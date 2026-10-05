@@ -64,14 +64,26 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on", "ended", "job", "settled")
+    __slots__ = ("proc", "started_on", "ended", "job", "settled", "cut_short", "lock")
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
         self.job: winjob.Job | None = None
         """The Windows Job object `proc` was started in, if it joined one (T299)."""
         self.settled = False
-        """Set under `_LIVE_STREAMS_LOCK` when `_finish` lets `job` go; a Stop then skips it."""
+        """Set under `lock` when `_finish` lets `job` go; a Stop then skips it."""
+        self.cut_short = False
+        """Set when a Stop ended `job` after the root exited: its exit status is not the story."""
+        self.lock = threading.RLock()
+        """Guards `ended` and `settled` between a Stop and `_finish` (T299).
+
+        Its own lock and not `_LIVE_STREAMS_LOCK`, and RE-ENTRANT, because
+        `_finish` runs in a generator's `finally`, and a generator is finalised
+        on whatever thread drops its last reference: inside a registry walk, or
+        in a GC pass. A thread holding a plain lock there froze for good (cold
+        review). Re-entered, `_finish` simply settles first, and the Stop
+        that was choosing finds the stream settled.
+        """
         self.started_on: int | None = None
         self.ended = False
         """Set by `end_streams_started_on()` BEFORE it ends `proc` (T240): the exit is a Stop's."""
@@ -192,7 +204,7 @@ def _finish(
     A Stop overrides `poll()`: if docker.exe exits before the Stop's thread
     runs, a release here would leave the rest of the tree running (Codex's
     second adversarial review). For a registered stream that Stop is
-    `child.ended`, read under `_LIVE_STREAMS_LOCK` at the moment of deciding,
+    `child.ended`, read under `child.lock` at the moment of deciding,
     and `child.settled` is set in the same breath, so `end_streams_started_on()`
     either marks the child first (closed here) or finds it settled and leaves
     it (Codex's fourth). `stopped` is the same for `interact()`, which is not
@@ -205,7 +217,7 @@ def _finish(
         # Whatever `_end_child` did, the job is let go (Codex's third review).
         if job is not None:
             if child is not None:
-                with _LIVE_STREAMS_LOCK:
+                with child.lock:
                     stopped = stopped or child.ended
                     child.settled = True
             if ran_out and not stopped:
@@ -423,26 +435,29 @@ def end_streams_started_on(ident: int) -> int:
     where it is said (`LogPanel._on_finished`).
     """
     with _LIVE_STREAMS_LOCK:
-        # Copied out under the lock and left before anything is terminated: the
-        # dictionary is weak and every other reader takes the same lock, and
-        # `_end_child()` can take seconds.
-        children = [
-            child
-            for child in _LIVE_STREAMS.values()
-            if child.started_on == ident and (_still_running(child.proc) or _job_unsettled(child))
-        ]
-        # Marked before the end is even asked for, so the reading thread can
-        # never see this child's exit before it can see why (T240). Under the
-        # lock, so `_finish` cannot decide between release and close in between
-        # (Codex's fourth adversarial review of T299).
-        for child in children:
-            child.ended = True
+        # Only copied out under the lock, and nothing else done there: the
+        # dictionary is weak and every other reader takes the same lock, and a
+        # generator can be finalised on this thread inside this very walk (its
+        # last reference dropped elsewhere, or a GC pass), running its `finally`
+        # here. Nothing that `finally` needs may be held (cold review of T299).
+        mine = [child for child in _LIVE_STREAMS.values() if child.started_on == ident]
+    children = []
+    for child in mine:
+        # Chosen and marked under the child's own lock, so `_finish` cannot
+        # decide between release and close in between (Codex's fourth
+        # adversarial review of T299). Marked before the end is even asked for,
+        # so the reading thread can never see this child's exit before it can
+        # see why (T240).
+        with child.lock:
+            if _still_running(child.proc) or _job_unsettled(child):
+                child.ended = True
+                children.append(child)
     for child in children:
         proc = child.proc
         assert proc is not None  # both filters need a started child; narrows for mypy
         threading.Thread(
             target=_stop_child,
-            args=(proc, child.job),
+            args=(child,),
             daemon=True,
             name=f"yulon-end-stream-{proc.pid}",
         ).start()
@@ -462,11 +477,20 @@ def _job_unsettled(child: _Child) -> bool:
     return child.proc is not None and child.job is not None and not child.settled
 
 
-def _stop_child(proc: _AnyPopen, job: winjob.Job | None) -> None:
-    """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299)."""
+def _stop_child(child: _Child) -> None:
+    """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299).
+
+    A root that had exited before the job was ended may have exited 0, but the
+    work it left its descendants was cut off: `cut_short` makes the stream
+    report a Stop rather than a success (cold review). Set before the end, so
+    the reader, which reaches EOF only once the writers are gone, sees it.
+    """
+    proc, job = child.proc, child.job
+    assert proc is not None  # chosen streams have started
     if proc.poll() is None:
         _end_child(proc, job)
     elif job is not None:
+        child.cut_short = True
         job.end()
 
 
@@ -725,8 +749,10 @@ def _stream_lines(
         proc.wait()
         yield from stderr_lines
 
-        if proc.returncode:
-            raise _exit_failure(child, proc.returncode, command)
+        if proc.returncode or child.cut_short:
+            # 1, the code a terminated child leaves on Windows, for a root that
+            # had exited 0 before its tree was stopped (`_stop_child`).
+            raise _exit_failure(child, proc.returncode or 1, command)
     finally:
         # Runs on normal completion (all no-ops below, since the process has
         # already exited and the reader thread has already finished) AND on
@@ -897,8 +923,10 @@ def _progress_lines(
         for reader in readers:
             reader.join()
         proc.wait()
-        if proc.returncode:
-            raise _exit_failure(child, proc.returncode, command)
+        if proc.returncode or child.cut_short:
+            # 1, the code a terminated child leaves on Windows, for a root that
+            # had exited 0 before its tree was stopped (`_stop_child`).
+            raise _exit_failure(child, proc.returncode or 1, command)
     finally:
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader

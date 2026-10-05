@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Generator
 from pathlib import Path
 
@@ -1606,6 +1607,7 @@ class _FakeJob:
         """A root this job holds: an `end()` that succeeds ends it, as TerminateJobObject does."""
         self.events: list[object] = []
         self.pid: int | None = None
+        self.proc: subprocess.Popen[str] | None = None
 
     def start(self, pid: int) -> bool:
         self.events.append(("start", pid))
@@ -1618,12 +1620,10 @@ class _FakeJob:
         self.events.append("end")
         if self.ends and self.root is not None:
             self.root.alive = False
-        if self.ends and self.pid is not None:
+        if self.ends and self.proc is not None and self.proc.poll() is None:
             # The real child of a `_windows_spawns` test: ended as the job would.
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            # Through its Popen, never by a pid that may have been reaped and reused.
+            self.proc.kill()
         return self.ends
 
     def close(self) -> None:
@@ -1652,6 +1652,8 @@ def _windows_spawns(
         kw["creationflags"] = 0
         proc: subprocess.Popen[str] = real_popen(argv, **kw)  # type: ignore[call-overload]
         record["proc"] = proc
+        if isinstance(job, _FakeJob):
+            job.proc = proc
         if exited:
             proc.wait(timeout=HANG_BOUND)
         return proc
@@ -2090,3 +2092,112 @@ def test_on_windows_a_stop_after_a_stream_let_its_job_go_ends_nothing(
 
     assert runner.end_streams_started_on(threading.get_ident()) == 0
     assert "end" not in job.events
+
+
+@pytest.mark.parametrize("where", ["in the registry walk", "in the choice"])
+def test_on_windows_a_stream_finalised_while_a_stop_is_choosing_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """A stream whose last reference drops while a Stop is choosing ends without a deadlock.
+
+    From the cold review of T299. `end_streams_started_on()` walks the weak
+    registry under `_LIVE_STREAMS_LOCK`; a generator whose owner dropped it can
+    be finalised right there, on that thread, when `WeakKeyDictionary.values()`
+    lets go of its strong reference, or in a GC pass. Its `finally` runs
+    `_finish`, which must not need a lock that thread already holds.
+
+    `in the registry walk` drops the last reference inside `values()`, under
+    the registry lock; `in the choice` drops it while the child's own lock is
+    held. The Stop runs on its own thread with a registry lock of its own, so
+    a deadlock fails this test instead of hanging the suite. Both deadlocked
+    (timed out at `HANG_BOUND`) on the code the cold review read.
+
+    Mutations this catches: `_finish` taking `_LIVE_STREAMS_LOCK` (walk); the
+    child's lock not re-entrant (choice).
+    """
+    holder: list[Generator[str, None, None]] = []
+
+    class FinalisingRegistry(weakref.WeakKeyDictionary):  # type: ignore[type-arg]
+        def values(self):  # type: ignore[no-untyped-def]
+            for value in super().values():
+                if where == "in the registry walk" and holder:
+                    holder.pop()  # the last reference: finalised here, under the lock
+                yield value
+
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    monkeypatch.setattr(runner, "_LIVE_STREAMS_LOCK", threading.Lock())
+    monkeypatch.setattr(runner, "_LIVE_STREAMS", FinalisingRegistry())
+    holder.append(stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)")))
+    assert next(holder[0]) == "first"
+    ident = threading.get_ident()
+    real_still_running = runner._still_running
+
+    def finalising(proc: object) -> bool:
+        if where == "in the choice" and holder:
+            holder.pop()  # the last reference: finalised here, under the child's lock
+        return real_still_running(proc)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "_still_running", finalising)
+    answered: list[int] = []
+    stop = threading.Thread(
+        target=lambda: answered.append(runner.end_streams_started_on(ident)), daemon=True
+    )
+    stop.start()
+    stop.join(HANG_BOUND)
+
+    assert not holder, "the stream was never finalised where the test meant it to be"
+    assert answered, f"the Stop deadlocked on a stream finalised {where}"
+    assert job.events[-1] == "close", job.events
+
+
+class _JobHoldingAPid(_FakeJob):
+    """A job double whose `end()` ends one more process, the way the real job ends a descendant."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.member: int | None = None
+
+    def end(self) -> bool:
+        ended = super().end()
+        if self.member is not None:
+            os.kill(self.member, signal.SIGKILL)
+        return ended
+
+
+def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reported_as_a_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docker.exe exited 0, its tree was still writing, Stop ended the tree: that is a Stop.
+
+    From the cold review of T299: the exit status alone read as success,
+    although the work the root had handed its descendants was cut off.
+
+    Mutations this catches: the generator deciding from `returncode` alone; the
+    error carrying exit 0, which `docker.run_attached()` would report as success.
+    """
+    job = _JobHoldingAPid()
+    spawned = _windows_spawns(monkeypatch, job)
+    # The root starts a grandchild that inherits the pipe, says its pid and
+    # writes on; the root itself exits 0 at once.
+    script = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', "
+        "\"import os, time; print('pid', os.getpid(), flush=True); time.sleep(60)\"]); "
+        "print('first', flush=True)"
+    )
+    lines = stream(_python_cmd(script))
+    seen = [next(lines), next(lines)]
+    said = next(line for line in seen if line.startswith("pid "))
+    job.member = int(said.split()[1])
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert proc.wait(timeout=HANG_BOUND) == 0
+
+    try:
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        with pytest.raises(runner.StreamEnded) as raised:
+            list(lines)
+    finally:
+        lines.close()
+    assert raised.value.returncode == 1, "a Stop must not read as exit 0"
