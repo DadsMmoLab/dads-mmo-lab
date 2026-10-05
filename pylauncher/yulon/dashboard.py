@@ -111,10 +111,10 @@ Only a read that failed because no daemon answered opens the window, and only
 when the world's `StartedAt` changed across it. So none is opened by any other
 failed read (Codex adversarial review: a crash loop's next run after one would
 be forgiven), by `missing` (Docker answering, which also ends the outage it
-follows and closes a window already open), by a Docker that went quiet without restarting anything, or by a
-first look that failed (no run seen before it to compare with). The cost is
-that delay, never a loop called steady: a server that was looping keeps
-`after_a_loop`.
+follows and closes a window already open), by a Docker that went quiet
+without restarting anything, or by a first look that failed (no run seen before
+it to compare with). The cost is that delay, never a loop called steady: a
+server that was looping keeps `after_a_loop`.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
