@@ -125,6 +125,18 @@ rewrite that record, and Uninstall removes it with the folder.
 REEXTRACT_BUTTON = "Re-extract map data"
 """The Server tab's press for `reextract()`, named in the sentences that ask for it."""
 
+REEXTRACT_PUT_BACK = (
+    "The map data from before this press was put back as it was, with the pathfinding data "
+    "made from it, so the server runs on it as before."
+)
+"""What a failed `reextract()` ends with once the old map data is back in place (T241)."""
+
+REEXTRACT_CANCEL_NOTE = (
+    "A Stop puts the map data from before this press back as it was. The temporary copy of "
+    "your client is removed either way."
+)
+"""What a Stop costs in the re-extraction: nothing, the old map data comes back (T241)."""
+
 WORLD_REIMPORT_FILE = ".yulon-world-reimport.json"
 """In the server folder: world table files an update still has to import again (fix round 1).
 
@@ -1837,14 +1849,24 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Run the client-data stage again, from a new temporary client; the movement maps go.
 
         The press `needs_reextract()` asks for. With the world server stopped (it
-        reads its map files while it runs): the movement-map job is stopped and its
-        set thrown away through `mmaps.discard()` -- pathfinding off, since the set
-        was made from the map data being replaced -- the extraction's evidence is
-        removed so nothing is vouched for, and `client-data` runs as the install
-        runs it: the same temporary extraction client, the same DBC overlay, the
-        same start check. Then the flag goes and the movement maps start again in
-        the background. The player's own client is the folder given, or the one
-        the map data was last made from.
+        reads its map files while it runs) and any movement-map job stopped, the
+        map data it replaces -- every extraction tool's folders and the record --
+        is moved aside within `data/` (`extract.set_aside()`, T241), so the tools
+        start into empty folders: `vmap4extractor` refuses a `Buildings/` holding
+        the `dir_bin` every finished extraction leaves. Then `client-data` runs as
+        the install runs it: the same temporary extraction client, the same DBC
+        overlay, the same start check.
+
+        Nothing old goes before the new data is in. Only then are the movement
+        maps thrown away through `mmaps.discard()` (they describe the old maps),
+        the set-aside data deleted, the flag removed, and the movement maps started
+        again in the background. A failure, a Stop or a closed stream puts the old
+        map data back with its record (`extract.put_back()`), and the movement maps
+        and pathfinding are as they were. A press that died harder than that (a
+        crash) leaves the old data aside, and the next press puts it back first --
+        unless the data in place is a finished extraction, which makes it stale.
+        The player's own client is the folder given, or the one the map data was
+        last made from.
 
         Raises:
             InstallerError: the folder is not one this app installed, no client
@@ -1866,6 +1888,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         if client is None:
             evidence = extract.read_evidence(data_dir)
             client = Path(evidence.client_path) if evidence and evidence.client_path else None
+            if client is None:
+                kept = extract.read_evidence(data_dir / extract.PREVIOUS_DIR)
+                client = Path(kept.client_path) if kept and kept.client_path else None
         if client is None:
             raise InstallerError(
                 f"Yu'lon does not know which game client {self.entry.name}'s map data was made "
@@ -1874,8 +1899,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         self._refuse_a_running_world_for_maps()
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
-        if mmaps.background_block(self.entry) is not None:
-            ident = self._install_id(server_dir)
+        background = mmaps.background_block(self.entry) is not None
+        ident = self._install_id(server_dir)
+        if background:
             stopped = mmaps.stop_for_route(
                 server_dir,
                 self.entry,
@@ -1886,22 +1912,38 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             if stopped is not None:
                 yield stopped
+        yield from self._settle_an_earlier_press(data_dir)
+        plan = self._tc().extract
+        extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
+        yield (
+            f"The map data in {data_dir} was moved aside, so the tools start into empty folders; "
+            "it is put back if this extraction does not finish."
+        )
+        ctx = replace(probe, client_dir=client)
+        stage = replace(
+            self.stage_named("client-data"), recorded=False, cancel_note=REEXTRACT_CANCEL_NOTE
+        )
+        try:
+            yield from self._staged((stage,), ctx)
+        except BaseException as failure:
+            told = self._put_the_old_map_data_back(data_dir)
+            if isinstance(failure, InstallerError):  # its words are what the person reads
+                failure.args = (f"{failure} {told}",)  # same object: its type is kept
+            raise
+        try:
+            extract.drop_aside(data_dir)
+        except OSError as exc:
+            yield (
+                f"warning: the map data from before this press, in "
+                f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}); it takes "
+                "space but is not used. Delete that folder when the server is stopped."
+            )
+        if background:
             mmaps.discard(server_dir, self.entry, install_id=ident)
             yield (
                 "The pathfinding data made from the old map data was removed, and pathfinding "
                 "is off until it has been made again."
             )
-        evidence_file = data_dir / extract.EVIDENCE_FILE
-        try:
-            evidence_file.unlink(missing_ok=True)
-        except OSError as exc:
-            raise InstallerError(
-                f"{evidence_file} could not be removed ({exc}), so the extraction would be "
-                f"skipped as done. Delete it, then press “{REEXTRACT_BUTTON}” again."
-            ) from exc
-        ctx = replace(probe, client_dir=client)
-        stage = replace(self.stage_named("client-data"), recorded=False)
-        yield from self._staged((stage,), ctx)
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -1914,6 +1956,51 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."
         )
+
+    def _settle_an_earlier_press(self, data_dir: Path) -> Iterator[str]:
+        """The map data an earlier press set aside and never settled: put back, or dropped (T241).
+
+        Put back when what is in `data/` is not a finished extraction: that press
+        died part way, and what it set aside is the last whole map data. Dropped
+        when it is: that press finished and could not delete it, so it is older
+        than what is in place, and putting it back would lose the newer data.
+        """
+        aside = data_dir / extract.PREVIOUS_DIR
+        if not os.path.lexists(aside):
+            return
+        current = extract.read_evidence(data_dir)
+        finished = current is not None and all(
+            current.record_for(tool.name) is not None for tool in self._tc().extract.tools
+        )
+        try:
+            if finished:
+                extract.drop_aside(data_dir)
+                return
+            extract.put_back(data_dir)
+        except OSError as exc:
+            raise InstallerError(
+                f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
+                f"{'deleted' if finished else 'put back'} ({exc}), so nothing was extracted. "
+                "Close whatever is using that folder, then press "
+                f"“{REEXTRACT_BUTTON}” again."
+            ) from exc
+        yield (
+            f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "
+            "put back first."
+        )
+
+    def _put_the_old_map_data_back(self, data_dir: Path) -> str:
+        """After a failed, stopped or closed extraction: the old map data back; what to say."""
+        try:
+            extract.put_back(data_dir)
+        except OSError as exc:
+            logger.warning(f"the map data set aside in {data_dir} could not be put back: {exc}")
+            return (
+                f"The map data from before this press could not be put back ({exc}); it is kept "
+                f"in {data_dir / extract.PREVIOUS_DIR}, and pressing “{REEXTRACT_BUTTON}” again "
+                "puts it back first."
+            )
+        return REEXTRACT_PUT_BACK
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""

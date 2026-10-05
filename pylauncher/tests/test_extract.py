@@ -642,6 +642,17 @@ def tool_program(spec: docker.ContainerRun) -> str:
     return spec.argv[4] if spec.argv[:2] == ("sh", "-c") else spec.argv[0]
 
 
+REFUSES_POLLUTED_OUTPUT = ("vmap_extractor", "vmap4extractor")
+"""The extractors whose source refuses a `Buildings/` holding `dir` or `dir_bin`.
+
+This double's own list, read in the sources (CMaNGOS `vmap_extractor`, and
+TrinityCore's `vmap4extractor` at Centurion faac5fc9, `vmapexport.cpp:529-541`,
+T241) and deliberately NOT `extract.DIRTY_OUTPUT_TOOLS`: a double that followed
+the production list would stop refusing for a tool dropped from it, and the
+test meant to catch the drop would pass.
+"""
+
+
 class Runner:
     """A `run_container` double: records every spec by field and fabricates the tool's output.
 
@@ -690,7 +701,7 @@ class Runner:
         program = tool_program(spec)
         sink(f"ran {program}")
         out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
-        extractor = Path(program).name == extract.DIRTY_OUTPUT_TOOL
+        extractor = Path(program).name in REFUSES_POLLUTED_OUTPUT
         if extractor:
             buildings = out / extract.BUILDINGS_DIR
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
@@ -951,6 +962,35 @@ def test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_t
     evidence = extract.read_evidence(data)
     assert evidence is not None
     assert [record.name for record in evidence.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+
+def test_trinitycores_vmap4extractor_over_a_finished_buildings_is_refused_before_any_container(
+    tmp_path: Path,
+) -> None:
+    """T241: `vmap4extractor` has the same "polluted" check as CMaNGOS's tool.
+
+    Centurion faac5fc9, `src/tools/vmap4_extractor/vmapexport.cpp:529-541`: it
+    stats `./Buildings/dir` and `./Buildings/dir_bin` and exits (255, with no
+    stdin) saying "Your output directory seems to be polluted". The up-front
+    question knew only `vmap_extractor`, so a TrinityCore extraction over a
+    finished `Buildings/` ran `mapextractor` first and died in the container.
+    """
+    vmap4 = VMAP.model_copy(
+        update={"argv": ("/opt/trinitycore/bin/vmap4extractor", "-d", "/client/Data/")}
+    )
+    plan = ExtractPlan(image="server", tools=(AD, vmap4, ASSEMBLE))
+    writes = {**FULL, "/opt/trinitycore/bin/vmap4extractor": {"Buildings": 2}}
+    run(plan, Runner(writes), tmp_path)
+    data = tmp_path / "server" / "data"
+    buildings = data / extract.BUILDINGS_DIR
+    assert (buildings / extract.DIR_BIN).is_file(), "the double left no finished extraction"
+    (data / extract.EVIDENCE_FILE).unlink()
+
+    blocked = Runner(writes)
+    with pytest.raises(InstallerError) as caught:
+        run(plan, blocked, tmp_path)
+    assert named_folder(str(caught.value)) == buildings
+    assert blocked.names() == [], "refused before the first container, mapextractor included"
 
 
 def _data_snapshot(data_dir: Path) -> dict[str, bytes]:

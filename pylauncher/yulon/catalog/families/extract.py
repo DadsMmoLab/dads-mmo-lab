@@ -48,7 +48,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from yulon import client_names, docker, platform
@@ -356,8 +356,9 @@ def _remove_tree(path: Path) -> bool:
     a refusal, because "the removal did not happen" and "there was nothing to
     remove" must not arrive at the same place.
 
-    Two callers now, and they are the two removals in this module:
-    `empty_out_dirs()` below, and `run_mmaps()`'s wipe at the foot of the file.
+    Its callers are the removals in this module: `empty_out_dirs()` below,
+    `run_mmaps()`'s wipe, and the re-extraction's kept-aside data
+    (`put_back()`, `drop_aside()`, T241).
     """
     try:
         shutil.rmtree(path)
@@ -590,6 +591,137 @@ back very little, and `security_args` is where a measured set lands later.
 """
 
 
+CLIENT_FILES_MOUNT = "/client-files"
+"""Where the player's client is mounted, read-only, when the tools read it through a view (T260).
+
+The view's links point here: a link is resolved inside the container, so its
+target has to be a path the container has.
+"""
+
+CASE_VIEW_DIR = ".yulon-client-view"
+"""In the server folder: the links the tools read a client named in another case through (T260)."""
+
+_Rename = Callable[[str, bool], str | None]
+
+
+def _spelled(folder: Path, rename: _Rename) -> list[tuple[str, str, bool]]:
+    """`(name in the view, name on disk, is a folder)` for each entry of `folder`.
+
+    `rename` gives the name the tools ask for, or None to keep the entry's own.
+    The entry already spelled that way wins it -- on a disk that tells cases
+    apart, `patch-2.MPQ` beside `patch-2.mpq` is the one the tools mean -- and
+    otherwise the first in name order, as `client_names.on_disk()` chooses.
+    Every other spelling keeps its own name, so no two entries share one.
+    """
+    names = sorted(os.listdir(folder))
+    is_dir = {name: (folder / name).is_dir() for name in names}
+    wanted = {name: rename(name, is_dir[name]) or name for name in names}
+    taken = {name for name in names if wanted[name] == name}
+    spelled: list[tuple[str, str, bool]] = []
+    for name in names:
+        view = wanted[name]
+        if view != name:
+            if view in taken:
+                view = name
+            else:
+                taken.add(view)
+        spelled.append((view, name, is_dir[name]))
+    return spelled
+
+
+def _top(name: str, is_dir: bool) -> str | None:
+    return client_names.DATA_FOLDER if is_dir and name.casefold() == "data" else None
+
+
+def _in_data(name: str, is_dir: bool) -> str | None:
+    return client_names.retail_locale(name) if is_dir else client_names.retail_archive(name)
+
+
+def _in_locale(name: str, is_dir: bool) -> str | None:
+    return None if is_dir else client_names.retail_archive(name)
+
+
+def _view_plan(client_dir: Path) -> tuple[list[tuple[PurePosixPath, PurePosixPath | None]], bool]:
+    """Every entry of the view -- `(path in it, client path it links to, None: a folder)` -- and
+    whether it is needed at all.
+
+    Folders are made for `Data/` and each locale folder in it, the two levels the
+    tools name; everything else is one link under its own name or the tools'
+    spelling. Needed when some name the tools ask for is not what the disk
+    reaches: on a disk that ignores case, `Data/common.MPQ` opens
+    `Data/common.mpq` and no view is laid.
+    """
+    entries: list[tuple[PurePosixPath, PurePosixPath | None]] = []
+    needed = False
+
+    def descend(
+        rel: PurePosixPath, view: PurePosixPath, rename: _Rename, deeper: _Rename | None
+    ) -> None:
+        nonlocal needed
+        folder = client_dir.joinpath(*rel.parts)
+        for name_in_view, name, is_dir in _spelled(folder, rename):
+            if name_in_view != name and not os.path.lexists(folder / name_in_view):
+                needed = True
+            made = view / name_in_view
+            if is_dir and deeper is not None and name_in_view == rename(name, True):
+                entries.append((made, None))
+                descend(rel / name, made, deeper, _in_locale if deeper is _in_data else None)
+            else:
+                entries.append((made, rel / name))
+
+    descend(PurePosixPath(), PurePosixPath(), _top, _in_data)
+    return entries, needed
+
+
+def lay_case_view(client_dir: Path, view_dir: Path) -> bool:
+    """Lay links at `view_dir` that give the client's archives the names the tools open (T260).
+
+    False, and nothing made, when the client is already named that way, which is
+    every client on a disk that ignores case. True when the view was laid: each
+    of the client's entries is one link, under the tools' spelling where that
+    differs (`Data/common.mpq` as `Data/common.MPQ`, `data/enus/` as
+    `Data/enUS/`) and under its own name otherwise, pointing at
+    `CLIENT_FILES_MOUNT`, where the run mounts the client read-only. A link
+    changes nothing about the file it points at: no name, no byte, no date, no
+    read-only flag of the player's is touched.
+
+    Raises:
+        OSError: the client could not be listed or a link could not be made.
+            What was laid stays for `remove_case_view()`.
+    """
+    entries, needed = _view_plan(client_dir)
+    if not needed:
+        return False
+    view_dir.mkdir(parents=True)
+    for made, target in entries:
+        path = view_dir.joinpath(*made.parts)
+        if target is None:
+            path.mkdir()
+        else:
+            path.symlink_to(f"{CLIENT_FILES_MOUNT}/{target.as_posix()}")
+    return True
+
+
+def renamed_in_view(client_dir: Path) -> list[tuple[str, str]]:
+    """`(client's name, the tools' name)` for each entry the view spells another way."""
+    entries, _needed = _view_plan(client_dir)
+    return [
+        (target.as_posix(), made.as_posix())
+        for made, target in entries
+        if target is not None and target != made
+    ]
+
+
+def remove_case_view(view_dir: Path) -> bool:
+    """Delete a view: its links and folders, never what a link points at. False: none there.
+
+    `shutil.rmtree` unlinks a link without following it -- the property the
+    player's files depend on here -- and never clears a flag, which is why this
+    is not `rmtree.remove_tree()`: its retry `chmod`s through what it walks.
+    """
+    return _remove_tree(view_dir)
+
+
 class RunContainer(Protocol):
     """`docker.run_container`'s shape, as a seam the tests fill with a recorder."""
 
@@ -729,8 +861,13 @@ def tool_run(
     data_dir: Path,
     user_args: Sequence[str],
     security_args: Sequence[str] = (),
+    client_files: Path | None = None,
 ) -> docker.ContainerRun:
     """The `docker run` for one tool, built by field so a test can assert it by field.
+
+    `client_files` is the player's client when `client_dir` is a view of it
+    (`lay_case_view()`, T260): mounted read-only at `CLIENT_FILES_MOUNT`, where
+    the view's links point.
 
     `--ulimit stack=-1` is data (`ulimit_stack_unlimited`): the vanilla vmap
     extractor overflows the default stack on some maps and segfaults; nothing
@@ -770,6 +907,11 @@ def tool_run(
         argv=argv,
         mounts=(
             docker.Mount(client_dir, CLIENT_MOUNT, read_only=True),
+            *(
+                ()
+                if client_files is None
+                else (docker.Mount(client_files, CLIENT_FILES_MOUNT, read_only=True),)
+            ),
             docker.Mount(data_dir, OUT_MOUNT),
         ),
         workdir=workdir,
@@ -893,8 +1035,13 @@ def run_plan(
     evidence_client_dir: Path | None = None,
     evidence_salt: str = "",
     client_named: str | None = None,
+    client_files: Path | None = None,
 ) -> Iterator[str]:
     """Run every tool the evidence does not vouch for, recording each as it finishes.
+
+    `client_files` is for a `client_dir` that is a view of the player's client
+    (T260), handed to `tool_run()`; the evidence then names the player's client
+    through `evidence_client_dir`.
 
     `evidence_client_dir` and `evidence_salt` are for a client that is MOUNTED
     from one folder and IDENTIFIED by another (T179): the TrinityCore family
@@ -1035,6 +1182,7 @@ def run_plan(
             data_dir=data_dir,
             user_args=user_args,
             security_args=security_args,
+            client_files=client_files,
         )
 
     retried = False
@@ -1379,8 +1527,19 @@ emptying for a second extraction, and a remedy that told a user to delete them
 would be charging for work the tools do not ask for.
 """
 
-DIRTY_OUTPUT_TOOL = "vmap_extractor"
-"""The basename of the one extractor binary this check was READ out of.
+DIRTY_OUTPUT_TOOLS: tuple[str, ...] = ("vmap_extractor", "vmap4extractor")
+"""The basenames of the extractor binaries this check was READ out of.
+
+`vmap4extractor` is TrinityCore's (T241). Read at the revision `catalog.json`
+pins for Centurion, `thomasjteachey/TrinityCore112` faac5fc9,
+`src/tools/vmap4_extractor/vmapexport.cpp:529-541`: the same two `stat()`s of
+`./Buildings/dir` and `./Buildings/dir_bin`, the same sentence, and then
+`return scanf("%c", garbage)` -- with no stdin that is EOF, and the live press
+on yulon-ubuntu2 (2026-10-05) exited 255. A grep for "polluted" and "empty
+directory" over every `.cpp` and `.h` of `map_extractor`, `vmap4_extractor`
+and `vmap4_assembler` at that revision finds that file alone. Until it was
+here, "Re-extract map data" on a finished Centurion install ran `mapextractor`
+and then died in the container naming no folder.
 
 `wow-tortoise` is the reason this is a name and not "every tool that produces
 `Buildings/`". Its `vmap extract` produces `Buildings` exactly like the CMaNGOS
@@ -1412,7 +1571,7 @@ def blocking_output(tool: ExtractTool, data_dir: Path) -> Path | None:
     else. The install was wedged, and nothing in the message led out.
 
     BOTH halves are demanded, and they answer different questions. The BINARY
-    (`DIRTY_OUTPUT_TOOL`, matched on `argv[0]`'s basename) is what refuses --
+    (`DIRTY_OUTPUT_TOOLS`, matched on `argv[0]`'s basename) is what refuses --
     the rule belongs to the lineage whose source carries it, and `wow-tortoise`
     produces the same folder with a binary that has no such check. The FOLDER
     (`BUILDINGS_DIR` in `produces`) is what the refusal is about, and the
@@ -1428,7 +1587,7 @@ def blocking_output(tool: ExtractTool, data_dir: Path) -> Path | None:
     `data/Buildings` on a finished install is hours of somebody's extraction.
     This one only reads, and hands the name to the sentence that asks.
     """
-    if tool.argv[0].rsplit("/", 1)[-1] != DIRTY_OUTPUT_TOOL:
+    if tool.argv[0].rsplit("/", 1)[-1] not in DIRTY_OUTPUT_TOOLS:
         return None
     if BUILDINGS_DIR not in tool.produces:
         return None
@@ -1844,6 +2003,109 @@ def run_mmaps(
     record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
     write_evidence(data_dir, with_record(current, record))
     yield f"mmaps: done ({_counts_text(seen)})"
+
+
+# ------------------------------------- T241: the map data a re-extraction replaces, kept aside
+
+PREVIOUS_DIR = ".yulon-previous"
+"""Under `data/`: the map data a re-extraction replaces, kept until the new data is in (T241).
+
+Inside `data/` so that setting a folder aside is a rename on one disk -- instant,
+and no second copy of gigabytes of maps -- and so that Uninstall, which removes
+the server folder, takes it too. No tool writes here and `counts()` never looks
+here: every count is of a `produces` folder by name.
+"""
+
+
+def replaced_names(plan: ExtractPlan, also: Iterable[str] = ()) -> tuple[str, ...]:
+    """What an extraction writes under `data/`: every tool's folders, `also`'s, and the record.
+
+    These are the names a second extraction has to start without. `vmap
+    extract` refuses a `Buildings/` holding the marker the first run left
+    (`DIRTY_OUTPUT_TOOLS`), and the record would vouch for the old run. `also`
+    is what else the caller's stage writes there (TrinityCore's DBC overlay
+    folder). A slashed name is taken by its first folder, the one directly
+    under `data/`.
+    """
+    named = [*(folder for tool in plan.tools for folder in tool.produces), *also]
+    folders = sorted({PurePosixPath(name).parts[0] for name in named})
+    return (*folders, EVIDENCE_FILE)
+
+
+def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
+    """Move each of `names` that is under `data_dir` into `PREVIOUS_DIR`; the names moved.
+
+    Renames only, so nothing is deleted and the old map data is whole wherever
+    it is. `put_back()` is the undo.
+
+    Raises:
+        InstallerError: `PREVIOUS_DIR` is already there (an earlier press's, which
+            the caller settles first), or a rename failed -- after the names
+            already moved were put back (`put_back()`), so nothing changed.
+    """
+    aside = data_dir / PREVIOUS_DIR
+    if os.path.lexists(aside):
+        raise InstallerError(
+            f"{aside} is already there, so the map data in {data_dir} was not moved aside. "
+            "Nothing was changed."
+        )
+    moved: list[str] = []
+    try:
+        aside.mkdir(parents=True)
+        for name in names:
+            if os.path.lexists(data_dir / name):
+                os.rename(data_dir / name, aside / name)
+                moved.append(name)
+    except OSError as exc:
+        try:
+            put_back(data_dir)
+            told = "Nothing was changed."
+        except OSError as again:
+            told = (
+                f"Part of it is still in {aside} ({again}); the next extraction puts it back "
+                "first."
+            )
+        raise InstallerError(
+            f"The map data in {data_dir} could not be moved aside ({exc}), so it was not "
+            f"extracted again. {told} Close whatever is using that folder, then try again."
+        ) from exc
+    return tuple(moved)
+
+
+def put_back(data_dir: Path) -> tuple[str, ...]:
+    """Return everything under `PREVIOUS_DIR` to `data_dir`, replacing what is there; the names.
+
+    What is there is the new extraction's partial output, and it is removed
+    first, name by name, because a rename onto a folder that is not empty fails.
+    `()` when nothing was set aside.
+
+    Raises:
+        OSError: a name could not be removed or moved back. What is still under
+            `PREVIOUS_DIR` stays there for the next call.
+    """
+    aside = data_dir / PREVIOUS_DIR
+    try:
+        names = sorted(entry.name for entry in aside.iterdir())
+    except FileNotFoundError:
+        return ()
+    for name in names:
+        target = data_dir / name
+        if target.is_dir() and not target.is_symlink():
+            _remove_tree(target)
+        elif os.path.lexists(target):
+            target.unlink()
+        os.rename(aside / name, target)
+    aside.rmdir()
+    return tuple(names)
+
+
+def drop_aside(data_dir: Path) -> bool:
+    """Delete `PREVIOUS_DIR` once the data that replaced it is in; False when there was none.
+
+    Raises:
+        OSError: it would not go.
+    """
+    return _remove_tree(data_dir / PREVIOUS_DIR)
 
 
 # ------------------------------------- T179: the tree's own DBCs, and the start check

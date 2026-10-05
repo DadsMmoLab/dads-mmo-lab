@@ -59,6 +59,17 @@ refused every install.
 """
 
 
+POLLUTED_OUTPUT_EXITS: Mapping[str, int] = {"vmap_extractor": 1, "vmap4extractor": 255}
+"""The extractors that refuse a `Buildings/` holding `dir` or `dir_bin`, and the status they exit.
+
+Read in the sources, not copied from `extract.py`: CMaNGOS's `vmap_extractor`
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp`, mangos-classic 8ec338a1)
+`return 1`s; TrinityCore's `vmap4extractor` (`src/tools/vmap4_extractor/
+vmapexport.cpp:529-541`, Centurion faac5fc9) `return scanf(...)`s, which with no
+stdin is EOF, and the live Centurion press exited 255 (T241).
+"""
+
+
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
@@ -610,22 +621,29 @@ class Recorder:
           tool's own last words and writes nothing, which is `main()`'s first
           `if`.
 
-        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
-        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
-        no such check, and a double that refused for it would be inventing a
-        rule for a tool nobody has read at the pinned revision.
+        Keyed on `argv[0]`'s basename, from this double's OWN list
+        (`POLLUTED_OUTPUT_EXITS`) and never from `extract.DIRTY_OUTPUT_TOOLS`: a
+        double that followed the production list would stop refusing the day a
+        tool fell off it, and the test meant to catch that would pass.
+        `wow-tortoise`'s `vmapextractor` is a different binary with no such
+        check, and a double that refused for it would be inventing a rule for a
+        tool nobody has read at the pinned revision. TrinityCore's
+        `vmap4extractor` has the same check (T241), and exits 255.
         """
         self.calls.append(f"run:{spec.argv[0]}")
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
-        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        program = spec.argv[0].rsplit("/", 1)[-1]
+        extractor = program in POLLUTED_OUTPUT_EXITS
         buildings = None if out is None else out / extract.BUILDINGS_DIR
         if extractor and buildings is not None:
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
                 polluted = "Your output directory seems to be polluted, please use an empty "
                 sink(polluted + "directory!")
-                return docker.AttachedRun(1, (polluted + "directory!",))
+                return docker.AttachedRun(
+                    POLLUTED_OUTPUT_EXITS[program], (polluted + "directory!",)
+                )
         if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
