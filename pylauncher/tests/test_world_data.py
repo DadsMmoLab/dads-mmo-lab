@@ -687,7 +687,9 @@ def test_a_modules_restart_with_a_stale_fingerprint_never_stops_the_world(
     assert calls == []
 
 
-def test_finishing_a_world_update_refuses_before_it_stops_the_world(box: Box) -> None:
+def test_finishing_a_world_update_refuses_before_it_stops_the_world(
+    box: Box,  # noqa: F811 - the fixture imported above
+) -> None:
     on_the_built_commit(box)
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     lay_compose(box.server_dir, "windows")
