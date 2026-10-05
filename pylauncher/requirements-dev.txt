@@ -2,6 +2,8 @@
 -r requirements.txt
 
 pytest>=8.3
+# CI runs the suite with `-n auto` (T229); serial `pytest` works without it.
+pytest-xdist>=3.6
 mypy>=1.11
 black>=24.8
 ruff>=0.6
