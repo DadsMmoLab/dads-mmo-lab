@@ -314,7 +314,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.zone_problem = self._put_back_the_zone_file()
-        self.world_data_problem = self._refresh_world_data()
+        # The map-data fingerprint was written by `refuse_start()` above (T219).
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
@@ -445,6 +445,11 @@ class Controller:
         if reason:
             logger.warning(f"start() refused: {reason}")
             raise StartRefused(reason)
+        # T219: here and not in `start()`, so a fingerprint that can be neither written
+        # nor removed refuses BEFORE a Restart's stop, a Recreate's removal or "stop the
+        # other server" (cold review of 2a70b82c). Safe while the world runs: a running
+        # Windows world reads the volume, never this file. Written only when it changed.
+        self.world_data_problem = self._refresh_world_data()
 
     def stop_conflicting_and_start(self) -> list[str]:
         """Stop the server holding our ports, then start this one."""

@@ -33,6 +33,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     machine,
 )
 from tests.test_mmaps_background import WORLD_CONF, lay_server
+from tests.test_trinitycore_updates import WORLD_SQL, Box, box, on_the_built_commit  # noqa: F401
 from yulon import docker, resources
 from yulon.catalog import composegen, world_data
 from yulon.catalog.catalog import CatalogEntry
@@ -602,3 +603,101 @@ def test_a_start_with_a_current_fingerprint_has_nothing_to_say(
     controller.world_data_problem = "left from an earlier start"
     controller.start()
     assert controller.world_data_problem is None
+
+
+# -- the refusal comes before any stop (cold review of 2a70b82c) --------------------------------
+
+
+def wedged_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[CenturionController, list[str]]:
+    """A Windows install whose fingerprint can be neither written nor removed, its
+    controller's stop, remove and start recorded instead of reaching Docker."""
+    server_dir = tmp_path / "wow-centurion-server"
+    lay_compose(server_dir, "windows")
+    lay_data(server_dir)
+    wedge(server_dir)
+    calls: list[str] = []
+    controller = CenturionController(MIRRORED, server_dir)
+    monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    monkeypatch.setattr(controller, "stop", lambda: calls.append("stop") or True)
+    monkeypatch.setattr(controller, "remove", lambda: calls.append("remove") or True)
+    monkeypatch.setattr(controller, "stop_conflicting", lambda: calls.append("stop-other") or [])
+    monkeypatch.setattr(
+        docker, "start_staged", lambda spec, where, **_kw: calls.append("start") or True
+    )
+    return controller, calls
+
+
+def test_refuse_start_is_where_a_stale_fingerprint_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every press that stops something on its way to a start asks this first."""
+    controller, calls = wedged_controller(tmp_path, monkeypatch)
+    with pytest.raises(StartRefused, match=REFUSED):
+        controller.refuse_start()
+    assert calls == []
+
+
+def test_restart_with_a_stale_fingerprint_never_stops_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from yulon.ui.controller_view import ControllerView
+
+    controller, calls = wedged_controller(tmp_path, monkeypatch)
+    view = SimpleNamespace(services=SimpleNamespace(controller=controller))
+    with pytest.raises(StartRefused, match=REFUSED):
+        ControllerView._do_restart(view)  # type: ignore[arg-type]
+    assert calls == [], "the server was stopped before the start was refused"
+
+
+def test_recreate_with_a_stale_fingerprint_never_removes_the_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from yulon.ui.controller_view import ControllerView
+
+    controller, calls = wedged_controller(tmp_path, monkeypatch)
+    view = SimpleNamespace(services=SimpleNamespace(controller=controller))
+    with pytest.raises(StartRefused, match=REFUSED):
+        ControllerView._do_recreate(view)  # type: ignore[arg-type]
+    assert calls == [], "the containers were removed before the start was refused"
+
+
+def test_stop_the_other_server_with_a_stale_fingerprint_stops_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, calls = wedged_controller(tmp_path, monkeypatch)
+    with pytest.raises(StartRefused, match=REFUSED):
+        controller.stop_conflicting_and_start()
+    assert calls == []
+
+
+def test_a_modules_restart_with_a_stale_fingerprint_never_stops_the_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.controller_wow_tortoise import botpool
+
+    controller, calls = wedged_controller(tmp_path, monkeypatch)
+    with pytest.raises(StartRefused, match=REFUSED):
+        botpool.restart_world(controller)
+    assert calls == []
+
+
+def test_finishing_a_world_update_refuses_before_it_stops_the_world(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    lay_compose(box.server_dir, "windows")
+    wedge(box.server_dir)
+    eng = box.engine()
+    eng.entry = MIRRORED
+    with pytest.raises(InstallerError, match=REFUSED):
+        list(eng.finish_world_reimport(InstallOptions(server_dir=box.server_dir)))
+    assert not any(
+        call.startswith("stop-world") or call == "stop_servers" for call in box.m.rec.calls
+    ), box.m.rec.calls
+    assert box.world.running is True
+    assert box.pending() is not None, "the world update still waits"
