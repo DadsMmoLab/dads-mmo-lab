@@ -354,10 +354,16 @@ class Controller:
 
         `world_data.refresh()` writes it only on an install whose compose file declares
         the `world-data` volume, and only when it changed. A failure never stops the
-        Start; its sentence is returned for the tab to show.
+        Start; its sentence is returned for the tab to show -- except one that leaves a
+        stale fingerprint in place, which refuses the Start (`StartRefused`).
         """
         entry = self.entry or _entry_for(self.spec)
-        return world_data.refresh(entry, self.server_dir) if entry is not None else None
+        if entry is None:
+            return None
+        try:
+            return world_data.refresh(entry, self.server_dir)
+        except world_data.FingerprintNotRecorded as exc:
+            raise StartRefused(str(exc)) from exc
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""

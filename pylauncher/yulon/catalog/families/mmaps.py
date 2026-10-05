@@ -569,7 +569,10 @@ def start_mmaps(
         # T219: on a Windows install the world server's copy of `data/mmaps` must stay
         # empty while this job writes it, should Docker restart the world meanwhile;
         # the fingerprint says `-` until the run is done. A failure is logged there.
-        world_data.refresh(entry, server_dir)
+        try:
+            world_data.refresh(entry, server_dir)
+        except world_data.FingerprintNotRecorded:
+            pass  # logged there; the job is not a world start, and the world's start refuses
         argv = _filled_argv(job, run)
         _remove_container(run, job.container)
         kept = _resume_or_clear(job, before, evidence)
@@ -951,13 +954,25 @@ def _finished(
     _write_record(job.server_dir, done)
     # T219: the fingerprint said `-` for mmaps while the run made it; now the next start
     # of a Windows world -- Yu'lon's or Docker's -- must copy the finished set.
-    world_data.refresh_for(job.block, job.server_dir)
+    _refresh_world_data(job)
     try:
         run.remove(job.container, timeout=CHANGE_TIMEOUT)
     except docker.DockerCommandError as exc:
         logger.warning(f"could not remove the finished {job.container}: {exc}")
     logger.info(f"{job.container} finished: {have} files in {job.data_dir / MMAPS_DIR}")
     return _done_status(job, done, run, now)
+
+
+def _refresh_world_data(job: Job) -> None:
+    """T219's fingerprint from a status poll: never a refusal here, which starts nothing.
+
+    A fingerprint that can be neither written nor removed is logged by `world_data`, and
+    the world's next start from Yu'lon refuses on it.
+    """
+    try:
+        world_data.refresh_for(job.block, job.server_dir)
+    except world_data.FingerprintNotRecorded:
+        pass
 
 
 def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
@@ -979,7 +994,7 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
                 error=f"the finished pathfinding data is no longer all there, and {exc}",
                 pathfinding_on=_pathfinding_on(job),
             )
-        world_data.refresh_for(job.block, job.server_dir)  # T219: back to `-` with it
+        _refresh_world_data(job)  # T219: back to `-` with it
         logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:

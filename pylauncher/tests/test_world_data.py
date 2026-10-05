@@ -37,7 +37,8 @@ from yulon import docker, resources
 from yulon.catalog import composegen, world_data
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import mmaps
-from yulon.catalog.installer import InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.controller import StartRefused
 from yulon.controller_wow_centurion.controller import CenturionController
 
 DIRS = ("dbc", "maps", "vmaps", "mmaps", "Cameras")
@@ -236,15 +237,44 @@ def test_refresh_writes_nothing_for_an_entry_without_world_folders(windows_insta
     assert not (windows_install / "data" / FILE).exists()
 
 
-def test_a_fingerprint_that_cannot_be_written_is_said_and_never_raised(
+REFUSED = "Yu'lon could not record which map data the server should use, so it does not start"
+
+
+def wedge(server_dir: Path) -> Path:
+    """A fingerprint that can be neither written nor removed: a folder where the file goes."""
+    path = server_dir / "data" / FILE
+    path.mkdir()
+    (path / "something").write_text("x", encoding="utf-8")
+    return path
+
+
+def test_a_fingerprint_that_can_be_neither_written_nor_removed_refuses(
     windows_install: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    (windows_install / "data" / FILE).mkdir()
-    said = world_data.refresh(MIRRORED, windows_install)
-    assert said is not None
-    assert str(windows_install / "data" / FILE) in said
-    assert "may not be brought up to date" in said
+    """Lead's ruling: a stale fingerprint left in place lets the world read old map data
+    without anyone noticing, so that one case refuses -- naming the file and the reason."""
+    path = wedge(windows_install)
+    with pytest.raises(world_data.FingerprintNotRecorded) as refused:
+        world_data.refresh(MIRRORED, windows_install)
+    said = str(refused.value)
+    assert said.startswith(REFUSED), said
+    assert str(path) in said
+    assert "Is a directory" in said, "the reason is the system's own"
     assert any(said in record.getMessage() for record in caplog.records)
+
+
+def test_a_fingerprint_that_cannot_be_written_where_none_was_says_so_and_goes_on(
+    windows_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing stale is left, so the start goes on: the copy takes all of the map data."""
+
+    def unreadable(*_args: object) -> str:
+        raise PermissionError(13, "Permission denied", str(windows_install / "data" / "maps"))
+
+    monkeypatch.setattr(world_data, "fingerprint", unreadable)
+    said = world_data.refresh(MIRRORED, windows_install)
+    assert said is not None and "copies all of the map data again" in said
+    assert not (windows_install / "data" / FILE).exists()
 
 
 # -- every start path writes it before it starts --------------------------------------------
@@ -294,21 +324,50 @@ def test_the_server_tabs_start_writes_it_before_compose_starts(
     assert seen.at_start == [expected(server_dir) if platform_id == "windows" else None]
 
 
-def test_a_start_whose_fingerprint_cannot_be_written_still_starts(
+def scan_fails(monkeypatch: pytest.MonkeyPatch, server_dir: Path) -> None:
+    def unreadable(*_args: object) -> str:
+        raise PermissionError(13, "Permission denied", str(server_dir / "data" / "maps"))
+
+    monkeypatch.setattr(world_data, "fingerprint", unreadable)
+
+
+def tab_controller(
+    server_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[CenturionController, list[Path]]:
+    started: list[Path] = []
+    monkeypatch.setattr(docker, "start_staged", lambda spec, where, **_kw: started.append(where))
+    controller = CenturionController(MIRRORED, server_dir)
+    monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    return controller, started
+
+
+def test_a_start_whose_fingerprint_could_be_removed_still_starts_and_says_why(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_dir = tmp_path / "wow-centurion-server"
     lay_compose(server_dir, "windows")
     lay_data(server_dir)
-    (server_dir / "data" / FILE).mkdir()
-    started: list[Path] = []
-    monkeypatch.setattr(docker, "start_staged", lambda spec, where, **_kw: started.append(where))
-    controller = CenturionController(MIRRORED, server_dir)
-    monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    world_data.refresh(MIRRORED, server_dir)
+    scan_fails(monkeypatch, server_dir)
+    controller, started = tab_controller(server_dir, monkeypatch)
     controller.start()
     assert started == [server_dir]
     said = controller.world_data_problem
-    assert said is not None and "may not be brought up to date" in said, said
+    assert said is not None and "copies all of the map data again" in said, said
+
+
+def test_the_server_tabs_start_is_refused_when_a_stale_fingerprint_must_stay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = tmp_path / "wow-centurion-server"
+    lay_compose(server_dir, "windows")
+    lay_data(server_dir)
+    wedge(server_dir)
+    controller, started = tab_controller(server_dir, monkeypatch)
+    with pytest.raises(StartRefused) as refused:
+        controller.start()
+    assert str(refused.value).startswith(REFUSED)
+    assert started == [], "compose was asked to start"
 
 
 @pytest.mark.parametrize("platform_id", ["windows", "linux"])
@@ -323,11 +382,59 @@ def test_the_installs_up_writes_it_before_the_start(tc: Machine, platform_id: st
     assert seen.at_start == [expected(tc.server_dir) if platform_id == "windows" else None]
 
 
-def test_the_installs_up_says_when_it_cannot_write_it(tc: Machine) -> None:
+def test_the_installs_up_says_when_it_had_to_remove_the_fingerprint(
+    tc: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mirrored_machine(tc)
-    (tc.server_dir / "data" / FILE).mkdir()
+    scan_fails(monkeypatch, tc.server_dir)
     said = list(engine(tc, entry=MIRRORED, start=lambda spec, where: True).stage_up(context(tc)))
-    assert any("may not be brought up to date" in line for line in said), said
+    assert any("copies all of the map data again" in line for line in said), said
+
+
+def test_the_installs_up_is_refused_when_a_stale_fingerprint_must_stay(tc: Machine) -> None:
+    seen = mirrored_machine(tc)
+    wedge(tc.server_dir)
+
+    def start(spec: docker.ContainerSpec, server_dir: Path) -> bool:
+        seen.look()
+        return True
+
+    with pytest.raises(InstallerError, match=REFUSED):
+        list(engine(tc, entry=MIRRORED, start=start).stage_up(context(tc)))
+    assert seen.at_start == []
+
+
+def test_a_rebuilds_recreate_is_refused_when_a_stale_fingerprint_must_stay(tc: Machine) -> None:
+    seen = mirrored_machine(tc)
+    wedge(tc.server_dir)
+    eng = engine(tc, entry=MIRRORED, docker_ready=lambda: True, recreate=recording_recreate(seen))
+    with pytest.raises(InstallerError, match=REFUSED):
+        list(eng.stage_recreate(context(tc)))
+    assert seen.at_start == []
+
+
+def test_finishing_a_world_update_is_refused_when_a_stale_fingerprint_must_stay(
+    tc: Machine,
+) -> None:
+    seen = mirrored_machine(tc)
+    wedge(tc.server_dir)
+    eng = engine(tc, entry=MIRRORED, recreate=recording_recreate(seen))
+    with pytest.raises(InstallerError, match=REFUSED):
+        list(eng._start_after_finish(context(tc)))
+    assert seen.at_start == []
+
+
+def test_the_pathfinding_job_is_not_a_world_start_and_still_runs(tmp_path: Path) -> None:
+    """The ruling is about starting the world; the job only reads `data/` beside it."""
+    server_dir = tmp_path / "wow-centurion-server"
+    lay_server(server_dir)
+    lay_compose(server_dir, "windows")
+    wedge(server_dir)
+    fake = FakeMmapsDocker()
+    mmaps.start_mmaps(
+        server_dir, MIRRORED, runner=fake, platform_id=lambda: "windows", user_args=()
+    )
+    assert len(fake.started) == 1
 
 
 def recording_recreate(seen: Seen) -> Callable[..., bool]:

@@ -1501,7 +1501,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
             yield warned
-        warned = world_data.refresh(self.entry, ctx.server_dir)
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         spec = self.entry.container_spec()

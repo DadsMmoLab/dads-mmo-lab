@@ -43,8 +43,20 @@ from pathlib import Path
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, TrinityCoreData
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
+
+
+class FingerprintNotRecorded(RuntimeError, SaidByYulon):
+    """The fingerprint could be neither written nor removed, so a start must not go on.
+
+    The lead's ruling (2026-10-05): the old file would stay, the copy would trust it, and
+    the world would read map data the server folder no longer holds without anyone
+    noticing. Every other failure is a warning and the start goes on. The message is the
+    sentence the player reads; each start path turns it into its own refusal.
+    """
+
 
 FINGERPRINT_FILE = ".yulon-world-data"
 """In the server folder's `data/`, and the volume keeps its own copy of the lines it holds;
@@ -126,8 +138,12 @@ def refresh(entry: CatalogEntry, server_dir: Path) -> str | None:
 
     Nothing for an entry with no `world_data_dirs` or an install whose compose file
     binds `data/`. Returns None, or -- when the file could not be worked out or
-    written -- the sentence to show, after logging it. Never raises: a start goes
-    on without it, and the copy then follows the last fingerprint written.
+    written, and the old one was removed so the copy takes everything -- the sentence
+    to show, after logging it; the start goes on.
+
+    Raises:
+        FingerprintNotRecorded: the old file could not be removed either, so the copy
+            would trust it; the start must not go on.
     """
     native = entry.install.native
     trinitycore = native.trinitycore if native is not None else None
@@ -166,12 +182,15 @@ def refresh_for(trinitycore: TrinityCoreData, server_dir: Path) -> str | None:
         # again: slower, never stale. The start itself still goes on (the plan's rule).
         try:
             path.unlink(missing_ok=True)
-        except OSError:
-            said = (
-                f"Yu'lon could not write {path} ({exc}), so the world server's copy of the map "
-                "data may not be brought up to date at this start. Check that the server "
-                "folder can be written, then start the server again."
+        except OSError as again:
+            refused = (
+                "Yu'lon could not record which map data the server should use, so it does not "
+                f"start: {path} could not be written ({exc}), and the one already there could "
+                f"not be removed ({again}). Check that the server folder can be written, then "
+                "start the server again."
             )
+            logger.warning(refused)
+            raise FingerprintNotRecorded(refused) from exc
         else:
             said = (
                 f"Yu'lon could not work out what is in {path.parent} ({exc}), so this start "

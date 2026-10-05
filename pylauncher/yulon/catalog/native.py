@@ -5823,7 +5823,7 @@ class StagedInstaller:
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
             yield warned
-        warned = world_data.refresh(self.entry, ctx.server_dir)
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         spec = self.entry.container_spec()
@@ -8768,6 +8768,18 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def _refresh_world_data(self, server_dir: Path) -> str | None:
+        """T219: the map-data fingerprint before this engine's own starts; the warning if any.
+
+        Raises:
+            InstallerError: it could be neither written nor removed, so the world would
+                read map data the server folder no longer holds; nothing was started.
+        """
+        try:
+            return world_data.refresh(self.entry, server_dir)
+        except world_data.FingerprintNotRecorded as exc:
+            raise InstallerError(str(exc)) from exc
+
     def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
         """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
 
@@ -9751,7 +9763,7 @@ class StagedInstaller:
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
             yield warned
-        warned = world_data.refresh(self.entry, ctx.server_dir)
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         try:
