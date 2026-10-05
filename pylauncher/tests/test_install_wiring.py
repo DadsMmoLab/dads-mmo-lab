@@ -231,6 +231,26 @@ def test_main_reports_an_engine_that_cannot_be_built_as_a_failure(
     assert "install failed: wow-tbc has no native install plan yet" in capsys.readouterr().err
 
 
+def test_main_prints_an_install_failure_with_its_details(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T248 Codex: the CLI dropped `InstallerError.detail`, the command that shows the log."""
+
+    def refuse(entry: CatalogEntry, **_k: object) -> object:
+        raise InstallerError(
+            "The database never reported healthy. Its own log says why.",
+            detail="To read everything it printed, run this in /srv:\n"
+            "docker compose logs ac-database",
+        )
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", refuse)
+    assert install_wiring.main(["wow-wotlk"]) == 1
+    err = capsys.readouterr().err
+    assert "install failed: The database never reported healthy." in err
+    assert "Details:\nTo read everything it printed" in err
+    assert "docker compose logs ac-database" in err
+
+
 def test_main_hands_the_engine_a_prompter_so_a_sudo_box_is_not_a_hang(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

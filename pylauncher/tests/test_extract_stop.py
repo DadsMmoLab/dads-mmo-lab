@@ -26,7 +26,7 @@ from tests import test_extract
 from tests.conftest import HANG_BOUND
 from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
-from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import end_fake_containers, finish_late_create, lay_fake_docker
 from yulon import container_end, docker, platform
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.families import extract
@@ -120,11 +120,35 @@ def test_a_stop_before_a_tool_starts_starts_nothing(fake_docker: tuple[Path, Pat
 
 
 def test_a_tool_container_the_daemon_creates_after_the_stop_is_removed_too(
-    fake_docker: tuple[Path, Path],
+    fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T240's second look: the Stop ended the CLI before the daemon had the name."""
+    """T240's second look: the Stop ended the CLI before the daemon had the name.
+
+    The daemon finishes the create during the settle, at the moment the test lays it
+    (T305's way: `finish_late_create()`), not on a real second's race.
+    """
     _cli, state = fake_docker
     (state / "late-create").write_text("", encoding="utf-8")
+    late: list[str] = []
+
+    def the_daemon_finishes_the_create() -> None:
+        assert [call for call in fake_calls(state) if call.startswith("rm -f ")] == [
+            f"rm -f {name}"
+        ], "the ground: the first look came before the create"
+        assert fake_containers(state) == []
+        late.append(finish_late_create(state))
+
+    slept: list[float] = []
+
+    class Settle:
+        def sleep(self, seconds: float) -> None:
+            slept.append(seconds)
+            the_daemon_finishes_the_create()
+
+        def __getattr__(self, attr: str) -> object:
+            return getattr(time, attr)
+
+    monkeypatch.setattr(container_end, "time", Settle())
     cancel = threading.Event()
     worker, got, name = _tool_on_a_worker(cancel, [], state)
 
@@ -132,6 +156,8 @@ def test_a_tool_container_the_daemon_creates_after_the_stop_is_removed_too(
     worker.join(HANG_BOUND)
 
     assert not worker.is_alive(), "the stopped tool did not end"
+    assert slept == [container_end.LATE_CREATE_SETTLE]
+    assert late == [name]
     assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
     removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
     assert removals == [f"rm -f {name}", f"rm -f {name}"], removals

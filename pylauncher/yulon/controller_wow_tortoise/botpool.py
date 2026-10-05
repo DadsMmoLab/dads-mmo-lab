@@ -90,8 +90,10 @@ def console_steps(why: str) -> str:
     return (
         "Your older bots stay offline for now: the bots module only runs bot accounts it has "
         f"enrolled, and Yu'lon could not enrol this server's older ones ({why}). To bring them "
-        f"back, type `{PREVIEW}` at the server console (the Console tab), then type the "
-        "`bot pool adopt confirm …` line it prints within five minutes, then restart the server."
+        "back, type this at the server console (the Console tab):\n"
+        f"{PREVIEW}\n"
+        "Then type the bot pool adopt confirm line it prints within five minutes, and restart "
+        "the server."
     )
 
 
@@ -396,8 +398,9 @@ def after_update(
         yield (
             f"The enrol command was sent but its answer never came ({outcome.why}), so it may "
             f"well have run. {restarting} so any bots it enrolled log in again. If the "
-            f"older bots are still missing afterwards, type `{PREVIEW}` at the server console "
-            "(the Console tab), then the `bot pool adopt confirm …` line it prints, then restart."
+            "older bots are still missing afterwards, type this at the server console (the "
+            f"Console tab):\n{PREVIEW}\n"
+            "then the bot pool adopt confirm line it prints, then restart."
         )
     else:
         yield (

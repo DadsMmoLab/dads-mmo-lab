@@ -618,3 +618,91 @@ def test_an_update_that_ends_while_a_check_is_out_asks_once_more(
     assert view._compose_state == "upstream", "the stale answer overwrote the fresh one"
     assert not view.compose_banner.isHidden()
     assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
+
+
+# -- T219: the repair that moves a Windows Centurion's map data into a volume ----------------
+
+
+class _VolumeRoute(_Route):
+    def __init__(self, world_data_gb: float) -> None:
+        super().__init__("stale")
+        self.world_data_gb = world_data_gb
+
+    def check(self) -> native.ComposeCheck:
+        self.checks += 1
+        return native.ComposeCheck("stale", added=40, removed=2, world_data_gb=self.world_data_gb)
+
+
+def test_the_repair_that_adds_the_map_data_volume_names_the_copy_and_its_size(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _view(ps, tmp_path, _VolumeRoute(5))
+    asked = _answer(monkeypatch, yes=False)
+    view.compose_banner_button.click()
+    [question] = asked
+    assert "first start after Recreate containers…" in question, question
+    assert "up to about 5 GB on Docker's disk" in question, question
+    assert question.index("about 5 GB") < question.index("Nothing else changes"), question
+
+
+def test_every_other_repair_question_is_word_for_word_as_before(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T219 adds a paragraph only where the volume is added; this is the text before it."""
+    view = _view(ps, tmp_path, _VolumeRoute(0))
+    asked = _answer(monkeypatch, yes=False)
+    view.compose_banner_button.click()
+    assert asked == [
+        "Repair this server's files now?\n\ndocker-compose.yml differs from what this version "
+        "of Yu'lon writes for this server, either because another version wrote it or because "
+        "it was edited by hand. Yu'lon writes it again the way this version installs it, with "
+        "this install's own project name, ports and SELinux labels (it adds 40 lines and "
+        "removes 2). Any hand edits in it are replaced; the file as it is now is kept beside it "
+        "as a backup (docker-compose.yml.<date>.repair.bak).\n\nNothing else changes: not your "
+        "characters, not your .conf settings, not docker-compose.override.yml or .env. The "
+        "running containers keep the old file until they are recreated, which Yu'lon offers "
+        "next."
+    ]
+
+
+def test_the_server_tab_says_when_a_start_could_not_bring_the_map_data_copy_up_to_date(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex review: an interactive Start's fingerprint failure was only logged. The tab says
+    it where it says the zone file's, after the Start's job is done."""
+    view = _view(ps, tmp_path, None)
+    said = "Yu'lon could not write data/.yulon-world-data (denied), so the copy may be stale."
+    view.services.controller.world_data_problem = said  # type: ignore[attr-defined]
+    view._server_action_done(None)
+    assert view.problem_label.text() == f"The server started, but {said}"
+
+
+def test_a_recreate_from_the_server_tab_banner_says_its_refusal_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#309's live proof: Recreate containers... on the Server tab's banner was refused (a
+    map-data fingerprint that could be neither written nor removed), and the Server tab
+    went on saying "The server is already running." -- the sentence was only on the
+    Tuning tab. The refusal is said where the press was made, and nothing was removed."""
+    from yulon.controller import StartRefused
+
+    route = _Route("stale")
+    view = _view(ps, tmp_path, route)
+    _answer(monkeypatch, yes=True)
+    view.compose_banner_button.click()
+    assert view.compose_banner_button.text() == TUNING_RECREATE_LABEL
+    view.problem_label.setText("The server is already running.")
+    said = (
+        "Yu'lon could not record which map data the server should use, so it does not start: "
+        "data/.yulon-world-data could not be written (denied)."
+    )
+
+    def refuse() -> None:
+        raise StartRefused(said)
+
+    removed: list[int] = []
+    view.services.controller.refuse_start = refuse  # type: ignore[method-assign]
+    view.services.controller.remove = lambda: removed.append(1) or True  # type: ignore
+    view.compose_banner_button.click()
+    assert removed == []
+    assert view.problem_label.text() == said

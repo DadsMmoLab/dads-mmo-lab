@@ -378,10 +378,13 @@ that was going to happen anyway" true rather than merely written.
 _CONTAINER_GIT_IMAGE = CONTAINER_GIT_IMAGE
 
 MISSING_GIT_HELP = {
-    "linux": "Install git with your package manager (e.g. `sudo apt install git`) and try again.",
+    "linux": (
+        "Install git with your package manager and try again. On Debian or Ubuntu that is:\n"
+        "sudo apt install git"
+    ),
     "macos": (
-        "Install Apple's Command Line Tools by running `xcode-select --install` in Terminal, "
-        "then try again."
+        "Install Apple's Command Line Tools by running this in Terminal, then try again:\n"
+        "xcode-select --install"
     ),
     "windows": "Install Git for Windows from https://git-scm.com/download/win and try again.",
 }
@@ -1200,8 +1203,8 @@ def container_left_line(name: str, dest: Path, reason: str) -> str:
     """The log line for a stopped clone whose container could not be removed (T240)."""
     return (
         f"The clone's container {name} could not be removed after Stop ({reason}), so it may "
-        f"still be writing into {dest}. Remove it in Docker Desktop's Containers list, or run: "
-        f"docker rm -f {name}"
+        f"still be writing into {dest}. Remove it in Docker Desktop's Containers list, or run "
+        f"this:\ndocker rm -f {name}"
     )
 
 

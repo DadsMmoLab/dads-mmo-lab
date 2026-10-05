@@ -2058,6 +2058,13 @@ class ControllerServices:
     a WSL distro. `None` means no check.
     """
 
+    kept_build: native.KeptBuildRoute | None = None
+    """T224's kept-build banner and "Remove kept build…"; None where builds are not kept.
+
+    `install_wiring.kept_build_for_app()` answers: every native install, never a
+    server inside a WSL distro (owner, D4). `None` means no banner and no check.
+    """
+
     corrections: native.CorrectionRoute | None = None
     """T129's "Apply database corrections…" for this install; None where it is not offered.
 
@@ -2753,6 +2760,9 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T224. Here for T106's reason: every native install can keep a build, and
+        # the distro (D4) is a fact of the install, answered in `install_wiring`.
+        kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -3977,6 +3987,7 @@ def _for_tortoise(
         world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
+        image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
     )
     return replace(
         services,
@@ -4417,6 +4428,12 @@ START_FAILED_DOCKER_MISSING = (
 START_FAILED_BROKE = "The server did not start. Details below says why."
 """A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
 
+STOP_FAILED_BROKE = "The server did not stop. Details below says why."
+"""A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
+
+UNINSTALL_FAILED_BROKE = "The uninstall did not finish. Details below says why."
+"""An Uninstall that broke rather than being refused by Yu'lon; the error is in Details (T248)."""
+
 STOP_LOG_NOT_SAVED = (
     "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below "
     "says why."
@@ -4775,8 +4792,8 @@ modules are already ledgered in `updates`.
 
 MODULE_SQL_FINISHED = (
     "The importer finished. Any '>> Applying update <file>.sql' line above is a file that was "
-    "applied just now; a module already recorded in the database's `updates` table correctly "
-    "gets nothing. Modules with C++ code still need a rebuild — that is a separate job."
+    "applied just now; a module already recorded in the database's own updates table "
+    "correctly gets nothing. Modules with C++ code still need a rebuild — that is a separate job."
 )
 """What is said at the end, and everything it deliberately does not say.
 
@@ -5952,7 +5969,8 @@ REPAIR_FILES_CONFIRM = (
     "Yu'lon writes for this server, either because another version wrote it or because it was "
     "edited by hand. Yu'lon writes it again the way this version installs it, with this "
     "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
-    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}\n\n"
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}{volume}"
+    "\n\n"
     "Nothing else changes: not your characters, not {others}, not docker-compose.override.yml "
     "or .env. The running containers keep the old file until they are recreated, which Yu'lon "
     "offers next."
@@ -5964,6 +5982,16 @@ REPAIR_FILES_CONFS = (
     "is kept beside itself as a backup too."
 )
 """T169's paragraph in the question, when the same repair sets a conf's folder setting."""
+
+REPAIR_FILES_WORLD_DATA = (
+    "\n\nIt also gives the world server a Docker volume of its own for the map data it reads, "
+    "so it no longer reads every map file through Windows' file share, which slowed the world "
+    "server's start. The first start after Recreate containers… copies the map data from the "
+    "server folder into it, which takes a few minutes, and once the pathfinding data is made "
+    "the copy takes up to about {gb:g} GB on Docker's disk. The server folder's data folder "
+    "stays where it is."
+)
+"""T219's paragraph in the question, when the same repair adds the `world-data` volume."""
 
 REPAIR_FILES_DONE = (
     "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
@@ -6596,6 +6624,21 @@ class _SaidLine(QLabel):
         self.said.emit()
 
 
+class _ToldLine(QLabel):
+    """A label that says when its text changes, and leaves its visibility to its owner (T248).
+
+    The Uninstall line is shown and hidden with the plan, so it cannot be a
+    `_SaidLine`; what it shares is that a new line takes the last Details down.
+    """
+
+    said = Signal()
+    """Every `setText`, as `_SaidLine.said`."""
+
+    def setText(self, text: str) -> None:  # noqa: N802  (Qt's own name)
+        super().setText(text)
+        self.said.emit()
+
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
@@ -6761,6 +6804,9 @@ class ControllerView(QWidget):
         self._busy = False
         # T195: what `_set_busy()` was last told is running, for "Wait: Start is running.".
         self._busy_job = ""
+        # T219 (#309's live proof): the running Restart or Recreate was pressed on the
+        # Server tab's compose banner, so its outcome is said on the Server tab too.
+        self._tuning_from_banner = False
         # T188 C4/C5: the word the realm badge holds while a Start, Stop or
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
@@ -7325,10 +7371,14 @@ class ControllerView(QWidget):
         # plan could not be put away once shown).
         self.uninstall_cancel_button = QPushButton(ARM_CANCEL, tab)
         self.uninstall_cancel_button.setVisible(False)
-        self.uninstall_label = QLabel("", tab)
+        self.uninstall_label = _ToldLine("", tab)
         self.uninstall_label.setWordWrap(True)
         self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.uninstall_label.setVisible(False)
+        # T248: what explains a failed uninstall (a command to list what is
+        # left) goes here, under the line; any new line takes it down.
+        self.uninstall_details = Details(tab)
+        self.uninstall_label.said.connect(lambda: self.uninstall_details.set_text(""))
         # 8.8. Beside Start, because it is the same errand seen from the other
         # side: Start plays this server from here, and this puts it and its
         # client in the Steam library so a Deck in Gaming Mode can. Built only
@@ -7385,6 +7435,7 @@ class ControllerView(QWidget):
         self._build_server_banners(tab)
         box.addWidget(self.compose_banner)
         box.addWidget(self.corrections_banner)
+        box.addWidget(self.kept_build_banner)
 
         realm, realm_column = section("Realm", tab)
         for label in (
@@ -7486,6 +7537,7 @@ class ControllerView(QWidget):
         danger_column.addWidget(self.uninstall_absent_label)
         if self.uninstall_button is not None:
             danger_column.addWidget(self.uninstall_label)
+            danger_column.addWidget(self.uninstall_details)
             danger_column.addWidget(self.keep_characters_check)
             danger_column.addWidget(self.delete_play_client_check)
             danger_column.addWidget(
@@ -7564,6 +7616,20 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
+        # T224 (owner D3): a finished build kept by a rebuild that replaced no
+        # container, and the press that removes it now.
+        self.kept_build_banner = QWidget(tab)
+        kept_build_box = QHBoxLayout(self.kept_build_banner)
+        kept_build_box.setContentsMargins(8, 6, 8, 6)
+        self.kept_build_banner_label = QLabel("", self.kept_build_banner)
+        self.kept_build_banner_label.setWordWrap(True)
+        self.kept_build_banner_button = QPushButton(
+            native.REMOVE_KEPT_BUILD_LABEL, self.kept_build_banner
+        )
+        self.kept_build_banner_button.clicked.connect(self.remove_kept_build)
+        kept_build_box.addWidget(self.kept_build_banner_label, 1)
+        kept_build_box.addWidget(self.kept_build_banner_button)
+        self.kept_build_banner.setVisible(False)
 
     def _add_section(self, box: QVBoxLayout, group: QGroupBox, wired: bool) -> None:
         """Put a Server section in the column if this game has it; otherwise keep it hidden.
@@ -8951,9 +9017,17 @@ class ControllerView(QWidget):
         goes through, and it never refuses over the zone file: the server runs
         on UTC, and this line says so and names the presses that fix it.
         """
-        said = getattr(self.services.controller, "zone_problem", None)
-        if isinstance(said, str) and said:
-            text = f"The server started, but {said}"
+        said = [
+            problem
+            for problem in (
+                getattr(self.services.controller, "zone_problem", None),
+                # T219: a Windows Centurion world's map-data copy, said the same way.
+                getattr(self.services.controller, "world_data_problem", None),
+            )
+            if isinstance(problem, str) and problem
+        ]
+        if said:
+            text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None
@@ -9176,11 +9250,15 @@ class ControllerView(QWidget):
             # line says so; the words go under Details and, through
             # `action_failed`, to the log. Yu'lon's own refusals stay as written.
             msg, why = START_FAILED_BROKE, raw
+        else:
+            # T248: Yu'lon's own sentence, and what explains it -- a container's
+            # log command -- under Details rather than on the line.
+            why = _detail_of(exc)
         # Asked of the raw text: Docker's port-in-use words are what it reads.
         rolled = self._roll_the_channel_back_if_it_took_the_port(raw)
         self.problem_label.setText(rolled or msg)
         self.problem_details.set_text("" if rolled else why)
-        self.action_failed.emit(rolled or (raw if why else msg))
+        self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
         self.refresh_status()
 
     def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
@@ -9419,8 +9497,22 @@ class ControllerView(QWidget):
         self._set_busy(False)
         msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
-        self.action_failed.emit(msg)
+        # T248: a refusal's command (`docker compose ls`) is under Details, not on the line.
+        detail = self._stop_failure_detail(exc, msg)
+        self.problem_details.set_text(detail)
+        self.action_failed.emit(f"{msg}\n{detail}" if detail else msg)
         self.refresh_status()
+
+    def _stop_failure_detail(self, exc: object, said: str) -> str:
+        """What goes under a failed stop's line (T248).
+
+        A refusal's own Details; for a stop that broke, Docker's own words,
+        which used to be the line itself (`docker stop X failed: …`); none
+        when Docker did not answer, whose words went to the log.
+        """
+        if said == STOP_FAILED_NO_DOCKER:
+            return ""
+        return _detail_of(exc) if _said_by_yulon(exc) else str(exc)
 
     def _stop_failure_words(self, exc: object) -> str:
         """What a failed stop says: its own refusal, or one plain line when Docker did not answer.
@@ -9431,7 +9523,8 @@ class ControllerView(QWidget):
         if isinstance(exc, docker.DockerUnansweredError) or docker_advice.unreachable(exc):
             logger.warning(f"{self.entry.name}: Stop could not reach Docker: {exc}")
             return STOP_FAILED_NO_DOCKER
-        return str(exc)
+        # T248: as a Start's (T214), only Yu'lon's own sentence goes on the line.
+        return str(exc) if _said_by_yulon(exc) else STOP_FAILED_BROKE
 
     def stop_for_removal(self) -> None:
         """Stop this server on the job runner because it is about to leave Yu'lon's list (T95).
@@ -9470,7 +9563,10 @@ class ControllerView(QWidget):
         self._set_busy(False)
         message = self._stop_failure_words(exc)
         self.problem_label.setText(message)
-        self.action_failed.emit(message)
+        # T248: as `_stop_failed()` does, the refusal's command goes under Details.
+        detail = self._stop_failure_detail(exc, message)
+        self.problem_details.set_text(detail)
+        self.action_failed.emit(f"{message}\n{detail}" if detail else message)
         # As `_stop_failed()` does: the status line said "stopping…", and the
         # tab may be kept (the second question can be answered No).
         self.refresh_status()
@@ -9717,9 +9813,16 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button.setVisible(False)
         self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
-        message = str(exc)
-        self.uninstall_label.setText(message)
-        self.action_failed.emit(message)
+        # T248: as a Stop's, only Yu'lon's own sentence goes on the line; what
+        # broke -- Docker's or the system's own words -- goes under Details.
+        if _said_by_yulon(exc):
+            self.uninstall_label.setText(str(exc))
+            self.uninstall_details.set_text(_detail_of(exc))
+            self.action_failed.emit(_for_the_log(exc))
+        else:
+            self.uninstall_label.setText(UNINSTALL_FAILED_BROKE)
+            self.uninstall_details.set_text(str(exc))
+            self.action_failed.emit(f"{UNINSTALL_FAILED_BROKE}\n{exc}")
 
     @Slot()
     def forget_install(self) -> None:
@@ -11421,7 +11524,7 @@ class ControllerView(QWidget):
         self.danger_label.setText(text)
         self.danger_label.setVisible(True)
         self.danger_details.set_text(details)
-        QTimer.singleShot(0, self._bring_the_danger_label_on_screen)
+        QTimer.singleShot(0, self, self._bring_the_danger_label_on_screen)
 
     @Slot()
     def _bring_the_danger_label_on_screen(self) -> None:
@@ -11519,8 +11622,10 @@ class ControllerView(QWidget):
     @Slot(object)
     def _remove_failed(self, exc: object) -> None:
         self._set_busy(False)
-        self._say_under_the_presses(f"Could not remove the containers: {exc}")
-        self.action_failed.emit(str(exc))
+        self._say_under_the_presses(
+            f"Could not remove the containers: {exc}", details=_detail_of(exc)
+        )
+        self.action_failed.emit(_for_the_log(exc))
 
     @Slot()
     def repair_import(self) -> None:
@@ -14511,8 +14616,7 @@ class ControllerView(QWidget):
         # clone they changed (T44 item 1).
         self.refresh_modules_button.clicked.connect(self.refresh_modules)
         self.refresh_modules_button.setToolTip(
-            "Read this install's module folders again. Cheap: directory names and one "
-            "`git log -1` per module, no network."
+            "Read this install's module folders again. Quick, and it does not use the network."
         )
         # The two whose subject is not in the catalog at all: a module this app
         # does not ship, named by the user.
@@ -16029,7 +16133,11 @@ class ControllerView(QWidget):
             QMessageBox.question(
                 self,
                 f"Rebuild {self.entry.name}?",
-                rebuild_confirmation(self.entry, self.services.controller.server_dir),
+                rebuild_confirmation(
+                    self.entry,
+                    self.services.controller.server_dir,
+                    kept_build=self.services.kept_build is not None,
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -16739,6 +16847,8 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        # T224: any press of this panel may have kept a build, used one or removed one.
+        self.check_kept_build()
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
         # that failed leaves it stopped with a press on the Bots tab to retry.
         self.refresh_bot_dashboard()
@@ -17150,6 +17260,7 @@ class ControllerView(QWidget):
         # distro none runs until it is up (T174's is never wired for a distro).
         if self._waits_for_the_distro("server files", self.check_server_files):
             return
+        self.check_kept_build()
         confs = self.services.repair_confs
         if confs is not None and not self._confs_pending:
             self._confs_pending = True
@@ -17278,15 +17389,80 @@ class ControllerView(QWidget):
         else:
             self.compose_banner.setVisible(False)
 
+    # ------------------------------------------------- T224: a kept build
+
+    def check_kept_build(self) -> None:
+        """Ask, off the GUI thread, whether a build is kept (T224, D3). It reads one file."""
+        route = self.services.kept_build
+        if route is None:
+            self.kept_build_banner.setVisible(False)
+            return
+        self._run(route.check, self._kept_build_checked, self._kept_build_check_failed)
+
+    @Slot(object)
+    def _kept_build_checked(self, result: object) -> None:
+        if isinstance(result, str) and result:
+            self.kept_build_banner_label.setText(result)
+            self.kept_build_banner.setVisible(True)
+        else:
+            self.kept_build_banner.setVisible(False)
+
+    @Slot(object)
+    def _kept_build_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, no banner is drawn on it."""
+        logger.warning(f"{self.entry.id}: the kept build check failed: {exc}")
+        self.kept_build_banner.setVisible(False)
+
+    def remove_kept_build(self) -> bool:
+        """Ask, then remove the kept build in a job (T224, D3). False if nothing started."""
+        route = self.services.kept_build
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was removed.",
+            )
+            return False
+        if not self._confirm(native.REMOVE_KEPT_BUILD_LABEL, native.REMOVE_KEPT_BUILD_QUESTION):
+            return False
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.remove, self._kept_build_removed, self._kept_build_remove_failed)
+        return True
+
+    @Slot(object)
+    def _kept_build_removed(self, result: object) -> None:
+        self.problem_label.setText(str(result))
+        self._set_busy(False)
+        self.check_kept_build()
+
+    @Slot(object)
+    def _kept_build_remove_failed(self, exc: object) -> None:
+        self.problem_label.setText(f"The kept build was not removed: {exc}")
+        self._set_busy(False)
+        self.check_kept_build()
+
     @Slot()
     def _compose_banner_pressed(self) -> None:
-        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart."""
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart.
+
+        A Recreate or Restart pressed here says how it ended here as well, not only in
+        the Tuning tab's report (T219: a refused Recreate left this tab saying "The
+        server is already running.").
+        """
         if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
+            self._tuning_from_banner = True
             self.recreate_containers()
         elif self.compose_banner_button.text() == TUNING_RESTART_LABEL:
+            self._tuning_from_banner = True
             self.restart_server()
         else:
             self.repair_server_files()
+        if not self._busy:
+            self._tuning_from_banner = False  # declined, or done inline: nothing pending
 
     @Slot()
     def repair_server_files(self) -> None:
@@ -17331,7 +17507,12 @@ class ControllerView(QWidget):
             if last is not None and last.state == "upstream"
             else REPAIR_FILES_CONFIRM
         )
-        question = confirm.format(backup=backup, counts=counts, confs=confs, others=others)
+        # T219: a Windows Centurion's file from before the map-data volume.
+        gb = last.world_data_gb if last is not None and last.state == "stale" else 0.0
+        volume = REPAIR_FILES_WORLD_DATA.format(gb=gb) if gb else ""
+        question = confirm.format(
+            backup=backup, counts=counts, confs=confs, others=others, volume=volume
+        )
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
@@ -17533,6 +17714,9 @@ class ControllerView(QWidget):
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
         zone = self._say_zone_problem()
+        if self._tuning_from_banner and zone is None:
+            self.problem_label.setText("")  # what this tab said before the press is past
+        self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
@@ -17547,6 +17731,9 @@ class ControllerView(QWidget):
         else:
             self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
             self.tuning_details.set_text(str(exc))
+        if self._tuning_from_banner:
+            self.problem_label.setText(self.tuning_report.toPlainText())
+        self._tuning_from_banner = False
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

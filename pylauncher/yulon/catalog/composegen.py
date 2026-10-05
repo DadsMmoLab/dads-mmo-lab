@@ -598,6 +598,8 @@ def render(
             # T165: the folders the server writes into, bound out with the same label;
             # T169: the ones the install's confs name, when they are there to ask.
             **_folder_binds(entry, bind_label, server_dir),
+            # T219: the world server's map data, a volume on Windows and the bind elsewhere.
+            **_world_data_tokens(entry, bind_label, platform_id, templates),
             # The catalog facts (contract A6), last so the install-identity keys
             # above stay the authority on any name the two sets ever share. A
             # token no template uses costs nothing — `fill()` minds unfilled
@@ -1252,6 +1254,93 @@ def _folder_binds(entry: CatalogEntry, bind_label: str, server_dir: Path) -> dic
             for folder in server_folders(entry, conf, server_dir=server_dir)
         )
         for token, conf in folder_confs(entry).items()
+    }
+
+
+WORLD_DATA_VOLUME = "world-data"
+"""T219: the named volume a Windows TrinityCore world server reads its map data from;
+Docker names it `<project>_world-data`. Uninstall removes it with or without "Keep my
+characters" (`purge` keeps only `_db-data` and `_client-data`): what it holds is a copy
+of the server folder's `data/`, which Uninstall deletes anyway."""
+
+WORLD_DATA_SOURCE = "data-src"
+"""Where the server folder's `data/` is mounted read-only beside the volume, for the copy."""
+
+WORLD_DATA_SCRIPT = "world-data-sync.sh"
+"""The world container's entrypoint on Windows, in the family's templates folder."""
+
+
+def world_data_dirs(entry: CatalogEntry, platform_id: Callable[[], str]) -> tuple[str, ...]:
+    """The `data/` folders this render copies into the `world-data` volume; () when it binds.
+
+    Windows and the TrinityCore family only (T219, owner decision 2): Docker Desktop
+    serves a Windows folder to a container over a file share at about 12 ms per file
+    opened, and the world server opens thousands of terrain files while it makes its
+    first bots (58.9 s over the share against 1.81 s from a volume, yulon-win11
+    2026-10-04). A WSL-distro install renders as `linux` (`native.Seams.in_wsl`) and
+    reads its own disk. macOS and the CMaNGOS family are not measured and keep the bind.
+    """
+    trinitycore = _native_of(entry).trinitycore
+    if trinitycore is None or platform_id() != "windows":
+        return ()
+    return trinitycore.world_data_dirs
+
+
+def _world_data_tokens(
+    entry: CatalogEntry, bind_label: str, platform_id: Callable[[], str], templates: Path
+) -> dict[str, str]:
+    """The TrinityCore base template's three `WORLD_DATA_*` tokens (T219).
+
+    Off Windows -- or for an entry that names no `world_data_dirs` -- the mount is the
+    `./data` bind it always was and the other two are empty, so those files render byte
+    for byte as before (`tests/data/centurion-rendered/`). On Windows the world server
+    mounts the `world-data` volume where `DataDir` points, the server folder's `data/`
+    read-only beside it, and runs `WORLD_DATA_SCRIPT` as its entrypoint: it copies what
+    changed (by the fingerprint `families.world_data` writes before every start) and
+    `exec`s the `command`. The entrypoint, and not a one-shot service, because
+    `docker.start_staged()` runs `compose up --no-deps` with the three services named,
+    which never starts anything they depend on; the entrypoint also runs on a restart
+    by Docker's policy and on a hand-run `compose up`.
+
+    The label goes on the binds only: a named volume is Docker's own and is never
+    relabelled. Beside `ro` it is a second option (`ro,z`), the one spelling compose reads.
+    Every `$` of the script is doubled, compose's escape for a literal `$`.
+
+    Raises:
+        ComposeGenError: the script template is missing, or a token in it is not filled.
+    """
+    if _native_of(entry).trinitycore is None:
+        return {}
+    tokens = entry_tokens(entry)
+    core = tokens["CORE_DIR"]
+    dirs = world_data_dirs(entry, platform_id)
+    if not dirs:
+        return {
+            "WORLD_DATA_MOUNTS": f"./data:{core}/data{bind_label}",
+            "WORLD_DATA_ENTRYPOINT": "",
+            "WORLD_DATA_VOLUME": "",
+        }
+    script = fill(
+        _read_template(templates / WORLD_DATA_SCRIPT),
+        {**tokens, "WORLD_DATA_DIRS": " ".join(dirs)},
+    ).replace("$", "$$")
+    body = "".join(f"        {line}\n" if line else "\n" for line in script.splitlines())
+    return {
+        "WORLD_DATA_MOUNTS": (
+            f"{WORLD_DATA_VOLUME}:{core}/data\n"
+            f"      - ./data:{core}/{WORLD_DATA_SOURCE}:ro{bind_label.replace(':', ',')}"
+        ),
+        "WORLD_DATA_ENTRYPOINT": (
+            "\n    # T219: on Windows the map data is read from the world-data volume, and"
+            "\n    # this copies into it what changed in the server folder's data before"
+            f"\n    # the server starts ({WORLD_DATA_SCRIPT} in Yu'lon's templates)."
+            "\n    entrypoint:"
+            "\n      - sh"
+            "\n      - -c"
+            "\n      - |"
+            f"\n{body}      - yulon-world"
+        ),
+        "WORLD_DATA_VOLUME": f"\n  {WORLD_DATA_VOLUME}:",
     }
 
 
