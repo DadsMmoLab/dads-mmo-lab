@@ -32,7 +32,7 @@ from tests.test_controller_view import ALL_UP, WOTLK, _Deferred, _Ps, _services
 from yulon import docker, runner
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.controller_view import TUNING_RESTARTING, ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -518,3 +518,100 @@ def test_a_cancel_reaches_the_wait_and_ends_it_as_cancelled() -> None:
     answer = _after_start(WOTLK, world, stop)
 
     assert answer.verdict == "cancelled"
+
+
+def test_an_ended_wait_s_answer_landing_before_the_newer_press_is_done_is_dropped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review: the cancelled wait answered at once, before the second press's
+    own wait existed, and wrote "the wait … was stopped" over "restarting the server…".
+
+    Mutation: do not move the number on in `_end_the_world_wait()`, and the report
+    and the failure signal carry the old wait's sentence.
+    """
+    failed: list[str] = []
+
+    def wait(*, cancel: threading.Event) -> native.StartAnswer:
+        return native.StartAnswer("cancelled" if cancel.is_set() else "ready")
+
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(ps, tmp_path, monkeypatch, wait)
+    view.action_failed.connect(failed.append)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+
+    view.restart_server()
+    _run_the(jobs, view._tuning_world_answered)  # the first wait, ended, answers now
+
+    assert view.tuning_report.toPlainText() == TUNING_RESTARTING
+    assert failed == []
+
+
+def test_stop_during_the_wait_says_the_wait_was_stopped_and_is_no_failure(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The player's own Stop is not a failed restart, in the report or the log."""
+    failed: list[str] = []
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(
+        ps,
+        tmp_path,
+        monkeypatch,
+        lambda *, cancel: native.StartAnswer("cancelled" if cancel.is_set() else "ready"),
+    )
+    view.action_failed.connect(failed.append)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+
+    view.stop_server()
+    said = view.tuning_report.toPlainText()
+    _run_the(jobs, view._tuning_world_answered)
+
+    assert "wait for the world server was stopped" in said, said
+    assert view.tuning_report.toPlainText() == said
+    assert not [f for f in failed if "wait for the world" in f], failed
+
+
+def test_an_old_wait_that_broke_does_not_write_over_a_newer_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error path carries the wait's number too."""
+    calls: list[threading.Event] = []
+
+    def wait(*, cancel: threading.Event) -> native.StartAnswer:
+        calls.append(cancel)
+        if len(calls) == 1:
+            raise RuntimeError("docker went away")
+        return native.StartAnswer("ready")
+
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(ps, tmp_path, monkeypatch, wait)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    for _ in range(2):
+        _run_the_first(jobs, view._tuning_world_answered)
+
+    assert view.tuning_report.toPlainText().startswith("restart: done.")
+
+
+def test_a_wait_that_broke_says_so_and_never_done(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def wait(*, cancel: threading.Event) -> native.StartAnswer:
+        raise RuntimeError("docker went away")
+
+    view, jobs = _deferred_view(ps, tmp_path, monkeypatch, wait)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    _run_the(jobs, view._tuning_world_answered)
+
+    report = view.tuning_report.toPlainText()
+    assert "could not wait for the world server" in report and "done" not in report
+    assert "docker went away" in view.tuning_details.text()
+
+
+def _run_the_first(jobs: _Deferred, on_done: object) -> None:
+    index = next(i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done)
+    jobs.run(index)

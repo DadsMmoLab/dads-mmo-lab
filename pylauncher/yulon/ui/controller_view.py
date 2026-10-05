@@ -2326,6 +2326,21 @@ def _what_the_start_did(
     return said, details
 
 
+def _waited_for_the_world(
+    number: int, job: str, wait: Callable[..., native.StartAnswer], cancel: threading.Event
+) -> tuple[int, str, native.StartAnswer | Exception]:
+    """The Tuning restart's world wait, on the worker, with its number on every answer (T382).
+
+    An Exception is returned rather than raised so the answer still carries the
+    number, and an old wait that broke never writes over a newer press's report.
+    """
+    try:
+        return number, job, wait(cancel=cancel)
+    except Exception as exc:  # noqa: BLE001 - reported by the slot, as the wait broke
+        logger.warning(f"the wait for the world after a {job} broke: {exc}")
+        return number, job, exc
+
+
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
     """The player's own client folder(s) a ready-to-play client stands in for (T181).
 
@@ -6940,6 +6955,7 @@ class ControllerView(QWidget):
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
         self._world_wait_number = 0
+        self._world_wait_job = "restart"
         self._world_wait_from_banner = False
         self._world_wait_zone: str | None = None
         # How many status reads were asked, and which one is out.
@@ -17845,9 +17861,6 @@ class ControllerView(QWidget):
         if self.services.ready_after_start is None:
             self._say_what_the_start_did(job, None)
         else:
-            self.tuning_report.setPlainText(
-                TUNING_WAITING_FOR_THE_WORLD.format(job=job) + (f"\n{zone}" if zone else "")
-            )
             self._wait_for_the_world(job)
         self.refresh_status()
 
@@ -17856,11 +17869,11 @@ class ControllerView(QWidget):
 
         Not in the press's busy job: a world's load can take an hour on a big
         first boot, and Stop, Start and Play must not be held for it (cold
-        review). Any Server action that starts (`_set_busy(True)`) ends this
-        wait through its cancel, so a Stop pressed during the load is never
-        raced by it, and its answer is then the plain `cancelled` sentence.
-        The number says which wait answered: one a newer press replaced is
-        dropped, not written over that press's report.
+        review). Any job of this tab that locks the Server buttons
+        (`_set_busy(True)`) ends the wait, as any of them may stop, restart or
+        replace the containers it watches: the report then says the wait was
+        stopped, at once, and the wait's own late answer is dropped. The
+        number says which wait answered, on the error path too.
         """
         wait = self.services.ready_after_start
         assert wait is not None
@@ -17868,45 +17881,60 @@ class ControllerView(QWidget):
         self._world_wait_number += 1
         number, cancel = self._world_wait_number, threading.Event()
         self._world_wait = cancel
+        self._world_wait_job = job
+        zone = self._world_wait_zone
+        self.tuning_report.setPlainText(
+            TUNING_WAITING_FOR_THE_WORLD.format(job=job) + (f"\n{zone}" if zone else "")
+        )
         self._run(
-            lambda: (number, job, wait(cancel=cancel)),
+            partial(_waited_for_the_world, number, job, wait, cancel),
             self._tuning_world_answered,
             self._tuning_world_failed,
         )
 
     def _end_the_world_wait(self) -> None:
-        """Cancel a world wait still running (T382): a Server action of ours has started."""
-        if self._world_wait is not None:
-            self._world_wait.set()
-            self._world_wait = None
+        """End a world wait still out (T382), and say so now rather than when it notices.
+
+        The number moves on, so the cancelled wait's own answer -- which can land
+        before or after a newer press's -- never writes over what that press says.
+        """
+        if self._world_wait is None:
+            return
+        self._world_wait.set()
+        self._world_wait = None
+        self._world_wait_number += 1
+        if not getattr(self, "_closed", False):
+            self._say_what_the_start_did(self._world_wait_job, native.StartAnswer("cancelled"))
 
     @Slot(object)
     def _tuning_world_answered(self, answer: object) -> None:
-        number, job, world = cast(tuple[int, str, native.StartAnswer], answer)
+        number, job, world = cast(tuple[int, str, "native.StartAnswer | Exception"], answer)
         if getattr(self, "_closed", False) or number != self._world_wait_number:
-            return  # a newer press's wait owns the report
+            return  # ended, or a newer press's wait owns the report
         self._world_wait = None
+        if isinstance(world, Exception):
+            # The wait itself broke, not the world: said as that, never as done.
+            self.tuning_report.setPlainText(TUNING_WORLD_WAIT_BROKE)
+            self.tuning_details.set_text(_detail_of(world) if _said_by_yulon(world) else str(world))
+            self.action_failed.emit(_for_the_log(world))
+            return
         self._say_what_the_start_did(job, world)
 
     @Slot(object)
     def _tuning_world_failed(self, exc: object) -> None:
-        """The wait itself broke (not the world): said as that, never as done (T382)."""
-        if getattr(self, "_closed", False):
-            return
-        self._world_wait = None
-        self.tuning_report.setPlainText(TUNING_WORLD_WAIT_BROKE)
-        self.tuning_details.set_text(_detail_of(exc) if _said_by_yulon(exc) else str(exc))
-        self.action_failed.emit(_for_the_log(exc))
+        """Only a BaseException `_waited_for_the_world()` let through reaches here: logged."""
+        logger.warning(f"the wait for the world after a restart broke: {exc!r}")
 
     def _say_what_the_start_did(self, job: str, world: native.StartAnswer | None) -> None:
         said, details = _what_the_start_did(job, world, self.services.controller)
         zone = self._world_wait_zone
-        if self._world_wait_from_banner and world is not None and not world.ready:
+        failed = world is not None and world.verdict not in ("ready", "cancelled")
+        if self._world_wait_from_banner and failed:
             self.problem_label.setText(said)
         self._world_wait_from_banner = False
         self.tuning_report.setPlainText(said + (f"\n{zone}" if zone else ""))
         self.tuning_details.set_text(details)  # after the report: a new report clears it
-        if world is not None and not world.ready:
+        if failed:
             self.action_failed.emit(said)
 
     @Slot(object)
