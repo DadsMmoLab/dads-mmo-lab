@@ -406,8 +406,15 @@ not a stripped copy, because a space is part of what gets written.
 
 INT32_SMALLEST = -(2**31)
 INT32_LARGEST = 2**31 - 1
-"""The range of the C++ `int` an `int` key is read into (`GetIntDefault` returns
-`int32` in mangos-tbc, and `std::stoi` throws `out_of_range` past it)."""
+"""The range of the C++ `int` an `int` key is read into.
+
+`GetIntDefault` returns `int32` in mangos-tbc (`std::stoi`, which throws
+`out_of_range` at world start past it), Tortoise (`atoi`) and Centurion. An
+AzerothCore module may read a key as `uint32` instead (`mod-ah-bot`'s GUID), and
+then 2147483648 and up is refused although that module could read it: no real
+GUID or count lives there, while accepting it for an `int32` reader is a value
+the server never sees. The catalog has no way yet to say a key is unsigned.
+"""
 
 
 def check(key: ConfKey | None, value: str) -> None:
