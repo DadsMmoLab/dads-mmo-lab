@@ -286,11 +286,14 @@ def test_an_unreadable_ledger_claims_nothing_the_database_was_not_asked_about(
     assert not [line for line in _report(view) if line.endswith(": applied")]
 
 
-def test_the_log_file_and_details_draw_no_colour_code(qapp: object) -> None:
+def test_the_log_formatter_and_details_draw_no_colour_code(qapp: object) -> None:
     """Item 1's other two places: whatever reaches them, the codes do not.
 
+    The log file itself is `test_log.py`'s
+    `test_a_programs_colour_codes_never_reach_the_log_file`.
+
     Mutation: format with a plain `logging.Formatter`, or set Details' text as it
-    comes, and the code is in the file or the fold.
+    comes, and the code is in the line or the fold.
     """
     from yulon import log
     from yulon.ui.widgets.details import Details
@@ -299,8 +302,6 @@ def test_the_log_file_and_details_draw_no_colour_code(qapp: object) -> None:
         "yulon.docker", logging.WARNING, __file__, 1, f"\x1b[31;1m{MYSQL_ERROR}\x1b[0m", None, None
     )
     assert log.PlainFormatter("%(message)s").format(record) == MYSQL_ERROR
-    handler = log._stderr_handler
-    assert handler is not None and isinstance(handler.formatter, log.PlainFormatter)
 
     details = Details()
     details.set_text(f"\x1b[0m\x1b[36m{MYSQL_ERROR}\x1b[0m")
