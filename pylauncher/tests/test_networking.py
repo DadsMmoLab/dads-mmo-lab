@@ -1846,9 +1846,11 @@ def test_a_reload_with_an_unresolved_route_is_refused_and_says_why() -> None:
     assert p.ssh_ports == ()
     assert len(p.refusals) == 1 and p.refusals[0] in p.warnings
     refusal = p.refusals[0]
-    assert "REFUSED to run `firewall-cmd --reload`" in refusal
+    assert "REFUSED to reload firewalld" in refusal
     assert "NOT in effect until a reload" in refusal
-    assert "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp`" in refusal
+    assert (
+        "\nsudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp\n" in refusal
+    )
     assert "systemctl" not in refusal, "no start was asked for, so none is handed back"
     seen: list[list[str]] = []
     report = networking.apply(p, sql=None, run=lambda argv: (seen.append(argv), _ok(argv))[1])
@@ -1859,7 +1861,7 @@ def test_a_reload_with_an_unresolved_route_is_refused_and_says_why() -> None:
     both = _firewalld_plan(daemon="unknown", enable_firewall=True, route=unresolved)
     assert not any(networking._can_lock_out(c) for c in both.firewall_commands)
     assert len(both.refusals) == 1
-    assert "REFUSED to enable firewalld and to run `firewall-cmd --reload`" in both.refusals[0]
+    assert "REFUSED to enable firewalld and to reload firewalld" in both.refusals[0]
     assert "systemctl enable --now firewalld && sudo firewall-cmd --reload" in both.refusals[0]
 
 
@@ -2518,16 +2520,16 @@ def test_an_empty_socket_table_is_a_private_namespace_not_a_box_without_ssh() ->
         ("firewall-cmd", "--permanent", "--zone=public", "--add-port=8085/tcp"),
     ], "the request minus the reload"
     assert len(p.refusals) == 1 and p.refusals[0] in p.warnings
-    assert "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+    assert "REFUSED to reload firewalld" in p.refusals[0]
     assert "listed NOTHING at all" in p.refusals[0] and "unshare --net" in p.refusals[0]
     q = _ufw_plan(enable_firewall=True, route=empty)
     assert all("enable" not in c for cmd in q.firewall_commands for c in cmd)
     assert q.refusals and "REFUSED to enable ufw" in q.refusals[0]
-    assert "`sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`" in q.refusals[0]
+    assert "\nsudo ufw allow <your ssh port>/tcp\nThen:\nsudo ufw enable" in q.refusals[0]
     # And the two together, when both are on the table: one sentence, both named.
     both = _firewalld_plan(daemon="unknown", enable_firewall=True, route=empty)
     assert not any(networking._can_lock_out(c) for c in both.firewall_commands)
-    assert "REFUSED to enable firewalld and to run `firewall-cmd --reload`" in both.refusals[0]
+    assert "REFUSED to enable firewalld and to reload firewalld" in both.refusals[0]
 
 
 def test_a_supplied_ssh_port_is_not_a_reading_of_the_socket_table() -> None:
@@ -2758,7 +2760,7 @@ def test_the_ports_are_written_to_every_active_zone_before_the_reload() -> None:
     # Round 6: "told nothing" was the wrong half of that. Two zones means the
     # ports went somewhere the user did not name, so the plan names both.
     said = next(w for w in p.warnings if "game ports" in w)
-    assert "`internal`" in said and "`public`" in said and "3724, 8085" in said
+    assert "internal" in said and "public" in said and "3724, 8085" in said
     assert "2022" in said, "and why the SSH port is in every one of them"
 
     seen: list[list[str]] = []
@@ -2807,11 +2809,11 @@ def test_a_reload_is_refused_when_the_active_zones_cannot_be_read() -> None:
     assert p.ssh_ports == () and p.firewalld_zones is None
     assert len(p.refusals) == 1
     refusal = p.refusals[0]
-    assert "REFUSED to run `firewall-cmd --reload`" in refusal
+    assert "REFUSED to reload firewalld" in refusal
     assert "SSH arrives on port 2022" in refusal
     assert "permanent zone bindings could not be read" in refusal
-    assert "`firewall-cmd --permanent --list-all-zones`" in refusal
-    assert "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp`" in refusal
+    assert "\nsudo firewall-cmd --permanent --list-all-zones\n" in refusal
+    assert "\nsudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp\n" in refusal
     assert "No route to host" in refusal, "say what was measured, not what might happen"
     assert refusal in p.warnings
     assert any("written to the DEFAULT zone" in w for w in p.warnings if w != refusal)
@@ -3145,8 +3147,8 @@ def test_a_stopped_daemon_writes_its_ssh_rule_to_every_zone_it_will_bring_up() -
     )
     assert not any(networking._starts_firewalld(c) for c in unread.firewall_commands)
     assert "REFUSED to enable firewalld" in unread.refusals[0]
-    assert "`sudo firewall-offline-cmd --list-all-zones`" in unread.refusals[0]
-    assert "`sudo firewall-offline-cmd --zone=<zone> --add-port=<port>/tcp`" in unread.refusals[0]
+    assert "\nsudo firewall-offline-cmd --list-all-zones\n" in unread.refusals[0]
+    assert "\nsudo firewall-offline-cmd --zone=<zone> --add-port=<port>/tcp\n" in unread.refusals[0]
     # The default path on a stopped daemon has no lockout command, so unread
     # zones cost a warning and nothing else: the ports are written, unzoned.
     quiet = _firewalld_plan(daemon="stopped", zones=None)
@@ -3998,7 +4000,7 @@ def test_a_default_zone_that_moves_is_written_to_and_said_out_loud() -> None:
     ) < written.index("firewall-cmd --reload")
     assert p.refusals == (), "written to both zones is not a refusal"
     said = next(w for w in p.warnings if "DefaultZone" in w)
-    assert "`public`" in said and "`work`" in said
+    assert "public" in said and "work" in said
     assert "/etc/firewalld/firewalld.conf" in said
     assert "firewall-offline-cmd --list-all-zones" in said
 
@@ -4027,7 +4029,7 @@ def test_a_running_daemon_whose_configured_default_zone_is_unread_refuses_the_re
     refusal = next(r for r in p.refusals if "DefaultZone" in r)
     assert "/etc/firewalld/firewalld.conf" in refusal
     assert "firewall-offline-cmd --get-default-zone" in refusal
-    assert "`public`" in refusal, "the running default is named, since it IS known"
+    assert "public" in refusal, "the running default is named, since it IS known"
     assert refusal in p.warnings
     # The ports the user asked for are still written; it is the reload that is held.
     assert (
@@ -4157,7 +4159,7 @@ def test_every_zone_the_game_ports_are_written_to_is_named_in_the_plan() -> None
     written = [" ".join(c) for c in p.firewall_commands]
     assert "firewall-cmd --permanent --zone=wanzone --add-port=3724/tcp" in written
     said = next(w for w in p.warnings if "game ports" in w)
-    assert "`wanzone`" in said and "`public`" in said
+    assert "wanzone" in said and "public" in said
     assert "3724, 8085" in said
     assert "--remove-port=<port>/tcp" in said, "and the command that takes one back"
     assert "SSH (port 2222)" in said, "and why the SSH rule is not narrowed with them"
@@ -4346,9 +4348,9 @@ def test_the_docker_zone_is_a_bridge_this_machine_made_not_breadth() -> None:
         ).warnings
         if w.startswith("firewalld: the game ports")
     )
-    assert "`FedoraWorkstation`" in said and "`wanzone`" in said
+    assert "FedoraWorkstation" in said and "wanzone" in said
     assert "did not make for its own containers" in said
-    assert "`docker` got the ports too and is not counted above" in said
+    assert "docker got the ports too and is not counted above" in said
 
 
 def test_a_zone_with_a_source_or_a_real_nic_is_never_machine_made() -> None:
@@ -4516,7 +4518,7 @@ def test_the_lockout_decision_is_one_function_driven_by_both_default_zone_readin
         _question(zoning=diverged, zones=("FedoraWorkstation", "docker", "work"))
     )
     assert moved.reason == networking.ALLOWED_SSH_PRESERVED
-    assert moved.notes and "`work`" in moved.notes[0], "two exposed zones now, and named"
+    assert moved.notes and "work" in moved.notes[0], "two exposed zones now, and named"
 
     # And a zone that could not be read at all refuses for its own reason.
     blind = networking.decide_lockout(_question(zones=None, zoning=None))
@@ -5843,7 +5845,7 @@ def test_t140_ports_saved_but_not_in_effect_still_need_the_reload_and_its_guard(
     refused = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=_answering(False, True))
     assert refused.firewall_commands == ()
     assert len(refused.refusals) == 1
-    assert "REFUSED to run `firewall-cmd --reload`" in refused.refusals[0]
+    assert "REFUSED to reload firewalld" in refused.refusals[0]
     assert (
         "firewalld's saved configuration already admits 3724/tcp and 8085/tcp in zone public, "
         "so those rules are not written again."
@@ -5882,7 +5884,7 @@ def test_t140_a_pair_the_seam_did_not_answer_is_not_admitted() -> None:
     """An answer missing for a pair is unknown, never yes — no command is removed for it."""
     p = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=lambda pairs: ())
     assert list(p.firewall_commands) == _PUBLIC_WRITES
-    assert any("REFUSED to run `firewall-cmd --reload`" in r for r in p.refusals)
+    assert any("REFUSED to reload firewalld" in r for r in p.refusals)
 
 
 def _query_run(
@@ -6014,7 +6016,7 @@ def test_t140_an_unreadable_zone_target_leaves_the_deck_plan_as_it_was() -> None
         mode="internet",
     )
     assert list(p.firewall_commands) == _DECK_WRITES
-    assert len(p.refusals) == 1 and "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+    assert len(p.refusals) == 1 and "REFUSED to reload firewalld" in p.refusals[0]
     assert not any("already admits" in w for w in p.warnings)
 
 
@@ -6036,7 +6038,7 @@ def test_t140_a_default_target_does_not_admit_the_docker_zone() -> None:
         mode="internet",
     )
     assert list(p.firewall_commands) == _DECK_WRITES
-    assert len(p.refusals) == 1 and "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+    assert len(p.refusals) == 1 and "REFUSED to reload firewalld" in p.refusals[0]
 
 
 def test_t140_an_unauthorized_query_leaves_todays_plan_and_refusal_exactly() -> None:
@@ -6056,7 +6058,7 @@ def test_t140_an_unauthorized_query_leaves_todays_plan_and_refusal_exactly() -> 
     assert list(p.firewall_commands) == _DECK_WRITES
     assert p.firewall_commands == before.firewall_commands
     assert p.refusals == before.refusals and len(p.refusals) == 1
-    assert "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+    assert "REFUSED to reload firewalld" in p.refusals[0]
     assert "this machine's listening sockets did not settle the question" in p.refusals[0]
     assert p.warnings == before.warnings
     assert not any("already admits" in w for w in p.warnings)
@@ -6089,7 +6091,7 @@ def test_t140_the_breadth_note_says_allowed_when_the_ports_are_already_in_effect
     )
     notes = [w for w in p.warnings if "every zone this machine binds" in w]
     assert len(notes) == 1, p.warnings
-    assert "are allowed in `home`, `public`" in notes[0]
+    assert "are allowed in home, public" in notes[0]
     assert "WRITTEN" not in notes[0]
 
 
@@ -6311,7 +6313,7 @@ def test_t140_a_refused_reload_brings_no_runtime_add() -> None:
     tells the owner how to reload by hand, as it always did.
     """
     p = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=_answering(False, False))
-    assert any("REFUSED to run `firewall-cmd --reload`" in r for r in p.refusals)
+    assert any("REFUSED to reload firewalld" in r for r in p.refusals)
     assert _runtime_adds(p) == []
 
 
@@ -6440,8 +6442,10 @@ _SSH_22 = networking.SshRoute(connected=True, ports=(22,), listeners_readable=Tr
 """A settled table with sshd on 22: the guard allows the reload, so the breadth note is said."""
 
 _TAKE_BACK = (
-    "take one back with `sudo firewall-cmd --permanent --zone=<zone> "
-    "--remove-port=<port>/tcp`, then `sudo firewall-cmd --reload`."
+    "take one back with this:\n"
+    "sudo firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp\n"
+    "then this:\n"
+    "sudo firewall-cmd --reload"
 )
 
 
@@ -6487,7 +6491,7 @@ def test_t142_a_zone_whose_range_admitted_the_port_is_offered_no_take_back() -> 
         "before: " + _TAKE_BACK
     ) in said
     assert said.count("--remove-port") == 1, "one take-back, and it names wanzone's pairs only"
-    assert "`docker` already let the game ports in and is not counted above" in said
+    assert "docker already let the game ports in and is not counted above" in said
     assert "got the ports too" not in said
 
 
@@ -6595,18 +6599,18 @@ def _per_port(pairs: tuple[tuple[str, str], ...]) -> tuple[networking.PortAdmiss
     [
         (
             _answering(False, False),
-            "have been WRITTEN to `home`, `public` — and are not in effect until firewalld "
+            "have been WRITTEN to home, public — and are not in effect until firewalld "
             "loads them",
         ),
         (
             _answering(False, True),
-            "were already in firewalld's saved configuration for `home`, `public` — and are "
+            "were already in firewalld's saved configuration for home, public — and are "
             "not in effect until firewalld loads it",
         ),
         (
             _per_port,
             "have been WRITTEN to, or were already in firewalld's saved configuration for, "
-            "`home`, `public` — and are not in effect until firewalld loads them",
+            "home, public — and are not in effect until firewalld loads them",
         ),
     ],
     ids=["none saved", "all saved", "some saved"],
@@ -6618,7 +6622,7 @@ def test_t142_a_refused_reload_says_written_only_for_what_was_written(
     p = _firewalld_plan(
         daemon="running", route=_UNSETTLED, zones=("home", "public"), admitted=admitted
     )
-    assert any("REFUSED to run `firewall-cmd --reload`" in r for r in p.refusals)
+    assert any("REFUSED to reload firewalld" in r for r in p.refusals)
     assert _breadth_note(p).startswith(f"firewalld: the game ports (3724, 8085) {lead} — ")
 
 
@@ -6669,7 +6673,7 @@ def test_t142_a_stopped_daemon_takes_back_with_the_offline_tool() -> None:
     assert len(notes) == 1, notes
     assert (
         "This plan wrote 3724/tcp and 8085/tcp in zones home and public, which firewalld did "
-        "not allow before: take one back with `sudo firewall-offline-cmd --zone=<zone> "
-        "--remove-port=<port>/tcp`"
+        "not allow before: take one back with this (firewalld loads the change when it "
+        "starts):\nsudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp"
     ) in notes[0]
     assert "firewall-cmd" not in notes[0] and "--reload" not in notes[0], notes[0]

@@ -2111,7 +2111,9 @@ def test_a_crash_after_the_compile_keeps_the_rollback_rather_than_deleting_it(
     assert daemon.transient() == sorted(_rollback_refs(server_dir)), daemon.transient()
 
 
-def test_a_name_the_daemon_will_not_take_is_said_out_loud(tmp_path: Path) -> None:
+def test_a_name_the_daemon_will_not_take_is_said_out_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """A refusal `-f` cannot answer is reported, not logged and forgotten.
 
     `(cannot be forced)` is a RUNNING container holding the image, and no name
@@ -2135,7 +2137,10 @@ def test_a_name_the_daemon_will_not_take_is_said_out_loud(tmp_path: Path) -> Non
     said = list(
         engine(rec, remove_image=remove_image).rebuild(InstallOptions(server_dir=server_dir))
     )
-    assert any(stuck in line and "docker image rm -f" in line for line in said), said
+    assert any(stuck in line for line in said), said
+    # T248 (lead): not a player's command, so the removal is in the log, not on the line.
+    assert not any("docker image rm" in line for line in said), said
+    assert f"docker image rm -f {stuck}" in caplog.text
     # And it was not forced: docker said forcing is not the answer.
     assert f"rmi -f:{stuck}" not in rec.calls, rec.calls
 

@@ -836,9 +836,8 @@ class CmangosInstaller(StagedInstaller):
             f"{ctx.server_dir / plan.file}. If you did not add the key named above, the thing "
             "to change is that password. It is not free — the database "
             f"volume {volume}, if it already exists, was created with whatever password the "
-            "file held at the time, so "
-            f"changing it means starting that database over (`docker volume rm {volume}` "
-            "deletes it, and every character in it)."
+            "file held at the time, so changing it means starting that database over. This "
+            f"deletes it, and every character in it:\ndocker volume rm {volume}"
         )
 
     def _write_dockerfile(self, ctx: StageContext) -> Iterator[str]:

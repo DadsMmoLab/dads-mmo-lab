@@ -73,7 +73,14 @@ COMMAND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "git command",
         re.compile(r"\bgit\s+(?:fetch|reset|clone|log|status|stash|pull|-C)\b|\bgit checkout -"),
     ),
-    ("shell command", re.compile(r"\b(?:gunzip|chcon|xcode-select|usermod|passwd)\b")),
+    (
+        "shell command",
+        re.compile(r"\b(?:gunzip|chcon|xcode-select|usermod|passwd|pacman-key|steamos-readonly)\b"),
+    ),
+    (
+        "firewall command",
+        re.compile(r"\b(?:firewall-cmd|firewall-offline-cmd)\b|\bufw\s+(?:allow|enable)\b"),
+    ),
 )
 """A command on a player's line (T248): the line says in words what failed and
 where to look, and a command worth running goes under Details (T194, T214).

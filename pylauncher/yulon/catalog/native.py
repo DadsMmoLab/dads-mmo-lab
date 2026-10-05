@@ -6681,8 +6681,11 @@ class StagedInstaller:
                     yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
                 except InstallerError as after:
                     also = f" {after}"
-                raise WorldStoppedAfterReadyError(
-                    f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                raise carry_detail(
+                    exc,
+                    WorldStoppedAfterReadyError(
+                        f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                    ),
                 ) from exc
             except RollbackNotDone as exc:
                 if exc.mixed:
@@ -6693,8 +6696,11 @@ class StagedInstaller:
                     if work is not None:
                         work.settle()
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
-                    raise RollbackNotDone(
-                        f"{exc} {mixed_note(exc.touched)}", touched=exc.touched, mixed=True
+                    raise carry_detail(
+                        exc,
+                        RollbackNotDone(
+                            f"{exc} {mixed_note(exc.touched)}", touched=exc.touched, mixed=True
+                        ),
                     ) from exc
                 # T197: the rollback stopped before the old build was back on its
                 # tags, which still name the NEW build, and a start runs them. Its
@@ -6722,8 +6728,9 @@ class StagedInstaller:
                     if exc.touched
                     else untouched_note(self.start_refusal(server_dir))
                 )
-                raise RollbackNotDone(
-                    f"{exc}{also} {left}", touched=exc.touched, sources_kept=True
+                raise carry_detail(
+                    exc,
+                    RollbackNotDone(f"{exc}{also} {left}", touched=exc.touched, sources_kept=True),
                 ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
@@ -6735,12 +6742,16 @@ class StagedInstaller:
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does.
-                    raise ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}") from exc
+                    raise carry_detail(
+                        exc, ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}")
+                    ) from exc
                 if isinstance(exc, RebuildChangedTheServer):
                     # T228: the rebuild's sentence is true after a Stop, and so is
                     # this one; the type carries that through.
                     note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
-                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
+                    raise carry_detail(
+                        exc, RebuildChangedTheServer(f"{exc} {note}", up=exc.up)
+                    ) from exc
                 raise carry_detail(exc, InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}")) from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -7059,11 +7070,16 @@ class StagedInstaller:
             try:
                 self._seams.restore_rev(dest, old)
             except (git.GitError, OSError) as exc:
-                logger.warning(f"could not put {dest} back on {old}: {exc}")
+                # T248: the command is for whoever reads the log; the line is words.
+                logger.warning(
+                    f"could not put {dest} back on {old}: {exc}. To do it by hand: "
+                    f"git -C {dest} checkout --detach --force {old}"
+                )
                 yield (
                     f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
-                    f"folder is now ahead of the server that is running. Put it back with this:\n"
-                    f"git -C {dest} checkout --detach --force {old}"
+                    f"folder is now ahead of the server that is running: put it back on commit "
+                    f"{old[:7]}, or press "
+                    f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}."
                 )
                 continue
             yield f"{source.repo} was put back on {old[:7]}."
@@ -7571,11 +7587,15 @@ class StagedInstaller:
         """
         left = self._let_go(kept)
         if left:
+            logger.warning(
+                f"to remove the rebuild's leftover names once the server is stopped: "
+                f"docker image rm -f {' '.join(left)}"
+            )
             yield (
                 f"Docker would not take {len(left)} transient name(s) off the daemon: "
                 f"{', '.join(left)}. They are this rebuild's own bookkeeping and nothing "
-                f"needs them; the log says what docker objected to. Once this server is "
-                f"stopped, remove them with this:\ndocker image rm -f {' '.join(left)}"
+                f"needs them; the log says what docker objected to, and how to remove them once "
+                f"this server is stopped."
             )
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:

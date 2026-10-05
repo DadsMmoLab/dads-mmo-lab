@@ -61,78 +61,198 @@ SHOWN_AS_WRITTEN_ROOTS = frozenset({"SaidByYulon", "InstallerError", "ConsoleErr
 
 _TYPED = "a command the player has to type, because no press can do it for them (owner, T296)"
 
-EXCEPTIONS: dict[tuple[str, str], str] = {
+_WSL_RESTART = frozenset({"wsl --shutdown"})
+_DOCKER_SERVICE = frozenset(
+    {"sudo service docker start", "sudo systemctl start docker", "sudo usermod -aG docker $USER"}
+)
+_COMPOSE = frozenset(
+    {
+        "docker compose version",
+        "sudo apt install docker-compose-v2",
+        "sudo pacman -S docker-compose",
+    }
+)
+_LIST_ZONES = frozenset(
+    {
+        "sudo firewall-cmd --permanent --list-all-zones",
+        "sudo firewall-offline-cmd --list-all-zones",
+    }
+)
+_TURN_ON = frozenset(
+    {
+        "sudo systemctl enable --now firewalld",
+        "sudo systemctl enable --now firewalld && sudo firewall-cmd --reload",
+    }
+)
+_SSH_PORT = frozenset(
+    {
+        "sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp",
+        "sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh port>/tcp",
+    }
+)
+_ANY_PORT = frozenset(
+    {
+        "sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp",
+        "sudo firewall-offline-cmd --zone=<zone> --add-port=<port>/tcp",
+    }
+)
+_FIREWALLD = {
+    "firewalld_start_withheld": _LIST_ZONES | _TURN_ON | _SSH_PORT,
+    "_zone_refusal": _LIST_ZONES | _TURN_ON | _ANY_PORT | {"sudo firewall-cmd --reload"},
+    "_ssh_refusal": _LIST_ZONES
+    | _TURN_ON
+    | _SSH_PORT
+    | {"sudo firewall-cmd --reload", "sudo ufw allow <your ssh port>/tcp", "sudo ufw enable"},
+}
+_CONSOLE = frozenset({"docker attach --sig-proxy=false {container}"})
+
+EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     **{
         ("yulon/docker_advice.py", name): (
-            f"the Linux, Deck and WSL 'start the engine' banner (T194): {_TYPED}"
+            f"the Linux, Deck and WSL 'start the engine' banner (T194): {_TYPED}",
+            frozenset({command}),
         )
-        for name in (
-            "_ENGINE_NOT_RUNNING",
-            "_DECK_NOT_RUNNING",
-            "_ENGINE_NOT_ANSWERING",
-            "_DECK_NOT_ANSWERING",
-            "_WSL_NOT_RUNNING",
-            "_WSL_UNNAMED",
+        for name, command in (
+            ("_ENGINE_NOT_RUNNING", "sudo systemctl start docker"),
+            ("_DECK_NOT_RUNNING", "sudo systemctl start docker"),
+            ("_ENGINE_NOT_ANSWERING", "sudo systemctl restart docker"),
+            ("_DECK_NOT_ANSWERING", "sudo systemctl restart docker"),
+            ("_WSL_NOT_RUNNING", "sudo systemctl start docker"),
+            ("_WSL_UNNAMED", "sudo systemctl start docker"),
         )
     },
     ("yulon/controller_wow_wotlk/console.py", "NO_TTY_HELP"): (
-        f"the Console tab's note where Yu'lon cannot open a terminal: {_TYPED}"
+        f"the Console tab's note where Yu'lon cannot open a terminal: {_TYPED}",
+        _CONSOLE,
     ),
-    ("yulon/controller_wow_wotlk/console.py", "ConsoleError() in send_command"): (
-        f"NO_TTY_HELP, raised where a console command is sent: {_TYPED}"
+    ("yulon/controller_wow_wotlk/console.py", "send_command"): (
+        f"NO_TTY_HELP, raised where a console command is sent: {_TYPED}",
+        _CONSOLE,
     ),
-    ("yulon/controller_wow_wotlk/console.py", "ConsoleError() in _send_inside_distro"): (
-        f"NO_SCRIPT_HELP: installing util-linux in the distro, and the console by hand: {_TYPED}"
+    ("yulon/controller_wow_wotlk/console.py", "_send_inside_distro"): (
+        f"NO_SCRIPT_HELP: installing util-linux in the distro, and the console by hand: {_TYPED}",
+        frozenset(
+            {
+                "sudo apt install bsdutils",
+                "sudo pacman -S util-linux",
+                "wsl -d {distro} -- docker attach --sig-proxy=false {container}",
+            }
+        ),
     ),
-    ("yulon/catalog/preflight.py", "Check() in _docker_check"): (
-        f"starting the Docker service, or joining the docker group: {_TYPED}"
+    **{
+        ("yulon/catalog/preflight.py", owner): (
+            f"starting Docker, or joining its group: {_TYPED}",
+            _DOCKER_SERVICE,
+        )
+        for owner in ("_docker_check", "_daemon_remedy")
+    },
+    **{
+        ("yulon/catalog/preflight.py", owner): (
+            f"installing the Compose plugin: {_TYPED}",
+            _COMPOSE,
+        )
+        for owner in ("_compose_check", "_compose_remedy")
+    },
+    **{
+        ("yulon/catalog/preflight.py", owner): (
+            f"restarting WSL after resizing it: {_TYPED}",
+            _WSL_RESTART,
+        )
+        for owner in ("_ram_check", "_cpu_check", "_memory_floor_remedy", "_jobs_remedy")
+    },
+    ("yulon/catalog/preflight.py", "_selinux_check"): (
+        f"relabelling the server folder for SELinux: {_TYPED}",
+        frozenset({"chcon -Rt container_file_t <server folder>"}),
     ),
-    ("yulon/catalog/preflight.py", "Check() in _compose_check"): (
-        f"installing the Compose plugin with this machine's package manager: {_TYPED}"
+    ("yulon/catalog/native.py", "_check_run"): (
+        f"BUILDER_LOST: reading Docker's memory and restarting WSL: {_TYPED}",
+        frozenset({"docker info", "wsl --shutdown"}),
     ),
-    ("yulon/catalog/preflight.py", "Check() in _ram_check"): (
-        f"restarting WSL after giving it more memory: {_TYPED}"
+    ("yulon/catalog/native.py", "build_stalled_notice"): (
+        f"a stalled build's notice on the build log: checking Docker answers: {_TYPED}",
+        frozenset({"docker info"}),
     ),
-    ("yulon/catalog/preflight.py", "Check() in _cpu_check"): (
-        f"restarting WSL after giving it fewer CPUs: {_TYPED}"
+    ("yulon/catalog/native.py", "stage_generate_compose"): (
+        f"relabelling the server folder for SELinux when Yu'lon could not: {_TYPED}",
+        frozenset({"chcon -Rt container_file_t {…}"}),
     ),
-    ("yulon/catalog/preflight.py", "Check() in _selinux_check"): (
-        f"relabelling the server folder for SELinux: {_TYPED}"
+    **{
+        ("yulon/catalog/families/cmangos.py", owner): (
+            f"deleting a database volume whose password is lost: {_TYPED}",
+            frozenset({"docker volume rm {…}_db-data"}),
+        )
+        for owner in ("_db_password", "_password_origin_note")
+    },
+    ("yulon/catalog/families/cmangos.py", "_refuse_to_patch_what_will_not_be_rebuilt"): (
+        f"removing the images so the next install compiles again: {_TYPED}",
+        frozenset({"docker image rm"}),
     ),
-    ("yulon/catalog/native.py", "InstallerError() in _check_run"): (
-        f"BUILDER_LOST: reading Docker's memory and restarting WSL: {_TYPED}"
+    ("yulon/git.py", "_streamed_capture"): (
+        f"removing a clone's container that Stop could not remove: {_TYPED}",
+        frozenset({"docker rm -f {…}"}),
     ),
-    ("yulon/catalog/families/cmangos.py", "InstallerError() in _db_password"): (
-        f"deleting a database volume whose password is lost, which only the player may: {_TYPED}"
+    **{
+        ("yulon/networking.py", owner): (
+            f"allowing SSH in firewalld or ufw before turning the firewall on: {_TYPED}",
+            frozenset(commands),
+        )
+        for owner, commands in _FIREWALLD.items()
+    },
+    ("yulon/networking.py", "_zone_breadth_note"): (
+        f"taking a game port back out of a zone it was written to: {_TYPED}",
+        frozenset(
+            {
+                "sudo firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp",
+                "sudo firewall-cmd --reload",
+                "sudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp",
+            }
+        ),
     ),
-    (
-        "yulon/catalog/families/cmangos.py",
-        "InstallerError() in _refuse_to_patch_what_will_not_be_rebuilt",
-    ): f"removing the images so the next install compiles again: {_TYPED}",
-    ("yulon/catalog/native.py", "yield in _put_sources_back"): (
-        f"putting a source folder back on the commit the running server was built from: {_TYPED}"
+    ("yulon/networking.py", "_default_zone_refusal"): (
+        f"allowing the ports in the default zone the file names: {_TYPED}",
+        frozenset(
+            {
+                "sudo firewall-cmd --permanent --zone=<that zone> --add-port=<port>/tcp",
+                "sudo firewall-cmd --reload",
+                "sudo firewall-offline-cmd --get-default-zone",
+            }
+        ),
     ),
-    ("yulon/catalog/native.py", "yield in _release"): (
-        f"removing a rebuild's leftover image names once the server is stopped: {_TYPED}"
+    ("yulon/platform.py", "ensure_wsl2"): (
+        f"installing WSL from an Administrator PowerShell: {_TYPED}",
+        frozenset({"wsl --install --no-distribution"}),
     ),
-    ("yulon/catalog/native.py", "yield in stage_generate_compose"): (
-        f"relabelling the server folder for SELinux when Yu'lon could not: {_TYPED}"
+    ("yulon/platform.py", "_repair_docker_after_steamos_update"): (
+        f"setting a sudo password on a Deck by hand: {_TYPED}",
+        frozenset({"passwd"}),
     ),
-    ("yulon/git.py", "yield in _streamed_capture"): (
-        f"removing a clone's container that Stop could not remove: {_TYPED}"
-    ),
-    ("yulon/platform.py", "manual_steps() in ensure_wsl2"): (
-        f"installing WSL from an Administrator PowerShell: {_TYPED}"
-    ),
-    ("yulon/platform.py", "manual_steps() in _repair_docker_after_steamos_update"): (
-        f"setting a sudo password on a Deck by hand: {_TYPED}"
+    ("yulon/platform.py", "docker_setup_remedy"): (
+        f"setting up pacman's keyring on SteamOS: {_TYPED}",
+        frozenset(
+            {
+                "sudo steamos-readonly disable",
+                "sudo pacman-key --init",
+                "sudo pacman-key --populate archlinux holo",
+            }
+        ),
     ),
 }
-"""(module, constant or "Type() in function") -> why it may name a command. Nothing else may.
+"""(module, function or constant) -> why it may name a command, and the exact command lines.
 
-Each one's command stands on a line of its own and in no backticks
-(`test_a_named_exception_puts_its_command_on_a_line_of_its_own`).
+Each command stands on a line of its own, in no backticks, and is one of the
+lines listed: a new command in the same function is not excepted
+(`test_a_named_exception_names_only_its_own_commands_on_their_own_lines`).
 """
+
+
+def owner_of(line: Line) -> tuple[str, str]:
+    """The exception key a line belongs to: its module and its function or constant."""
+    what = line.what
+    for marker in ("() in ", "yield in "):
+        if marker in what:
+            return line.where, what.split(marker, 1)[1]
+    return line.where, what.removesuffix("()")
+
 
 NOT_SHOWN: frozenset[tuple[str, str]] = frozenset(
     {("yulon/ui/controller_view.py", "REBUILD_HISTORY")}
@@ -225,12 +345,22 @@ class _Module:
         return parent if isinstance(parent, ast.ClassDef) else None
 
     def _logged(self, node: ast.AST) -> bool:
-        """Whether `node` is written to the app log rather than shown."""
+        """Whether `node` is not shown on a line: written to the app log, handed to `re`,
+        or passed as `detail=` (what goes under Details)."""
+        child: ast.AST = node
         parent = self.parents.get(id(node))
         while parent is not None and not isinstance(parent, ast.stmt):
             if isinstance(parent, ast.Call) and _LOGGED.search(ast.unparse(parent.func)):
                 return True
-            parent = self.parents.get(id(parent))
+            if isinstance(parent, ast.Call) and ast.unparse(parent.func).startswith("re."):
+                return True
+            if isinstance(parent, ast.keyword) and parent.arg == "detail":
+                return True
+            child, parent = parent, self.parents.get(id(parent))
+        if isinstance(parent, ast.Assign) and child is parent.value:
+            # `rules = …` built for a `detail=`, or a pattern for `re`: judged where used.
+            names = [t.id for t in parent.targets if isinstance(t, ast.Name)]
+            return any(name.endswith(("_PATTERN", "_RE")) for name in names)
         return False
 
     def _sentences(self, function: _Function, depth: int) -> list[str]:
@@ -239,6 +369,26 @@ class _Module:
         body = function.body[1:] if ast.get_docstring(function) is not None else function.body
         for statement in body:
             for inner in ast.walk(statement):
+                if (
+                    isinstance(inner, ast.Name)
+                    and isinstance(inner.ctx, ast.Load)
+                    and inner.id in self.constants
+                    and _CAPITALS.match(inner.id)
+                    and not self._logged(inner)
+                ):
+                    found += self.texts(self.constants[inner.id], depth + 1)
+                    continue
+                if (
+                    isinstance(inner, ast.Call)
+                    and _name_of(inner.func) in self.functions
+                    and _name_of(inner.func) != function.name
+                    and depth < _DEPTH - 2
+                    and not self._logged(inner)
+                ):
+                    # A helper whose words this one hands on (`parts.extend(_take_back(…))`).
+                    for helper in self.functions[_name_of(inner.func)]:
+                        found += self._sentences(helper, depth + 2)
+                    continue
                 if isinstance(inner, ast.JoinedStr) or (
                     isinstance(inner, ast.Constant)
                     and isinstance(inner.value, str)
@@ -481,6 +631,23 @@ def _shown_messages(module: _Module, shown: set[str]) -> Iterator[Line]:
                     yield Line(module.rel, f"{owner.name}.__init__", text)
 
 
+PLAYER_TEXT_FUNCTIONS = re.compile(
+    r"(?:_notice|_refusal|_remedy|_withheld|_message|_note|_hint|_steps|_help|_sentence)$"
+)
+"""Functions named for the player text they return: a notice a job yields later, a refusal
+the Networking tab shows, a remedy the install dialog quotes (T248 review)."""
+
+
+def _named_texts(module: _Module) -> Iterator[Line]:
+    """Every string a function named for player text builds (`PLAYER_TEXT_FUNCTIONS`)."""
+    for name, functions in module.functions.items():
+        if not PLAYER_TEXT_FUNCTIONS.search(name):
+            continue
+        for function in functions:
+            for text in module._sentences(function, 0):
+                yield Line(module.rel, f"{name}()", text)
+
+
 def _log_lines(module: _Module) -> Iterator[Line]:
     """What a job yields: the lines its log panel shows the player as it runs (T296)."""
     for node in ast.walk(module.tree):
@@ -524,6 +691,7 @@ def player_lines() -> list[Line]:
             found += _widget_texts(module)
         found += _shown_messages(module, shown_types)
         found += _log_lines(module)
+        found += _named_texts(module)
     return found
 
 
@@ -533,29 +701,34 @@ def command_lines(lines: list[Line]) -> list[str]:
         {
             f"{line.where} {line.what} {command_faults(line.text)}: {line.text!r}"
             for line in lines
-            if command_faults(line.text) and (line.where, line.what) not in EXCEPTIONS
+            if command_faults(line.text) and owner_of(line) not in EXCEPTIONS
         }
     )
 
 
-def typed_command_faults(text: str) -> list[str]:
-    """How an excepted text fails the owner's rule: a backtick, or a command inside a sentence.
+def typed_command_faults(text: str, allowed: frozenset[str]) -> list[str]:
+    """How an excepted text fails the owner's rule (T296, T248).
 
-    A line of its own is one whose words start with the command: easy to copy,
-    nothing else to select around it.
+    A backtick; a command inside a sentence rather than on a line of its own,
+    where it is easy to copy; or a command line its exception does not name,
+    which is a new command in the same function.
     """
     faults = ["backtick"] if "`" in text else []
     for line in text.split("\n"):
         if not command_faults(line):
             continue
         stripped = line.strip()
+        if stripped in allowed:
+            continue
         starts = {
             match.start()
             for rule, pattern in _COMMAND_PATTERNS
             if rule != "backtick"
             for match in pattern.finditer(stripped)
         }
-        if 0 not in starts:
+        if 0 in starts:
+            faults.append(f"command its exception does not name: {stripped!r}")
+        else:
             faults.append(f"command inside a sentence: {line!r}")
     return faults
 
@@ -578,6 +751,8 @@ def test_the_reader_finds_each_kind_of_player_line() -> None:
     assert ("yulon/docker_advice.py", "_DESKTOP_NOT_RUNNING") in whats
     assert ("yulon/ui/controller_view.py", "_say_under_the_presses() in repair_import") in whats
     assert ("yulon/docker.py", "DockerRefusal() in verify_import") in whats
+    assert ("yulon/catalog/native.py", "build_stalled_notice()") in whats, "a notice a job yields"
+    assert ("yulon/networking.py", "_zone_refusal()") in whats, "a refusal the Networking tab shows"
     assert ("yulon/apply.py", "ApplyRefusal() in _require_own_clone") in whats
     assert ("yulon/catalog/native.py", "InstallerError() in stage_ready") in whats
     assert ("yulon/platform.py", "manual_steps() in ensure_wsl2") in whats
@@ -600,12 +775,22 @@ def test_the_reader_finds_each_kind_of_player_line() -> None:
             "        super().__init__(f'stop {n} with docker stop')\n",
             "stop {…} with docker stop",
         ),
+        (
+            "def _h():\n    return 'take it back with docker rm x'\n"
+            "def _x_note():\n    parts = []\n    parts.extend(_h())\n    return ' '.join(parts)",
+            "take it back with docker rm x",
+        ),
+        (
+            "def build_x_notice():\n    return f'run docker info {_X}'\n_X = 'now'",
+            "run docker info now",
+        ),
     ],
 )
 def test_the_reader_follows_each_shape_a_message_is_built_in(
     tmp_path: Path, source: str, words: str
 ) -> None:
-    """T248 review: `%`, a constant in an f-string, a join, a parameter, a type's own `__init__`."""
+    """T248 review: `%`, a constant in an f-string, a join, a parameter, a type's own `__init__`,
+    a helper a named function hands on, and a notice a job yields later."""
     path = YULON / "_t248_probe.py"
     module = _Module.__new__(_Module)
     module.path = path
@@ -627,28 +812,42 @@ def test_the_reader_follows_each_shape_a_message_is_built_in(
         if isinstance(node, ast.Call):
             module.calls.setdefault(_name_of(node.func), []).append(node)
 
-    texts = {line.text for line in _label_constants(module)} | {
-        line.text for line in _shown_messages(module, {"E"})
-    }
+    texts = (
+        {line.text for line in _label_constants(module)}
+        | {line.text for line in _shown_messages(module, {"E"})}
+        | {line.text for line in _named_texts(module)}
+    )
 
     assert words in texts, texts
 
 
 def test_every_named_exception_is_still_a_line_that_names_its_command() -> None:
-    """An exception whose text no longer names a command is a stale permission: drop it."""
-    named = {(line.where, line.what) for line in player_lines() if command_faults(line.text)}
+    """An exception, or one of its commands, that no line names any more is stale: drop it."""
+    named: dict[tuple[str, str], set[str]] = {}
+    for line in player_lines():
+        for said in line.text.split("\n"):
+            if command_faults(said):
+                named.setdefault(owner_of(line), set()).add(said.strip())
+    stale = {
+        key: sorted(commands - named.get(key, set()))
+        for key, (_why, commands) in EXCEPTIONS.items()
+        if commands - named.get(key, set())
+    }
 
-    assert set(EXCEPTIONS) <= named, set(EXCEPTIONS) - named
+    assert stale == {}, stale
 
 
-def test_a_named_exception_puts_its_command_on_a_line_of_its_own() -> None:
-    """The owner's rule (T296): a command to type is on a line of its own, never in backticks."""
-    faults = [
-        f"{line.where} {line.what}: {fault}"
-        for line in player_lines()
-        if (line.where, line.what) in EXCEPTIONS
-        for fault in typed_command_faults(line.text)
-    ]
+def test_a_named_exception_names_only_its_own_commands_on_their_own_lines() -> None:
+    """The owner's rule (T296): a command to type is on a line of its own, never in backticks,
+    and it is one its exception names."""
+    faults = sorted(
+        {
+            f"{line.where} {line.what}: {fault}"
+            for line in player_lines()
+            if owner_of(line) in EXCEPTIONS
+            for fault in typed_command_faults(line.text, EXCEPTIONS[owner_of(line)][1])
+        }
+    )
 
     assert faults == [], "\n".join(faults)
 
@@ -707,10 +906,16 @@ def test_words_about_docker_are_not_commands(text: str) -> None:
         ("Open a terminal and run this:\nsudo systemctl start docker", []),
         ('Open a terminal and run "sudo systemctl start docker".', ["command inside a sentence"]),
         ("Run this:\n`sudo systemctl start docker`", ["backtick", "command inside a sentence"]),
+        (
+            "Run this:\nsudo systemctl start docker\nThen this:\nsudo systemctl restart docker",
+            ["command its exception does not name"],
+        ),
     ],
 )
-def test_a_typed_command_must_stand_on_its_own_line(text: str, faults: list[str]) -> None:
-    found = typed_command_faults(text)
+def test_a_typed_command_must_stand_on_its_own_line_and_be_named(
+    text: str, faults: list[str]
+) -> None:
+    found = typed_command_faults(text, frozenset({"sudo systemctl start docker"}))
     assert [fault.split(":")[0] for fault in found] == faults, found
 
 

@@ -2043,6 +2043,29 @@ def test_a_stop_docker_would_not_do_says_so_in_words_with_dockers_words_below(
     assert "Error response from daemon: tried" in view.problem_details.text()
 
 
+def test_a_view_closed_before_its_scroll_timer_fires_is_not_called_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248 CI: `_say_under_the_presses()` scrolls on the next loop turn; a view gone by then
+    must not be called. The timer had no context object, so it called into a deleted view
+    and crashed the next test's Qt wait on py3.11."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    called: list[object] = []
+    monkeypatch.setattr(
+        ControllerView, "_bring_the_danger_label_on_screen", lambda self: called.append(self)
+    )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._say_under_the_presses("a line said just before the view closed")
+    view.close()
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    process_events(50)
+
+    assert called == [], "the scroll was asked of a view that is gone"
+
+
 def test_a_start_whose_containers_did_not_stay_up_puts_the_log_command_under_details(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6725,8 +6748,10 @@ class _FakeUninstall:
         report: object | None = None,
         while_running: object | None = None,
         forget_error: OSError | None = None,
+        crash: Exception | None = None,
     ) -> None:
         self.server_dir = server_dir
+        self.crash = crash
         self.refusal = refusal
         self.failure = failure
         self.plans = 0
@@ -6768,8 +6793,10 @@ class _FakeUninstall:
         self.runs.append(keep_characters)
         if self._while_running is not None:
             self.busy_seen.append(self._while_running())
+        if self.crash is not None:
+            raise self.crash
         if self.failure:
-            raise purge.PurgeError(self.failure)
+            raise purge.PurgeRefusal(self.failure)
         return self._report or purge.PurgeReport(
             removed_containers=True,
             removed_volumes=("yulon-wow-wotlk-deadbeef_client-data",),
@@ -7035,6 +7062,33 @@ def test_an_uninstall_that_failed_says_so_and_signals_nothing(
     assert seen == []
     assert "could not be deleted" in view.uninstall_label.text()
     assert failures and "could not be deleted" in failures[0]
+
+
+def test_an_uninstall_docker_broke_says_so_in_words_with_dockers_words_below(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248 review: purge's volume step raised Docker's own line, and it reached the line raw.
+
+    Through the press: plan shown, Uninstall pressed, the job fails.
+    """
+    from tests.support_player_text import command_faults
+
+    raw = (
+        "docker volume inspect yulon-wow-wotlk-deadbeef_db-data exited 1: Error response from "
+        "daemon: get yulon-wow-wotlk-deadbeef_db-data: no such volume"
+    )
+    fake = _FakeUninstall(tmp_path, crash=docker.DockerCommandError(raw))
+    view = _uninstall_view(ps, tmp_path, fake)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+
+    said = view.uninstall_label.text()
+    assert said == controller_view_module.UNINSTALL_FAILED_BROKE
+    assert command_faults(said) == [], said
+    assert view.uninstall_details.text_box.toPlainText() == raw
+    assert failures and raw in failures[0], "the log lost Docker's words"
 
 
 def test_a_failed_uninstall_makes_the_user_ask_for_a_fresh_plan(

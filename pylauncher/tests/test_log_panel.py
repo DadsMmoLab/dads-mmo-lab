@@ -1736,6 +1736,26 @@ def test_the_failure_line_shows_the_sentence_and_details_holds_the_rest(qapp: ob
     assert panel.failure_details.isHidden(), "the last run's Details stayed up over this one"
 
 
+def test_a_failure_with_details_and_no_sentence_still_says_something_on_the_line(
+    qapp: object,
+) -> None:
+    """T248 review: an empty sentence with a Details part read "FAILED: " and nothing after."""
+    from yulon.catalog.installer import InstallerError
+    from yulon.ui.widgets.log_panel import UNDESCRIBED_FAILURE
+
+    def refused() -> Iterator[str]:
+        yield "Step 1 of 9 (11%): preflight"
+        raise InstallerError("", detail="what the program printed")
+
+    panel = LogPanel()
+    panel.run(refused)
+    wait_for_panel(panel)
+
+    assert panel.failure_label.text() == UNDESCRIBED_FAILURE
+    assert panel.status_text().endswith(UNDESCRIBED_FAILURE), panel.status_text()
+    assert panel.failure_details.text_box.toPlainText() == "what the program printed"
+
+
 def test_the_failure_line_carries_a_long_reason_whole_and_a_new_run_takes_it_down(
     qapp: object,
 ) -> None:

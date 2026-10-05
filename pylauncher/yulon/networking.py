@@ -2400,9 +2400,9 @@ while the machine was being locked.
 """
 
 _FIREWALLD_WHY_NOT_STARTED = (
-    "starting a firewall can only take reachability away, and firewalld's shipped `ssh` service "
+    "starting a firewall can only take reachability away, and firewalld's shipped ssh service "
     "is port 22 and nothing else — so on a machine whose sshd was moved, or whose default zone "
-    "is `drop`, starting it takes away the way you are reading this."
+    "is drop, starting it takes away the way you are reading this."
 )
 """The argument, once, because the three messages below differ only in the facts.
 
@@ -2430,29 +2430,35 @@ def firewalld_start_withheld(daemon: FirewalldDaemon) -> str:
     """
     if daemon == "stopped":
         return (
-            "Yu'lon wrote the game ports into firewalld's permanent configuration with "
-            "`firewall-offline-cmd` and did NOT run `systemctl enable --now firewalld`: the "
-            "daemon is not running (`firewall-cmd --state` said so), so nothing is being blocked "
-            "right now, and the ports are already reachable — they load as soon as firewalld is "
-            f"started. {_FIREWALLD_WHY_NOT_STARTED} firewalld is left stopped. To start it "
-            "yourself, allow your SSH port FIRST, in every zone that will be active — with the "
-            "daemon down that is `sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh "
-            "port>/tcp` for each zone with an interface or a source in `sudo "
-            "firewall-offline-cmd --list-all-zones` and for the default zone, NOT `firewall-cmd "
-            "--permanent`, which cannot reach a daemon that is not running — and then `sudo "
-            "systemctl enable --now firewalld`."
+            "Yu'lon wrote the game ports into firewalld's permanent configuration with its "
+            "offline tool and did NOT enable firewalld: the daemon is not running (firewalld "
+            "said so itself), so nothing is being blocked right now, and the ports are already "
+            "reachable — they load as soon as firewalld is started. "
+            f"{_FIREWALLD_WHY_NOT_STARTED} firewalld is left stopped. To start it yourself, "
+            "allow your SSH port FIRST, in every zone that will be active. With the daemon "
+            "down, list the zones with this:\n"
+            "sudo firewall-offline-cmd --list-all-zones\n"
+            "Then, for each zone with an interface or a source and for the default zone, run "
+            "this (the online tool cannot reach a daemon that is not running):\n"
+            "sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh port>/tcp\n"
+            "Then start firewalld:\n"
+            "sudo systemctl enable --now firewalld"
         )
     return (
-        "Yu'lon added the game ports to firewalld's permanent configuration but did NOT run "
-        f"`systemctl enable --now firewalld`: {_FIREWALLD_WHY_NOT_STARTED} firewalld is left as "
-        "you had it. To turn it on yourself, allow your SSH port FIRST, in every active zone: "
-        "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp` for each "
-        "zone in `sudo firewall-cmd --permanent --list-all-zones` that has an interface or a "
-        "source under it, plus the default, then `sudo systemctl enable --now "
-        "firewalld && sudo firewall-cmd --reload`. If those answer `FirewallD is not running` or "
-        "`DBUS_ERROR` then the daemon is down — Yu'lon could not read its state to tell you in "
-        "advance — and the command that works there is `sudo firewall-offline-cmd --zone=<zone> "
-        "--add-port=<your ssh port>/tcp`."
+        "Yu'lon added the game ports to firewalld's permanent configuration but did NOT enable "
+        f"firewalld: {_FIREWALLD_WHY_NOT_STARTED} firewalld is left as you had it. To turn it "
+        "on yourself, allow your SSH port FIRST, in every active zone. List the zones with "
+        "this:\n"
+        "sudo firewall-cmd --permanent --list-all-zones\n"
+        "Then, for each zone that has an interface or a source under it, plus the default, "
+        "run this:\n"
+        "sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp\n"
+        "Then turn it on:\n"
+        "sudo systemctl enable --now firewalld && sudo firewall-cmd --reload\n"
+        "If those answer that firewalld is not running, or with a D-Bus error, the daemon is "
+        "down — Yu'lon could not read its state to tell you in advance — and the command that "
+        "works there is this:\n"
+        "sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh port>/tcp"
     )
 
 
@@ -2743,7 +2749,7 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
     exposed = tuple(zone for zone in zones if zone not in machine_made)
     if len(exposed) < 2:
         return None
-    where = ", ".join(f"`{zone}`" for zone in exposed)
+    where = ", ".join(exposed)
     said = ", ".join(str(port) for port in question.ports)
     in_effect = (
         allowed
@@ -2773,7 +2779,7 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
         f"{lead} — every zone this machine binds that it did not make for its own "
         "containers, including any of them that faces the internet. Nothing here can tell "
         "which zone is which, and writing the ports anywhere narrower was measured to break "
-        "the feature in silence: on a box whose interface was bound to `internal`, ports "
+        "the feature in silence: on a box whose interface was bound to internal, ports "
         "written to the default zone alone left the game unreachable and the plan said "
         "nothing (firewalld 2.2.3, fedora:41, 2026-09-04)."
     ]
@@ -2784,8 +2790,8 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
         # configuration said so, nothing was written there (T142).
         _, written_m, unsure_m = _before_the_plan(question, machine_made)
         got = {zone for zone, _ in written_m + unsure_m}
-        wrote = ", ".join(f"`{zone}`" for zone in machine_made if zone in got)
-        had = ", ".join(f"`{zone}`" for zone in machine_made if zone not in got)
+        wrote = ", ".join(zone for zone in machine_made if zone in got)
+        had = ", ".join(zone for zone in machine_made if zone not in got)
         head = (
             f"{wrote} got the ports too and {had} already let the game ports in; neither is"
             if wrote and had
@@ -2811,13 +2817,15 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
 
 
 _TAKE_BACK = (
-    "take one back with `sudo firewall-cmd --permanent --zone=<zone> "
-    "--remove-port=<port>/tcp`, then `sudo firewall-cmd --reload`."
+    "take one back with this:\n"
+    "sudo firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp\n"
+    "then this:\n"
+    "sudo firewall-cmd --reload"
 )
 
 _TAKE_BACK_OFFLINE = (
-    "take one back with `sudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp`; "
-    "firewalld loads the change when it starts."
+    "take one back with this (firewalld loads the change when it starts):\n"
+    "sudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp"
 )
 """The take-back for a stopped daemon, spelled the way its writes were (`_offline_firewalld()`).
 
@@ -3105,27 +3113,30 @@ def _default_zone_refusal(
     unbound interface will be in one second after `firewall-cmd --reload`, and
     the two commands that answer it are named.
     """
-    dropped = (["enable firewalld"] if enables else []) + (
-        ["run `firewall-cmd --reload`"] if reloads else []
-    )
+    dropped = (["enable firewalld"] if enables else []) + (["reload firewalld"] if reloads else [])
     said = ", ".join(str(port) for port in asked.ports)
     live = zoning.default_zone if zoning is not None else None
-    running = f"is `{live}`" if live else "could not be read either"
+    running = f"is {live}" if live else "could not be read either"
     return (
         f"REFUSED to {' and to '.join(dropped)}: SSH arrives on port {said} and the ports "
-        "have been written to every zone this machine binds, but `DefaultZone` in "
+        "have been written to every zone this machine binds, but the DefaultZone line in "
         f"{_FIREWALLD_CONF} could not be read, and that is the zone the reload puts every "
         "unbound interface into. The daemon's running default zone "
-        f"{running}, and a `firewall-cmd` listing tags THAT one `(default)` whatever the file "
-        "says — so when the two differ, every reading this plan can take agrees and the "
+        f"{running}, and firewalld's own listing marks THAT one as the default whatever the "
+        "file says — so when the two differ, every reading this plan can take agrees and the "
         "reload moves the interface anyway. Measured on firewalld 2.2.3 (fedora:41, "
-        "2026-09-05) with the daemon on `public` and the file on `work`: three ports written "
-        "to `public`, apply 4/4 with no refusal and no warning, and after the reload eth0 had "
-        'no zone, `work` listed no ports and ssh answered "No route to host". Read it '
-        f"yourself with `sudo grep DefaultZone {_FIREWALLD_CONF}` or `sudo "
-        "firewall-offline-cmd --get-default-zone`; if it names a zone the ports are not in, "
-        "`sudo firewall-cmd --permanent --zone=<that zone> --add-port=<port>/tcp` for your "
-        "SSH port and the game ports, then `sudo firewall-cmd --reload`"
+        "2026-09-05) with the daemon on public and the file on work: three ports written to "
+        "public, apply 4/4 with no refusal and no warning, and after the reload eth0 had no "
+        'zone, work listed no ports and ssh answered "No route to host". Read it yourself '
+        "with this:\n"
+        f"sudo grep DefaultZone {_FIREWALLD_CONF}\n"
+        "or this:\n"
+        "sudo firewall-offline-cmd --get-default-zone\n"
+        "If it names a zone the ports are not in, run this for your SSH port and for each "
+        "game port:\n"
+        "sudo firewall-cmd --permanent --zone=<that zone> --add-port=<port>/tcp\n"
+        "Then:\n"
+        "sudo firewall-cmd --reload"
     )
 
 
@@ -3145,49 +3156,45 @@ def _zone_refusal(
     who has the port to "find your ssh port" is the remediation-repeats-the-
     failure shape `firewalld_start_withheld()` describes.
     """
-    dropped = (["enable firewalld"] if enables else []) + (
-        ["run `firewall-cmd --reload`"] if reloads else []
-    )
+    dropped = (["enable firewalld"] if enables else []) + (["reload firewalld"] if reloads else [])
     said = ", ".join(str(port) for port in asked.ports)
     if firewalld_daemon == "stopped":
-        read = (
-            "`sudo firewall-offline-cmd --list-all-zones` (the zones with an interface or a "
-            "source under them, plus the default)"
-        )
-        write = "`sudo firewall-offline-cmd --zone=<zone> --add-port=<port>/tcp`"
-        then = "`sudo systemctl enable --now firewalld`"
+        which = "the zones with an interface or a source under them, plus the default"
+        read = "sudo firewall-offline-cmd --list-all-zones"
+        write = "sudo firewall-offline-cmd --zone=<zone> --add-port=<port>/tcp"
+        then = "sudo systemctl enable --now firewalld"
         failed = (
-            "`firewall-offline-cmd --list-all-zones` could not be read (it answers only root: "
+            "firewalld's offline zone list could not be read (it answers only root: "
             '"You need to be root", exit 255)'
         )
     else:
-        read = (
-            "`sudo firewall-cmd --permanent --list-all-zones` (the zones with an interface or "
-            "a source under them, plus the default — those are the bindings the reload "
-            "restores; `sudo firewall-cmd --get-active-zones` shows the runtime ones, which a "
-            "reload with `FlushAllOnReload=yes` throws away)"
+        which = (
+            "the zones with an interface or a source under them, plus the default: those are "
+            "the bindings the reload restores, not the runtime ones, which a reload with "
+            "FlushAllOnReload=yes throws away"
         )
-        write = "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp`"
+        read = "sudo firewall-cmd --permanent --list-all-zones"
+        write = "sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp"
         then = (
-            "`sudo systemctl enable --now firewalld && sudo firewall-cmd --reload`"
+            "sudo systemctl enable --now firewalld && sudo firewall-cmd --reload"
             if enables
-            else "`sudo firewall-cmd --reload`"
+            else "sudo firewall-cmd --reload"
         )
         failed = (
-            "firewalld's permanent zone bindings could not be read (`firewall-cmd --permanent "
-            '--list-all-zones`: exit 253 is "not authorized" — an unprivileged probe without '
-            'a polkit agent, and without passwordless sudo to elevate it; 252 is "not '
-            'running"; 36 is no system bus)'
+            "firewalld's permanent zone bindings could not be read (exit 253 is \"not "
+            'authorized" — an unprivileged probe without a polkit agent, and without '
+            'passwordless sudo to elevate it; 252 is "not running"; 36 is no system bus)'
         )
     return (
         f"REFUSED to {' and to '.join(dropped)}: SSH arrives on port {said}, and the rule that "
         f"keeps it open has to be written to every zone this machine is using, but {failed}. "
-        "A rule written without `--zone` goes to the default zone — measured on firewalld "
-        "2.2.3 (fedora:41, 2026-09-04) with the interface bound to `internal`: `internal` "
-        'stayed empty, and the reload ended the SSH session with "No route to host". The '
-        "game ports were written to the default zone only, for the same reason. Read the "
-        f"zones and allow the ports in each of them yourself: {read}, then per zone {write} "
-        f"for your SSH port and for the game ports, then {then}"
+        "A rule written without a zone goes to the default zone — measured on firewalld "
+        "2.2.3 (fedora:41, 2026-09-04) with the interface bound to internal: internal stayed "
+        'empty, and the reload ended the SSH session with "No route to host". The game ports '
+        "were written to the default zone only, for the same reason. Read the zones and allow "
+        f"the ports in each of them yourself ({which}). List them with this:\n{read}\n"
+        f"Then, per zone, for your SSH port and for the game ports:\n{write}\n"
+        f"Then:\n{then}"
     )
 
 
@@ -3209,9 +3216,7 @@ def _ssh_refusal(
     tool works on this daemon — a hand that repeats the command that just
     failed is worse than none (see `firewalld_start_withheld()`).
     """
-    dropped = ([f"enable {named}"] if enables else []) + (
-        ["run `firewall-cmd --reload`"] if reloads else []
-    )
+    dropped = ([f"enable {named}"] if enables else []) + (["reload firewalld"] if reloads else [])
     what = " and to ".join(dropped)
     verb = " or ".join(
         ([f"enabling {named}"] if enables else []) + (["reloading firewalld"] if reloads else [])
@@ -3241,7 +3246,7 @@ def _ssh_refusal(
         why = (
             "this machine's listening sockets did not settle the question — the socket "
             "table could not be read, or it listed NOTHING at all (what a private network "
-            "namespace shows — `unshare --net`, a container — of a host whose firewall "
+            "namespace shows — unshare --net, a container — of a host whose firewall "
             "configuration it shares; measured on m910q, 2026-09-04), or something on it "
             "is held by an init that could be fronting an SSH daemon (a socket-activated "
             f"sshd's port belongs to systemd, not to sshd), so it cannot tell whether {verb} "
@@ -3253,37 +3258,39 @@ def _ssh_refusal(
     if reloads:
         consequence.append(
             "The game ports were written to firewalld's permanent configuration and are NOT "
-            "in effect until a reload — and `firewall-cmd --reload` drops every rule that was "
-            "added without `--permanent` (measured on firewalld 2.2.3: a runtime-only "
-            "`--add-port` was gone after the reload and the connection through it was "
-            "blocked), so if a rule like that is what keeps your SSH session alive, the "
-            "reload would have ended it."
+            "in effect until a reload — and a reload drops every rule that was added without "
+            "the permanent flag (measured on firewalld 2.2.3: a runtime-only port rule was "
+            "gone after the reload and the connection through it was blocked), so if a rule "
+            "like that is what keeps your SSH session alive, the reload would have ended it."
         )
     if backend != "firewalld":
-        hand = "`sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`."
+        hand = "Run this:\nsudo ufw allow <your ssh port>/tcp\nThen:\nsudo ufw enable"
     elif firewalld_daemon == "stopped":
         hand = (
-            "`sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh port>/tcp` for every "
-            "zone with an interface or a source in `sudo firewall-offline-cmd --list-all-zones` "
-            "and for the default zone (the daemon is not running, so `firewall-cmd "
-            "--permanent` cannot do it), then `sudo systemctl enable --now firewalld`."
-        )
-    elif enables:
-        hand = (
-            "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp` for "
-            "every bound zone in `sudo firewall-cmd --permanent --list-all-zones` (those are "
-            "the bindings the reload restores), then `sudo systemctl enable --now firewalld "
-            "&& sudo firewall-cmd --reload`."
+            "List the zones with this:\n"
+            "sudo firewall-offline-cmd --list-all-zones\n"
+            "Then, for every zone with an interface or a source and for the default zone, run "
+            "this (the daemon is not running, so the online tool cannot do it):\n"
+            "sudo firewall-offline-cmd --zone=<zone> --add-port=<your ssh port>/tcp\n"
+            "Then:\n"
+            "sudo systemctl enable --now firewalld"
         )
     else:
+        then = (
+            "sudo systemctl enable --now firewalld && sudo firewall-cmd --reload"
+            if enables
+            else "sudo firewall-cmd --reload"
+        )
         hand = (
-            "`sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp` for "
-            "every bound zone in `sudo firewall-cmd --permanent --list-all-zones` (those are "
-            "the bindings the reload restores), then `sudo firewall-cmd --reload`."
+            "List the bound zones (the bindings the reload restores) with this:\n"
+            "sudo firewall-cmd --permanent --list-all-zones\n"
+            "Then, for every bound zone, run this:\n"
+            "sudo firewall-cmd --permanent --zone=<zone> --add-port=<your ssh port>/tcp\n"
+            f"Then:\n{then}"
         )
     return (
         f"REFUSED to {what}: {why}. {' '.join(consequence)} Allow every SSH port "
-        f"permanently and do it yourself: {hand}"
+        f"permanently and do it yourself. {hand}"
     )
 
 
@@ -4284,8 +4291,8 @@ def _firewalld_daemon_hint(command: list[str], returncode: int) -> str:
             "to the permanent configuration load when firewalld starts."
         )
     return (
-        f". firewalld is not running ({said}), so `firewall-cmd` cannot do this at all — the "
-        f"command that works with the daemon down is `sudo {' '.join(offline)}`."
+        f". firewalld is not running ({said}), so the online tool cannot do this at all. The "
+        f"command that works with the daemon down is this:\nsudo {' '.join(offline)}"
     )
 
 

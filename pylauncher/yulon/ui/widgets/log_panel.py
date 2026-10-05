@@ -410,7 +410,7 @@ class _StreamWorker(QObject):
             # The reason alone (T194 C8): the class name is for the log line
             # below, not for the screen and not for `run_finished`'s readers.
             # T248: and its Details below it, for `_on_finished` to fold away.
-            message = with_details(exc) or UNDESCRIBED_FAILURE
+            message = with_details(exc, str(exc) or UNDESCRIBED_FAILURE)
             raised = f"{type(exc).__name__}: {exc}"
             if self._stop and isinstance(exc, TrueAfterStop):
                 # T228: NOT the Stop taking effect. What the route did after the

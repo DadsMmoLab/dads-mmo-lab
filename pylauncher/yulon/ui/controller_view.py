@@ -4381,9 +4381,13 @@ START_FAILED_DOCKER_MISSING = (
 """A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
 START_FAILED_BROKE = "The server did not start. Details below says why."
+"""A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+
 STOP_FAILED_BROKE = "The server did not stop. Details below says why."
 """A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
-"""A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+
+UNINSTALL_FAILED_BROKE = "The uninstall did not finish. Details below says why."
+"""An Uninstall that broke rather than being refused by Yu'lon; the error is in Details (T248)."""
 
 STOP_LOG_NOT_SAVED = (
     "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below "
@@ -9698,9 +9702,16 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button.setVisible(False)
         self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
-        self.uninstall_label.setText(str(exc))
-        self.uninstall_details.set_text(_detail_of(exc))
-        self.action_failed.emit(_for_the_log(exc))
+        # T248: as a Stop's, only Yu'lon's own sentence goes on the line; what
+        # broke -- Docker's or the system's own words -- goes under Details.
+        if _said_by_yulon(exc):
+            self.uninstall_label.setText(str(exc))
+            self.uninstall_details.set_text(_detail_of(exc))
+            self.action_failed.emit(_for_the_log(exc))
+        else:
+            self.uninstall_label.setText(UNINSTALL_FAILED_BROKE)
+            self.uninstall_details.set_text(str(exc))
+            self.action_failed.emit(f"{UNINSTALL_FAILED_BROKE}\n{exc}")
 
     @Slot()
     def forget_install(self) -> None:
