@@ -229,6 +229,41 @@ def test_an_abandoned_tool_whose_container_will_not_go_is_known_to_write_into_it
     assert docker.tool_containers_writing_into(tmp_path / "elsewhere") == ()
 
 
+@pytest.mark.parametrize(
+    ("docker_says", "still"),
+    [("nothing", True), ("it is gone", False)],
+    ids=("unanswered-is-kept", "gone-is-dropped"),
+)
+def test_a_remembered_tool_container_is_asked_about_again_and_kept_unless_docker_says_gone(
+    fake_docker: tuple[Path, Path], tmp_path: Path, docker_says: str, still: bool
+) -> None:
+    """Cold review: Docker is asked again before the memory is trusted; a Docker that does
+    not answer keeps the name, which is the safe side."""
+    _cli, state = fake_docker
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
+
+    def interrupted(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        docker.run_container(spec, sink=interrupted, cancel=threading.Event())
+    (name,) = fake_containers(state)
+    if docker_says == "nothing":
+        (state / "no-answer").write_text("", encoding="utf-8")
+    else:
+        end_fake_containers(state)
+
+    assert docker.tool_containers_writing_into(out) == ((name,) if still else ())
+    (state / "no-answer").unlink(missing_ok=True)
+    end_fake_containers(state)
+    assert docker.tool_containers_writing_into(out) == (), "and dropped once Docker says gone"
+
+
 def test_a_tool_whose_container_was_removed_is_not_counted_as_writing(
     fake_docker: tuple[Path, Path], tmp_path: Path
 ) -> None:

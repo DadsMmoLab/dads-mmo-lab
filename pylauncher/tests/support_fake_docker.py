@@ -48,6 +48,9 @@ if args[:1] == ["run"]:
     sys.exit(137 if not box.exists() else 0)
 if args[:1] == ["inspect"]:
     # `docker.container_exit()`'s question (T303): a container still there is running.
+    if (state / "no-answer").exists():
+        sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
+        sys.exit(1)
     if (state / "containers" / args[1]).exists():
         sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
         sys.exit(0)
