@@ -3923,7 +3923,12 @@ def watch_after_ready(
     `cancel` set (the job's Stop, T247) ends the watch after the look it lands
     in, answering "still up" -- which the caller must not believe: it asks the
     event before it says anything. After the look, not before it, so a world
-    seen to have stopped is reported as that, Stop or no Stop.
+    seen to have stopped is reported as that, Stop or no Stop. A Stop that
+    lands in the pause is heard when the pause ends: at most `interval`, two
+    seconds as shipped. Left so rather than waiting on the event, because
+    `sleep` is the seam every test hands a clock-advancing fake, and a pause
+    built from the event would be a real one in every test that hands the
+    press a cancel (Codex adversarial review, 2026-10-05).
     """
     deadline = monotonic() + grace
     baseline: int | None = None
