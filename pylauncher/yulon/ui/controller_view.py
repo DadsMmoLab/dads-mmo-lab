@@ -90,6 +90,7 @@ from yulon import (
     reset_defaults,
     resources,
     server_build_presses,
+    server_rates,
     server_time_zone,
     serverlock,
     tuning,
@@ -16966,6 +16967,8 @@ class ControllerView(QWidget):
         # collision and the truer one -- this tab is the modules' settings.
         self._add_panel_tab(tab, "modules", "Tuning")
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        # T302: the built-in Server rates card's rows, read with the modules'.
+        self._rate_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -17005,6 +17008,8 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
+        # T302: the world conf's rates, read in the same pass -- one file, no job.
+        self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -17024,13 +17029,18 @@ class ControllerView(QWidget):
         self._look_up_time_zone()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
-        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+        """The Server rates card (T302), the modules' rows, then the server's own bot keys
+        (T99, CMaNGOS and Tortoise).
 
-        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
-        latter is what T94's reset reads as "keys an installed MODULE keeps",
-        and these are the server's own keys, which a reset puts back.
+        Kept apart in `_rate_rows` and `_bot_rows` rather than folded into
+        `_tuning_rows`: the latter is what T94's reset reads as "keys an installed
+        MODULE keeps", and these are the server's own keys, which a reset puts
+        back. For the same reason a module row the rates card also writes is
+        made read-only HERE, for the drawing only (`server_rates.yield_to_card`),
+        and `_tuning_rows` keeps it as the module declared it.
         """
-        return self._tuning_rows + self._bot_rows
+        modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
+        return self._rate_rows + modules + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -17840,6 +17850,8 @@ class ControllerView(QWidget):
         """
         if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
+        if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
+            return server_rates.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}

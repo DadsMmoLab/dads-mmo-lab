@@ -269,6 +269,10 @@ class SqlStep(_Strict):
         return self
 
 
+_BOUNDED = ("int", "float")
+"""The key types a `min`/`max` may sit on: the two that are numbers (T302 added `float`)."""
+
+
 class ConfKey(_Strict):
     """A config key the app sets or surfaces, with its default, the why, and how to edit it.
 
@@ -291,6 +295,9 @@ class ConfKey(_Strict):
     * no `min`/`max` on an `int` -> no clamping is invented. The module decides
       what it accepts; a bound this catalog made up would refuse a value the
       module is happy with.
+
+    `float` (T302) is a decimal number such as a server rate (`Rate.XP.Kill = 1.5`):
+    a text box that takes digits and one point, checked against its bounds at Save.
     """
 
     key: str = Field(min_length=1)
@@ -304,11 +311,15 @@ class ConfKey(_Strict):
     explain: str | None = Field(
         default=None, description="The module author's own sentence about this key."
     )
-    type: Literal["bool", "int", "list", "text"] | None = Field(
+    type: Literal["bool", "int", "float", "list", "text"] | None = Field(
         default=None, description="Which control edits this key. Absent means a text box."
     )
-    min: int | None = Field(default=None, description="`int` keys only; no bound is invented.")
-    max: int | None = Field(default=None, description="`int` keys only; no bound is invented.")
+    min: int | None = Field(
+        default=None, description="`int` and `float` keys only; no bound is invented."
+    )
+    max: int | None = Field(
+        default=None, description="`int` and `float` keys only; no bound is invented."
+    )
 
     @model_validator(mode="after")
     def _bounds_belong_to_an_int(self) -> ConfKey:
@@ -325,9 +336,11 @@ class ConfKey(_Strict):
         in `tuning.check()`, which would then decline every value the user
         typed while naming a range that reads reasonable.
         """
-        if (self.min is not None or self.max is not None) and self.type != "int":
+        if (self.min is not None or self.max is not None) and self.type not in _BOUNDED:
             named = self.type or "no type"
-            raise ValueError(f"{self.key}: `min`/`max` are for an `int` key; this one is {named}")
+            raise ValueError(
+                f"{self.key}: `min`/`max` are for an `int` or `float` key; this one is {named}"
+            )
         if self.min is not None and self.max is not None and self.min > self.max:
             raise ValueError(f"{self.key}: min {self.min} is above max {self.max}")
         return self

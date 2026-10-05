@@ -410,9 +410,38 @@ def check(key: ConfKey | None, value: str) -> None:
         if key.max is not None and number > key.max:
             raise TuningError(f"{key.key}: {number} is above the largest allowed value {key.max}")
         return
+    if key.type == "float":
+        _check_decimal(key, value)
+        return
     if key.type == "bool" and value.strip().lower() not in _BOOL_WORDS:
         allowed = ", ".join(sorted(_BOOL_WORDS))
         raise TuningError(f"{key.key}: `{value}` is not an on/off value (use one of: {allowed})")
+
+
+DECIMAL = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)")
+"""How a `float` key's value may be spelled: digits, at most one point, an optional minus.
+
+Narrower than Python's `float()` on purpose (T302). The cores parse a rate in C:
+mangos-tbc and mangos-classic with `std::stof` (`src/shared/Config/Config.cpp:134-139`
+at their pins), which throws -- at world start -- on a value that does not begin
+with a number, and Tortoise with `atof` (`src/shared/Config/Config.cpp:261-265`).
+Both stop at the first character they do not expect, so `float("1_0")` is 10 to
+this app and 1 to the server, and `1,5` is 1. `inf` and `nan` are numbers to
+Python and not rates. A value the two sides would read differently is refused
+rather than written.
+"""
+
+
+def _check_decimal(key: ConfKey, value: str) -> None:
+    """A `float` key's rule: a plain decimal, inside whichever bounds the key states."""
+    text = value.strip()
+    if DECIMAL.fullmatch(text) is None:
+        raise TuningError(f"{key.key}: `{value}` is not a number (write it like 1, 2 or 1.5)")
+    number = float(text)
+    if key.min is not None and number < key.min:
+        raise TuningError(f"{key.key}: {text} is below the smallest allowed value {key.min}")
+    if key.max is not None and number > key.max:
+        raise TuningError(f"{key.key}: {text} is above the largest allowed value {key.max}")
 
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false"})

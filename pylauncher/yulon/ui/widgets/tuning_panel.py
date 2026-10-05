@@ -467,14 +467,14 @@ def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
 
 
 def bounds_note(row: TuningRow) -> str | None:
-    """`0–80` for an int the catalog gave BOTH bounds for, else `None` (T44 item 11).
+    """`0–80` for an int or a float (T302) given BOTH bounds, else `None` (T44 item 11).
 
     Both, and never one: the pair is exactly what earns this row a spinner
     (`control_kind`), and printing a half-range would state a limit the
     catalog never declared -- the invention that function refuses a spinner
     over in the first place.
     """
-    if row.type != "int" or row.min is None or row.max is None:
+    if row.type not in ("int", "float") or row.min is None or row.max is None:
         return None
     return f"{row.min}–{row.max}"
 
@@ -550,6 +550,19 @@ Digits and a leading minus, and NO range: the range is the catalog's to state,
 and `tuning.check()` applies the one bound it has at Save. `*` and not `+`, so
 the box can be emptied on the way to a new number.
 """
+
+
+DECIMAL_TEXT = r"-?\d*\.?\d*"
+"""What a box for a `float` key lets a player type (T302): digits and one point.
+
+The partial spellings on the way to a number (`-`, `2.`, `.`) are let through,
+and `tuning.check()` decides at Save, with `tuning.DECIMAL`, whether the result
+is one the core reads as the same number. The range is not typed into the box
+-- it is printed beside it (`bounds_note`) and checked at Save.
+"""
+
+NUMBER_TEXT: dict[str, str] = {"int": INT_TEXT, "float": DECIMAL_TEXT}
+"""The box rule per numeric `type`; any other type's box takes any text."""
 
 
 def bool_words(row: TuningRow) -> tuple[str, str]:
@@ -702,16 +715,17 @@ class RowEditor(QWidget):
         # validate, so a value the box would refuse to have typed is still shown
         # rather than blanked -- the T43 rule that nothing here invents a value.
         field.setText(self._start)
-        if self.row.type == "int":
-            numbers = QRegularExpressionValidator(QRegularExpression(INT_TEXT), field)
-            self._guard_int(field, numbers)
-            field.textChanged.connect(lambda _text: self._guard_int(field, numbers))
+        pattern = NUMBER_TEXT.get(self.row.type or "")
+        if pattern is not None:
+            numbers = QRegularExpressionValidator(QRegularExpression(pattern), field)
+            self._guard_number(field, numbers, pattern)
+            field.textChanged.connect(lambda _text: self._guard_number(field, numbers, pattern))
         field.textChanged.connect(lambda _text: self._touched())
         self._keep_room(field)
         return field
 
     @staticmethod
-    def _guard_int(field: QLineEdit, numbers: QRegularExpressionValidator) -> None:
+    def _guard_number(field: QLineEdit, numbers: QRegularExpressionValidator, pattern: str) -> None:
         """The number rule on the box only while its text keeps it (T190 final review).
 
         A file can hold `1.5` under an `int` key. With the rule on, every edit of
@@ -719,7 +733,7 @@ class RowEditor(QWidget):
         refused the edit and the value could not be changed at all. Off while the
         text breaks it, on again the moment the text is a number.
         """
-        fits = re.fullmatch(INT_TEXT, field.text()) is not None
+        fits = re.fullmatch(pattern, field.text()) is not None
         # `None` is Qt's own "no validator"; the stubs type the argument as required.
         field.setValidator(numbers if fits else None)  # type: ignore[arg-type]
 
