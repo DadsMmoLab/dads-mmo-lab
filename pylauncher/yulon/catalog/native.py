@@ -102,6 +102,7 @@ from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
+    ReadyWaitStopped,
     RollbackNotDone,
     UnsupportedPlatformError,
     UpdateRefused,
@@ -3168,8 +3169,10 @@ READY_CEILING_SECONDS = 6 * 60 * 60
 
 NOT a load budget, and the refusal that names it says so. `wait_for_ready()`
 grants a server that is still printing another window every time it prints, so
-without an outer bound an install could wait for ever with no way to cancel it
-(`wait_ready()` takes no cancel) — this is where that stops.
+without an outer bound an install could wait for ever — this is where that stops.
+(Until T247 not even Stop ended it: `wait_ready()` took no cancel. It does now,
+through `docker.ReadySpec.cancel`, and that is the player's way out; this bound
+is the one for a wait nobody is watching.)
 
 Six hours is 5.8 times the slowest first boot this project has measured —
 Tortoise's 3702 s ready stage on yulon-win11-gate 2026-09-05, with the server
@@ -3184,6 +3187,32 @@ has a problem no timeout should hide.
 
 This is the INSTALL ceiling. A management wait gets its own — see
 `MANAGEMENT_CEILING_WINDOWS`.
+"""
+
+READY_WAIT_STOPPED = (
+    "Stop was pressed while the world server was loading, so the wait for it ended before it "
+    "reported ready: this build was never seen to come up."
+)
+"""What a ready wait ended by the player's Stop says (T247), first in whatever follows.
+
+A rebuild rolls back on it, as on any ready wait that failed, and appends what
+the rollback did; an install adds `INSTALL_LEFT_LOADING`.
+"""
+
+INSTALL_LEFT_LOADING = (
+    "The server's containers were started and are left running, so the world server goes on "
+    "loading. Nothing was stopped: a world is never stopped in the middle of its load, which "
+    "is when it updates its database. Press Install again on the same folder to wait for it "
+    "and finish the install; the steps already done are not done again."
+)
+"""What an install stopped in its ready wait has left (T247), said before the Stop ends it.
+
+True by construction: the stages before `ready` are done (`up` started the
+containers), and `ready` and `up` are never recorded, so the next Install on
+the folder skips every recorded stage, runs `start-db`/`up` again on a server
+already up, and then waits again. Not stopping is T158's rule, the owner's:
+never kill a world mid-load (`docker.wait_for_the_world_to_load()`). Driven in
+`test_an_install_stopped_in_its_ready_wait_resumes_at_the_wait`.
 """
 
 READY_GRACE_SECONDS = 60.0
@@ -3870,6 +3899,7 @@ def watch_after_ready(
     banner: str,
     fatal: str | None,
     grace: float = READY_GRACE_SECONDS,
+    cancel: threading.Event | None = None,
 ) -> AfterReady:
     """Keep watching a world server for `grace` seconds AFTER it said it was ready (T71).
 
@@ -3888,6 +3918,11 @@ def watch_after_ready(
 
     Returns as soon as it has an answer. A server that stays up costs the full
     `grace`; one that dies costs one poll after it died.
+
+    `cancel` set (the job's Stop, T247) ends the watch after the look it lands
+    in, answering "still up" -- which the caller must not believe: it asks the
+    event before it says anything. After the look, not before it, so a world
+    seen to have stopped is reported as that, Stop or no Stop.
     """
     deadline = monotonic() + grace
     baseline: int | None = None
@@ -3906,7 +3941,7 @@ def watch_after_ready(
             return stopped
         baseline = _restart_baseline(baseline, now)
         before = now
-        if monotonic() >= deadline:
+        if monotonic() >= deadline or (cancel is not None and cancel.is_set()):
             break
         sleep(interval)
     return AfterReady(False, "")
@@ -4726,9 +4761,15 @@ class StagedInstaller:
         # produced; see its docstring for what reading a stale copy cost.
         # Each stage first locks the folder to this account on Windows (T174),
         # so no secret lands in a folder anyone else can read.
-        state = yield from self._staged(
-            self._locking(self.stages(), server_dir, started_empty), ctx
-        )
+        try:
+            state = yield from self._staged(
+                self._locking(self.stages(), server_dir, started_empty), ctx
+            )
+        except ReadyWaitStopped:
+            # T247: the containers are up and the world is still loading. That is
+            # what this Stop leaves, and it is said before the Stop ends the press.
+            yield INSTALL_LEFT_LOADING
+            raise
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
         # is not one — a realm row that could not be written is a sentence, not
@@ -7465,7 +7506,12 @@ class StagedInstaller:
             # one never reach a recreate, and a name docker already let go is a
             # no-op here (`remove_image` treats "no such image" as done).
             yield from self._release(named)
-            yield from self.wait_for_ready(ctx, self._native().ready)
+            # With no cancel (T247): the Stop that brought a rollback here is
+            # already set, and handed on it would end this wait before it began.
+            # A rollback is finished, not given up -- `servers_down.back()` above
+            # is run the same way -- and this wait is how it learns whether the
+            # build it put back is up.
+            yield from self.wait_for_ready(replace(ctx, cancel=None), self._native().ready)
         except InstallerError as second:
             # T79. Every ref above is back on the old build -- `moved` is all of
             # them or this line is not reached -- so the `-rollback` names are
@@ -9822,9 +9868,24 @@ class StagedInstaller:
         container only, so an auth container that loops or prints a fatal line
         is not seen. Both are conservative — slower to give up, never quicker to
         call a dead server ready.
+
+        **Stop ends it (T247)**, within one poll: `ctx.cancel` rides to the
+        real wait on `docker.ReadySpec.cancel` and to the watch after the
+        banner, and this raises `ReadyWaitStopped` once either comes back on
+        it. A window the Stop cut short is never read as silence, but a verdict
+        that is a failure in its own right -- a crash loop, a container gone, a
+        fatal line, a world that stopped after its banner -- is still that
+        failure: the Stop did not cause it. A caller that must not be stopped
+        (the rollback's wait for the build it put back) passes a context with
+        no cancel.
         """
         spec = self.entry.container_spec()
-        ready = self._ready_spec(markers)
+        ready = replace(self._ready_spec(markers), cancel=ctx.cancel)
+
+        def stopped() -> None:
+            if ctx.cancel is not None and ctx.cancel.is_set():
+                raise ReadyWaitStopped(READY_WAIT_STOPPED)
+
         service, container = spec.service_for(spec.world), spec.world
         logs = f"`docker compose logs {service}` in {ctx.server_dir}"
         quiet = markers.timeout_s
@@ -9863,8 +9924,10 @@ class StagedInstaller:
                     interval=ready.interval,
                     banner=ready.world,
                     fatal=ready.fatal,
+                    cancel=ctx.cancel,
                 )
                 if not after.stopped:
+                    stopped()
                     yield "The server is up."
                     return
                 said = (
@@ -9890,6 +9953,11 @@ class StagedInstaller:
                 before, now, first_restarts, markers.restart_loop, ready.fatal
             )
             spent = self._seams.monotonic() - started
+            if verdict in ("alive", "quiet", "unreadable"):
+                # Asked here and not before the verdict: the three above are about
+                # the window, which the Stop cut short, and the three below are
+                # about the server, which it did not touch.
+                stopped()
             if verdict == "loop":
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "

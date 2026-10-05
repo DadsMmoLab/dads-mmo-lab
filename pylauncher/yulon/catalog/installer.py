@@ -139,6 +139,17 @@ class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
 
+class ReadyWaitStopped(InstallerError):
+    """Stop was pressed while the world server was being waited for (T247).
+
+    Raised by `StagedInstaller.wait_for_ready()` as soon as it hears the Stop,
+    instead of waiting out the window it was in. It is a failed ready wait in
+    every way that matters to what comes next -- the build was never seen to
+    come up -- so a rebuild rolls back on it as on any other; its own type so
+    the install can say what it left running before it re-raises.
+    """
+
+
 class WorldStoppedAfterReadyError(InstallerError, TrueAfterStop):
     """The world server printed its ready banner and then stopped (T71).
 
