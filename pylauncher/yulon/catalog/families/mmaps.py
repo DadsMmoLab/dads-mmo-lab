@@ -178,7 +178,7 @@ class DockerRunner:
 
     def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
         if self.wsl_distro is not None:
-            raise docker.DockerCommandError(
+            raise docker.DockerRefusal(
                 f"the pathfinding job cannot be started from here for a server inside the WSL "
                 f"distro {self.wsl_distro}; open Yu'lon inside that distro and start it on the "
                 "server's Server tab there"
@@ -326,6 +326,12 @@ def _forget_record(server_dir: Path) -> None:
 
 RUNS_WITHOUT_IT = "the server already runs without it"
 
+START_PRESS = "Make the pathfinding data"
+"""The Server tab's press that starts a run, spelled once (T245).
+
+A run that ended says what this press does next -- continue from the kept tiles, or
+begin again -- so the line names it, and the view labels its button with this."""
+
 
 @dataclass(frozen=True)
 class MmapsStatus:
@@ -346,6 +352,9 @@ class MmapsStatus:
     """Docker could not be asked this time; the state is the record's last word."""
     kept: int = 0
     """T209: a failed or stopped run's finished tiles, which the next run continues from."""
+    begins_again_because: str = ""
+    """T245: why the next start throws the `kept` tiles away (`_why_it_begins_again()`);
+    empty when it continues from them."""
 
     @property
     def can_start(self) -> bool:
@@ -366,13 +375,28 @@ class MmapsStatus:
             done = f"{self.percent} %" if self.percent is not None else "being made (takes hours)"
             unasked = " (Docker did not answer just now)" if self.docker_unanswered else ""
             return f"Pathfinding data: {done}{unasked} — {RUNS_WITHOUT_IT}."
+        # T245: an ended run says how far it got and what the press offered beside it
+        # does next, so the press's own sentence ("Making…") is never the last word.
+        # "had reached", never "stopped at": the percentage is the generator's last
+        # progress line when its log could be read at the end, and otherwise the last
+        # one a poll saw (a container Docker lost, a Stop) -- reached either way.
+        reached = f" (it had reached {self.percent} %)" if self.percent is not None else ""
+        if self.state == "failed" and self.kept and self.begins_again_because:
+            return (
+                f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "
+                f"finished tiles cannot be continued from, because {self.begins_again_because}, "
+                f"so \u201c{START_PRESS}\u201d starts it again from the beginning."
+            )
         if self.state == "failed" and self.kept:
             return (
-                f"Pathfinding data stopped part-way: {self.error} Its {self.kept} finished "
-                f"tiles are kept, and the next run continues from there."
+                f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "
+                f"finished tiles are kept, and \u201c{START_PRESS}\u201d continues from there."
             )
         if self.state == "failed":
-            return f"Pathfinding data could not be made: {self.error} It can be started again."
+            return (
+                f"Pathfinding data could not be made{reached}: {self.error} "
+                f"\u201c{START_PRESS}\u201d starts it again from the beginning."
+            )
         if self.error:
             return f"Pathfinding data is ready, but {self.error}"
         if not self.pathfinding_on:
@@ -648,6 +672,14 @@ def stop_mmaps(
         if state == "done":
             return "Pathfinding data is already made; there was nothing to stop."
         kept = _stop(job, run, keep="you stopped it.")
+        stopped = read_record(server_dir) if kept else None
+        why = _why_it_begins_again(job, stopped) if stopped is not None else ""
+        if why:
+            return (
+                f"Stopped making the pathfinding data. Its {kept} finished tiles are kept, but "
+                f"{why}, so the next run starts again from the beginning. Pathfinding stays off "
+                "until a run finishes."
+            )
         if kept:
             return (
                 f"Stopped making the pathfinding data. Its {kept} finished tiles are kept, and "
@@ -669,6 +701,8 @@ def stop_for_route(
     runner: Runner | None = None,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
+    kept_note: str = "It continues from there once the server has been rebuilt, or from the "
+    "Server tab.",
 ) -> str | None:
     """Stop a job that may run before `route` changes the server; None when none can.
 
@@ -689,7 +723,11 @@ def stop_for_route(
     run started once the server is ready continues from them; True for Update to
     latest, Return to the tested pin and Re-extract map data, whose new code or
     map data the tiles were not made with -- then a failed run's kept tiles go too
-    and its record is forgotten.
+    and its record is forgotten. Re-extract map data passes False since T241: it
+    keeps the old map data until the new is in and puts it back unchanged when the
+    extraction does not finish, so the tiles made from it are still good; it
+    throws them away itself (`discard()`) once the new data is in. `kept_note` is
+    what the sentence about kept tiles says happens to them next.
     """
     again = f"Check that Docker is running, then press \u201c{press}\u201d again."
     if background_block(entry) is None:
@@ -737,8 +775,7 @@ def stop_for_route(
         if kept:
             return (
                 f"Stopped making the pathfinding data before {route}; its {kept} finished tiles "
-                "are kept and pathfinding stays off. It continues from there once the server "
-                "has been rebuilt, or from the Server tab."
+                f"are kept and pathfinding stays off. {kept_note}"
             )
         return (
             f"Stopped making the pathfinding data before {route}; what it had made so far was "
@@ -849,7 +886,7 @@ def _reconcile(job: Job, run: Runner, now: Clock) -> MmapsStatus:
         return _reconcile_live(job, record, run, now)
     if record.state == "done":
         return _done_status(job, record, run, now)
-    return _status_of(record, pathfinding_on=_pathfinding_on(job))
+    return _failed_status(job, record)
 
 
 def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
@@ -867,18 +904,21 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
         return _fail(job, record, why, run, now, remove=False)
     tail = run.log_tail(job.container, LOG_TAIL_LINES, timeout=STATUS_TIMEOUT)
     percent, current = _progress(tail) if tail is not None else (None, None)
+    # The log's last progress line, also for a run that ended since the last poll: a
+    # failure then says how far it really got (T245), not where a poll last saw it.
+    latest = replace(
+        record,
+        percent=percent if percent is not None else record.percent,
+        map=current if current is not None else record.map,
+    )
     if facts.status not in ("exited", "dead"):
         moved = replace(
-            record,
-            state="running",
-            container_id=record.container_id or facts.container_id,
-            percent=percent if percent is not None else record.percent,
-            map=current if current is not None else record.map,
+            latest, state="running", container_id=record.container_id or facts.container_id
         )
         if moved != record:
             _write_record(job.server_dir, moved)
         return _status_of(moved)
-    return _finished(job, record, facts, tail, run, now)
+    return _finished(job, latest, facts, tail, run, now)
 
 
 def _finished(
@@ -1016,7 +1056,7 @@ def _fail(
     )
     _write_record(job.server_dir, failed)
     logger.warning(f"{job.container} failed: {failed.error}")
-    return _status_of(failed, pathfinding_on=_pathfinding_on(job))
+    return _failed_status(job, failed)
 
 
 def _stop(job: Job, run: Runner, *, keep: str | None) -> int:
@@ -1126,8 +1166,10 @@ def _evidence(job: Job) -> str:
     """What the map data is now: a hash of the extraction's evidence and every input file's facts.
 
     `data/.yulon-extract.json` (`extract.EVIDENCE_FILE`) is rewritten whenever the
-    extraction makes the map data, and Re-extract map data removes it first. That
-    alone does not prove the files are the same (Codex adversarial review, T209): a
+    extraction makes the map data, and Re-extract map data moves it aside with the
+    map data and puts it back, unchanged, when the extraction does not finish
+    (T241); a run made from the old data then continues. That alone does not prove
+    the files are the same (Codex adversarial review, T209): a
     map put back or changed by hand leaves it as it was. So the hash also covers
     each file under `_input_dirs()` -- its path, size and modification time, from one
     `os.scandir` walk (the directory listing carries them on Windows), never its
@@ -1164,6 +1206,32 @@ def _file_facts(folder: Path, prefix: str) -> list[str]:
             info = entry.stat(follow_symlinks=False)
             facts.append(f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n")
     return facts
+
+
+def _why_it_begins_again(job: Job, record: Record) -> str:
+    """Why a start would throw away the tiles `record` kept, in words; "" when it continues.
+
+    The rule `_resume_or_clear()` starts by: a run whose map data could not be told
+    is never continued, nor one whose map data has changed since. Hashed at every
+    reading, never cached: the line beside the press is a promise about that press
+    (T245; a one-minute cache was refused by Codex's adversarial review, because a
+    map file changed inside the minute left the promise false). One hash of ~18,000
+    files took 55 ms on WSL (2026-10-05), once per poll and only while a failed run
+    with kept tiles is shown.
+    """
+    if not record.evidence:
+        return "Yu'lon could not tell which map data it was made from"
+    if _evidence(job) == record.evidence:
+        return ""
+    return "the map data has changed since it began"
+
+
+def _failed_status(job: Job, record: Record) -> MmapsStatus:
+    """A failed record's status, saying whether the next start continues from its tiles."""
+    status = _status_of(record, pathfinding_on=_pathfinding_on(job))
+    if not status.kept:
+        return status
+    return replace(status, begins_again_because=_why_it_begins_again(job, record))
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:

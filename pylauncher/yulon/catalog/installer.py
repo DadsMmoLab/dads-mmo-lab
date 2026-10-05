@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     # `native` imports this module for `InstallOptions` and the error types
     # (see `installer_for()`), so it is named here for the Protocol's
     # annotations only.
-    from yulon.catalog import native
+    from yulon.catalog import native, snapshot
 
 logger = get_logger(__name__)
 
@@ -1088,8 +1088,12 @@ def installer_for(
     import_probe: docker.ImportProbe | None = None,
     reset_unfinished: docker.ResetUnfinished | None = None,
     seams: native.Seams | None = None,
+    database_snapshot: snapshot.DatabaseSnapshot | None = None,
 ) -> InstallEngine:
     """The engine that installs `entry`. The only place that decides.
+
+    `database_snapshot` is the update route's copy of the databases a new build
+    can change (T217), supplied by `install_wiring` for `import_probe`'s reason.
 
     `seams` replaces the engine's default seams whole, `platform_id` then
     included; only `install_wiring` passes it, for a server inside a WSL
@@ -1147,4 +1151,5 @@ def installer_for(
         import_probe=import_probe,
         reset_unfinished=reset_unfinished,
         seams=seams if seams is not None else native.Seams(platform_id=platform_id),
+        database_snapshot=database_snapshot,
     )

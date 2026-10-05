@@ -40,7 +40,7 @@ from tests.support_stop import compile_until_stopped, stop_when
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import docker, git, resources, rmtree, runner
+from yulon import docker, git, resources, rmtree, runner, server_build_presses
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
@@ -1865,17 +1865,19 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
 def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
     """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before.
 
-    And their rebuild replaces the containers in the one `recreate` call it always made:
-    no family work between a stop and a start (T179 Task 6, fix round 1).
+    Since T217 their update's rebuild stops the servers first and then recreates
+    (it copies the databases its new build can change in between, and its rollback
+    puts the sources back in that window), as T179's family work always did; a plain
+    Rebuild still replaces them in the one `recreate` call.
     """
     rec, server_dir = _ready(tmp_path / "wotlk")
     _press(rec, server_dir)
     assert not [call for call in rec.calls if call.startswith("changed-")]
-    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert not [call for call in rec.calls if call.startswith("changed-")]
-    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
 
 
 ABORTED_AFTER_READY = native.WorldOutput(
@@ -1967,10 +1969,16 @@ def _tags(rec: Recorder, refuse: Callable[[str, str, int], bool]) -> Callable[[s
 
 
 def _stop_refused(rec: Recorder) -> dict[str, object]:
-    """The rollback's stop of the failed build fails (`docker.DockerCommandError`)."""
+    """The rollback's stop of the failed build fails (`docker.DockerCommandError`).
+
+    Only the ROLLBACK's: since T217 the update route stops the old build's servers
+    itself before the new build first starts (to copy its databases), and that stop
+    comes before any `recreate`. The rollback's is the one after the new build's.
+    """
 
     def refuse(control: object) -> None:
-        raise docker.DockerCommandError("the daemon did not answer the stop")
+        if "recreate" in rec.calls:
+            raise docker.DockerCommandError("the daemon did not answer the stop")
 
     rec.on_stop_servers = refuse
     return {}
@@ -2099,12 +2107,18 @@ def test_a_rollback_that_put_the_old_build_back_still_puts_the_sources_back(
 
 
 def _recreate_given_up(rec: Recorder) -> None:
-    """The recreate is given up in the load wait, before its signal: no container replaced."""
+    """The recreate is given up in the load wait, before its signal: no container replaced.
+
+    On the update route the load wait is in its own stop since T217 (the stop that
+    lets it copy the databases before the new build starts), so the give-up is
+    armed there too; a plain Rebuild's is still inside its one `recreate`.
+    """
 
     def give_up(control: object) -> None:
         raise docker.StopAbandoned("the world was still loading")
 
     rec.on_recreate = give_up
+    rec.on_stop_servers = give_up
 
 
 def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_sources_too(
@@ -2129,8 +2143,14 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "
-        "its next Start runs the new build."
+        f"Start is refused until this is done: {native.UNTESTED_BUILD_REFUSAL}"
     )
+    # T223 (lead, under owner answer D1): the new build never started, so no Start
+    # may run it; this was "its next Start runs the new build" until then. This
+    # family's update route has no work of its own that refuses Start, so it is
+    # not exempt (lead ruling, option 1; the exemption is pinned in
+    # test_trinitycore_updates).
+    assert native.owed_start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
     assert set(_heads(rec, server_dir).values()) == {NEW}
     assert _recorded_builds(server_dir) == {NEW[:7]}
     assert raised.value.touched is False and raised.value.sources_kept is True
@@ -2138,8 +2158,7 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
 
 GIVEN_UP = (
     "The rebuild was cancelled while the world was still loading, so its containers were not "
-    "replaced -- the server you have is still the one that was running before this rebuild. "
-    "Nothing was touched."
+    "replaced -- the server you have is still the one that was running before this rebuild."
 )
 """`stage_recreate()`'s sentence for a recreate given up before its signal: nothing replaced."""
 
@@ -2227,11 +2246,28 @@ def _start_is_refused_for_a_rebuild(server_dir: Path) -> None:
     assert (server_dir / native.START_REFUSED_FILE).is_file()
 
 
+def _built_on_old(server_dir: Path) -> None:
+    """The record says the running build was made from `OLD`, where `_ready()` left the heads.
+
+    A plain Rebuild refuses a folder whose sources are not on the commit the
+    running build came from (T217), and an install's record says nothing, which
+    means "on the pins"; the Recorder's heads sit on `OLD` instead.
+    """
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    revs = tuple(
+        native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
+        for source in ENTRY.emulator.sources
+    )
+    native.write_state(server_dir, replace(state, source_revs=revs))
+
+
 def test_a_plain_rebuild_that_leaves_the_tags_mixed_refuses_every_start_too(
     tmp_path: Path,
 ) -> None:
     """Fix round 2: the geometry is the Rebuild press's as much as the update's."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone) as raised:
         list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2244,6 +2280,7 @@ def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
 ) -> None:
     """Fix round 2: Rebuild is the repair, so it is not refused, and only its success clears."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     assert native.owe_start(server_dir) == ""
     rec.build_result = AttachedRun(2, ("error: no",))
     with pytest.raises(InstallerError):
@@ -2269,6 +2306,7 @@ def test_the_repair_rebuild_after_mixed_tags_runs_to_the_end_and_starts_the_serv
     before the start. Bound here so a stage tuple that grows an `up` fails this.
     """
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone):
         list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2291,6 +2329,7 @@ def test_a_repair_rebuild_whose_build_does_not_come_up_leaves_the_mixed_build_st
     restart, so a failed repair recreated the very images the record refuses to start.
     """
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     assert native.owe_start(server_dir) == ""
     rec.ready = False
     with pytest.raises(native.ServersLeftStopped) as raised:
@@ -2319,7 +2358,11 @@ def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_s
         _press(rec, server_dir)
     said = str(raised.value)
     assert not isinstance(raised.value, RollbackNotDone)
-    assert "The tags were put back to the build that is running" in said
+    assert "The build that had just finished was removed, and no container was replaced" in said
+    # T223 cold review: the press the player used, not "the next rebuild".
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    assert f"pressing {update} again compiles it again" in said, said
+    assert "next rebuild" not in said, said
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert said.endswith(native.SOURCES_PUT_BACK_NOTE)
 
@@ -2329,6 +2372,7 @@ def test_a_rollback_that_stops_early_on_a_plain_rebuild_adds_nothing_about_sourc
 ) -> None:
     """Rebuild moves no source: its sentence is the rollback's own, and nothing is kept."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone) as raised:
         list(engine(rec, **_name_refused(rec)).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2579,8 +2623,10 @@ def test_a_stop_in_the_replace_before_any_container_moved_says_only_cancelled(
 ) -> None:
     """The rollback's untouched return: the tags went back, no container moved, sources back.
 
-    The recreate waits on the world's load until Stop, then gives up before its
-    signal. Nothing that runs was changed, so this is a clean cancel.
+    The replace waits on the world's load until Stop, then gives up before its
+    signal. Nothing that runs was changed, so this is a clean cancel. Since T217
+    the update route's load wait is in its own stop (the one before the copy of
+    the databases), so the give-up is armed there, as `_recreate_given_up()` does.
     """
     rec, server_dir = _ready(tmp_path)
     reached = threading.Event()
@@ -2592,6 +2638,7 @@ def test_a_stop_in_the_replace_before_any_container_moved_says_only_cancelled(
         raise docker.StopAbandoned("the world was still loading")
 
     rec.on_recreate = give_up
+    rec.on_stop_servers = give_up
     made = engine(rec)
     options = InstallOptions(server_dir=server_dir)
 

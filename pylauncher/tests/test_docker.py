@@ -24,6 +24,7 @@ import pytest
 
 from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
+from yulon.said import SaidByYulon
 from yulon.ui import lines
 
 SPEC = docker_ctl.SPEC
@@ -1563,8 +1564,10 @@ def test_a_stop_cannot_be_confirmed_when_docker_will_not_answer(
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    with pytest.raises(docker.DockerCommandError, match="cannot be confirmed"):
+    with pytest.raises(docker.DockerCommandError, match="cannot be confirmed") as raised:
         docker.stop_staged(SPEC, tmp_path)
+    assert isinstance(raised.value, docker.DockerUnansweredError)
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's sentence is shown as written (T214)"
 
 
 def test_stop_staged_will_not_claim_success_when_ownership_goes_dark_mid_stop(
@@ -1799,8 +1802,12 @@ def test_refusing_without_an_identity_does_not_read_a_failed_ps_as_empty(
             returncode=1, stderr="permission denied while trying to connect"
         ),
     )
-    with pytest.raises(docker.DockerCommandError, match="nothing about it can be established"):
+    with pytest.raises(
+        docker.DockerCommandError, match="nothing about it can be established"
+    ) as raised:
         docker.stop_staged(SPEC, Path("/tmp/unpinned"))
+    assert isinstance(raised.value, docker.DockerUnansweredError)
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's sentence is shown as written (T214)"
 
 
 def test_start_staged_will_not_report_success_for_a_container_that_died(
@@ -2617,9 +2624,10 @@ def test_repair_import_refuses_while_this_installs_servers_are_running(
     """A live worldserver holds characters in memory and writes them back over the import."""
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db, SPEC.world})
-    with pytest.raises(docker.DockerCommandError, match="Press Stop first"):
+    with pytest.raises(docker.DockerCommandError, match="Press Stop first") as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
     assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's refusal is shown as written (T214)"
 
 
 def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_own(
@@ -2872,7 +2880,8 @@ def test_the_failure_text_of_a_broken_import_reaches_the_error_on_screen(
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
-    assert "ERROR 1698" in said, said
+    assert "ERROR 1698" in raised.value.detail, raised.value.detail
+    assert "ERROR 1698" not in said, "the import's own words are Details', not the line's (T214)"
     assert "still read as absent" in said, "the state it is in stopped being said"
 
 
@@ -2912,8 +2921,10 @@ def test_a_thirty_minute_import_is_not_kept_in_memory(
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
-    assert "line 9999" in said and "line 0 " not in said, said
-    assert len(said) < 1000, f"a {len(said)}-character message for a QLabel"
+    detail = raised.value.detail  # T214 review: the last words are Details', not the line's
+    assert "line 9999" in detail and "line 0 " not in detail, detail
+    assert "line 9999" not in said, said
+    assert len(said) + len(detail) < 1000, f"a {len(said) + len(detail)}-character failure"
 
 
 def test_a_sink_that_has_gone_away_cannot_kill_a_running_import(
@@ -4148,6 +4159,7 @@ def test_a_deleted_distro_is_explained_rather_than_reported_as_a_bare_exit_code(
     said = str(raised.value)
     assert "dml-arch" in said and "no longer exists" in said, said
     assert "4294967295" not in said, "the raw exit code is still what the user reads"
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's sentence is shown as written (T214)"
 
 
 def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
@@ -4166,6 +4178,7 @@ def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
         docker._run(["inspect", "nope"], wsl_distro="dml-arch")
     said = str(raised.value)
     assert "docker inspect nope exited 1" in said and "no such container" in said, said
+    assert not isinstance(raised.value, SaidByYulon), "Docker's own words go under Details (T214)"
 
 
 # wsl.exe writes UTF-16LE, and `runner.stream()` decodes as UTF-8, so each ASCII

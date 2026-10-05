@@ -73,6 +73,13 @@ class Clock:
         return self.now
 
 
+CHANGED = (
+    "Its 3 finished tiles cannot be continued from, because the map data has changed since it "
+    "began, so “Make the pathfinding data” starts it again from the beginning."
+)
+"""T245: the line's end for kept tiles a start would throw away."""
+
+
 @pytest.fixture
 def box(machine: Machine) -> Machine:  # noqa: F811 - the fixture imported above
     return machine
@@ -369,7 +376,7 @@ def test_a_container_that_vanished_while_running_is_a_failed_run_that_keeps_its_
     assert len(output(server)) == 40 and "0013251.mmtile" not in output(server)
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     assert now.line().endswith(
-        "Its 40 finished tiles are kept, and the next run continues from there."
+        "Its 40 finished tiles are kept, and “Make the pathfinding data” continues from there."
     )
     start(server, fake)
     assert len(fake.mmaps_at_run[-1]) == 40
@@ -430,7 +437,7 @@ def test_stop_removes_the_container_and_keeps_the_finished_tiles(server: Path) -
     assert now.state == "failed" and now.can_start and now.kept == 12
     assert now.line() == (
         "Pathfinding data stopped part-way: you stopped it. Its 12 finished tiles are kept, "
-        "and the next run continues from there."
+        "and “Make the pathfinding data” continues from there."
     )
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     start(server, fake)
@@ -1094,7 +1101,7 @@ def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_f
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     assert now.line().startswith("Pathfinding data stopped part-way: the generator stopped with")
     assert now.line().endswith(
-        "Its 3 finished tiles are kept, and the next run continues from there."
+        "Its 3 finished tiles are kept, and “Make the pathfinding data” continues from there."
     )
     said = start(server, fake)
     assert fake.mmaps_at_run[-1] == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]
@@ -1111,6 +1118,8 @@ def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
     fake.finish(139)
     status(server, fake)
     (server / "data" / extract.EVIDENCE_FILE).write_text('{"plan_hash": "second"}\n', "utf-8")
+    now = status(server, fake)
+    assert now.kept == 3 and now.line().endswith(CHANGED), "the line says what Start will do"
     with caplog.at_level("WARNING"):
         start(server, fake)
     assert fake.mmaps_at_run[-1] == [], "tiles made from other map data are not continued"
@@ -1168,8 +1177,9 @@ def test_map_data_changed_behind_an_unchanged_evidence_file_clears_the_tiles(
     start(server, fake)
     fake.write_tiles(3)
     fake.finish(139)
-    status(server, fake)
+    assert "continues from there" in status(server, fake).line()
     change(next(iter(sorted((server / "data" / folder).iterdir()))))
+    assert status(server, fake).line().endswith(CHANGED), "T245: the line says what Start does"
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
 
@@ -1181,7 +1191,30 @@ def test_a_run_whose_map_data_had_no_evidence_is_never_continued(server: Path) -
     start(server, fake)
     fake.write_tiles(3)
     fake.finish(139)
-    status(server, fake)
+    line = status(server, fake).line()
+    assert line.endswith(
+        "Its 3 finished tiles cannot be continued from, because Yu'lon could not tell which "
+        "map data it was made from, so “Make the pathfinding data” starts it again from the "
+        "beginning."
+    )
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_stop_over_changed_map_data_says_the_next_run_begins_again(server: Path) -> None:
+    """T245: Stop's sentence stays on the tab while the run is stopped, so it must agree with
+    what the next start does."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    _change_size_only(next(iter(sorted((server / "data" / "maps").iterdir()))))
+    said = mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
+    assert said == (
+        "Stopped making the pathfinding data. Its 3 finished tiles are kept, but the map data "
+        "has changed since it began, so the next run starts again from the beginning. "
+        "Pathfinding stays off until a run finishes."
+    )
+    assert status(server, fake).line().endswith(CHANGED)
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
 
@@ -1428,3 +1461,27 @@ def test_every_failed_exit_keeps_the_tiles_and_the_usual_threads(server: Path, c
     start(server, fake)
     assert len(fake.mmaps_at_run[-1]) == 3
     assert fake.started[-1].argv[-2:] == ("--threads", "4")
+
+
+def test_a_new_run_over_changed_map_data_continues_from_its_own_tiles(
+    server: Path,
+) -> None:
+    """T245: a run started over changed map data, that fails in turn, keeps tiles made from
+    THAT data, and continues from them: the check is against each run's own hash."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    (server / "data" / extract.EVIDENCE_FILE).write_text('{"plan_hash": "second"}\n', "utf-8")
+    assert status(server, fake).line().endswith(CHANGED)
+    start(server, fake)  # from the beginning, over the new map data
+    fake.write_tiles(3)
+    fake.finish(139)
+    assert (
+        status(server, fake)
+        .line()
+        .endswith(
+            "Its 3 finished tiles are kept, and “Make the pathfinding data” continues from there."
+        )
+    )
