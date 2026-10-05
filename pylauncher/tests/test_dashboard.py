@@ -13,6 +13,7 @@ count and whether the current run has lasted.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -524,14 +525,23 @@ def test_the_realm_poll_logs_a_silent_docker_once_not_every_tick(
 _AWAY = docker.ContainerState()
 """A read that failed, as with docker.service stopped ("Cannot connect to the Docker daemon")."""
 
-RESTARTED = ("bridge-before", "bridge-after")
-"""The daemon's identity before and after: Docker recreated its default bridge network.
 
-Measured on yulon-ubuntu, Docker 29.1.3: `docker network inspect bridge` gave a new
-`Id`, `Created` the daemon's start time, after every `systemctl restart docker`
-(7e1d2a79… created 20:01:55 → b10dec55… created 22:13:47), while `docker info`'s
-`ID` stayed the same.
-"""
+def _restart_at(seconds: float) -> Callable[[timedelta], str]:
+    """The daemon's identity at each moment: Docker restarted `seconds` after NOW.
+
+        Docker recreates its default bridge network on every start, so it answers with
+        a new identity from then on.
+
+    Measured on yulon-ubuntu, Docker 29.1.3: `docker network inspect bridge` gave a new
+    `Id`, `Created` the daemon's start time, after every `systemctl restart docker`
+    (7e1d2a79… created 20:01:55 → b10dec55… created 22:13:47), while `docker info`'s
+    `ID` stayed the same.
+    """
+    return lambda at: "bridge-before" if at < timedelta(seconds=seconds) else "bridge-after"
+
+
+RESTARTED = _restart_at(7)
+"""Docker stopped after the tick at 5 s (which failed) and was back before the one at 10 s."""
 
 
 def _stamp(at: datetime) -> str:
@@ -559,16 +569,15 @@ def _clocked(
     tmp_path: Path,
     script: list[tuple[timedelta, docker.ContainerState]],
     sql: _FakeSql | None = None,
-    daemons: tuple[str, ...] = ("bridge-before",),
+    daemons: Callable[[timedelta], str] = lambda _at: "bridge-before",
 ) -> tuple[dashboard.Dashboard, list[str]]:
     """A dashboard ticked at the given offsets from NOW, one container state per tick.
 
-    `daemons` answers the daemon-identity reads in order, the last one repeating;
-    returns the dashboard and the list of identities it was handed.
+    `daemons` gives the daemon's identity at each moment (offset from NOW); returns
+    the dashboard and the list of identities it was handed.
     """
     clock = [NOW]
     remaining = list(script)
-    identities = list(daemons)
     handed: list[str] = []
 
     def state_of(_container: str) -> docker.ContainerState:
@@ -577,7 +586,7 @@ def _clocked(
         return state
 
     def daemon_of() -> str:
-        handed.append(identities.pop(0) if len(identities) > 1 else identities[0])
+        handed.append(daemons(clock[0] - NOW))
         return handed[-1]
 
     watch = dashboard.Dashboard(
@@ -719,7 +728,7 @@ def test_a_crash_while_docker_could_not_be_asked_is_still_a_crash(tmp_path: Path
 
     verdicts = [watch.tick() for _ in range(4)]
 
-    assert handed == ["bridge-before", "bridge-before"], "asked once at the start, once after"
+    assert set(handed) == {"bridge-before"}, "the same daemon throughout"
     assert verdicts[-1].state == "restart_loop"
 
 
@@ -737,7 +746,7 @@ def test_a_daemon_whose_identity_cannot_be_read_opens_no_window(tmp_path: Path) 
             (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
         ],
         _ScriptedSql(True, False),
-        ("bridge-before", ""),
+        lambda at: "bridge-before" if at < timedelta(seconds=7) else "",
     )
 
     verdicts = [watch.tick() for _ in range(4)]
@@ -761,7 +770,6 @@ def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path:
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
         ],
         _ScriptedSql(False),
-        RESTARTED,
     )
 
     verdicts = [watch.tick() for _ in range(3)]
@@ -770,13 +778,17 @@ def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path:
 
 
 def test_a_container_docker_said_was_missing_does_not_open_a_window(tmp_path: Path) -> None:
-    """`missing` is Docker ANSWERING (T95): the outage before it is over, and opens nothing later.
+    """`missing` is Docker ANSWERING (T95): whatever runs after it is a new container.
 
     Codex review and adversarial review, 2026-10-05, round 4: the outage outlived
     the `missing` answer, and the container recreated much later took its first
-    run for Docker's restore.
+    run for Docker's restore. Round 7's identity reads make the same mistake
+    another way: the daemon that restarted during the silence differs from the
+    one seen before it, and the recreated container's first growth would open a
+    window, unless the `missing` answer makes the daemon answering then the one
+    to compare with.
 
-    Mutation: keep the outage through a `missing` answer, and the last tick reads `up`.
+    Mutation: keep the daemon seen before a `missing` answer, and the last tick reads `up`.
     """
     watch, _handed = _clocked(
         tmp_path,
@@ -857,7 +869,7 @@ def test_strikes_from_before_docker_restarted_are_not_carried_into_the_new_run(
             (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 2)),
             (after, _running(young, 3)),
         ],
-        daemons=RESTARTED,
+        daemons=_restart_at(12),
     )
 
     verdicts = [watch.tick() for _ in range(5)]
@@ -916,7 +928,7 @@ def test_the_real_readers_ask_docker_for_the_daemons_identity(
         (0, f"running\t{_stamp(NOW + timedelta(seconds=9))}\t1\n", ""),
         (0, f"running\t{_stamp(NOW + timedelta(seconds=13))}\t5\n", ""),
     ]
-    bridges = ["7e1d2a79ddbf\n", "b10dec5534ec\n"]
+    bridges = ["7e1d2a79ddbf\n", "b10dec5534ec\n", "b10dec5534ec\n"]
     asked: list[list[str]] = []
 
     def run(
@@ -934,5 +946,90 @@ def test_the_real_readers_ask_docker_for_the_daemons_identity(
 
     verdicts = [watch.tick() for _ in range(4)]
 
-    assert asked == [["network", "inspect", "bridge", "--format", "{{.Id}}"]] * 2
+    assert asked == [["network", "inspect", "bridge", "--format", "{{.Id}}"]] * 3
     assert [v.state for v in verdicts] == ["up", "unknown", "up", "up"]
+
+
+def test_a_docker_restart_between_two_ticks_is_still_told_by_the_daemon(tmp_path: Path) -> None:
+    """No read failed, but the count grew: the daemon is asked who it is before it counts.
+
+    Codex review, 2026-10-05, round 7: a Docker that stops and starts between two
+    five-second ticks leaves no failed read, and its restore race was counted as
+    crashes again.
+
+    Mutation: ask the daemon only after a silence, and the last tick reads `restart_loop`.
+    """
+    back = _stamp(NOW + timedelta(seconds=8))
+    watch, handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 1)),
+            (timedelta(seconds=10), _running(back, 5)),
+            (timedelta(seconds=15), _running(back, 5)),
+        ],
+        _ScriptedSql(True, False, False),
+        _restart_at(3),
+    )
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert handed[:2] == ["bridge-before", "bridge-after"]
+    assert [v.state for v in verdicts] == ["up", "up", "up", "up"]
+    assert verdicts[-1].stable is True
+
+
+def test_an_identity_read_that_failed_keeps_the_one_seen_before(tmp_path: Path) -> None:
+    """One unreadable identity is no identity: the last one read stays what Docker was.
+
+    Codex adversarial review, 2026-10-05, round 7: storing the blank answer made
+    every later daemon restart compare against nothing, so none opened a window.
+
+    Mutation: store a blank identity, and the last tick reads `restart_loop`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), _running(up, 0)),  # the identity read fails here
+            (timedelta(seconds=15), _AWAY),
+            (timedelta(seconds=20), _running(_stamp(NOW + timedelta(seconds=19)), 1)),
+            (timedelta(seconds=25), _running(_stamp(NOW + timedelta(seconds=23)), 4)),
+        ],
+        _ScriptedSql(True, True, False, False),
+        # Blank while Docker is down the first time; back with a new bridge the second.
+        lambda at: {0: "bridge-before", 1: ""}.get(int(at.total_seconds() // 8), "bridge-after"),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[-1].state == "up"
+
+
+def test_the_first_answer_after_a_silence_asks_the_daemon_even_with_no_new_restart(
+    tmp_path: Path,
+) -> None:
+    """Docker resets the count on its restore, so the first answer can read lower than before.
+
+    Measured: 5 → 3 (`restarting`) → 5 across `systemctl restart docker`. With no
+    growth to prompt it, the silence itself must, or that first tick says "restart
+    loop" about Docker's own restart.
+
+    Mutation: never note the silence, and this reads `restart_loop`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 5)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), docker.ContainerState("restarting", "", 3)),
+        ],
+        daemons=RESTARTED,
+    )
+
+    verdicts = [watch.tick() for _ in range(3)]
+
+    assert verdicts[-1].state == "starting"
