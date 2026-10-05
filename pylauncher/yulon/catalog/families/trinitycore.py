@@ -82,6 +82,7 @@ from yulon.catalog.native import (
     _speaking,
     _stop_control,
     build_cancel_note,
+    folder_start_refusal,
     owed_start_refusal,
     past_the_tested_pin,
     read_state,
@@ -1457,7 +1458,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         # T197 fix round 8: the finish ends in a start, and mixed image tags refuse every
         # start but the Rebuild's, which goes first (`start_refusal()`). Cannot happen
         # today: a TrinityCore server builds one image, so its tags are never mixed.
-        mixed = owed_start_refusal(server_dir)
+        mixed = folder_start_refusal(server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(f"{mixed} Nothing was changed.")
         self._refuse_unless_the_checkout_is_built(server_dir, state)
@@ -1519,7 +1520,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         Asks the mixed-tags record again (T197 fix round 8), the belt under the finish's
         own refusal of it: this start must not run two builds side by side either.
         """
-        mixed = owed_start_refusal(ctx.server_dir)
+        mixed = folder_start_refusal(ctx.server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(
                 f"The world update is finished, but {mixed} The server was not started."

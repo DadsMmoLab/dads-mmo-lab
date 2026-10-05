@@ -2058,6 +2058,13 @@ class ControllerServices:
     a WSL distro. `None` means no check.
     """
 
+    kept_build: native.KeptBuildRoute | None = None
+    """T224's kept-build banner and "Remove kept build…"; None where builds are not kept.
+
+    `install_wiring.kept_build_for_app()` answers: every native install, never a
+    server inside a WSL distro (owner, D4). `None` means no banner and no check.
+    """
+
     corrections: native.CorrectionRoute | None = None
     """T129's "Apply database corrections…" for this install; None where it is not offered.
 
@@ -2753,6 +2760,9 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T224. Here for T106's reason: every native install can keep a build, and
+        # the distro (D4) is a fact of the install, answered in `install_wiring`.
+        kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -3977,6 +3987,7 @@ def _for_tortoise(
         world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
+        image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
     )
     return replace(
         services,
@@ -7385,6 +7396,7 @@ class ControllerView(QWidget):
         self._build_server_banners(tab)
         box.addWidget(self.compose_banner)
         box.addWidget(self.corrections_banner)
+        box.addWidget(self.kept_build_banner)
 
         realm, realm_column = section("Realm", tab)
         for label in (
@@ -7564,6 +7576,20 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
+        # T224 (owner D3): a finished build kept by a rebuild that replaced no
+        # container, and the press that removes it now.
+        self.kept_build_banner = QWidget(tab)
+        kept_build_box = QHBoxLayout(self.kept_build_banner)
+        kept_build_box.setContentsMargins(8, 6, 8, 6)
+        self.kept_build_banner_label = QLabel("", self.kept_build_banner)
+        self.kept_build_banner_label.setWordWrap(True)
+        self.kept_build_banner_button = QPushButton(
+            native.REMOVE_KEPT_BUILD_LABEL, self.kept_build_banner
+        )
+        self.kept_build_banner_button.clicked.connect(self.remove_kept_build)
+        kept_build_box.addWidget(self.kept_build_banner_label, 1)
+        kept_build_box.addWidget(self.kept_build_banner_button)
+        self.kept_build_banner.setVisible(False)
 
     def _add_section(self, box: QVBoxLayout, group: QGroupBox, wired: bool) -> None:
         """Put a Server section in the column if this game has it; otherwise keep it hidden.
@@ -16024,7 +16050,11 @@ class ControllerView(QWidget):
             QMessageBox.question(
                 self,
                 f"Rebuild {self.entry.name}?",
-                rebuild_confirmation(self.entry, self.services.controller.server_dir),
+                rebuild_confirmation(
+                    self.entry,
+                    self.services.controller.server_dir,
+                    kept_build=self.services.kept_build is not None,
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -16734,6 +16764,8 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        # T224: any press of this panel may have kept a build, used one or removed one.
+        self.check_kept_build()
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
         # that failed leaves it stopped with a press on the Bots tab to retry.
         self.refresh_bot_dashboard()
@@ -17145,6 +17177,7 @@ class ControllerView(QWidget):
         # distro none runs until it is up (T174's is never wired for a distro).
         if self._waits_for_the_distro("server files", self.check_server_files):
             return
+        self.check_kept_build()
         confs = self.services.repair_confs
         if confs is not None and not self._confs_pending:
             self._confs_pending = True
@@ -17272,6 +17305,62 @@ class ControllerView(QWidget):
             self.compose_banner.setVisible(True)
         else:
             self.compose_banner.setVisible(False)
+
+    # ------------------------------------------------- T224: a kept build
+
+    def check_kept_build(self) -> None:
+        """Ask, off the GUI thread, whether a build is kept (T224, D3). It reads one file."""
+        route = self.services.kept_build
+        if route is None:
+            self.kept_build_banner.setVisible(False)
+            return
+        self._run(route.check, self._kept_build_checked, self._kept_build_check_failed)
+
+    @Slot(object)
+    def _kept_build_checked(self, result: object) -> None:
+        if isinstance(result, str) and result:
+            self.kept_build_banner_label.setText(result)
+            self.kept_build_banner.setVisible(True)
+        else:
+            self.kept_build_banner.setVisible(False)
+
+    @Slot(object)
+    def _kept_build_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, no banner is drawn on it."""
+        logger.warning(f"{self.entry.id}: the kept build check failed: {exc}")
+        self.kept_build_banner.setVisible(False)
+
+    def remove_kept_build(self) -> bool:
+        """Ask, then remove the kept build in a job (T224, D3). False if nothing started."""
+        route = self.services.kept_build
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was removed.",
+            )
+            return False
+        if not self._confirm(native.REMOVE_KEPT_BUILD_LABEL, native.REMOVE_KEPT_BUILD_QUESTION):
+            return False
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.remove, self._kept_build_removed, self._kept_build_remove_failed)
+        return True
+
+    @Slot(object)
+    def _kept_build_removed(self, result: object) -> None:
+        self.problem_label.setText(str(result))
+        self._set_busy(False)
+        self.check_kept_build()
+
+    @Slot(object)
+    def _kept_build_remove_failed(self, exc: object) -> None:
+        self.problem_label.setText(f"The kept build was not removed: {exc}")
+        self._set_busy(False)
+        self.check_kept_build()
 
     @Slot()
     def _compose_banner_pressed(self) -> None:

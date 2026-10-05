@@ -3346,6 +3346,36 @@ def test_a_partial_build_is_not_a_build(monkeypatch: pytest.MonkeyPatch) -> None
     assert docker.images_built(REFS) is False
 
 
+def test_image_id_reads_the_id_docker_inspect_prints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T224/T225: one ref's image id, asked the way `images_built()` asks, stripped."""
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv)
+        return _completed(stdout="sha256:0123abcd\n")
+
+    monkeypatch.setattr(docker.runner, "run", record)
+    assert docker.image_id(REFS[0]) == "sha256:0123abcd"
+    assert [a[1:] for a in seen] == [["image", "inspect", "--format", "{{.Id}}", REFS[0]]]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _completed(returncode=1, stderr="Error: No such image: x"),
+        _completed(returncode=1, stderr="permission denied"),
+        _completed(stdout="   \n"),
+    ],
+    ids=("no-such-image", "no-answer", "empty"),
+)
+def test_image_id_is_none_when_docker_says_no_such_image_or_fails(
+    monkeypatch: pytest.MonkeyPatch, answer: object
+) -> None:
+    """None is "no id to compare": the caller decides what that means (T225 counts it as moved)."""
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: answer)
+    assert docker.image_id(REFS[0]) is None
+
+
 def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

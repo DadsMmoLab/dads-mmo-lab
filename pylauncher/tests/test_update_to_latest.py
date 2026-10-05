@@ -2358,7 +2358,8 @@ def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_s
         _press(rec, server_dir)
     said = str(raised.value)
     assert not isinstance(raised.value, RollbackNotDone)
-    assert "The build that had just finished was removed, and no container was replaced" in said
+    assert "The build that had just finished was removed, " in said, said
+    assert "and no container was replaced" in said, said
     # T223 cold review: the press the player used, not "the next rebuild".
     update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
     assert f"pressing {update} again compiles it again" in said, said

@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -1873,11 +1873,24 @@ class _Daemon:
         self.containers = dict.fromkeys(refs, "before")
         self.pinned = pinned
         self.live = refs
+        self.builds = 0
 
-    def compiled(self) -> None:
-        """What `docker compose build` does to the tags: they name the new image."""
-        for ref in self.live:
-            self.names[ref] = "after"
+    def compiled(self, only: Sequence[str] | None = None) -> None:
+        """What `docker compose build` does to the tags: they name the new image.
+
+        Each compile makes a new image: `"after"` the first time, then `"after-2"`,
+        `"after-3"` (T224: a kept build and a later compile are different images).
+        `only` is a compose run stopped part-way, which has tagged some refs and not
+        the others (T225).
+        """
+        self.builds += 1
+        image = "after" if self.builds == 1 else f"after-{self.builds}"
+        for ref in self.live if only is None else only:
+            self.names[ref] = image
+
+    def image_id(self, ref: str) -> str | None:
+        """`docker image inspect --format {{.Id}}`: the image the name holds, None for no name."""
+        return self.names.get(ref)
 
     def recreate(
         self,
@@ -1962,6 +1975,7 @@ def _seams_of(rec: Recorder, daemon: _Daemon, **overrides: object) -> dict[str, 
         "recreate": daemon.recreate,
         "tag_image": daemon.tag_image,
         "remove_image": daemon.remove_image,
+        "image_id": daemon.image_id,
         **overrides,
     }
 
@@ -2056,6 +2070,11 @@ def test_no_rollback_name_is_left_on_the_daemon_by_any_exit(tmp_path: Path, path
         f"{daemon.transient()}"
     )
     assert set(daemon.names) == set(_refs(server_dir)), daemon.names
+    # T225: the SET of names said nothing about which build they name, and
+    # `cancelled-mid-run` passed while every live tag named the untested build.
+    kept_new = path in ("finished", "world-came-up-and-stopped")
+    expected = "after" if kept_new else "before"
+    assert {daemon.names[ref] for ref in _refs(server_dir)} == {expected}, (path, daemon.names)
 
 
 def test_a_rollback_kept_because_the_restore_could_not_start_says_so(tmp_path: Path) -> None:
