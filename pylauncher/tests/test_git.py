@@ -29,7 +29,7 @@ import pytest
 from tests.conftest import HANG_BOUND
 from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
-from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import end_fake_containers, finish_late_create, lay_fake_docker
 from yulon import git, runner
 from yulon.catalog import native
 from yulon.ui import lines
@@ -3440,9 +3440,18 @@ def test_a_clone_that_fails_on_its_own_still_falls_back_and_ends_nothing(
 
 
 def _stop_mid_clone(
-    container_git: git.ContainerGit, spec: git.CloneSpec, state: Path
+    container_git: git.ContainerGit,
+    spec: git.CloneSpec,
+    state: Path,
+    *,
+    container_first: bool = False,
 ) -> tuple[list[str], list[BaseException]]:
-    """Clone on a worker thread and send the panel's Stop once the docker CLI is running."""
+    """Clone on a worker thread and send the panel's Stop once the docker CLI is running.
+
+    `container_first` holds the Stop until the fake container exists. Without
+    it the Stop can land before the CLI has made its container, and a test of
+    what `rm -f` answers about a container then asks about none (T305).
+    """
     said: list[str] = []
     outcome: list[BaseException] = []
 
@@ -3458,6 +3467,9 @@ def _stop_mid_clone(
     while not any(call.startswith("run ") for call in fake_calls(state)):
         assert time.monotonic() < deadline, "the docker CLI never started"
         time.sleep(0.01)
+    while container_first and not fake_containers(state):
+        assert time.monotonic() < deadline, "the clone's container never started"
+        time.sleep(0.01)
     assert worker.ident is not None
     while runner.end_streams_started_on(worker.ident) == 0:
         assert time.monotonic() < deadline, "the clone's stream never went live"
@@ -3465,6 +3477,27 @@ def _stop_mid_clone(
     worker.join(HANG_BOUND)
     assert not worker.is_alive(), "the stopped clone did not end"
     return said, outcome
+
+
+class _Settle:
+    """`git.time` for a stopped clone: the wait before the second `rm -f`, in no real time.
+
+    `ContainerGit._end_container()` sleeps `_LATE_CREATE_SETTLE` between its two
+    looks. A real second against a fake daemon that had to act inside it is what
+    flaked under xdist (T305), so the wait is recorded instead, and `during` is
+    what happens while it lasts. Any other `time` attribute is the real one.
+    """
+
+    def __init__(self, during: Callable[[], None] = lambda: None) -> None:
+        self.slept: list[float] = []
+        self._during = during
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self._during()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
 
 def test_a_container_the_daemon_creates_after_the_stop_is_removed_too(
@@ -3481,6 +3514,16 @@ def test_a_container_the_daemon_creates_after_the_stop_is_removed_too(
     """
     cli, state = fake_docker
     (state / "late-create").write_text("", encoding="utf-8")
+    late: list[str] = []
+
+    def the_daemon_finishes_the_create() -> None:
+        # The ground, at the moment it is laid: the first look found nothing.
+        assert len([call for call in fake_calls(state) if call.startswith("rm -f ")]) == 1
+        assert fake_containers(state) == []
+        late.append(finish_late_create(state))
+
+    settle = _Settle(during=the_daemon_finishes_the_create)
+    monkeypatch.setattr(git, "time", settle)
     container_git = _container_git(monkeypatch, cli)
     caplog.set_level("INFO", logger="yulon.git")
     said, outcome = _stop_mid_clone(
@@ -3488,8 +3531,9 @@ def test_a_container_the_daemon_creates_after_the_stop_is_removed_too(
     )
 
     assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
+    assert settle.slept == [git._LATE_CREATE_SETTLE], settle.slept
     removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
-    assert len(removals) == 2 and removals[0] == removals[1], removals
+    assert removals == [f"rm -f {late[0]}"] * 2, removals
     assert fake_containers(state) == [], "the late container is still there"
     assert not [line for line in said if "could not be removed" in line], said
     logged = [r.getMessage() for r in caplog.records if "clone container" in r.getMessage()]
@@ -3509,14 +3553,20 @@ def test_a_removal_already_in_progress_is_a_container_going_not_a_refusal(
     """
     cli, state = fake_docker
     (state / "rm-in-progress").write_text("", encoding="utf-8")
+    settle = _Settle()
+    monkeypatch.setattr(git, "time", settle)
     container_git = _container_git(monkeypatch, cli)
     caplog.set_level("INFO", logger="yulon.git")
     said, outcome = _stop_mid_clone(
-        container_git, git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"), state
+        container_git,
+        git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"),
+        state,
+        container_first=True,
     )
 
     assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
     assert fake_containers(state) == []
+    assert settle.slept == [git._LATE_CREATE_SETTLE], "an in-progress removal is asked again"
     assert not [line for line in said if "could not be removed" in line], said
     logged = [r.getMessage() for r in caplog.records if "clone container" in r.getMessage()]
     # Not "gone": one that appears later than the second look is not ruled out.
