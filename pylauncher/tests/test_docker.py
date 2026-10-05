@@ -3405,6 +3405,30 @@ def test_a_one_service_game_keeps_its_single_build_call_and_the_users_buildx_con
     assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
 
 
+def test_a_build_key_deeper_in_a_service_does_not_make_it_a_built_service(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Only a service's OWN `build:` key builds it; a label that happens to be named build does not.
+
+    Counting the label would split a one-service game into two calls, the
+    second a service compose has nothing to build for.
+    """
+    overlay = tmp_path / "overlay.yml"
+    overlay.write_text(
+        "services:\n"
+        "  tbc-mangosd:\n"
+        "    build:\n"
+        "      context: .\n"
+        "  tbc-realmd:\n"
+        "    labels:\n"
+        '      build: "nightly"\n',
+        encoding="utf-8",
+    )
+    docker.build_staged(_server_with(tmp_path, overlay), THREE_FILES)
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+
+
 def test_a_stop_after_one_service_starts_no_further_service(
     build_cli: Path, tmp_path: Path
 ) -> None:
