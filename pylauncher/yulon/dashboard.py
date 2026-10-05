@@ -111,7 +111,7 @@ Only a read that failed because no daemon answered opens the window, and only
 when the world's `StartedAt` changed across it. So none is opened by any other
 failed read (Codex adversarial review: a crash loop's next run after one would
 be forgiven), by `missing` (Docker answering, which also ends the outage it
-follows), by a Docker that went quiet without restarting anything, or by a
+follows and closes a window already open), by a Docker that went quiet without restarting anything, or by a
 first look that failed (no run seen before it to compare with). The cost is
 that delay, never a loop called steady: a server that was looping keeps
 `after_a_loop`.
@@ -310,7 +310,10 @@ class Dashboard:
             if docker_advice.unreachable(state.said):  # never "No such container"
                 self._docker_away = True
             elif state.missing:
-                self._docker_away = False  # Docker answered: that outage is over
+                # Docker answered: that outage is over, and whatever runs next
+                # is a new container, not Docker's restore of the old one.
+                self._docker_away = False
+                self._restoring_until = None
             return Verdict(kind, state.restart_count, state.started_at, uptime)
         restoring = self._docker_is_restoring(state)
         if self._restarted(state) or restoring:

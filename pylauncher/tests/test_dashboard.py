@@ -899,3 +899,30 @@ def test_the_real_state_reader_carries_dockers_words_to_the_window(
     verdicts = [watch.tick() for _ in range(4)]
 
     assert [v.state for v in verdicts] == ["up", "unknown", "up", "up"]
+
+
+def test_a_missing_answer_closes_a_window_already_open(tmp_path: Path) -> None:
+    """A world container removed while the window is open: what comes next is a new container.
+
+    Codex adversarial review, 2026-10-05, round 5: clearing only the outage flag
+    on `missing` left an open window running, and a container recreated inside it
+    had its crash loop forgiven.
+
+    Mutation: leave the window open through a `missing` answer, and the last tick reads `up`.
+    """
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
+            (timedelta(seconds=15), docker.ContainerState(missing=True)),
+            (timedelta(seconds=20), _running(_stamp(NOW + timedelta(seconds=19)), 0)),
+            (timedelta(seconds=25), _running(_stamp(NOW + timedelta(seconds=24)), 3)),
+        ],
+        _ScriptedSql(True, False, False),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[-1].state == "restart_loop"
