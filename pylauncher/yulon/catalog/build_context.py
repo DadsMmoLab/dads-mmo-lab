@@ -91,6 +91,10 @@ each with its proof in the T230 plan §1:
   `data/`, which HEAD tracks, read as deleted whatever the index says.
   `modules/*/.git` is copied, into the db-import image, but read by no step: the
   db-import service bind-mounts `./modules` over that copy (`base.yml.tmpl`).
+  The same rule is applied to a `.git` folder anywhere else under the reads (in
+  `deps` or `src`, say). At the pin that is sound for the same reason: the only git
+  run is genrev's, in `/azerothcore`, which reads the root `.git` alone, and the
+  build stage that copies `deps` and `src` passes on only what it compiled.
 
 What that leaves uncovered changes at most the world's version line: a git reader
 other than `genrev.cmake` after an update that leaves it unchanged, or a custom
