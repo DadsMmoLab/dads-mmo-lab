@@ -1075,10 +1075,11 @@ def test_the_test_tiles_are_the_pinned_structs_size() -> None:
     assert len(mmtile(64)) == 84
 
 
-def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_on_one_thread(
+def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_from_them(
     server: Path,
 ) -> None:
-    """The crash seen live (exit 139 at 16 %): the retry continues, on `retry_threads`."""
+    """The crash seen live (exit 139 at 16 %): the retry continues from the kept tiles, on the
+    usual threads -- one thread crashed at 16-17 % too (live, 2026-10-05), so it gains nothing."""
     fake = FakeMmapsDocker()
     start(server, fake)
     assert fake.started[-1].argv[-2:] == ("--threads", "4"), "the first run: half the cores"
@@ -1088,7 +1089,7 @@ def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_o
     now = status(server, fake)
     assert now.state == "failed" and now.kept == 3 and not now.pathfinding_on
     saved = record(server)
-    assert saved["resumable"] is True and saved["kept"] == 3 and saved["crashed"] is True
+    assert saved["resumable"] is True and saved["kept"] == 3
     assert output(server) == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     assert now.line().startswith("Pathfinding data stopped part-way: the generator stopped with")
@@ -1097,36 +1098,8 @@ def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_o
     )
     said = start(server, fake)
     assert fake.mmaps_at_run[-1] == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]
-    assert fake.started[-1].argv[-2:] == ("--threads", "1"), "the retry after a crash"
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "the usual threads after a crash"
     assert said.startswith("Continuing the pathfinding data in the background from its 3 ")
-    assert record(server)["crashed"] is True, "a Stop of the retry must not go back to 4"
-
-
-def test_a_retry_after_a_crash_keeps_the_usual_threads_without_retry_threads(
-    server: Path,
-) -> None:
-    raw = ENTRY.model_dump(mode="json")
-    raw["install"]["native"]["trinitycore"]["mmaps"]["retry_threads"] = None
-    entry = type(ENTRY).model_validate(raw)
-    fake = FakeMmapsDocker()
-
-    def begin() -> None:
-        mmaps.start_mmaps(
-            server,
-            entry,
-            runner=fake,
-            platform_id=lambda: "linux",
-            install_id=INSTALL_ID,
-            user_args=(),
-        )
-
-    begin()
-    fake.write_tiles(3)
-    fake.finish(139)
-    mmaps.mmaps_status(server, entry, runner=fake, install_id=INSTALL_ID)
-    begin()
-    assert fake.started[-1].argv[-2:] == ("--threads", "4")
-    assert len(fake.mmaps_at_run[-1]) == 3
 
 
 def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
@@ -1146,19 +1119,6 @@ def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
     )
     assert record(server)["kept"] == 0
     assert fake.started[-1].argv[-2:] == ("--threads", "4"), "a new set: the usual threads"
-    assert record(server)["crashed"] is False, "the crash belonged to the old map data"
-
-
-def test_the_retry_after_a_crash_that_kept_no_tile_still_uses_one_thread(server: Path) -> None:
-    """Owner, 2026-10-04: the retry after a crash runs on `retry_threads`, tiles or not."""
-    fake = FakeMmapsDocker()
-    start(server, fake)
-    fake.write_cut_tile()
-    fake.finish(139)
-    assert status(server, fake).kept == 0
-    start(server, fake)
-    assert fake.mmaps_at_run[-1] == []
-    assert fake.started[-1].argv[-2:] == ("--threads", "1")
 
 
 def test_map_data_changed_during_a_run_is_never_switched_on(server: Path) -> None:
@@ -1317,7 +1277,7 @@ def test_a_rebuild_through_the_engine_keeps_the_tiles_of_a_failed_run(box: Machi
     assert eng.mmaps_status(box.server_dir).kept == 30
     list(eng.rebuild(InstallOptions(server_dir=box.server_dir)))
     assert len(box.mmaps.mmaps_at_run[-1]) == 30
-    assert box.mmaps.started[-1].argv[-2:] == ("--threads", "1"), "still the crash's retry"
+    assert box.mmaps.started[-1].argv[-2:] == ("--threads", "4")
 
 
 def test_reextract_discards_the_kept_tiles(server: Path) -> None:
@@ -1414,8 +1374,7 @@ def test_a_record_written_before_t209_is_never_continued(server: Path) -> None:
 
 
 def test_an_update_route_forgets_a_crashed_run_that_kept_no_tile(server: Path) -> None:
-    """Codex review: a crash before any whole tile still marks the set `crashed`; an update
-    starts a new set, which runs on the usual threads."""
+    """Codex review: a failed run that kept no whole tile is forgotten by an update too."""
     fake = FakeMmapsDocker()
     start(server, fake)
     fake.write_cut_tile()
@@ -1455,44 +1414,17 @@ def test_map_data_reached_through_a_link_is_never_continued(server: Path, linked
     assert fake.mmaps_at_run[-1] == []
 
 
-@pytest.mark.parametrize(
-    ("code", "crashed"),
-    [
-        (139, True),
-        (134, True),
-        (135, True),
-        (136, True),
-        (132, True),
-        (255, False),
-        (137, False),
-        (143, False),
-        (1, False),
-    ],
-    ids=(
-        "sigsegv",
-        "sigabrt",
-        "sigbus",
-        "sigfpe",
-        "sigill",
-        "docker-daemon-went-away",
-        "sigkill",
-        "sigterm",
-        "plain-error",
-    ),
-)
-def test_only_a_signal_of_the_generators_own_is_a_crash(
-    server: Path, code: int, crashed: bool
-) -> None:
-    """Cold review: Docker Desktop quitting leaves the container `exited` with 255, 137 or 143,
-    not missing. That is a lost run, which keeps its tiles and the usual threads; only a
-    fault of the generator's own (SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL) moves to one."""
+@pytest.mark.parametrize("code", [139, 134, 255, 137, 143, 1])
+def test_every_failed_exit_keeps_the_tiles_and_the_usual_threads(server: Path, code: int) -> None:
+    """A crash (139, 134), Docker going away (255, 137, 143) or an error (1): the next run
+    continues from the kept tiles on the usual threads. The one-thread retry was dropped on
+    the live evidence of 2026-10-05: one thread crashed at 16-17 % as well (T209)."""
     fake = FakeMmapsDocker()
     start(server, fake)
     fake.write_tiles(3)
     fake.finish(code)
     now = status(server, fake)
     assert now.state == "failed" and now.kept == 3
-    assert record(server)["crashed"] is crashed
     start(server, fake)
-    assert len(fake.mmaps_at_run[-1]) == 3, "the tiles are kept either way"
-    assert fake.started[-1].argv[-2:] == ("--threads", "1" if crashed else "4")
+    assert len(fake.mmaps_at_run[-1]) == 3
+    assert fake.started[-1].argv[-2:] == ("--threads", "4")

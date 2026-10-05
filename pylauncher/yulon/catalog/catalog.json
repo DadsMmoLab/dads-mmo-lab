@@ -1533,7 +1533,6 @@
               ],
               "min_files": 500,
               "background": true,
-              "retry_threads": 1,
               "tile_header": {
                 "length": 20,
                 "magic": 1296908624,

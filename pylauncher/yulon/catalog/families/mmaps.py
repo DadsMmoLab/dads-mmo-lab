@@ -52,9 +52,9 @@ checked against that hash: map data changed while it ran makes it a failure
 with every tile removed, never a set switched on. Update to latest, Return to the
 tested pin (`stop_for_route(clear=True)`: the generator's code may change while
 `MMAP_VERSION` does not) and Re-extract map data (`discard()`) still throw every
-tile away. After the generator CRASHED on a set (a fault signal, `CRASH_EXITS`; not
-Docker taking the container away), its later runs use the entry's `retry_threads`
-(Centurion: 1, the owner's stopgap for the crash at 16 %).
+tile away. Every run uses the entry's `threads`, a retry after a crash included:
+the owner's stopgap of one thread after a crash was dropped when one thread crashed
+at 16-17 % live too (2026-10-05), so it only made the retry hours slower.
 
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
@@ -101,13 +101,6 @@ WORK_MOUNT = "/out"
 
 LOG_TAIL_LINES = 200
 """How much of the generator's log a status reads: bounded, the progress is in its last line."""
-
-CRASH_EXITS = frozenset({132, 134, 135, 136, 139})
-"""Exit statuses that are the generator's OWN fault: 128 + SIGILL, SIGABRT, SIGBUS, SIGFPE,
-SIGSEGV (T209: the crash at 16 % was 139). Only these move a set to `retry_threads`. A
-container Docker took away -- Docker Desktop quitting or the daemon restarting leaves it
-`exited` with 255, 137 (SIGKILL) or 143 (SIGTERM), not missing, because it runs without
-`--rm` -- is a lost run, like a missing one: tiles kept, the usual threads (cold review)."""
 
 TILE_SUFFIX = ".mmtile"
 """`mmaps/MMMYYXX.mmtile`, one finished navmesh tile (MapBuilder.cpp:963 at faac5fc9); the
@@ -241,9 +234,6 @@ class Record:
     """T209: failed or stopped with `kept` finished tiles left for the next run."""
     kept: int = 0
     """T209: how many whole tiles it left (`_keep_finished()`), or a resume started from."""
-    crashed: bool = False
-    """T209: the generator crashed on this set (an exit in `CRASH_EXITS`); its later runs use
-    `retry_threads`. Carried while the set is continued."""
     unreadable: bool = False
     """Read off a file that could not be read or parsed: says nothing about the container.
     Never written."""
@@ -284,7 +274,6 @@ def read_record(server_dir: Path) -> Record | None:
             evidence=str(raw.get("evidence", "")),
             resumable=raw.get("resumable") is True,
             kept=_int_or_none(raw.get("kept")) or 0,
-            crashed=raw.get("crashed") is True,
         )
     except (ValueError, KeyError, TypeError) as exc:
         return Record(
@@ -577,22 +566,11 @@ def start_mmaps(
         )
         before = read_record(server_dir)
         evidence = _evidence(job)
-        # The crash belongs to the set made from THIS map data: new map data is a
-        # new set, on the usual threads (Codex review).
-        crashed = (
-            before is not None
-            and not before.unreadable
-            and before.crashed
-            and bool(evidence)
-            and before.evidence == evidence
-        )
-        argv = _filled_argv(job, run, retry=crashed)
+        argv = _filled_argv(job, run)
         _remove_container(run, job.container)
         kept = _resume_or_clear(job, before, evidence)
         started = _stamp(now())
-        queued = Record(
-            "queued", job.container, started=started, evidence=evidence, kept=kept, crashed=crashed
-        )
+        queued = Record("queued", job.container, started=started, evidence=evidence, kept=kept)
         _write_record(server_dir, queued)
         spec = docker.ContainerRun(
             image=ref,
@@ -772,9 +750,8 @@ def stop_for_route(
 def _drop_kept(job: Job, record: Record, route: str) -> str | None:
     """A failed run's kept tiles removed and its record forgotten before `route` (`clear`).
 
-    Forgotten even when it kept nothing: `route` begins a new set, which must not
-    inherit the old one's `crashed` (and so its `retry_threads`). The sentence only
-    when there were tiles to remove.
+    Forgotten even when it kept nothing: `route` begins a new set, and a failed
+    record would read as that set's. The sentence only when there were tiles to remove.
     """
     _clear_output(job)
     _forget_record(job.server_dir)
@@ -918,7 +895,7 @@ def _finished(
         words = docker.last_words(tuple((tail or "").splitlines()[-20:]))
         return _fail(
             job,
-            replace(record, crashed=record.crashed or facts.exit_code in CRASH_EXITS),
+            record,
             f"the generator stopped with exit {facts.exit_code}. {words}",
             run,
             now,
@@ -1081,18 +1058,14 @@ def _stop(job: Job, run: Runner, *, keep: str | None) -> int:
     return 0
 
 
-def _filled_argv(job: Job, run: Runner, *, retry: bool = False) -> tuple[str, ...]:
+def _filled_argv(job: Job, run: Runner) -> tuple[str, ...]:
     """The plan's argv with `{{THREADS}}` filled (`TrinityCoreMmaps.threads`).
 
     `half` is half the DAEMON's CPUs, at least 1: on Docker Desktop that is the
     VM's share, not this host's `os.cpu_count()`. A daemon that does not say is 1.
-    `retry` (T209): the generator crashed on this set before, so the plan's
-    `retry_threads` is used when it has one.
     """
     plan = job.block.mmaps
-    if retry and plan.retry_threads is not None:
-        threads = plan.retry_threads
-    elif isinstance(plan.threads, int):
+    if isinstance(plan.threads, int):
         threads = plan.threads
     else:
         cpus = run.cpus(timeout=CHANGE_TIMEOUT)

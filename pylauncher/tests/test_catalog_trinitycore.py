@@ -521,13 +521,12 @@ def test_centurions_tile_header_is_the_pinned_structs() -> None:
     assert (header.length, header.magic) == (TILE_HEADER.size, MMAP_MAGIC)
     tile = mmtile(1234)
     assert int.from_bytes(tile[header.size_offset : header.size_offset + 4], "little") == 1234
-    assert block.mmaps.retry_threads == 1, "owner 2026-10-04: one thread after a crash"
 
 
-def test_without_a_tile_header_nothing_is_ever_kept_and_without_retry_threads_none() -> None:
+def test_without_a_tile_header_nothing_is_ever_kept() -> None:
     block = NativeInstall.model_validate(_native()).trinitycore
     assert block is not None
-    assert block.mmaps.tile_header is None and block.mmaps.retry_threads is None
+    assert block.mmaps.tile_header is None
 
 
 @pytest.mark.parametrize(
@@ -536,20 +535,18 @@ def test_without_a_tile_header_nothing_is_ever_kept_and_without_retry_threads_no
         ("tile_header", {"length": 20, "magic": 0x4D4D4150, "size_offset": 17}),
         ("tile_header", {"length": 20, "magic": 1 << 32, "size_offset": 12}),
         ("tile_header", {"length": 20, "magic": 0x4D4D4150, "size_offset": 2}),
-        ("retry_threads", 0),
-        ("retry_threads", "half"),
-        ("retry_threads", True),
+        ("retry_threads", 1),
     ],
     ids=(
         "size-past-the-header",
         "magic-past-uint32",
         "size-over-the-magic",
-        "zero-threads",
-        "half-is-not-a-retry",
-        "bool",
+        "retry-threads-is-gone",
     ),
 )
-def test_the_tile_header_and_retry_threads_refuse_nonsense(field: str, value: object) -> None:
+def test_the_tile_header_refuses_nonsense_and_retry_threads_is_no_longer_a_field(
+    field: str, value: object
+) -> None:
     raw = _native()
     raw["trinitycore"]["mmaps"][field] = value
     with pytest.raises(ValidationError):

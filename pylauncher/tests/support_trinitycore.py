@@ -163,7 +163,6 @@ TRINITYCORE: dict[str, Any] = {
         "background": True,
         # T209: Centurion's values (catalog.json), read off `MmapTileHeader` at faac5fc9.
         "tile_header": {"length": 20, "magic": 0x4D4D4150, "size_offset": 12},
-        "retry_threads": 1,
     },
     "conf": {
         "source_dir": f"{CORE_DIR}/etc",

@@ -1002,17 +1002,6 @@ class TrinityCoreMmaps(MmapPlan):
             "the world server runs beside it. A number: exactly that many."
         ),
     )
-    retry_threads: Annotated[StrictInt, Field(ge=1)] | None = Field(
-        default=None,
-        description=(
-            "T209: `{{THREADS}}` for every run of a set after the generator CRASHED on it (a "
-            "fault signal of its own, `mmaps.CRASH_EXITS`; not a Stop, not Docker losing or "
-            "killing the container). None: "
-            "`threads` always. Centurion's 1, the owner's stopgap of 2026-10-04: its generator "
-            "died twice at 16 % with a general-protection fault on 3 threads, while the tiles it "
-            "was on finished alone on 1 thread."
-        ),
-    )
     tile_header: MmapTileHeader | None = Field(
         default=None,
         description=(
