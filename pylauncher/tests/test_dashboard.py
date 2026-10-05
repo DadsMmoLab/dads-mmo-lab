@@ -525,8 +525,27 @@ def _stamp(at: datetime) -> str:
     return at.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
 
+class _ScriptedSql(_FakeSql):
+    """A database that is down (`None`) or answers, one entry per population read.
+
+    Docker's restore starts the database and the world at once; until the
+    database answers, the world's deaths are that race. Past the script it answers.
+    """
+
+    def __init__(self, *script: bool) -> None:
+        super().__init__()
+        self.script = list(script)
+
+    def query(self, db: str, statement: str) -> str:
+        if self.script and not self.script.pop(0):
+            raise RuntimeError("ERROR 2002 (HY000): Can't connect to local MySQL server")
+        return super().query(db, statement)
+
+
 def _clocked(
-    tmp_path: Path, script: list[tuple[timedelta, docker.ContainerState]]
+    tmp_path: Path,
+    script: list[tuple[timedelta, docker.ContainerState]],
+    sql: _FakeSql | None = None,
 ) -> tuple[dashboard.Dashboard, list[datetime]]:
     """A dashboard ticked at the given offsets from NOW, one container state per tick."""
     clock = [NOW]
@@ -541,7 +560,7 @@ def _clocked(
         SPEC,
         WOTLK,
         _install(tmp_path),
-        sql=_FakeSql(),
+        sql=sql if sql is not None else _FakeSql(),
         state_of=state_of,
         now=lambda: clock[0],
     )
@@ -576,6 +595,8 @@ def test_restarts_while_docker_brings_itself_back_are_not_a_restart_loop(
             (timedelta(seconds=15), _running(back, 5)),
             (timedelta(seconds=45), _running(back, 5)),
         ],
+        # Read 1: before Docker stopped. Read 2: the database is not up yet.
+        _ScriptedSql(True, False),
     )
 
     verdicts = [watch.tick() for _ in range(5)]
@@ -622,7 +643,8 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
 
     Measured with the same stand-in while the daemon stayed up: a container that
     exits 3 after four seconds went 0 → 1 → 2 → 3 → 4 → 5 → 6 restarts in forty
-    seconds. Past the grace, its count growing three times is a loop again.
+    seconds. Here the database never answers, so only the two-minute cap closes
+    the window; past it, the count growing three times is a loop again.
 
     Mutation: make the grace never end, and the last tick reads `up`.
     """
@@ -637,6 +659,7 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
             (grace + timedelta(seconds=5), docker.ContainerState("restarting", "", 4)),
             (later, _running(_stamp(NOW + later - timedelta(seconds=1)), 7)),
         ],
+        _ScriptedSql(True, False, False),
     )
 
     verdicts = [watch.tick() for _ in range(5)]
@@ -723,6 +746,7 @@ def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Pat
             (timedelta(seconds=10), _running(up, 0)),
             (timedelta(seconds=20), _running(young, 3)),
         ],
+        _ScriptedSql(True, False),  # its database not answering keeps any window open
     )
 
     verdicts = [watch.tick() for _ in range(4)]
@@ -730,35 +754,68 @@ def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Pat
     assert verdicts[-1].state == "restart_loop"
 
 
-def test_the_grace_ends_once_the_restored_world_holds_its_run(tmp_path: Path) -> None:
-    """Docker's restore race is over once one run of the world lasts from one tick to the next.
+def test_the_window_closes_when_the_database_answers_and_not_before(tmp_path: Path) -> None:
+    """Docker's restore race is over once the world's database answers, and only then.
 
-    Codex adversarial review, 2026-10-05: a grace that runs its full two minutes
-    erases every death inside it, so a world that loads for a while and then dies
-    again after Docker came back would be counted from scratch only after the
-    window. The race measured on yulon-ubuntu ended within five seconds of the
-    daemon starting; once the world is seen running on the same `StartedAt` twice,
-    its database answered, and every later death is the world's own.
+    Codex adversarial review, 2026-10-05, round 1: a window that always runs its
+    full length erases a slow loop's deaths inside it. Round 4: closing it once a
+    run lasts from one tick to the next is no proof either, as a world can run a
+    while waiting for its database and still die of it. So the window closes on
+    the tick whose population read reached the database; every death after that is
+    the world's own.
 
-    Mutation: let the grace run its full length, and the last tick reads `up`.
+    Mutations: never close on the database's answer, and the last tick reads
+    `up`; close on a run held across two ticks, and the fifth reads `restart_loop`.
     """
-    back = _stamp(NOW + timedelta(seconds=13))
+    held = _stamp(NOW + timedelta(seconds=9))
+    again = _stamp(NOW + timedelta(seconds=24))
     young = _stamp(NOW + timedelta(seconds=38))
     watch, _clock = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
             (timedelta(seconds=5), _AWAY),
-            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
-            (timedelta(seconds=15), _running(back, 5)),
-            (timedelta(seconds=20), _running(back, 5)),
-            (timedelta(seconds=40), _running(young, 8)),
+            (timedelta(seconds=10), _running(held, 1)),
+            (timedelta(seconds=15), _running(held, 1)),  # held, database still down
+            (timedelta(seconds=25), _running(again, 4)),  # died of it three times more
+            (timedelta(seconds=30), _running(again, 4)),  # the database answers
+            (timedelta(seconds=40), _running(young, 7)),  # the world's own deaths
         ],
+        _ScriptedSql(True, False, False, False, True),
     )
 
-    verdicts = [watch.tick() for _ in range(6)]
+    verdicts = [watch.tick() for _ in range(7)]
 
-    assert verdicts[4].state == "up"
+    assert [v.state for v in verdicts[:6]] == ["up", "unknown", "up", "up", "up", "up"]
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_missing_answer_after_docker_went_away_settles_the_outage(tmp_path: Path) -> None:
+    """`missing` is Docker answering, so the outage before it is over and opens nothing later.
+
+    Codex review and adversarial review, 2026-10-05, round 4: the flag set by the
+    unreachable read outlived the `missing` answer, and the container recreated
+    much later took its first run for Docker's restore.
+
+    Mutation: keep the outage flag through a `missing` answer, and the last tick reads `up`.
+    """
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), docker.ContainerState(missing=True)),
+            (timedelta(minutes=5), _running(_stamp(NOW + timedelta(minutes=5)), 0)),
+            (
+                timedelta(minutes=5, seconds=10),
+                _running(_stamp(NOW + timedelta(minutes=5, seconds=9)), 3),
+            ),
+        ],
+        _ScriptedSql(True, False),  # its database not answering keeps any window open
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
     assert verdicts[-1].state == "restart_loop"
 
 
@@ -777,6 +834,7 @@ def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path:
             (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 0)),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
         ],
+        _ScriptedSql(False),  # its database not answering keeps any window open
     )
 
     verdicts = [watch.tick() for _ in range(3)]
@@ -835,7 +893,8 @@ def test_the_real_state_reader_carries_dockers_words_to_the_window(
         return subprocess.CompletedProcess(cmd, code, out, err)
 
     monkeypatch.setattr(docker.runner, "run", run)
-    watch = dashboard.Dashboard(SPEC, WOTLK, _install(tmp_path), sql=_FakeSql(), now=lambda: NOW)
+    sql = _ScriptedSql(True, False, False)
+    watch = dashboard.Dashboard(SPEC, WOTLK, _install(tmp_path), sql=sql, now=lambda: NOW)
 
     verdicts = [watch.tick() for _ in range(4)]
 

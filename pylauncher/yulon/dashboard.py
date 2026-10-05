@@ -96,22 +96,25 @@ Docker banner goes by). So the restarts in the window after Docker answers
 again are taken as Docker restoring the stack, and counting starts over when
 it closes.
 
-The window closes early, at the first tick that finds the world running on
-the same run as the tick before: its database answered, the race is over, and
-every death from then on is the world's own (Codex adversarial review: a
-window that always ran its full length erased a slow loop's deaths inside it).
-Otherwise it lasts two minutes, because Docker's back-off doubles from 100 ms,
-so a database that takes T seconds to come up ends the race by about 2T: this
-covers one that takes a minute. A world that never holds a run is dying fast,
-spends most of its time `restarting`, and reads `restart_loop` on such a tick
-as soon as the window closes; its count starts over then. Only a read that
-failed because no daemon answered opens the window, and only when the world's
-`StartedAt` changed across it, so any other failed read (Codex adversarial
-review: a crash loop's next run after one would be forgiven), `missing`
-(Docker answering), a Docker that went quiet without
-restarting anything, and a first look that failed (no run seen before it to
-compare with) open none. The cost is that delay, never a loop called
-steady: a server that was looping keeps `after_a_loop`.
+The window closes early, at the first tick whose population read reached the
+world's database: the dependency the race is about is up, and every death from
+then on is the world's own (Codex adversarial review: a window that always ran
+its full length erased a slow loop's deaths inside it, and a run that merely
+lasted from one tick to the next proved nothing, as a world can wait a while
+for its database and still die of it). Otherwise it lasts two minutes, because
+Docker's back-off doubles from 100 ms, so a database that takes T seconds to
+come up ends the race by about 2T: this covers one that takes a minute. A world
+still dying when it closes is counted from then on, and one that dies fast is
+`restarting` most of the time, which reads `restart_loop` again at once.
+
+Only a read that failed because no daemon answered opens the window, and only
+when the world's `StartedAt` changed across it. So none is opened by any other
+failed read (Codex adversarial review: a crash loop's next run after one would
+be forgiven), by `missing` (Docker answering, which also ends the outage it
+follows), by a Docker that went quiet without restarting anything, or by a
+first look that failed (no run seen before it to compare with). The cost is
+that delay, never a loop called steady: a server that was looping keeps
+`after_a_loop`.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
@@ -306,6 +309,8 @@ class Dashboard:
             kind: State = "missing" if state.missing else "unknown"
             if docker_advice.unreachable(state.said):  # never "No such container"
                 self._docker_away = True
+            elif state.missing:
+                self._docker_away = False  # Docker answered: that outage is over
             return Verdict(kind, state.restart_count, state.started_at, uptime)
         restoring = self._docker_is_restoring(state)
         if self._restarted(state) or restoring:
@@ -334,7 +339,10 @@ class Dashboard:
             return Verdict("restart_loop", state.restart_count, state.started_at, uptime)
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
-        return self._with_population(state, uptime, after_a_loop=self._looping)
+        verdict = self._with_population(state, uptime, after_a_loop=self._looping)
+        if restoring and verdict.players is not None:
+            self._restoring_until = None  # its database answered: the race is over
+        return verdict
 
     def _docker_is_restoring(self, state: docker.ContainerState) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker came back (T306).
@@ -352,8 +360,6 @@ class Dashboard:
             self._docker_away = False
             if self._last_started is not None and state.started_at != self._last_started:
                 self._restoring_until = now + DOCKER_RESTORE_GRACE
-        elif state.status == "running" and state.started_at == self._last_started:
-            self._restoring_until = None  # the run held from one tick to the next
         self._last_started = state.started_at
         return self._restoring_until is not None and now < self._restoring_until
 
