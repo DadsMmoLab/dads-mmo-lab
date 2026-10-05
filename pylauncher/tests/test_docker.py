@@ -572,6 +572,75 @@ def test_container_state_reads_the_restart_count_in_the_same_inspect(
     assert docker.container_state("x") == docker.ContainerState("running", "T", 0)
 
 
+_DAEMON_DOWN = (
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+    "Is the docker daemon running?\n"
+)
+
+
+def test_a_state_read_docker_will_not_answer_is_logged_once_per_change(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Linux live test of PR 291: a stopped daemon logged this line every 5 s, 39 in 3 min.
+
+    The Server tab's realm poll reads the world's state every five seconds, and
+    each read that failed logged Docker's words again. Now: one line when what
+    Docker says changes, one when it answers again, and a failure after that is
+    a change again. Each container (and each WSL distro's daemon) is its own.
+
+    Mutation: log on every failed read, and the first assert counts five.
+    """
+    answers: list[subprocess.CompletedProcess[str]] = []
+    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None, timeout=None: answers.pop(0))
+
+    def read(*results: subprocess.CompletedProcess[str], container: str = "ac-worldserver") -> None:
+        answers.extend(results)
+        for _ in results:
+            assert docker.container_state(container).status in ("", "running")
+
+    down = _completed(returncode=1, stderr=_DAEMON_DOWN)
+    up = _completed(stdout="running\t2026-10-04T21:31:00Z\t0\n")
+
+    def lines(word: str) -> list[str]:
+        return [r.getMessage() for r in caplog.records if word in r.getMessage()]
+
+    with caplog.at_level("INFO", logger="yulon.docker"):
+        read(down, down, down, down, down)
+        assert len(lines("could not read the state of ac-worldserver")) == 1
+        read(down, container="ac-authserver")
+        assert len(lines("could not read the state of ac-authserver")) == 1
+        timeout = _completed(returncode=124, stderr="timed out after 30.0s")
+        read(timeout, timeout)
+        assert len(lines("could not read the state of ac-worldserver")) == 2, "a new wording"
+        read(up, up, up)
+        assert lines("answers about ac-worldserver again") == [
+            "Docker answers about ac-worldserver again"
+        ]
+        read(down, down)
+        assert len(lines("could not read the state of ac-worldserver")) == 3, "down again"
+
+
+def test_a_job_state_read_shares_the_once_per_change_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`container_exit()` logs the same line as `container_state()`, so it is de-duplicated too.
+
+    Mutation: leave `container_exit()` logging on every read, and this counts three.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(returncode=1, stderr=_DAEMON_DOWN),
+    )
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        for _ in range(3):
+            assert docker.container_exit("yulon-mmaps").status == ""
+    said = [
+        r for r in caplog.records if "could not read the state of yulon-mmaps" in r.getMessage()
+    ]
+    assert len(said) == 1
+
+
 def test_container_state_says_missing_only_when_docker_answered_no_such_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7205,3 +7274,109 @@ def test_project_container_images_says_none_rather_than_guess(
 ) -> None:
     _answer_with(monkeypatch, {"ps": _volume_proc(0, stdout="tbc-mangosd\n"), "inspect": inspect})
     assert docker.project_container_images("yulon-wow-tbc-1") is None
+
+
+# -- T203: how much build cache Docker holds -------------------------------------
+
+_BUILDX_DU = (
+    "ID                           RECLAIMABLE   SIZE       LAST ACCESSED\n"
+    "c5d2rdjfaz5epontrnlmdyjd8    true          4.096kB*   11 days ago\n"
+    "75k0887kpwwsgg4pelbvwg0r8*   true          2.08GB*    11 days ago\n"
+    "Shared:\t\t4.496GB\n"
+    "Private:\t294.1MB\n"
+    "Reclaimable:\t4.79GB\n"
+    "Total:\t\t4.79GB\n"
+)
+"""`docker buildx du`, from a Linux test box (Docker 29.7.2, buildx v0.36.1, 2026-10-04).
+
+Rows trimmed; the summary lines are verbatim, tabs included. Its `Total` is the
+same 4.79GB `docker system df` gave for Build Cache on the same box that minute.
+"""
+
+_SYSTEM_DF = (
+    '{"Active":"9","Reclaimable":"1.404GB (23%)","Size":"6.08GB","TotalCount":"14",'
+    '"Type":"Images"}\n'
+    '{"Active":"0","Reclaimable":"1.393MB (100%)","Size":"1.393MB","TotalCount":"13",'
+    '"Type":"Containers"}\n'
+    '{"Active":"5","Reclaimable":"467.6MB (5%)","Size":"7.875GB","TotalCount":"7",'
+    '"Type":"Local Volumes"}\n'
+    '{"Active":"0","Reclaimable":"294.1MB","Size":"4.79GB","TotalCount":"20",'
+    '"Type":"Build Cache"}\n'
+)
+"""`docker system df --format '{{json .}}'`, verbatim from the same box and minute."""
+
+
+def _answers(
+    buildx: subprocess.CompletedProcess[str], system_df: subprocess.CompletedProcess[str]
+) -> tuple[list[list[str]], object]:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv[1:])
+        return buildx if argv[1:3] == ["buildx", "du"] else system_df
+
+    return seen, run
+
+
+def test_build_cache_bytes_asks_buildx_du_first_and_reads_its_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`buildx du` sizes only the cache, and only the builder a build would use."""
+    seen, run = _answers(_completed(stdout=_BUILDX_DU), _completed(stdout=""))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == 4_790_000_000
+    assert seen == [["buildx", "du"]], "system df, which sizes every volume, is not asked"
+
+
+@pytest.mark.parametrize(
+    "buildx",
+    [
+        _completed(returncode=1, stderr="docker: 'buildx' is not a docker command."),
+        _completed(stdout="ID   RECLAIMABLE   SIZE   LAST ACCESSED\n"),
+        _completed(stdout="Total:\t\tlots\n"),
+    ],
+    ids=["no-buildx-plugin", "no-total-line", "unreadable-total"],
+)
+def test_build_cache_bytes_falls_back_to_system_df(
+    buildx: subprocess.CompletedProcess[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen, run = _answers(buildx, _completed(stdout=_SYSTEM_DF))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == 4_790_000_000
+    assert seen == [["buildx", "du"], ["system", "df", "--format", "{{json .}}"]]
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [("0B", 0), ("12.91GB", 12_910_000_000), ("441.6kB", 441_600), ("1.2TB", 1_200_000_000_000)],
+)
+def test_build_cache_bytes_reads_docker_s_decimal_units(
+    size: str, expected: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, run = _answers(_completed(stdout=f"Total:\t\t{size}\n"), _completed(returncode=1))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == expected
+    _, run = _answers(
+        _completed(returncode=1), _completed(stdout=f'{{"Size":"{size}","Type":"Build Cache"}}')
+    )
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        _completed(returncode=1, stderr="Cannot connect to the Docker daemon"),
+        _completed(stdout='{"Size":"6.08GB","Type":"Images"}'),
+        _completed(stdout='{"Size":"lots","Type":"Build Cache"}'),
+        _completed(stdout="not json"),
+    ],
+    ids=["daemon-down", "no-build-cache-row", "unreadable-size", "not-json"],
+)
+def test_build_cache_bytes_says_unknown_rather_than_zero(
+    proc: subprocess.CompletedProcess[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None`, never 0: "could not ask" must not read as "nothing to reuse", nor the reverse."""
+    _, run = _answers(_completed(returncode=1, stderr="no buildx"), proc)
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() is None

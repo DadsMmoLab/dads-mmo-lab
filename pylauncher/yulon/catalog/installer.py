@@ -93,6 +93,36 @@ def compose_file(server_dir: Path) -> Path | None:
     return None
 
 
+FORMER_DEFAULT_DIRS: dict[str, str] = {
+    "wow-wotlk": "wow-server-playerbots",
+    "wow-tbc": "wow-tbc-server",
+    "wow-vanilla": "wow-vanilla-server",
+    "wow-tortoise": "tortoise-wow-server",
+    "wow-centurion": "wow-centurion-server",
+}
+"""The default folder names before `yulon-<game>` (T195 C30), by game id."""
+
+
+def default_server_dir(entry: CatalogEntry, home: Path) -> Path:
+    """Where an install goes when nobody picked a folder (T195 F1).
+
+    The entry's `yulon-<game>` folder, unless only the former default folder
+    (`FORMER_DEFAULT_DIRS`) holds a server - then that one, so a player with an
+    install under the old name is never handed a second, parallel server beside
+    it. "Holds a server" is `compose_file()`. When both hold one, the new name
+    wins. The Install suggestion (`CatalogView.start_install`) and the engine's
+    own default (`StagedInstaller.server_dir`, which the CLI harness reaches with
+    no --server-dir) both ask this.
+    """
+    new = home / entry.install.default_server_dir
+    if compose_file(new) is not None:
+        return new
+    former_name = FORMER_DEFAULT_DIRS.get(entry.id)
+    if former_name is not None and compose_file(home / former_name) is not None:
+        return home / former_name
+    return new
+
+
 # How the app recognised sudo's own password prompt: the bash engine set
 # `SUDO_PROMPT` to this prefix plus a random per-install token, so an exact
 # match proved the text came from sudo rather than from build output, in any
@@ -132,6 +162,38 @@ class WorldStoppedAfterReadyError(InstallerError):
 
     def __init__(self, *args: object, sources_kept: bool = False) -> None:
         super().__init__(*args)
+        self.sources_kept = sources_kept
+
+
+class RollbackNotDone(InstallerError):
+    """A rebuild's rollback stopped before the old build was back on its tags (T197).
+
+    `StagedInstaller._restore_rollback()` has four ways to stop early: the new
+    build's servers would not stop, the new build could not be given a name to
+    undo onto, a tag would not move back (and the ones moved were moved back),
+    or that undo failed too and the tags are mixed. In every one the old build
+    is NOT what the tags name, so a start (`compose up -d`) runs the new one.
+    Its own type because one caller acts on it: "Update the server to latest…"
+    then leaves the moved sources with the new build instead of putting the old
+    commits back under it, and `sources_kept` says so, as on
+    `WorldStoppedAfterReadyError`.
+
+    `touched` False: no container was replaced, so the server still runs the old
+    build until its next start. `mixed` True: the tags name neither build, so there
+    is no new build for the sources to stay with, and the route puts them back
+    (fix round 1).
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        touched: bool = True,
+        mixed: bool = False,
+        sources_kept: bool = False,
+    ) -> None:
+        super().__init__(*args)
+        self.touched = touched
+        self.mixed = mixed
         self.sources_kept = sources_kept
 
 
@@ -354,11 +416,13 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
 
 
 MEASURED_BUILD_TIMES = (
-    "about 15 minutes on an Apple M4 Pro, 35-72 minutes on the Linux boxes this project is "
-    "usually built on, and 68 minutes on a Windows machine that gave Docker 11.7 GB and two "
-    "compiler jobs"
+    "about 15 minutes on a fast Mac, 35-72 minutes on a typical Linux PC, and about 68 minutes "
+    "on a Windows PC that gives Docker little memory"
 )
 """How long the compile took, on machines this project actually timed it on.
+
+The screen describes those machines the way a player would describe their own
+(T194, Decision 2); which machines they were is below.
 
 Every number is a citation, and `test_rebuild.py` pins each one to the page it
 came from so a friendlier figure cannot be substituted quietly:
@@ -475,7 +539,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
-        f"the same compile an install does, and this project has timed it at "
+        f"the same compile an install does, and it has taken "
         f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
         f"predict it better than that range does.\n\n"
         f"{recipe}"

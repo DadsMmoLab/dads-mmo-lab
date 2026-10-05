@@ -129,6 +129,7 @@ TRINITYCORE: dict[str, Any] = {
     "checkout": CHECKOUT,
     "client": {
         "required_file": "Data/lichking.MPQ",
+        "archives_any_case": True,
         "min_mpq": 6,
         "mpq_depth": "recursive",
         "locale_mpq_required": True,
@@ -285,8 +286,8 @@ def centurion_like(
             # (cs_character.cpp:72-73); the inventory row carries the item INSTANCE
             # guid and `item_instance.itemEntry` the template, as on AzerothCore;
             # `MAX_MAIL_ITEMS` is 12 (Mail.h:33).
-            # Offered only once T179 Task 9 has watched them work
-            # (`controller_wow_centurion.characters`).
+            # Which are offered is `controller_wow_centurion.characters` (T208's live
+            # check, 2026-10-04).
             "play": {
                 "equipped": {
                     "template_column": "itemEntry",
@@ -316,7 +317,7 @@ def centurion_like(
         },
         "must_not_listen": [3443],
     }
-    entry["install"]["default_server_dir"] = "wow-centurion-server"
+    entry["install"]["default_server_dir"] = "yulon-centurion"
     entry["install"]["password"] = {"mode": "generated", "file": ".db_password", "prefix": "tc-"}
     entry["install"]["native"] = {
         "family": "trinitycore",

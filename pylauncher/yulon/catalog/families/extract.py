@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from yulon import docker, platform
+from yulon import client_names, docker, platform
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
@@ -165,7 +165,13 @@ def expected_evidence(
     mtime: int | None = None
     if required_file is not None:
         try:
-            stat = client_dir.joinpath(*required_file.split("/")).stat()
+            # Whatever its case: `Data/lichking.mpq` on a case-sensitive disk is
+            # the file, and read exactly it never stats, so no resume could skip
+            # a tool (T227).
+            found = client_names.find(client_dir, required_file)
+            if found is None:
+                raise FileNotFoundError(f"no {required_file} under {client_dir}, in any case")
+            stat = found.stat()
         except OSError as exc:
             logger.warning(
                 f"could not read the size and date of {required_file} under {client_dir}: {exc}; "

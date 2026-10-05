@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from yulon import client_names
 from yulon.catalog.catalog import ClientSpec, MpqDepth
 from yulon.catalog.preflight import GIB, Check
 from yulon.log import get_logger
@@ -116,8 +117,15 @@ def validate(
         )
     checks: list[Check] = [Check(CLIENT_CHECK, "pass", f"{client_dir} has a {DATA_DIR} directory")]
     if spec.required_file is not None:
-        required = client_dir.joinpath(*spec.required_file.split("/"))
-        if not required.is_file():
+        # Found whatever its case, so `Data/lichking.mpq` is the file on a
+        # case-sensitive disk too, and named as the disk names it (T227).
+        required = client_names.find(client_dir, spec.required_file)
+        exact = client_dir.joinpath(*spec.required_file.split("/"))
+        if required is not None and required.is_file() and not exact.is_file():
+            if not spec.archives_any_case:
+                checks.append(_named_in_another_case(client_dir, required, spec.required_file))
+                return tuple(checks)
+        if required is None or not required.is_file():
             checks.append(
                 Check(
                     REQUIRED_CHECK,
@@ -129,13 +137,34 @@ def validate(
                 )
             )
             return tuple(checks)
-        checks.append(Check(REQUIRED_CHECK, "pass", f"{spec.required_file} is there"))
+        found = required.relative_to(client_dir).as_posix()
+        checks.append(Check(REQUIRED_CHECK, "pass", f"{found} is there"))
     wrong_locale = _wrong_locale(client_dir, data, spec)
     if wrong_locale is not None:
         checks.append(wrong_locale)
         return tuple(checks)
     checks.extend(_warnings(client_dir, data, spec, free_bytes))
     return tuple(checks)
+
+
+def _named_in_another_case(client_dir: Path, found: Path, required: str) -> Check:
+    """The refusal for a required file only another case reaches, where that is fatal (T227).
+
+    Only on a disk that tells cases apart (the exact spelling did not open) and
+    only for a game whose map tools read the player's own folder by exact name
+    (`ClientSpec.archives_any_case` false, every CMaNGOS game). Accepted, the
+    install would compile for half an hour or more and then fail extraction with a
+    sentence blaming the client's completeness. Until that extraction handles
+    another case (T260), the check says the true thing first.
+    """
+    named = found.relative_to(client_dir).as_posix()
+    case = "lower case" if found.name == found.name.lower() else "another case"
+    return Check(
+        REQUIRED_CHECK,
+        "refuse",
+        f"{named} is named in {case}; this server's map tools open {required} only",
+        f"Rename the client's archives to that spelling ({required}), then try again.",
+    )
 
 
 def _wrong_locale(client_dir: Path, data: Path, spec: ClientSpec) -> Check | None:

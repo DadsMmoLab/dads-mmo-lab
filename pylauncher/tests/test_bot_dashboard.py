@@ -150,6 +150,9 @@ class _Lifecycle:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
+    def refuse_start(self) -> None:
+        return None
+
     def stop(self) -> bool:
         self.calls.append("stop")
         return True
@@ -1672,3 +1675,52 @@ def test_kill_container_is_one_docker_kill_and_raises_on_a_refusal(
     with pytest.raises(docker.DockerCommandError):
         docker.kill_container("tortoise-observability")
     assert seen == [["kill", "tortoise-observability"]]
+
+
+@pytest.mark.parametrize("before", ["unread", "read"])
+def test_every_greyed_press_on_a_tortoise_tab_says_why(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Fix round 1, F2 (T195): the dashboard's presses, the bot rebuild's and the
+    bot count's are greyed until a reading lands, and each says why on the tab."""
+    from tests.test_controller_view import T191_SIZES, _greys_without_a_reason, _Ps
+    from yulon import runner
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = _view(qapp, tmp_path, _Seam())
+    if before == "read":
+        view.refresh_status()
+        view.refresh_bot_dashboard()
+        view.refresh_bots()
+
+    faults = _greys_without_a_reason(view, T191_SIZES[0])
+
+    assert faults == [], "\n".join(faults)
+
+
+class _FailingOnSeam(_Seam):
+    """Switching on fails with a sentence of its own."""
+
+    def switch_on(self, *, lan: bool, cancel: threading.Event | None = None) -> Iterator[str]:
+        self._note(f"switch_on lan={lan}")
+        raise RuntimeError("The dashboard could not start: port 8095 is taken.")
+        yield "never"  # pragma: no cover - makes this a generator
+
+
+def test_a_failed_dashboard_job_says_its_reason_once(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 (T194 final fix): the report line and the log's failure line said it twice."""
+    seam = _FailingOnSeam()
+    view = _view(qapp, tmp_path, seam)
+    view.refresh_bot_dashboard()
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
+
+    view.dashboard_switch.click()
+    _wait(view, qapp)
+
+    log = view.dashboard_log
+    assert log is not None
+    assert "port 8095 is taken" in view.dashboard_report.text()
+    assert log.failure_label.isHidden(), "the reason is under the log as well as the report"
+    assert log.failure_label.text() == ""

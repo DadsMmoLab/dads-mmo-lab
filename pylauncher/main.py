@@ -170,10 +170,15 @@ def build_catalog_tab(
     from PySide6.QtWidgets import QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon.ui.icons import get_tab_icon
+    from yulon.ui.sidebar import SidebarRail
     from yulon.ui.widgets.update_bar import UpdateBar
 
     tabs = QTabWidget(window)
     tabs.setObjectName("sidebar-tabs")
+    # Before any tab exists: `setTabBar` is only honoured on an empty widget.
+    # The rail keeps its width with every tab hidden, and never draws or
+    # leaves current a hidden tab (T192, `sidebar.py`).
+    tabs.setTabBar(SidebarRail(tabs))
     tabs.setTabPosition(QTabWidget.TabPosition.West)
     tabs.setIconSize(QSize(18, 18))
     # The sidebar grows by one tab per remembered install; once there are more
@@ -181,7 +186,10 @@ def build_catalog_tab(
     # until the text clips rather than scroll. Scroll buttons keep each tab at
     # its styled size and let the rail scroll instead, on any window height.
     tabs.setUsesScrollButtons(True)
-    tabs.setElideMode(Qt.TextElideMode.ElideRight)
+    # Never elided (T192): with ElideRight every tab shrank to its elided
+    # minimum once the rail overflowed -- "WoW…", "Cata…". The titles are short
+    # now (`tab_titles.sidebar_titles`) and the rail scrolls instead.
+    tabs.setElideMode(Qt.TextElideMode.ElideNone)
     central = QWidget(window)
     column = QVBoxLayout(central)
     # The app's identity banner, styled like a Dadcraft title bar
@@ -204,26 +212,33 @@ def build_catalog_tab(
     console_tabs = QTabWidget()
     console_tabs.setObjectName("catalog-console-tabs")
     console_tabs.setIconSize(QSize(16, 16))
-    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console and Install Logs")
+    console_tabs.addTab(log_panel, get_tab_icon("console"), "Install log")
+    toggle_btn = catalog_view.toggle_console_button
 
     def _set_console_visible(visible: bool) -> None:
         console_tabs.setVisible(visible)
-        btn = getattr(catalog_view, "toggle_console_button", None)
-        if btn is not None:
-            btn.setText("▼ Hide Console" if visible else "▲ Show Console")
+        toggle_btn.setText("▼ Hide install log" if visible else "▲ Show install log")
         if visible:
-            splitter.setSizes([max(200, splitter.height() - 170), 170])
+            # 55/45 rather than a fixed 170 px: the log and its strip get room
+            # to be read at any window height (T195 C31). Proportions, because
+            # `setSizes` spreads its total over whatever height the splitter has.
+            splitter.setSizes([55, 45])
 
     def _toggle_console() -> None:
-        _set_console_visible(not console_tabs.isVisible())
+        _set_console_visible(console_tabs.isHidden())
 
-    toggle_btn = getattr(catalog_view, "toggle_console_button", None)
-    if toggle_btn is not None:
-        toggle_btn.clicked.connect(_toggle_console)
+    toggle_btn.clicked.connect(_toggle_console)
 
-    log_panel.run_started.connect(lambda: _set_console_visible(True))
+    def _install_started() -> None:
+        # Hidden until the first install of the session (T195 C23): an empty
+        # log under the tiles took the room the Install buttons needed.
+        toggle_btn.setVisible(True)
+        _set_console_visible(True)
+
+    log_panel.run_started.connect(_install_started)
 
     splitter.addWidget(console_tabs)
+    console_tabs.setVisible(False)
     # The catalog shelf sits on top; the console window at the bottom can be
     # toggled or resized via the vertical splitter.
     splitter.setCollapsible(0, False)
@@ -407,28 +422,33 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverN
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
+    from yulon import play_client, ui_settings
     from yulon.catalog.families import trinitycore
 
-    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir):
+    lost: list[play_client.LostFlag] = []
+    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir, flags_lost=lost):
         logger.warning(warning)
-    from yulon import ui_settings
 
+    # T198: a file of the player's whose read-only flag could not be put back, said
+    # every time it happens (it happens once: the copy that shared it is gone).
+    told = play_client.flags_lost_warning(lost)
     targets = trinitycore.recorded_leftover_targets(config_dir=config_dir)
     if targets is None:
-        return LeftoverNotice(LEFTOVER_LIST_UNREAD)
+        return LeftoverNotice(f"{LEFTOVER_LIST_UNREAD} {told}".rstrip())
     # Once per folder (T179 Task 5 fix rounds 1-2): a copy left at every start is in
     # the log every time, and said in the bar until a notice naming it was SHOWN
     # (`leftover_notice_shown`, called by the bar) -- not merely offered.
     fresh = ui_settings.unnoticed_leftovers(targets, ui_settings.ui_settings_path(config_dir))
     left = len(fresh)
     if left == 0:
-        return None
+        return LeftoverNotice(told) if told else None
     copies = (
         "a temporary copy of a game client"
         if left == 1
         else f"{left} temporary copies of a game client"
     )
-    return LeftoverNotice(LEFTOVER_COPIES_NOTICE.format(count=copies), tuple(fresh))
+    text = LEFTOVER_COPIES_NOTICE.format(count=copies)
+    return LeftoverNotice(f"{text} {told}".rstrip(), tuple(fresh))
 
 
 HELPER_STAMP_SECONDS = 30.0
@@ -566,8 +586,10 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
-    from yulon.ui.tab_titles import retitle_controller_tabs
+    from yulon.ui.sidebar import SidebarPins, server_tab_icon
+    from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
+        CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
         TAB_BUTTONS,
@@ -605,6 +627,8 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
+        # T192: the Catalog and Logs buttons pinned above the rail.
+        yulon_sidebar_pins: SidebarPins
         # T179: the runner of the start-up sweep of temporary client copies, held
         # so the job is not collected while it runs.
         yulon_sweep_jobs: Any
@@ -729,6 +753,19 @@ def build_window() -> object:
     logs_view = LogsView(lambda: list(state.installs), catalog)
     tabs.insertTab(1, logs_view, get_tab_icon("console"), "Logs")
     tabs.setTabToolTip(1, "Yu'lon's own logs, and a file to send when something goes wrong")
+    # T192: both stay tabs 0 and 1 -- `indexOf()`, the bumpers and
+    # `setCurrentIndex(0)` all still reach them -- but are drawn as two pinned
+    # buttons above the rail, so a rail of servers scrolls and they never do.
+    # Hiding the current tab moves the bar off it, so the Catalog is made
+    # current again after: a hidden tab can be current, and the rail draws
+    # nothing selected while it is.
+    tabs.tabBar().setTabVisible(0, False)
+    tabs.tabBar().setTabVisible(1, False)
+    tabs.setCurrentIndex(0)
+    window.yulon_sidebar_pins = SidebarPins(
+        tabs,
+        [(0, get_tab_icon("catalog"), "Catalog"), (1, get_tab_icon("console"), "Logs")],
+    )
     navigator.invalidate()
 
     def _build_tab_menu(pos: QPoint) -> QMenu | None:
@@ -736,36 +773,34 @@ def build_window() -> object:
         index = tab_bar.tabAt(pos)
         if index < 0:
             return None
+        # Only a server tab has a menu. The Catalog's own branch (one disabled
+        # caption) went with T192: Catalog and Logs are pinned above the bar
+        # and have no tab in it to right-click, so this guard is the backstop.
+        widget = tabs.widget(index)
+        if not isinstance(widget, ControllerView):
+            return None
         menu = QMenu(tab_bar)
-        if index == 0:
-            act = menu.addAction("Catalog of Server Emulators")
-            act.setEnabled(False)
-        else:
-            widget = tabs.widget(index)
-            if not isinstance(widget, ControllerView):
-                # The Logs tab (T93): nothing to open or start from its handle.
-                return None
-            cv = widget
-            sd = cv.services.controller.server_dir
-            open_dir_act = menu.addAction("Open Server Folder in File Manager")
-            open_dir_act.triggered.connect(
-                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
-            )
-            copy_path_act = menu.addAction("Copy Server Path")
-            copy_path_act.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(sd)))
-            menu.addSeparator()
-            if cv.start_button.isEnabled() and cv.start_button.isVisible():
-                start_act = menu.addAction("Start Server")
-                start_act.triggered.connect(cv.start_server)
-            if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
-                stop_act = menu.addAction("Stop Server")
-                stop_act.triggered.connect(cv.stop_server)
-            # T95: the ×'s dialog, for anyone who reads the menu first.
-            # The same entry point and the same refusals.
-            menu.addSeparator()
-            remove_act = menu.addAction(forgetting.BUTTON_LABEL)
-            menu_key = (cv.entry.id, sd)
-            remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
+        cv = widget
+        sd = cv.services.controller.server_dir
+        open_dir_act = menu.addAction("Open Server Folder in File Manager")
+        open_dir_act.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
+        )
+        copy_path_act = menu.addAction("Copy Server Path")
+        copy_path_act.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(sd)))
+        menu.addSeparator()
+        if cv.start_button.isEnabled() and cv.start_button.isVisible():
+            start_act = menu.addAction("Start Server")
+            start_act.triggered.connect(cv.start_server)
+        if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
+            stop_act = menu.addAction("Stop Server")
+            stop_act.triggered.connect(cv.stop_server)
+        # T95: the ×'s dialog, for anyone who reads the menu first.
+        # The same entry point and the same refusals.
+        menu.addSeparator()
+        remove_act = menu.addAction(forgetting.BUTTON_LABEL)
+        menu_key = (cv.entry.id, sd)
+        remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
         return menu
 
     def _on_tab_bar_context_menu(pos: QPoint) -> None:
@@ -784,6 +819,8 @@ def build_window() -> object:
     # distro comparison both reach into `services` and `console_log`.
     controllers: dict[tuple[str, Path], ControllerView] = {}
     controller_views: list[QWidget] = []
+    # T192: each tab's status-dot slot, so `drop_controller()` can unhook it.
+    status_dots: dict[tuple[str, Path], Callable[[str], None]] = {}
     # T187: one launcher window per server, keyed as its tab is. Made on the
     # first ▶ and kept (closing one hides it) until its server goes.
     launchers: dict[tuple[str, Path], LauncherWindow] = {}
@@ -869,6 +906,15 @@ def build_window() -> object:
         later call `shutdown()`/`wait()` on at exit.
         """
         view = controllers.pop(key)
+        # T192: the tab's status dot lets go of the badge first. The badge
+        # outlives this call until the deferred delete below, and a rebuilt
+        # tab's old badge must not keep a line to the rail.
+        dot = status_dots.pop(key, None)
+        if dot is not None:
+            try:
+                view.realm_badge.status_changed.disconnect(dot)
+            except (RuntimeError, TypeError):  # pragma: no cover - never connected
+                pass
         view.shutdown()
         # EVERY panel the view owns, not the console one by name. It grew a
         # second (the rebuild's) on 2026-09-08, and a panel this loop cannot see
@@ -1016,6 +1062,9 @@ def build_window() -> object:
             # which is a fact about the SET - so removing one can make another's
             # title longer than it needs to be.
             retitle_controller_tabs(tabs, controllers.values())
+            # And the header's name for the tab on screen with it: a tab removed
+            # off screen moves no selection, so nothing else asks (T192).
+            follow_the_tab_on_screen()
         catalog_view.forget_installed(game, state.installed_dirs())
 
     removal_pending: set[tuple[str, Path]] = set()
@@ -1211,8 +1260,22 @@ def build_window() -> object:
         if header is None:
             return
         current = tabs.currentWidget()
-        badge = getattr(current, "realm_badge", None) if current in controller_views else None
-        header.follow(badge)
+        views = list(controllers.values())
+        if current not in views:
+            header.follow(None)
+            return
+        # T192's game strip: the server's whole name beside its badge, worked
+        # out over the set of open tabs as the old tab titles were -- the rail
+        # shows only the short name. The tab's tooltip carries the full path.
+        titles = controller_tab_titles(
+            [(view.entry.name, view.services.controller.server_dir) for view in views]
+        )
+        position = views.index(current)
+        header.follow(
+            views[position].realm_badge,
+            title=titles[position],
+            tooltip=tabs.tabToolTip(tabs.currentIndex()),
+        )
 
     tabs.currentChanged.connect(follow_the_tab_on_screen)
 
@@ -1415,7 +1478,18 @@ def build_window() -> object:
         controller_views.append(view)
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
-        tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
+
+        # C28 (T192): the icon is a status dot that follows the Server tab's
+        # badge -- through its signal, so T188's held "stopping" shows too --
+        # read once now, because the badge already says something.
+        def show_status_dot(status: str, view: ControllerView = view) -> None:
+            index = tabs.indexOf(view)
+            if index != -1:
+                tabs.setTabIcon(index, server_tab_icon(status))
+
+        view.realm_badge.status_changed.connect(show_status_dot)
+        status_dots[key] = show_status_dot
+        show_status_dot(view.realm_badge.status)
         # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
         # one, because only this function attaches it and only to a ControllerView.
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
@@ -2101,8 +2175,9 @@ def build_window() -> object:
     announce_previous_update(update_bar)
 
     check_button = QPushButton("Check for updates", window)
-    check_button.setObjectName("check-for-updates")
-    check_button.setFlat(True)
+    check_button.setObjectName(CHECK_UPDATES_BUTTON)
+    # Not flat (T193 A20): it is the window's one control for the update check,
+    # and it is drawn as the theme's button, edge and fill, on the ember glow.
     check_button.clicked.connect(update_host.check_now)
     header = window.property("header")
     if header is not None:

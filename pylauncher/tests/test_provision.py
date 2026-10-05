@@ -1981,8 +1981,9 @@ def test_the_sudo_question_is_masked_by_the_prompt_widget() -> None:
     """The wording is what makes the dialog echo dots — assert that, do not assume it."""
     from yulon.ui.widgets import prompt
 
-    assert prompt.is_secret(platform.SUDO_PASSWORD_QUESTION) is True
-    assert "sudo password" in platform.SUDO_PASSWORD_QUESTION
+    for question in (platform.SUDO_PASSWORD_QUESTION, platform.SUDO_REPAIR_PASSWORD_QUESTION):
+        assert prompt.is_secret(question) is True, question
+        assert "this computer's password" in question, question
 
 
 def test_the_default_run_with_input_feeds_stdin_and_pins_the_locale(

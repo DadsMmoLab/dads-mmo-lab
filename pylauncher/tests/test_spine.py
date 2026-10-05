@@ -2437,6 +2437,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
     ),
+    ("catalog/native.py", "folder_bytes"): (
+        "T203 fix round 3. Adds up the sizes of the files under a server folder for "
+        "preflight's credit to a resumed install; it never writes, never enters a link or a "
+        "Windows reparse point, and an entry it cannot look at counts short (less credit, a "
+        "higher floor). A top folder it cannot list answers None, which credits nothing"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
@@ -2492,12 +2498,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("platform.py", "_desktop_wsl_vhdx"): (
         "T39. Lists `<drive>/Users` to find the profile holding Docker Desktop's "
-        "`docker_data.vhdx`, so preflight measures the drive the images actually land on "
+        "`docker_data.vhdx` - since T199 the location that profile's Docker Desktop settings "
+        "name (`CustomWslDistroDir`, then the legacy keys, reached as `/mnt/<letter>/...`), "
+        "else the default one - so preflight measures the drive the images actually land on "
         "rather than a `/var/lib/docker` that does not exist in the distro. Nothing is "
         "written anywhere near it - the path is handed to `shutil.disk_usage` and no further "
         "- and the OSError per drive is skipped because a drive with no `Users` is the "
-        "ordinary case. Anything other than exactly one hit answers None, which the caller "
-        "renders *unchecked*"
+        "ordinary case. Anything other than exactly one hit, or any profile whose settings "
+        "name a location that cannot be found or cannot be read, answers None, which the "
+        "caller renders *unchecked*"
+    ),
+    ("platform.py", "_legacy_disk_folder"): (
+        "T199. Lists the folder a legacy Docker Desktop settings key (`dataFolder`/`diskPath`) "
+        "names, looking for a `.vhdx`/`.raw` disk image directly inside it, as proof that "
+        "Docker's disk lives there before preflight measures that drive. It decides no write: "
+        "the folder is handed to `shutil.disk_usage` and no further, and a folder that cannot "
+        "be listed answers None - 'could not be established' - which the caller renders "
+        "*unchecked*, never a guessed drive"
     ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
@@ -2767,6 +2784,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "listed through once, because that is where the game reads its addons. A folder that "
         "cannot be listed answers no names"
     ),
+    ("client_names.py", "on_disk"): (
+        "T227. Lists each folder on the way to one client file to find the name on disk that "
+        "matches it whatever its case (exact spelling first). Read-only. Its answer decides a "
+        "write in exactly one way: which existing name in a ready-to-play client a pack's "
+        "file replaces or `remove_when_off` removes (`client_packs`), after that folder's "
+        "marker was checked and with every link refusal unchanged; it never decides whether "
+        "the app may write somewhere. A folder that cannot be listed ends the matching, and "
+        "the rest keeps the spelling it was asked for"
+    ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
@@ -2786,6 +2812,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "A rename changes no flag on the inode the copy shares with the player's file; the "
         "player's own client is never listed or written, and the copy is removed through "
         "`play_client.remove_folder()` either way"
+    ),
+    ("catalog/families/trinitycore.py", "_spell_archives_as_the_extractors_open_them"): (
+        "T227. Walks `Data/` of the TEMPORARY extraction client beside the player's client "
+        "for every `.MPQ` the block's `client_archives` keeps under another case than the "
+        "catalog's (`lichking.mpq`), and RENAMES it inside the same copy to the catalog's "
+        "spelling, which the extractors open by exact name. A name the catalog's spelling "
+        "already reaches is never replaced; the player's own client is never listed or "
+        "written, and the copy is removed through `play_client.remove_folder()` either way"
     ),
     ("catalog/families/trinitycore.py", "_put_left_out_back"): (
         "T179 Task 3 (fix round 3). Walks `.yulon-left-out/` of the TEMPORARY extraction "

@@ -1782,7 +1782,13 @@ def test_a_reinstall_under_a_new_target_removes_the_old_target(rig: _Rig) -> Non
 def test_a_case_only_rename_never_deletes_the_file_it_just_installed(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On Windows `nova.lua` and `Nova.lua` are one file: dropping the old name drops the new."""
+    """On Windows `nova.lua` and `Nova.lua` are one file: dropping the old name drops the new.
+
+    Since T227 the new version lands on the name already in the folder, whatever
+    its case, so on a disk that tells cases apart there is one file too, not an
+    old `nova.lua` left beside the new `Nova.lua` for the game to pick from. The
+    only file removed is the swap's own aside of the old bytes.
+    """
     first = rig.install(ADDONS, rig.fetched({"Nova/nova.lua": b"v1\n"}))
     removed: list[Path] = []
     real = client_config._remove_own
@@ -1792,9 +1798,12 @@ def test_a_case_only_rename_never_deletes_the_file_it_just_installed(
         ADDONS, rig.fetched({"Nova/Nova.lua": b"v2\n"}, name="v2.zip"), previous=first
     )
 
-    assert removed == [], "nothing was removed: the old name folds onto a new one"
-    assert _addon(rig, "Nova/Nova.lua").read_bytes() == b"v2\n"
-    assert set(second["files"]) == {"Interface/AddOns/Nova/Nova.lua"}
+    dropped = [path for path in removed if not path.name.endswith(".yulon-pack-old")]
+    assert dropped == [], "nothing was dropped: the old name folds onto a new one"
+    nova = rig.play / "Interface" / "AddOns" / "Nova"
+    assert [p.name for p in nova.iterdir() if p.name.casefold() == "nova.lua"] == ["nova.lua"]
+    assert (nova / "nova.lua").read_bytes() == b"v2\n"
+    assert set(second["files"]) == {"Interface/AddOns/Nova/nova.lua"}
 
 
 def test_a_dropped_file_the_player_edited_is_left_and_named_in_the_entry(rig: _Rig) -> None:
@@ -2126,6 +2135,44 @@ def test_a_read_only_aside_with_one_name_is_made_writable_and_deleted(
     assert [n for _, n in windows_read_only] == [1]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_deleting_the_client_after_a_pack_over_a_shared_read_only_archive_keeps_its_flag(
+    rig: _Rig, windows_read_only: list[tuple[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T196: the install could not delete the aside of the player's read-only archive.
+
+    Delete has to clear the flag on that inode to remove it (Windows), and puts it
+    back on the player's own `Data/patch-X.MPQ`, the name the aside was moved from.
+    """
+    original = rig.original / "Data" / "patch-X.MPQ"
+    _REAL_CHMOD(original, 0o444)  # the player's own file, hard-linked into the client
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    aside = rig.play / "Data" / ("patch-X.MPQ" + client_packs._ASIDE)
+    assert os.path.samefile(aside, original), "the fixture must leave the player's file aside"
+    refused: list[str] = []
+
+    def windows_unlink(path: Any) -> None:
+        if not os.lstat(path).st_mode & 0o200:
+            refused.append(os.fspath(path))
+            raise PermissionError(errno.EACCES, "Access is denied", os.fspath(path))
+        os.unlink(path)
+
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, unlink=windows_unlink, **kw),
+    )
+
+    play_client.delete(rig.play, game=GAME, server_dir=rig.server)
+
+    assert not rig.play.exists()
+    assert set(refused) == {os.fspath(aside)}, "the read-only rule was not what the delete met"
+    assert original.stat().st_mode & 0o777 == 0o444, "the player's own file left writable"
+    _REAL_CHMOD(original, 0o644)
+    rig.untouched()
+
+
 def _fail_staging(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EIO, "Input/output error")
@@ -2409,3 +2456,70 @@ def test_this_computer_said_takes_the_realm_keys_out_only_where_realmlist_wtf_ca
         "accountName",
         "patchList",
     )
+
+
+# -- T227: a client whose files are named in lower case ----------------------
+
+
+@pytest.fixture
+def lower_rig(tmp_path: Path) -> _Rig:
+    """`_Rig`, made from a player's client named in lower case: `patch-x.mpq`, `enus/`."""
+    rig = _Rig(tmp_path)
+    play_client.remove_folder(rig.play, original=rig.original)
+    os.rename(rig.original / "Data" / "patch-X.MPQ", rig.original / "Data" / "patch-x.mpq")
+    os.rename(rig.original / "Data" / "enUS", rig.original / "Data" / "enus")
+    play_client.create(
+        rig.original,
+        rig.play,
+        game=GAME,
+        server_dir=rig.server,
+        allow_full_copy=False,
+        reflink=lambda src, dst: False,
+    )
+    rig.before = _snapshot(rig.original)
+    return rig
+
+
+def _named_alike(folder: Path, name: str) -> list[str]:
+    return sorted(p.name for p in folder.iterdir() if p.name.casefold() == name.casefold())
+
+
+def test_a_pack_lands_on_the_lowercase_name_already_there_not_beside_it(lower_rig: _Rig) -> None:
+    """T227: two archives whose names differ only in case are one archive to the game.
+
+    Written beside it, `patch-X.MPQ` would leave the player's stock `patch-x.mpq`
+    in the folder as well, and which one WoW loads would be anybody's guess.
+    """
+    entry = lower_rig.install(WORLD, lower_rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    assert _named_alike(lower_rig.play / "Data", "patch-X.MPQ") == ["patch-x.mpq"]
+    assert (lower_rig.play / "Data" / "patch-x.mpq").read_bytes() == NEW_Y
+    assert entry["files"] == {"Data/patch-x.mpq": _sha(NEW_Y)}
+    lower_rig.untouched()
+
+
+def test_a_pack_for_a_locale_folder_goes_into_the_one_already_there(lower_rig: _Rig) -> None:
+    pack = _pack_of([{"member": "a.MPQ", "to": "Data/enUS/patch-enUS-A.MPQ"}])
+
+    entry = lower_rig.install(pack, lower_rig.fetched({"a.MPQ": b"MPQ locale"}))
+
+    assert _named_alike(lower_rig.play / "Data", "enUS") == ["enus"]
+    assert (lower_rig.play / "Data" / "enus" / "patch-enUS-A.MPQ").read_bytes() == b"MPQ locale"
+    assert entry["files"] == {"Data/enus/patch-enUS-A.MPQ": _sha(b"MPQ locale")}
+    lower_rig.untouched()
+
+
+def test_switching_a_pack_off_removes_its_file_in_whatever_case(lower_rig: _Rig) -> None:
+    """`remove_when_off` names `Data/patch-Y.MPQ`; on this client it is `Data/patch-y.mpq`."""
+    pack = _pack_of(
+        [{"member": "t.MPQ", "to": "Data/patch-T.MPQ"}], remove_when_off=["Data/patch-Y.MPQ"]
+    )
+    entry = lower_rig.install(pack, lower_rig.fetched({"t.MPQ": b"t"}))
+    other = lower_rig.play / "Data" / "patch-y.mpq"
+    other.write_bytes(b"the stock alternative terrain, in lower case")
+
+    lower_rig.remove(entry, pack)
+
+    assert not other.exists()
+    assert not (lower_rig.play / "Data" / "patch-T.MPQ").exists()
+    lower_rig.untouched()

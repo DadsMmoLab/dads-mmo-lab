@@ -528,6 +528,18 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "_resolved_docker_cli", "docker")
 
 
+@pytest.fixture(autouse=True)
+def _each_test_starts_with_no_unread_container_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docker` logs a failed state read once per change, and remembers it to know (PR 291).
+
+    A fresh memory per test, so one test's failed read cannot hide the next
+    test's first line, whatever order the suite runs in.
+    """
+    from yulon import docker
+
+    monkeypatch.setattr(docker, "_UNREAD_SAID", {})
+
+
 @pytest.fixture(scope="session")
 def qapp() -> Iterator[object]:
     """One offscreen `QApplication` for the whole session (Qt allows exactly one)."""
@@ -983,6 +995,48 @@ def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
     deletes the window.
     """
     yield from destroying_what_is_left_behind()
+
+
+@pytest.fixture(autouse=True)
+def _no_test_leaves_the_application_restyled() -> Iterator[None]:
+    """Fail the test that leaves the `QApplication`'s style sheet or palette changed (T212).
+
+    There is one `QApplication` for the whole session, so an app-wide restyle a
+    test does not undo is felt by every later test, in whichever file happens to
+    run next. `test_theme.py` themed the app and left it themed, and the theme's
+    touch-target floor grew `test_gamepad_keyboard.py`'s fixed-size buttons from
+    60x20 to 98x50: four navigation tests failed, but only in that order.
+
+    Put back and failed, rather than only put back, so the leak is named at the
+    test that made it and not found later as a mystery in somebody else's file.
+    Read only when a `QApplication` exists: a test that never imported Qt cannot
+    have restyled one, and importing it here would load Qt for every test.
+    """
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    app = widgets.QApplication.instance() if widgets is not None else None
+    if app is None:
+        yield
+        return
+    from PySide6.QtGui import QPalette
+
+    sheet, palette = app.styleSheet(), QPalette(app.palette())
+    yield
+    changed = [
+        what
+        for what, same in (
+            ("style sheet", app.styleSheet() == sheet),
+            ("palette", app.palette() == palette),
+        )
+        if not same
+    ]
+    if not changed:
+        return
+    app.setStyleSheet(sheet)
+    app.setPalette(palette)
+    pytest.fail(
+        f"this test left the application's {' and '.join(changed)} changed. Every later test "
+        "in the session inherits it (T212); put it back in the test's own teardown."
+    )
 
 
 UNGUARDED_HTTPS_GET = upstream.https_get
