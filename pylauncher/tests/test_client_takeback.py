@@ -1344,9 +1344,43 @@ def test_the_live_sequence_puts_the_players_original_back_after_a_second_install
     assert kept.read_bytes() == b"the player's edit"
 
     applier.install(manifest)
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert copy.kept == (str(kept),), "recorded as kept, so it is never unrecorded"
     report = applier.remove(manifest)
 
     assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
     assert kept.read_bytes() == b"the player's edit", "the kept copy stays a kept copy"
     assert _names(data) == ["Patch-A.MPQ", "Patch-A.MPQ" + ASIDE + ".1"]
     assert any(str(kept) in line for line in report.left_behind), "the kept copy is named"
+
+
+def test_an_unrecorded_aside_beside_a_file_of_the_players_is_not_taken_for_the_original(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D2: `.yulon-module-old` is adopted as the moved file only while the live name is
+    free or the module's own; beside the player's current file it is a kept copy."""
+    manifest = _manifest(ARAC)
+    data = tmp_path / "client" / "Data"
+    _write(data / ("Patch-A.MPQ" + ASIDE), b"an older copy")
+
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's current"})
+    applier.remove(manifest)
+
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's current"
+    assert (data / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"an older copy"
+
+
+def test_remove_never_puts_a_numbered_kept_copy_on_the_live_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D2's belt half: a numbered copy no receipt records is named, never moved."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {})
+    data = tmp_path / "client" / "Data"
+    kept = data / ("Patch-A.MPQ" + ASIDE + ".1")
+    _write(kept, b"a kept copy")
+
+    report = applier.remove(manifest)
+
+    assert _names(data) == ["Patch-A.MPQ" + ASIDE + ".1"]
+    assert any(str(kept) in line for line in report.left_behind)
