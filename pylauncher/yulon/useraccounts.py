@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from yulon import commands, passwordcheck
-from yulon.actions import Outcome
+from yulon.actions import Outcome, outcome_of
 from yulon.actions import send as _send
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
@@ -323,6 +323,193 @@ def _not_our_own(account: str, app_account: str, what: str) -> Outcome | None:
     )
 
 
+# -- deleting one (T301) ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeletePlan:
+    """What deleting one account would remove, or why it will not be deleted.
+
+    `characters` is what the person is asked about, read from the characters
+    database: the server deletes them with the account
+    (`AccountMgr::DeleteAccount` on every tree), so a question that named only
+    the account would be asking about less than the press does.
+    """
+
+    account: str
+    characters: tuple[str, ...] = ()
+    problem: str = ""
+
+
+def deletion_plan(
+    sql: SqlReader, entry: CatalogEntry, marker: Marker, *, account: str, app_account: str
+) -> DeletePlan:
+    """The account's characters, or the rule that keeps it.
+
+    The rules, in the order they are asked: a name the server would refuse;
+    this app's own command-channel accounts; the auction-house account; an
+    account that is not there; the bot module's accounts (by registry where
+    there is one, and by prefix); and an account with a character in the game.
+    The last is a refusal rather than a log-out (lead decision, T301): taking
+    somebody out of the game is a second thing the press would do without
+    saying so.
+    """
+    refusal = _not_ours_to_delete(account, app_account)
+    if refusal:
+        return DeletePlan(account, problem=refusal)
+    ops = entry.observability
+    if ops is None:
+        return DeletePlan(
+            account,
+            problem=(
+                f"Yu'lon cannot yet tell whose characters are whose on {entry.name}, so it "
+                "does not delete accounts there"
+            ),
+        )
+    schemas = entry.schema_map()
+    bots = _bot_accounts_clause(entry, marker)
+    try:
+        raw = sql.query(
+            "auth",
+            f"SELECT a.id, CASE WHEN ({bots}) THEN 1 ELSE 0 END FROM {schemas['auth']}.account a "
+            f"WHERE a.username = {_text_literal(account)};",
+        )
+    except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+        logger.warning(f"could not read the account {account}: {exc}")
+        return DeletePlan(account, problem=f"Could not read the account {account}: {exc}")
+    rows = [line.split("\t") for line in raw.splitlines() if line.strip()]
+    if not rows:
+        return DeletePlan(
+            account,
+            problem=(
+                f"There is no account named {account} on this server now. "
+                "Press Refresh the list."
+            ),
+        )
+    if len(rows) != 1 or len(rows[0]) != 2 or not rows[0][0].strip().isdigit():
+        return DeletePlan(account, problem=f"the account {account} came back as {raw.strip()!r}")
+    if rows[0][1].strip() != "0":
+        return DeletePlan(
+            account,
+            problem=(
+                f"{account} belongs to this server's bots: the bot module made it and runs it, "
+                "so Yu'lon does not delete it."
+            ),
+        )
+    table = ops.characters
+    try:
+        raw = sql.query(
+            "characters",
+            f"SELECT name, {table.online} FROM {schemas['characters']}.{table.table} "
+            f"WHERE {table.account} = {int(rows[0][0])} ORDER BY name;",
+        )
+    except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+        logger.warning(f"could not read {account}'s characters: {exc}")
+        return DeletePlan(
+            account,
+            problem=(
+                f"Could not read {account}'s characters, so Yu'lon cannot say what deleting "
+                f"it would remove: {exc}"
+            ),
+        )
+    names: list[str] = []
+    online: list[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 2 or not fields[1].strip().isdigit():
+            return DeletePlan(
+                account, problem=f"one of {account}'s characters came back as {line.strip()!r}"
+            )
+        names.append(fields[0].strip())
+        if fields[1].strip() != "0":
+            online.append(fields[0].strip())
+    if online:
+        who = _names(online)
+        verb = "is" if len(online) == 1 else "are"
+        whom = online[0] if len(online) == 1 else "them"
+        return DeletePlan(
+            account,
+            characters=tuple(names),
+            problem=(
+                f"{who} {verb} in the game right now on {account}. Log {whom} out first, then "
+                "delete the account."
+            ),
+        )
+    return DeletePlan(account, characters=tuple(names))
+
+
+def delete_account(
+    channel: object, *, account: str, app_account: str, characters: tuple[str, ...]
+) -> Outcome:
+    """`account delete <user>` through the server, and its answer read truthfully.
+
+    A result -- even an empty one, which is a command that ran and printed
+    nothing (T226) -- is done. A fault is the server refusing, said in its own
+    words. Anything else is `outcome_of()`'s, which keeps "could not ask" and
+    "may have run" apart from both.
+
+    The own-account and auction-house rules are asked here too, where the line
+    is built; the rules that need a read are `InstallAccounts.delete_account`'s,
+    which asks them again right before it calls this.
+    """
+    refusal = _not_ours_to_delete(account, app_account)
+    if refusal:
+        return Outcome(False, problem=refusal)
+    try:
+        line = commands.account_delete(account)
+    except commands.CommandError as exc:
+        return Outcome(False, problem=str(exc))
+    answer = channel.send(line)  # type: ignore[attr-defined]
+    outcome = getattr(answer, "outcome", "")
+    if outcome == "yes":
+        logger.info(f"the server deleted the account {account}")
+        if not characters:
+            return Outcome(True, text=f"Deleted the account {account}. It had no characters.")
+        if len(characters) == 1:
+            return Outcome(
+                True, text=f"Deleted the account {account} and its character {characters[0]}."
+            )
+        return Outcome(
+            True,
+            text=(
+                f"Deleted the account {account} and its {len(characters)} characters, "
+                f"{_names(characters)}."
+            ),
+        )
+    if outcome == "no":
+        said = str(getattr(answer, "text", "")).strip()
+        if not said:
+            return Outcome(
+                False, problem=f"The server did not delete {account}, and did not say why."
+            )
+        return Outcome(False, problem=f"The server did not delete {account}: {said}")
+    return outcome_of(answer)
+
+
+def _not_ours_to_delete(account: str, app_account: str) -> str:
+    """The rules that need no read: the name, the channel accounts, the auction house."""
+    if not commands.valid_account_name(account):
+        return f"{account!r} is not a name this server would accept"
+    own = _not_our_own(account, app_account, "be deleted")
+    if own is not None:
+        return own.problem
+    if account.strip().upper() == AHBOT_ACCOUNT:
+        return (
+            f"{AHBOT_ACCOUNT} is the account the auction house runs as. Deleting it stops the "
+            "auction house, so Yu'lon does not delete it."
+        )
+    return ""
+
+
+def _names(names: list[str] | tuple[str, ...]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _text_literal(text: str) -> str:
     """A hex blob, as every other statement in this project writes a string."""
     return "_utf8mb4 X'" + text.encode("utf-8").hex().upper() + "'"
@@ -437,6 +624,51 @@ class InstallAccounts:
             app_account=self.app_account,
             realms=level_block is not None and level_block.table is not None,
             highest=level_block.max_level if level_block is not None else 3,
+        )
+
+    def delete_plan(self, account: str) -> DeletePlan:
+        """What deleting `account` would remove, read now, or why it will not be deleted."""
+        refusal = _not_ours_to_delete(account, self.app_account)
+        if refusal:
+            return DeletePlan(account, problem=refusal)
+        if self._channel() is None:
+            # Said before the question rather than after it: a person who has
+            # just said yes should not then be told nothing could be asked.
+            return DeletePlan(account, problem=_NO_CHANNEL)
+        answer = resolve_marker(self.entry, self.server_dir)
+        if answer.marker is None:
+            return DeletePlan(
+                account, problem=answer.problem or "this install's bot marker could not be read"
+            )
+        return deletion_plan(
+            self._sql, self.entry, answer.marker, account=account, app_account=self.app_account
+        )
+
+    def delete_account(self, account: str, *, characters: tuple[str, ...]) -> Outcome:
+        """Delete `account`, if it is still what the person was asked about.
+
+        Every rule is asked again here, right before the line is sent: the
+        question may have been open for a minute, and somebody can log in, or
+        make a character, in that minute. `characters` is what they were told
+        would go; if the account has others now, nothing is deleted.
+        """
+        plan = self.delete_plan(account)
+        if plan.problem:
+            return Outcome(False, problem=plan.problem)
+        channel = self._channel()
+        if channel is None:
+            return Outcome(False, problem=_NO_CHANNEL)
+        if plan.characters != tuple(characters):
+            now = _names(plan.characters) if plan.characters else "none"
+            return Outcome(
+                False,
+                problem=(
+                    f"{account}'s characters changed while you were being asked; it now has "
+                    f"{now}. Nothing was deleted. Press delete again to be asked about these."
+                ),
+            )
+        return delete_account(
+            channel, account=account, app_account=self.app_account, characters=plan.characters
         )
 
     def _channel(self) -> object | None:

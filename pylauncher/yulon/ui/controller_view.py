@@ -422,6 +422,10 @@ class AccountAdmin(Protocol):
 
     def set_gm_level(self, account: str, level: int) -> object: ...
 
+    def delete_plan(self, account: str) -> object: ...
+
+    def delete_account(self, account: str, *, characters: tuple[str, ...]) -> object: ...
+
 
 class BotDashboardSeam(Protocol):
     """The Bots tab's "Bot dashboard" switch (T127). Every method does IO: never on the GUI thread.
@@ -4452,6 +4456,25 @@ RESTORE_WAITS_FOR_DISTRO = (
 )
 
 ACCOUNT_NEEDS_CHOICE = "Choose an account first."
+DELETE_ACCOUNT_LABEL = "Delete account…"
+"""The Accounts tab's delete press (T301), and its context-menu entry."""
+
+
+def delete_account_question(account: str, characters: tuple[str, ...]) -> str:
+    """What the delete press asks, naming everything the server will remove (T301)."""
+    if not characters:
+        what = f"{account} has no characters."
+    elif len(characters) == 1:
+        what = f"Its character {characters[0]} is deleted with it."
+    else:
+        names = f"{', '.join(characters[:-1])} and {characters[-1]}"
+        what = f"Its {len(characters)} characters are deleted with it: {names}."
+    return (
+        f"Delete the account {account}? {what} This cannot be undone from Yu'lon; only a "
+        "backup made before now can bring it back."
+    )
+
+
 CHARACTER_NEEDS_CHOICE = "Choose a character in the list first."
 CHARACTERS_EMPTY = (
     "There are no characters on this server yet. Make one in the game, logged in with an "
@@ -11814,6 +11837,10 @@ class ControllerView(QWidget):
         change.addRow(self.set_password_button)
         change.addRow(_FieldLabel("GM level", self.selected_gm), self.selected_gm)
         change.addRow(self.set_gm_button)
+        # T301. Asks first, naming the characters that go with the account.
+        self.delete_account_button = QPushButton(DELETE_ACCOUNT_LABEL, existing)
+        self.delete_account_button.clicked.connect(self.delete_selected_account)
+        change.addRow(self.delete_account_button)
         # The list is what grows (T191 A16): the window's spare height is its.
         existing_box.addWidget(self.account_list, 1)
         existing_box.addWidget(self.refresh_accounts_button)
@@ -11824,11 +11851,17 @@ class ControllerView(QWidget):
             self.refresh_accounts_button,
             self.set_password_button,
             self.set_gm_button,
+            self.delete_account_button,
         ):
             control.setVisible(wired)
         # T195 (A23): why a press here is greyed, under both panels.
         self.account_reasons = ReasonLine(tab)
-        for press in (self.create_account_button, self.set_password_button, self.set_gm_button):
+        for press in (
+            self.create_account_button,
+            self.set_password_button,
+            self.set_gm_button,
+            self.delete_account_button,
+        ):
             self.account_reasons.watch(press)
         # Nothing is chosen yet, and a button that acts on "whichever row
         # happens to be first" is a trap rather than a convenience.
@@ -12500,9 +12533,9 @@ class ControllerView(QWidget):
         )
 
     def _account_chosen(self, row: int) -> None:
-        """Both changes act on the chosen account, so both wait for one."""
+        """Every change acts on the chosen account, so every one waits for one."""
         chosen = row >= 0 and self.account_list.item(row) is not None
-        for press in (self.set_password_button, self.set_gm_button):
+        for press in (self.set_password_button, self.set_gm_button, self.delete_account_button):
             set_enabled_why(press, None if chosen else ACCOUNT_NEEDS_CHOICE)
         if chosen:
             item = self.account_list.item(row)
@@ -12605,6 +12638,78 @@ class ControllerView(QWidget):
         # way; only the signal is withheld.
         if not getattr(outcome, "indeterminate", False):
             self.action_failed.emit(problem)
+
+    @Slot()
+    def delete_selected_account(self) -> None:
+        """T301: read what would go, ask, then have the server delete it.
+
+        The read comes first and off the GUI thread, so the question can name
+        the characters; a rule that keeps the account (the app's own, a bot's,
+        somebody in the game) is said instead of asking at all.
+        """
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is reading {account}.")
+        self.account_report.setText(f"Reading what deleting {account} would remove…")
+        self._run(
+            lambda: admin.delete_plan(account),
+            self._delete_planned,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _delete_planned(self, plan: object) -> None:
+        admin = self.services.accounts
+        account = str(getattr(plan, "account", ""))
+        problem = str(getattr(plan, "problem", ""))
+        if admin is None or not account:
+            self._account_chosen(self.account_list.currentRow())
+            return
+        if problem:
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(problem)
+            self.action_failed.emit(problem)
+            return
+        characters = tuple(getattr(plan, "characters", ()))
+        if not self._confirm(f"Delete {account}?", delete_account_question(account, characters)):
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(f"{account} was not deleted.")
+            return
+        self.account_report.setText(f"Deleting {account}…")
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is deleting {account}.")
+        self._run(
+            lambda: admin.delete_account(account, characters=characters),
+            self._account_deleted,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _account_deleted(self, outcome: object) -> None:
+        """Say what came back and read the list again.
+
+        Read again after a delete that may have happened, too: the sentence
+        asks the person to check, and the list is where they check.
+        """
+        self._account_chosen(self.account_list.currentRow())
+        if getattr(outcome, "done", False):
+            self.account_report.setText(getattr(outcome, "text", "") or "Deleted.")
+            self.refresh_accounts()
+            return
+        problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
+        self.account_report.setText(problem)
+        if getattr(outcome, "indeterminate", False):
+            self.refresh_accounts()
+            return
+        self.action_failed.emit(problem)
+
+    @Slot(object)
+    def _delete_failed(self, exc: object) -> None:
+        self._account_chosen(self.account_list.currentRow())
+        problem = f"Could not delete the account: {exc}"
+        self.account_report.setText(problem)
+        self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:
@@ -18262,6 +18367,9 @@ class ControllerView(QWidget):
         if self.set_gm_button.isEnabled():
             gm_action = menu.addAction("Set GM Level…")
             gm_action.triggered.connect(self.set_selected_gm_level)
+        if self.delete_account_button.isEnabled():
+            delete_action = menu.addAction(DELETE_ACCOUNT_LABEL)
+            delete_action.triggered.connect(self.delete_selected_account)
         menu.exec(self.account_list.mapToGlobal(pos))
 
     def _show_character_context_menu(self, pos: QPoint) -> None:

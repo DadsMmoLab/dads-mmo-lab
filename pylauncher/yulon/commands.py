@@ -111,6 +111,24 @@ def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int
     return line(f"account set gmlevel {account} {level}{every_realm}")
 
 
+def account_delete(account: str) -> str:
+    """`account delete <user>` -- the same line on all five trees (T301).
+
+    Read from each pinned tree: AzerothCore `cs_account.cpp:93` (handler :330),
+    TrinityCore112 for Centurion `cs_account.cpp:77` (handler :294), mangos-tbc
+    and mangos-classic `src/game/Chat/Chat.cpp:83` (handlers `Chat.cpp:3800` and
+    `:3714`), and the tortoise fork `src/game/Chat/Chat.cpp:71` (handler
+    `src/mangosd/CliRunnable.cpp:74`). Every one allows the console, and on the
+    CMaNGOS trees the command is `SEC_CONSOLE`, which SOAP runs every command at
+    (`src/mangosd/MaNGOSsoap.cpp:113` on both, `:196` on the fork).
+
+    The server deletes the account's characters with it
+    (`AccountMgr::DeleteAccount`); the caller asks the person about them first.
+    """
+    _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    return line(f"account delete {account}")
+
+
 def account_set_password(account: str, password: str) -> str:
     """`account set password <user> <pass> <pass>` — the server wants it twice."""
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
