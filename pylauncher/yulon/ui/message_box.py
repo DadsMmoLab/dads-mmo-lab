@@ -60,7 +60,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QRect, Qt
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import (
     QFrame,
@@ -114,16 +114,10 @@ class FittedMessageBox(QMessageBox):
         self._question_scroll()
 
     def event(self, event: QEvent) -> bool:
-        kind = event.type()
-        if kind in _REFIT_ON:
+        if event.type() in _REFIT_ON:
             fit_buttons_to_labels(self)
             self._fit_question_to_screen()
-        handled = super().event(event)
-        if kind in _REFIT_ON and self.isVisible():
-            # Centred as it opens; afterwards only kept on screen, so a box the
-            # player moved stays where they put it.
-            self._keep_on_screen(centre=kind == QEvent.Type.Show)
-        return bool(handled)
+        return bool(super().event(event))
 
     # -- the question, in a scroll area --------------------------------------
 
@@ -203,31 +197,9 @@ class FittedMessageBox(QMessageBox):
         self._scroll = scroll
         return scroll
 
-    # -- where the box opens -------------------------------------------------
-
     def _room(self) -> QRect:
         """The free area of the screen the box opens on."""
         return self.screen().availableGeometry()
-
-    def _keep_on_screen(self, *, centre: bool) -> None:
-        """Move the box wholly onto the screen; with `centre`, over its window first.
-
-        `QDialog` places a box BEFORE `QMessageBox` sizes it in its `showEvent()`,
-        so the place was worked out for a box of another size: a 752px box was
-        drawn from y=336 on an 800px screen, its buttons below the bottom.
-        """
-        room = self._room()
-        frame = self.frameGeometry()
-        left, top = frame.left(), frame.top()
-        if centre:
-            parent = self.parentWidget()
-            middle = parent.window().frameGeometry().center() if parent else room.center()
-            left, top = middle.x() - frame.width() // 2, middle.y() - frame.height() // 2
-        left = min(left, room.right() + 1 - frame.width())
-        top = min(top, room.bottom() + 1 - frame.height())
-        place = QPoint(max(left, room.left()), max(top, room.top()))
-        if place != frame.topLeft():
-            self.move(place)
 
 
 def _qt_hard_width_limit(room: QRect) -> int:
