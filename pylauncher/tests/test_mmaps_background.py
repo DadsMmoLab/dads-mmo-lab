@@ -369,7 +369,7 @@ def test_a_container_that_vanished_while_running_is_a_failed_run_that_keeps_its_
     assert len(output(server)) == 40 and "0013251.mmtile" not in output(server)
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     assert now.line().endswith(
-        "Its 40 finished tiles are kept, and the next run continues from there."
+        "Its 40 finished tiles are kept, and “Make the pathfinding data” continues from there."
     )
     start(server, fake)
     assert len(fake.mmaps_at_run[-1]) == 40
@@ -430,7 +430,7 @@ def test_stop_removes_the_container_and_keeps_the_finished_tiles(server: Path) -
     assert now.state == "failed" and now.can_start and now.kept == 12
     assert now.line() == (
         "Pathfinding data stopped part-way: you stopped it. Its 12 finished tiles are kept, "
-        "and the next run continues from there."
+        "and “Make the pathfinding data” continues from there."
     )
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     start(server, fake)
@@ -1094,7 +1094,7 @@ def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_f
     assert "mmap.enablePathFinding = 0" in conf_text(server)
     assert now.line().startswith("Pathfinding data stopped part-way: the generator stopped with")
     assert now.line().endswith(
-        "Its 3 finished tiles are kept, and the next run continues from there."
+        "Its 3 finished tiles are kept, and “Make the pathfinding data” continues from there."
     )
     said = start(server, fake)
     assert fake.mmaps_at_run[-1] == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]

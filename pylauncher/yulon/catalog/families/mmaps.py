@@ -326,6 +326,12 @@ def _forget_record(server_dir: Path) -> None:
 
 RUNS_WITHOUT_IT = "the server already runs without it"
 
+START_PRESS = "Make the pathfinding data"
+"""The Server tab's press that starts a run, spelled once (T245).
+
+A run that ended says what this press does next -- continue from the kept tiles, or
+begin again -- so the line names it, and the view labels its button with this."""
+
 
 @dataclass(frozen=True)
 class MmapsStatus:
@@ -366,13 +372,23 @@ class MmapsStatus:
             done = f"{self.percent} %" if self.percent is not None else "being made (takes hours)"
             unasked = " (Docker did not answer just now)" if self.docker_unanswered else ""
             return f"Pathfinding data: {done}{unasked} — {RUNS_WITHOUT_IT}."
+        # T245: an ended run says how far it got and what the press offered beside it
+        # does next, so the press's own sentence ("Making…") is never the last word.
+        reached = (
+            f" (it was at {self.percent} % when Yu'lon last checked)"
+            if self.percent is not None
+            else ""
+        )
         if self.state == "failed" and self.kept:
             return (
-                f"Pathfinding data stopped part-way: {self.error} Its {self.kept} finished "
-                f"tiles are kept, and the next run continues from there."
+                f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "
+                f"finished tiles are kept, and \u201c{START_PRESS}\u201d continues from there."
             )
         if self.state == "failed":
-            return f"Pathfinding data could not be made: {self.error} It can be started again."
+            return (
+                f"Pathfinding data could not be made{reached}: {self.error} "
+                f"\u201c{START_PRESS}\u201d starts it again from the beginning."
+            )
         if self.error:
             return f"Pathfinding data is ready, but {self.error}"
         if not self.pathfinding_on:
@@ -867,18 +883,21 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
         return _fail(job, record, why, run, now, remove=False)
     tail = run.log_tail(job.container, LOG_TAIL_LINES, timeout=STATUS_TIMEOUT)
     percent, current = _progress(tail) if tail is not None else (None, None)
+    # The log's last progress line, also for a run that ended since the last poll: a
+    # failure then says how far it really got (T245), not where a poll last saw it.
+    latest = replace(
+        record,
+        percent=percent if percent is not None else record.percent,
+        map=current if current is not None else record.map,
+    )
     if facts.status not in ("exited", "dead"):
         moved = replace(
-            record,
-            state="running",
-            container_id=record.container_id or facts.container_id,
-            percent=percent if percent is not None else record.percent,
-            map=current if current is not None else record.map,
+            latest, state="running", container_id=record.container_id or facts.container_id
         )
         if moved != record:
             _write_record(job.server_dir, moved)
         return _status_of(moved)
-    return _finished(job, record, facts, tail, run, now)
+    return _finished(job, latest, facts, tail, run, now)
 
 
 def _finished(
