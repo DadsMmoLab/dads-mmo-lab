@@ -543,12 +543,14 @@ def shows_key_line(row: TuningRow) -> bool:
     return row.label != row.key
 
 
-INT_TEXT = r"-?\d*"
+INT_TEXT = r"-?[0-9]*"
 """What a box for an `int` with fewer than two bounds lets a player type (T190).
 
-Digits and a leading minus, and NO range: the range is the catalog's to state,
-and `tuning.check()` applies the one bound it has at Save. `*` and not `+`, so
-the box can be emptied on the way to a new number.
+The digits 0 to 9 and a leading minus, and NO range: the range is the catalog's
+to state, and `tuning.check()` applies the one bound it has at Save. `[0-9]` and
+not `\\d`: `_guard_int` asks this rule in Python, where `\\d` also matches other
+scripts' digits, which no server reads. `*` and not `+`, so the box can be
+emptied on the way to a new number.
 """
 
 

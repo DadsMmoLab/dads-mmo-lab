@@ -1304,6 +1304,32 @@ def test_an_int_box_holding_a_value_it_would_refuse_can_still_be_edited(qapp: ob
     assert field.text() == "15", "once the text is a number again, letters stay out"
 
 
+@pytest.mark.parametrize("typed", ["١٢", "１２", "1_0", "+5"])
+def test_an_int_box_takes_only_the_digits_0_to_9(qapp: object, typed: str) -> None:
+    """Other scripts' digits are `\\d` to a regex and no number at all to the server.
+
+    One `insert()` per character, which is what typing and a paste go through:
+    `QTest.keyClicks` aborts on a character outside Latin-1.
+    """
+    editor = tp.RowEditor(_row(type="int", min=0, current="10"))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    field.clear()
+    for character in typed:
+        field.insert(character)
+    assert field.text() == "".join(ch for ch in typed if ch in "0123456789"), field.text()
+
+
+def test_an_int_box_whose_file_holds_other_digits_drops_the_rule_until_they_are_gone(
+    qapp: object,
+) -> None:
+    """`_guard_int` asks the same rule in Python: the rule must not call `١٢` a fit."""
+    editor = tp.RowEditor(_row(type="int", min=0, current="١٢"))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    assert field.validator() is None, "the rule held a text it refuses, and froze the box"
+
+
 def test_reading_the_same_file_again_keeps_the_editors_scroll_and_cursor(qapp: object) -> None:
     """Every save and Reload re-reads the open file; it jumped back to line one each time."""
     from tests.conftest import process_events

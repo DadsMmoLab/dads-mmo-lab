@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, module_answers, platform, play_client, rmtree, runner
+from yulon import docker, module_answers, platform, play_client, rmtree, runner, tuning
 from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -1837,7 +1837,10 @@ def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: st
 
 # --------------------------------------------------- the answers to prompts
 
-_INT = re.compile(r"[+-]?\d+")
+_INT = re.compile(r"-?[0-9]+")
+"""An `int` answer's spelling: ASCII digits and a leading minus, the one AzerothCore's
+`std::from_chars` reads (see `tuning.WHOLE_NUMBER`). No `\\d`, which in Python
+also matches other scripts' digits, and no `+`, which `from_chars` refuses."""
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
@@ -2030,7 +2033,12 @@ def check_answer(prompt: Prompt, value: str) -> str:
     if not text:
         return "this cannot be left empty"
     if prompt.kind == "int":
-        return prompt.range_problem(text) if _INT.fullmatch(text) else "this must be a whole number"
+        # The answer is written as given, so its spaces are checked too.
+        if not _INT.fullmatch(value):
+            return "this must be a whole number, typed with the digits 0 to 9 only"
+        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
+            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        return prompt.range_problem(text)
     if prompt.kind == "float":
         try:
             float(text)
