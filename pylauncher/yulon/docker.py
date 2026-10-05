@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import inspect
 import io
 import json
@@ -4777,6 +4778,7 @@ def run_attached(
     keep: int = KEEP_OUTPUT_LINES,
     cancel: threading.Event | None = None,
     merge_stderr: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> AttachedRun:
     """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
@@ -4827,7 +4829,9 @@ def run_attached(
     deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;
-    see `runner.stream()`.
+    see `runner.stream()`. `env` is the child's whole environment, None to
+    inherit; for a WSL install it must already carry its `WSLENV`
+    (`platform.wsl_env()`), and `build_staged()` is its one caller (T376).
     """
     logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
     tail: deque[str] = deque(maxlen=keep)
@@ -4858,7 +4862,7 @@ def run_attached(
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
         with closing(
-            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr)
+            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
         ) as lines:
             for line in lines:
                 if cancel is not None and cancel.is_set():
@@ -4941,6 +4945,25 @@ def build_staged(
     otherwise withholds it until the child exits — which for a two-to-four-hour
     compile is a blank panel for the entire build.
 
+    **More than one built service is built one call per service (T376)**, each
+    on its own buildx config folder (`_buildx_config()`). BuildKit keeps a
+    cached copy of a build context under a key made of the context folder's
+    NAME and the buildx node, and the node is the `.buildNodeID` in the buildx
+    config folder; which files a target reads is not part of the key. WotLK's
+    four services are four targets of one Dockerfile on one folder, built
+    together by compose, so they took each other's copy and re-sent the
+    difference: on yulon-win11-gate a Rebuild with nothing changed sent 2.36 GB
+    in 912 s, and this shape sent 1.1 MB in 21 s (`.notes/plans/2026-10-05-t376-
+    compose-context-resend.md`). Splitting the calls without the folders fixes
+    nothing: the one key then flips between targets call by call. A game with
+    one built service keeps the single call and the user's own buildx config,
+    because it has no race to lose and a new key costs one cold send.
+
+    The calls run in the overlay's order and the first that does not exit 0
+    ends the build: its run is returned as it is, so its status and its own
+    lines are what `_check_run()` and `base_image_unreachable()` read. A Stop
+    between two calls starts no further one.
+
     Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
     not). Returns the run rather than raising, so the caller can tell a
     cancellation from a failure.
@@ -4949,10 +4972,117 @@ def build_staged(
     for name in compose_files:
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
-    logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
-    return run_attached(
-        argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
-    )
+    services = _built_services(server_dir, compose_files)
+    if len(services) < 2:
+        logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
+        return run_attached(
+            argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+        )
+    tail: deque[str] = deque(maxlen=KEEP_OUTPUT_LINES)
+    for service in services:
+        if cancel is not None and cancel.is_set():
+            logger.warning(f"build_staged(): stopped before building {service}")
+            return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+        config = _buildx_config(server_dir, service)
+        extra = {"BUILDX_CONFIG": str(config)}
+        env = (
+            platform.wsl_env(extra, paths=("BUILDX_CONFIG",))
+            if wsl_distro is not None
+            else {**os.environ, **extra}
+        )
+        logger.info(
+            f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
+            f"BUILDX_CONFIG={config}"
+        )
+        run = run_attached(
+            [*argv, service],
+            server_dir,
+            wsl_distro=wsl_distro,
+            sink=sink,
+            cancel=cancel,
+            merge_stderr=True,
+            env=env,
+        )
+        if run.returncode != 0:
+            return run
+        tail.extend(run.tail)
+    return AttachedRun(0, tuple(tail))
+
+
+def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str, ...]:
+    """The services with a `build:` block in the build overlay, in its order (T376).
+
+    The overlay is the LAST of `compose_files` and is a file Yu'lon writes
+    (`composegen.BUILD_FILE`), so this reads its block shape rather than YAML
+    at large: a service is a key one level under `services:`, and it is built
+    when one of its own keys is `build`. An overlay it cannot read, or one in
+    another shape, answers no services, and the build is then the single
+    call it was before T376.
+    """
+    if not compose_files:
+        return ()
+    overlay = server_dir / compose_files[-1]
+    try:
+        text = overlay.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"the build overlay {overlay} could not be read ({exc}); one build call")
+        return ()
+    found: list[str] = []
+    in_services = False
+    service_indent: int | None = None
+    key_indent: int | None = None
+    service: str | None = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            in_services = line == "services:"
+            service_indent = key_indent = None
+            service = None
+            continue
+        if not in_services:
+            continue
+        if service_indent is None:
+            service_indent = indent
+        if indent == service_indent:
+            service = line.strip()[:-1] if line.endswith(":") else None
+            key_indent = None
+            continue
+        if service is None or indent < service_indent:
+            continue
+        if key_indent is None:
+            key_indent = indent
+        key = line.strip().split(":", 1)[0]
+        if indent == key_indent and key == "build" and service not in found:
+            found.append(service)
+    return tuple(found)
+
+
+def _buildx_config(server_dir: Path, service: str) -> Path:
+    """The buildx config folder one service of one install builds on (T376).
+
+    Under the app's own folder and never under `server_dir`, because the T224
+    fingerprint reads every file in the server folder and buildx writes here.
+    The same install and service get the same folder every time, so its node,
+    and with it BuildKit's cached copy of the context, survives from one build
+    to the next; a folder named per build would make every build a cold send.
+    The install part is a hash of the folder's absolute path, so two installs
+    in folders of the same name do not share one.
+
+    Created here rather than left to buildx, so that WSL has a folder to
+    translate when it crosses as `BUILDX_CONFIG/p`; a folder that cannot be
+    made is logged and left to buildx to try.
+    """
+    where = os.path.normcase(os.path.abspath(server_dir))
+    install = hashlib.sha256(where.encode("utf-8")).hexdigest()[:12]
+    config = platform.config_dir() / "buildx" / install / service
+    try:
+        config.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not make the buildx config folder {config}: {exc}")
+    return config
 
 
 def build_image(

@@ -17,11 +17,13 @@ import subprocess
 import threading
 import time
 import zlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
 
+from tests.support_fake_docker import build_env, end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import calls as fake_calls
 from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.said import SaidByYulon
@@ -2536,7 +2538,11 @@ def _repair_doubles(
         return _completed()
 
     def fake_stream(
-        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        merge_stderr: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Iterator[str]:
         calls.append(cmd)
         if cwds is not None:
@@ -2897,7 +2903,11 @@ def test_a_thirty_minute_import_is_not_kept_in_memory(
     seen: list[str] = []
 
     def fake_stream(
-        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        merge_stderr: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Iterator[str]:
         # A generator, not `iter(list)`: `run_attached()` closes what it is
         # given so an early exit terminates the child, and a double that cannot
@@ -3252,7 +3262,11 @@ def _stream_double(
     merged: list[bool] = []
 
     def fake_stream(
-        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        merge_stderr: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Iterator[str]:
         seen.append(cmd)
         merged.append(merge_stderr)
@@ -3262,39 +3276,207 @@ def _stream_double(
     return seen, merged
 
 
+WOTLK_OVERLAY = Path(__file__).parent / "data" / "wotlk-rendered" / "docker-compose.build.yml"
+"""The rendered WotLK build overlay: four services with a `build:` block each (T376)."""
+
+TBC_OVERLAY = (
+    Path(__file__).parent / "data" / "cmangos-rendered" / "wow-tbc" / "docker-compose.build.yml"
+)
+"""A rendered one-service build overlay, the shape of every game but WotLK (T376)."""
+
+THREE_FILES = ("docker-compose.yml", "docker-compose.override.yml", "docker-compose.build.yml")
+WOTLK_SERVICES = ("ac-worldserver", "ac-authserver", "ac-db-import", "ac-client-data-init")
+
+
+def _server_with(tmp_path: Path, overlay: Path, *parts: str) -> Path:
+    """A server folder holding `overlay` as its build file, at `tmp_path/<parts>`."""
+    server = tmp_path.joinpath(*(parts or ("wow",)))
+    server.mkdir(parents=True)
+    (server / "docker-compose.build.yml").write_text(
+        overlay.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return server
+
+
 def test_build_staged_passes_all_three_compose_files_and_plain_progress(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The trap: a bare `docker compose build` here builds NOTHING and exits 0.
 
     The `build:` blocks live in a file compose never auto-loads, and naming any
     `-f` disables auto-loading — so the base and the override have to be listed
     too, or the build loses the image tags and env it is meant to produce.
+
+    Since T376 a game with more than one built service (WotLK) builds them one
+    call each, in the overlay's order, and every call names all three files.
     """
+    monkeypatch.setattr(docker.platform, "config_dir", lambda: tmp_path / "cfg")
     seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
-    run = docker.build_staged(
-        Path("/tmp/wow"),
-        ("docker-compose.yml", "docker-compose.override.yml", "docker-compose.build.yml"),
-    )
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    files = ["-f", THREE_FILES[0], "-f", THREE_FILES[1], "-f", THREE_FILES[2]]
     assert seen == [
-        [
-            "docker",
-            "compose",
-            "-f",
-            "docker-compose.yml",
-            "-f",
-            "docker-compose.override.yml",
-            "-f",
-            "docker-compose.build.yml",
-            "build",
-            "--progress",
-            "plain",
-        ]
+        ["docker", "compose", *files, "build", "--progress", "plain", service]
+        for service in WOTLK_SERVICES
     ]
     # BuildKit writes ALL of its progress to stderr, which `stream()` otherwise
     # withholds until the child exits — a blank log panel for the whole build.
-    assert merged == [True]
+    assert merged == [True] * len(WOTLK_SERVICES)
     assert run.returncode == 0
+
+
+@pytest.fixture
+def build_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
+    """`support_fake_docker`'s CLI as THE docker, on the real `runner.stream()`; its state folder.
+
+    The real streaming path, not a `runner.stream` double: what T376 changes is
+    the environment the child process is started with, and only a real child can
+    say what it was started with.
+    """
+    cli, state = lay_fake_docker(tmp_path)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: str(cli))
+    monkeypatch.setattr(docker.platform, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.delenv("BUILDX_CONFIG", raising=False)
+    monkeypatch.delenv("WSLENV", raising=False)
+    # A variable of this process's own: the child must see it, because a build
+    # handed only BUILDX_CONFIG would run docker with no PATH and no HOME.
+    monkeypatch.setenv("FAKE_DOCKER_INHERITED", "yes")
+    yield state
+    end_fake_containers(state)
+
+
+def _build_lines(state: Path) -> list[str]:
+    return [call for call in fake_calls(state) if call.startswith("compose ")]
+
+
+def test_each_wotlk_service_builds_on_its_own_buildx_config_outside_the_server_folder(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """T376's cause: one context folder, four targets, ONE BuildKit cache key.
+
+    BuildKit keys a context's cached copy by folder name and buildx node, and the
+    node comes from `.buildNodeID` in the buildx config folder. Four targets that
+    share a key take each other's copy and re-send gigabytes; a folder per service
+    gives each its own. Outside the server folder, because the T224 fingerprint
+    reads everything in there.
+    """
+    server = _server_with(tmp_path, WOTLK_OVERLAY)
+    run = docker.build_staged(server, THREE_FILES)
+    assert run.returncode == 0
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
+    seen = build_env(build_cli)
+    assert [inherited for _, _, inherited in seen] == ["yes"] * len(WOTLK_SERVICES)
+    configs = [Path(config) for config, _, _ in seen]
+    assert len(set(configs)) == len(WOTLK_SERVICES), configs
+    for config in configs:
+        assert config.is_relative_to(tmp_path / "cfg"), config
+        assert not config.is_relative_to(server), config
+
+
+def test_the_next_build_of_the_same_install_reuses_each_services_buildx_config(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """A fresh folder per build is a fresh key per build: every Rebuild would send it all again.
+
+    And two installs whose folders share a NAME must not share a folder of
+    settings, or their builds take each other's cached copy as WotLK's targets did.
+    """
+    first = _server_with(tmp_path, WOTLK_OVERLAY, "a", "wow")
+    docker.build_staged(first, THREE_FILES)
+    docker.build_staged(first, THREE_FILES)
+    docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY, "b", "wow"), THREE_FILES)
+    configs = [config for config, _, _ in build_env(build_cli)]
+    once, again, other = configs[0:4], configs[4:8], configs[8:12]
+    assert once == again
+    assert not set(other) & set(once), (once, other)
+
+
+def test_a_one_service_game_keeps_its_single_build_call_and_the_users_buildx_config(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Centurion, TBC, Vanilla and Tortoise build one service: no race, so nothing changes.
+
+    A new config folder there would buy nothing and cost one cold send of the
+    whole context on the first Rebuild after the upgrade.
+    """
+    run = docker.build_staged(_server_with(tmp_path, TBC_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
+
+
+def test_a_stop_after_one_service_starts_no_further_service(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """T246/T247/T299's promise across the now-separate calls: a Stop stops the REST too.
+
+    The Stop lands while the world server's call is printing its last line, so
+    that call ends by itself with 0. Without a check between the calls the next
+    one would start a compose client, and its first line would be the first time
+    anything noticed the Stop.
+    """
+    cancel = threading.Event()
+
+    def sink(line: str) -> None:
+        if "ac-worldserver" in line:
+            cancel.set()
+
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink, cancel=cancel
+    )
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == ["ac-worldserver"]
+
+
+def test_a_failed_service_ends_the_build_with_its_own_status_and_lines(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """The first failure is the answer: later services are not built over it.
+
+    Its status and its lines are what `_check_run()` and
+    `base_image_unreachable()` read, so they have to be the FAILING call's, not
+    the last call's and not a fixed 1.
+    """
+    (build_cli / "fail-build-ac-authserver").write_text("", encoding="utf-8")
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 17
+    assert run.tail[-1] == "ERROR: failed to solve: target ac-authserver: exit code 2"
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+    ]
+    # Every call's lines reach the one panel, the passing call's included.
+    assert "#1 building ac-worldserver" in lines_seen
+
+
+def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A distro's docker reads BUILDX_CONFIG only if WSLENV names it, and as `/p` (T376).
+
+    Unnamed, it arrives empty and every service shares the default config again;
+    named without `/p`, buildx inside the distro is handed `C:\\Users\\...`.
+    """
+    cli = docker.platform.docker_program()
+    assert cli is not None
+    monkeypatch.setattr(
+        docker.platform, "docker_prefix", lambda distro, inside=None: (cli,) if distro else None
+    )
+    monkeypatch.setattr(docker.platform, "wsl_linux_path_in", lambda path, distro: "/home/u/wow")
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, wsl_distro="Ubuntu"
+    )
+    assert run.returncode == 0
+    seen = build_env(build_cli)
+    assert len(seen) == len(WOTLK_SERVICES)
+    for config, wslenv, inherited in seen:
+        assert "BUILDX_CONFIG/p" in wslenv.split(":"), wslenv
+        assert inherited == "yes"
+        # WSL turns `C:\\...` into `/mnt/c/...` for a folder that is there.
+        assert Path(config).is_dir(), config
 
 
 def test_run_one_shot_keeps_the_argv_that_was_live_gated(

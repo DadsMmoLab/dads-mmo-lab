@@ -479,7 +479,11 @@ def child_env(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
 
 
 def stream(
-    command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    command: list[str],
+    cwd: Path | None = None,
+    *,
+    merge_stderr: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> Generator[str, None, None]:
     """Run a command, yielding stdout lines live and stderr lines at the end.
 
@@ -525,6 +529,9 @@ def stream(
             Interleaving costs the ability to tell the two streams apart, which
             is why it is opt-in: every existing caller reads a command whose
             stderr is an error report rather than its output.
+        env: The child's WHOLE environment, or None to inherit this process's.
+            Either way it goes through `child_env()`. Added for T376, whose
+            build hands each compose call its own `BUILDX_CONFIG`.
 
     Yields:
         Each output line (all of stdout, in order, then any stderr) as a
@@ -539,13 +546,18 @@ def stream(
             directly from `subprocess.Popen`).
     """
     child = _Child()
-    generator = _stream_lines(command, cwd, merge_stderr=merge_stderr, child=child)
+    generator = _stream_lines(command, cwd, merge_stderr=merge_stderr, env=env, child=child)
     _register(generator, child)
     return generator
 
 
 def _stream_lines(
-    command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False, child: _Child
+    command: list[str],
+    cwd: Path | None = None,
+    *,
+    merge_stderr: bool = False,
+    env: Mapping[str, str] | None = None,
+    child: _Child,
 ) -> Generator[str, None, None]:
     """`stream()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream() called: command={command} cwd={cwd} merge_stderr={merge_stderr}")
@@ -557,7 +569,7 @@ def _stream_lines(
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=child_env(),
+        env=child_env(env),
         creationflags=creationflags(),
     )
     child.proc = proc

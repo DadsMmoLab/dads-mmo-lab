@@ -11,6 +11,12 @@ leaves the file exactly where the daemon would leave the container. `rm -f
 With `late-create`, `run` makes no container at all until the test calls
 `finish_late_create()`: the daemon that finishes a create after the Stop.
 
+`compose ... build` (T376) prints one line, records its environment's
+`BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
+is a variable a test sets in its own environment, to see the child inherit
+it), and exits 17 for a service named by a `fail-build-<service>` file in the
+state folder.
+
 Its argv0 is `fake-docker`, so `conftest`'s real-daemon guard lets it run: it
 is a script in the test's own folder and talks to nothing.
 """
@@ -46,6 +52,23 @@ if args[:1] == ["run"]:
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
+if args[:1] == ["compose"] and "build" in args:
+    # T376: a build is a line of output and an exit status, per call. What the
+    # test reads is what the CLI was HANDED: its argv in `calls.log`, and the
+    # BUILDX_CONFIG and WSLENV of its own environment in `build-env.log`.
+    with open(state / "build-env.log", "a", encoding="utf-8") as seen:
+        seen.write(
+            os.environ.get("BUILDX_CONFIG", "<unset>") + "\\t"
+            + os.environ.get("WSLENV", "<unset>") + "\\t"
+            + os.environ.get("FAKE_DOCKER_INHERITED", "<unset>") + "\\n"
+        )
+    target = args[-1] if args[-1] != "plain" else "<every service>"
+    sys.stderr.write(f"#1 building {{target}}\\n")
+    sys.stderr.flush()
+    if (state / f"fail-build-{{target}}").exists():
+        sys.stderr.write(f"ERROR: failed to solve: target {{target}}: exit code 2\\n")
+        sys.exit(17)
+    sys.exit(0)
 if args[:2] == ["rm", "-f"]:
     box = state / "containers" / args[2]
     if (state / "refuse-rm").exists():
@@ -117,3 +140,12 @@ def finish_late_create(state: Path) -> str:
     name = run[run.index("--name") + 1]
     (state / "containers" / name).write_text("created", encoding="utf-8")
     return name
+
+
+def build_env(state: Path) -> list[tuple[str, str, str]]:
+    """(BUILDX_CONFIG, WSLENV, FAKE_DOCKER_INHERITED) per `compose build` the CLI ran (T376)."""
+    log = state / "build-env.log"
+    if not log.exists():
+        return []
+    rows = [line.split("\t") for line in log.read_text(encoding="utf-8").splitlines()]
+    return [(row[0], row[1], row[2]) for row in rows]
