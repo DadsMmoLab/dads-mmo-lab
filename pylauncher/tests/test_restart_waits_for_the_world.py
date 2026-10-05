@@ -19,6 +19,7 @@ fake docker CLI.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import partial
@@ -27,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_player_text import command_faults, text_faults
-from tests.test_controller_view import WOTLK, _Ps, _services
+from tests.test_controller_view import ALL_UP, WOTLK, _Deferred, _Ps, _services
 from yulon import docker, runner
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -98,7 +99,9 @@ class _World:
         return native.WorldOutput("\n".join(said), 0, "running")
 
 
-def _after_start(entry: CatalogEntry, world: _World) -> native.StartAnswer:
+def _after_start(
+    entry: CatalogEntry, world: _World, cancel: threading.Event | None = None
+) -> native.StartAnswer:
     return native.ready_after_start(
         entry,
         entry.container_spec(),
@@ -106,6 +109,7 @@ def _after_start(entry: CatalogEntry, world: _World) -> native.StartAnswer:
         output=world.output,
         monotonic=world.clock,
         sleep=world.sleep,
+        cancel=cancel,
     )
 
 
@@ -321,7 +325,7 @@ def test_every_way_a_start_can_end_has_its_own_plain_sentence(
 ) -> None:
     services = _services(ps, tmp_path, [])
     answer = native.StartAnswer(verdict, "the server's last line")  # type: ignore[arg-type]
-    object.__setattr__(services, "ready_after_start", lambda: answer)
+    object.__setattr__(services, "ready_after_start", lambda **_kw: answer)
     view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
     monkeypatch.setattr(view, "_confirm", lambda *_a, **_k: True)
 
@@ -376,4 +380,141 @@ def test_every_game_s_services_wait_for_its_own_world_after_a_start(
 
     assert services.ready_after_start().ready
     assert seen and seen[0][0] == services.controller.spec.world
+    native_block = entry.install.native
+    assert native_block is not None
+    assert seen[0][1] == native.ready_spec_for(entry, native_block.ready).world
     assert looked and set(looked) == {services.controller.spec.world}
+
+
+# -- the wait holds no button: Stop, Start and Play stay free while the world loads --------
+
+
+def _deferred_view(
+    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait: object
+) -> tuple[ControllerView, _Deferred]:
+    jobs = _Deferred()
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "ready_after_start", wait)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=jobs)
+    jobs.queue.clear()
+    monkeypatch.setattr(view, "_confirm", lambda *_a, **_k: True)
+    return view, jobs
+
+
+def _run_the(jobs: _Deferred, on_done: object) -> None:
+    [index] = [i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done]
+    jobs.run(index)
+
+
+def test_the_server_tab_is_not_busy_while_the_restart_waits_for_the_world(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: the wait ran inside the press's busy job, so Stop was greyed for
+    the world's whole load -- up to the ready ceiling, near two hours.
+
+    Mutation: run the wait inside the restart's own job, and `_busy` is True while
+    it waits (and Stop says "Wait: Restart is running").
+    """
+    seen: list[bool] = []
+    cancels: list[threading.Event] = []
+
+    def wait(*, cancel: threading.Event) -> native.StartAnswer:
+        seen.append(view._busy)
+        cancels.append(cancel)
+        return native.StartAnswer("ready")
+
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(ps, tmp_path, monkeypatch, wait)
+
+    view.restart_server()
+    assert view._busy
+    _run_the(jobs, view._tuning_job_done)
+
+    assert view._busy is False, "the world wait held the Server tab"
+    assert "Waiting for the world server" in view.tuning_report.toPlainText()
+    _run_the(jobs, view._tuning_world_answered)
+    assert seen == [False]
+    assert view.tuning_report.toPlainText().startswith("restart: done.")
+    assert cancels and not cancels[0].is_set()
+
+
+def test_a_server_action_pressed_during_the_wait_ends_it_and_owns_the_report(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop during the load: the wait is cancelled, and a newer press is never written over.
+
+    Mutation: drop `_end_the_world_wait()` from `_set_busy()`, and the cancel is
+    never set; drop the number check, and the old wait's answer replaces the
+    newer restart's report.
+    """
+    cancels: list[threading.Event] = []
+
+    def wait(*, cancel: threading.Event) -> native.StartAnswer:
+        cancels.append(cancel)
+        return native.StartAnswer("cancelled" if cancel.is_set() else "ready")
+
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(ps, tmp_path, monkeypatch, wait)
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    [first] = [w for w, done, _e in jobs.queue if done == view._tuning_world_answered]
+
+    view.restart_server()  # a second press while the first wait is still out
+    assert view._world_wait is None, "the newer press did not end the old wait"
+
+    _run_the(jobs, view._tuning_job_done)
+    second = [w for w, done, _e in jobs.queue if done == view._tuning_world_answered][-1]
+    view._tuning_world_answered(second())
+    assert view.tuning_report.toPlainText().startswith("restart: done.")
+    view._tuning_world_answered(first())  # the first wait answers last: cancelled
+    assert cancels[-1].is_set()
+    assert view.tuning_report.toPlainText().startswith("restart: done."), "overwritten"
+
+
+def test_stop_during_the_wait_cancels_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ps.names = ALL_UP
+    view, jobs = _deferred_view(
+        ps, tmp_path, monkeypatch, lambda *, cancel: native.StartAnswer("ready")
+    )
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    cancel = view._world_wait
+    assert cancel is not None and not cancel.is_set()
+
+    view.stop_server()
+
+    assert cancel.is_set()
+
+
+def test_closing_the_tab_ends_a_world_wait_still_out(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`shutdown()` joins the tab's jobs; a world wait must not hold that join for a load."""
+    view, jobs = _deferred_view(
+        ps, tmp_path, monkeypatch, lambda *, cancel: native.StartAnswer("ready")
+    )
+    view.restart_server()
+    _run_the(jobs, view._tuning_job_done)
+    cancel = view._world_wait
+    assert cancel is not None
+
+    view.shutdown()
+
+    assert cancel.is_set()
+
+
+def test_a_cancel_reaches_the_wait_and_ends_it_as_cancelled() -> None:
+    """The Server tab's Stop ends the wait through `ready_after_start(cancel=)` (T247's verdict).
+
+    Mutation: do not hand `cancel` on to `watch_the_start()`, and a world still
+    loading is waited out to its quiet budget instead.
+    """
+    world = _World(banner="AzerothCore rev. 1 ready...", boot_s=10_000.0)
+    stop = threading.Event()
+    stop.set()
+
+    answer = _after_start(WOTLK, world, stop)
+
+    assert answer.verdict == "cancelled"

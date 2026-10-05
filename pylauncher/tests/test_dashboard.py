@@ -1328,3 +1328,35 @@ def test_docker_backing_off_inside_the_restore_window_is_not_recorded_as_a_loop(
     assert [v.state for v in verdicts[2:4]] == ["starting", "starting"]
     assert verdicts[-1].state == "up"
     assert verdicts[-1].after_a_loop is False and verdicts[-1].stable is True
+
+
+def test_a_world_that_crashes_again_after_it_recovered_is_a_loop_again_at_once(
+    tmp_path: Path,
+) -> None:
+    """Cold review: ending the loop zeroed the strikes, so the next crash read up.
+
+    A world that dies a couple of minutes after ready (bot spawn, a first login)
+    loads past Docker's back-off reset, so only the strikes can catch it, and three
+    fresh ones took three more cycles while the badge said REALM ONLINE.
+
+    Mutation: zero `_strikes` where the ready rule ends the loop, and the tick
+    after the crash reads `up`.
+    """
+    fixed = _stamp(NOW + timedelta(seconds=9))
+    again = _stamp(NOW + timedelta(seconds=204))
+    said_ready = timedelta(seconds=40)
+    watch, _ = _clocked(
+        tmp_path,
+        _a_loop_then(
+            (timedelta(seconds=10), _running(fixed, 14)),
+            (said_ready, _running(fixed, 14)),
+            (said_ready + GRACE, _running(fixed, 14)),
+            (timedelta(seconds=205), _running(again, 15)),
+        ),
+        logs=_said_ready_from(said_ready, fixed),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[4].state == "up", "recovered"
+    assert verdicts[5].state == "restart_loop", "crashed again: a loop, not up"

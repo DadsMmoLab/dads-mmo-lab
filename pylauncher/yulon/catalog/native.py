@@ -5317,6 +5317,7 @@ def ready_after_start(
     output: Callable[..., WorldOutput] | None = None,
     monotonic: Callable[[], float] | None = None,
     sleep: Callable[[float], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> StartAnswer:
     """Wait for `spec`'s world after a start with `entry`'s own ready markers (T382).
 
@@ -5337,6 +5338,7 @@ def ready_after_start(
         monotonic=monotonic,
         sleep=sleep,
         wsl_distro=wsl_distro,
+        cancel=cancel,
     )
 
 

@@ -1856,13 +1856,14 @@ class ControllerServices:
     the read and the two writes share a fact -- which account is the app's own
     -- and splitting them would be three places to remember it.
     """
-    ready_after_start: Callable[[], native.StartAnswer] | None = None
+    ready_after_start: Callable[..., native.StartAnswer] | None = None
     """Wait for the world after a start by the install's ready rule, and say what it did (T382).
 
     What the Tuning tab's Restart and Recreate wait on before they say done:
     `native.ready_after_start()` with this game's entry and world container,
     wired once for every game in `for_entry()`. None (a test's fake services)
     makes the press say only that the server was started, never that it is up.
+    Called with `cancel=`, an event any Server action of the tab sets.
     """
     module_sql: ModuleSqlRoute | None = None
     """Run this install's importer over the modules on disk, or None if it has none.
@@ -5999,6 +6000,14 @@ TUNING_RECREATING = (
 waits for the world, which can take minutes on a big load, and says so."""
 
 TUNING_STARTED_UP = "{job}: done. The world server reported ready and stayed up."
+TUNING_WAITING_FOR_THE_WORLD = (
+    "{job}: the server was started. Waiting for the world server to report ready and stay "
+    "up; the Server tab's buttons work meanwhile."
+)
+TUNING_WORLD_WAIT_BROKE = (
+    "The server was started, but Yu'lon could not wait for the world server. Details below "
+    "says why; the Server tab shows whether it is up."
+)
 TUNING_STARTED_UNASKED = "{job}: the server was started."
 """No ready wait was handed to the tab, so whether the world came up was not asked."""
 
@@ -6928,6 +6937,11 @@ class ControllerView(QWidget):
         # badge. A crash-looping world is in `docker ps` between its restarts.
         self._world_loops = False
         self._last_polled: InstallStatus | None = None
+        # T382: the Tuning restart's wait for the world, which no button waits on.
+        self._world_wait: threading.Event | None = None
+        self._world_wait_number = 0
+        self._world_wait_from_banner = False
+        self._world_wait_zone: str | None = None
         # How many status reads were asked, and which one is out.
         self._status_asks = 0
         self._status_ask_out = 0
@@ -7809,6 +7823,9 @@ class ControllerView(QWidget):
         # look and sends nothing, so the joins below are not held by a load
         # and the world is left running rather than signalled mid-load.
         self._stop_abandon.set()
+        # T382: the Tuning restart's wait for the world ends at its next look,
+        # so the join below is not held for a world's whole load.
+        self._end_the_world_wait()
         self._timer.stop()
         if self._docker_repair_cancel is not None:
             # T160: a repair waiting on a question stops rather than holding
@@ -8913,6 +8930,8 @@ class ControllerView(QWidget):
         not have its greyed button handed back by a job ending.
         """
         waited = wait_for(self._busy_job) if self._busy else None
+        if busy:
+            self._end_the_world_wait()  # T382: the press that starts now owns the server
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -17739,7 +17758,7 @@ class ControllerView(QWidget):
         self._hold_badge("restarting")
         self.tuning_report.setPlainText(TUNING_RESTARTING)
         self._run(
-            lambda: ("restart", self._do_restart(), self._world_after_start()),
+            lambda: ("restart", self._do_restart()),
             self._tuning_job_done,
             self._tuning_job_failed,
         )
@@ -17764,7 +17783,7 @@ class ControllerView(QWidget):
         self._hold_badge("restarting")
         self.tuning_report.setPlainText(TUNING_RECREATING)
         self._run(
-            lambda: ("recreate", self._do_recreate(), self._world_after_start()),
+            lambda: ("recreate", self._do_recreate()),
             self._tuning_job_done,
             self._tuning_job_failed,
         )
@@ -17794,16 +17813,6 @@ class ControllerView(QWidget):
             controller.start()
         return removed
 
-    def _world_after_start(self) -> native.StartAnswer | None:
-        """After a Restart's or Recreate's start: wait for the world by the install's rule (T382).
-
-        On the worker, in the press's own job and AFTER the lifecycle command, so
-        a restore is held off for the stop and the start and not for a world's
-        whole load. None when the tab was handed no wait (`ready_after_start`).
-        """
-        wait = self.services.ready_after_start
-        return wait() if wait is not None else None
-
     @Slot(object)
     def _tuning_job_done(self, answer: object) -> None:
         """The handler for a finished restart or recreate: forget what it covered.
@@ -17816,8 +17825,12 @@ class ControllerView(QWidget):
         (T97): the closure was a plain callable, so the runner delivered it on
         the worker thread, and this wrote the report and started the status
         read from there.
+
+        T382: then the world is waited on by the install's ready rule, in a job
+        of its own that holds no Server button (`_wait_for_the_world()`), and
+        the report says done only once it is up.
         """
-        job, _, world = cast(tuple[str, object, "native.StartAnswer | None"], answer)
+        job = cast(tuple[str, object], answer)[0]
         self._set_busy(False)
         self._tuning_owed.pop("restart", None)
         if job == "recreate":
@@ -17826,15 +17839,75 @@ class ControllerView(QWidget):
         zone = self._say_zone_problem()
         if self._tuning_from_banner and zone is None:
             self.problem_label.setText("")  # what this tab said before the press is past
-        said, details = _what_the_start_did(job, world, self.services.controller)
-        if self._tuning_from_banner and world is not None and not world.ready:
-            self.problem_label.setText(said)
+        self._world_wait_from_banner = self._tuning_from_banner
         self._tuning_from_banner = False
+        self._world_wait_zone = zone
+        if self.services.ready_after_start is None:
+            self._say_what_the_start_did(job, None)
+        else:
+            self.tuning_report.setPlainText(
+                TUNING_WAITING_FOR_THE_WORLD.format(job=job) + (f"\n{zone}" if zone else "")
+            )
+            self._wait_for_the_world(job)
+        self.refresh_status()
+
+    def _wait_for_the_world(self, job: str) -> None:
+        """Wait for the world after a Restart's or Recreate's start, holding no button (T382).
+
+        Not in the press's busy job: a world's load can take an hour on a big
+        first boot, and Stop, Start and Play must not be held for it (cold
+        review). Any Server action that starts (`_set_busy(True)`) ends this
+        wait through its cancel, so a Stop pressed during the load is never
+        raced by it, and its answer is then the plain `cancelled` sentence.
+        The number says which wait answered: one a newer press replaced is
+        dropped, not written over that press's report.
+        """
+        wait = self.services.ready_after_start
+        assert wait is not None
+        self._end_the_world_wait()
+        self._world_wait_number += 1
+        number, cancel = self._world_wait_number, threading.Event()
+        self._world_wait = cancel
+        self._run(
+            lambda: (number, job, wait(cancel=cancel)),
+            self._tuning_world_answered,
+            self._tuning_world_failed,
+        )
+
+    def _end_the_world_wait(self) -> None:
+        """Cancel a world wait still running (T382): a Server action of ours has started."""
+        if self._world_wait is not None:
+            self._world_wait.set()
+            self._world_wait = None
+
+    @Slot(object)
+    def _tuning_world_answered(self, answer: object) -> None:
+        number, job, world = cast(tuple[int, str, native.StartAnswer], answer)
+        if getattr(self, "_closed", False) or number != self._world_wait_number:
+            return  # a newer press's wait owns the report
+        self._world_wait = None
+        self._say_what_the_start_did(job, world)
+
+    @Slot(object)
+    def _tuning_world_failed(self, exc: object) -> None:
+        """The wait itself broke (not the world): said as that, never as done (T382)."""
+        if getattr(self, "_closed", False):
+            return
+        self._world_wait = None
+        self.tuning_report.setPlainText(TUNING_WORLD_WAIT_BROKE)
+        self.tuning_details.set_text(_detail_of(exc) if _said_by_yulon(exc) else str(exc))
+        self.action_failed.emit(_for_the_log(exc))
+
+    def _say_what_the_start_did(self, job: str, world: native.StartAnswer | None) -> None:
+        said, details = _what_the_start_did(job, world, self.services.controller)
+        zone = self._world_wait_zone
+        if self._world_wait_from_banner and world is not None and not world.ready:
+            self.problem_label.setText(said)
+        self._world_wait_from_banner = False
         self.tuning_report.setPlainText(said + (f"\n{zone}" if zone else ""))
         self.tuning_details.set_text(details)  # after the report: a new report clears it
         if world is not None and not world.ready:
             self.action_failed.emit(said)
-        self.refresh_status()
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:

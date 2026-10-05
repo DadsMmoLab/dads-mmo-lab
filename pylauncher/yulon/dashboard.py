@@ -379,8 +379,10 @@ class Dashboard:
             self._restarting_run = None
         if self._looping and self._loop_is_current and state.status == "running":
             if self._said_ready_and_stayed_up(state.started_at):
+                # The strikes stay (cold review): a world that dies again after
+                # this, past Docker's back-off reset, is a loop at its next one.
+                # `SETTLED_AFTER` clears them, as it clears `_looping`.
                 self._loop_is_current = False
-                self._strikes = 0
 
         if restoring and state.status == "restarting":
             return Verdict("starting", state.restart_count, state.started_at, uptime)
