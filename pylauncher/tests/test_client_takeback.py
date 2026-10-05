@@ -1040,6 +1040,8 @@ def test_a_crash_during_the_install_leaves_a_record_remove_acts_on(
     with pytest.raises(Died):
         applier.install(manifest)
     monkeypatch.setattr(apply_module.os, "rename", real_rename)
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert copy.aside == str(players.with_name("Patch-A.MPQ" + ASIDE)), "written BEFORE the move"
 
     report = applier.remove(manifest)
 
@@ -1207,3 +1209,32 @@ def test_uninstall_takes_every_modules_files_back_and_puts_the_players_back(
     assert f"put your own Patch-A.MPQ back in {data}" in took
     assert left == []
     assert applier is not None
+
+
+def test_an_update_that_ships_no_client_file_any_more_leaves_no_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Its receipts are replaced by this run's, even by none: nothing of it is left to take."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    without = manifest.model_copy(update={"client": []})
+
+    _update(applier, without, monkeypatch)
+
+    data = tmp_path / "client" / "Data"
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert read_client_copies(_clone_of(applier, manifest), item_id=manifest.id) == ()
+
+
+def test_uninstall_puts_back_an_aside_no_receipt_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    applier = _arac_over(monkeypatch, tmp_path, {})
+    data = tmp_path / "client" / "Data"
+    _write(data / ("Patch-A.MPQ" + ASIDE), b"the player's own")
+
+    took, left = applier.take_back_everything()
+
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert left == []
