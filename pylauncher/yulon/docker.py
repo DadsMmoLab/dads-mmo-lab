@@ -3574,6 +3574,13 @@ class ContainerState:
     host), a live container also reads as missing (`native.py:2170-2175`),
     so every caller that means it must pass `wsl_distro`.
     """
+    said: str = field(default="", compare=False)
+    """What Docker's CLI printed when the read failed, `""` when it answered (T306).
+
+    The dashboard tells Docker going away (`docker_advice.unreachable()`) from
+    any other failed read by it. Left out of `==`, so a failed read still equals
+    `ContainerState()` for every caller that compares against that.
+    """
 
     @property
     def settled(self) -> bool:
@@ -3616,7 +3623,7 @@ def container_state(
     if proc.returncode != 0:
         _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
-        return ContainerState(missing=missing)
+        return ContainerState(missing=missing, said=proc.stderr.strip())
     _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]

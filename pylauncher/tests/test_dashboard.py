@@ -512,6 +512,15 @@ def test_the_realm_poll_logs_a_silent_docker_once_not_every_tick(
 # ---------------------------------------------------------------- T306: Docker restarted itself
 
 
+_AWAY = docker.ContainerState(
+    said=(
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?"
+    )
+)
+"""A read that failed because no daemon answered: Docker's own words on Linux (T248 log)."""
+
+
 def _stamp(at: datetime) -> str:
     return at.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
@@ -562,7 +571,7 @@ def test_restarts_while_docker_brings_itself_back_are_not_a_restart_loop(
         tmp_path,
         [
             (timedelta(0), _running(up, 0)),
-            (timedelta(seconds=5), docker.ContainerState()),  # Docker is away
+            (timedelta(seconds=5), _AWAY),  # Docker is away
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
             (timedelta(seconds=15), _running(back, 5)),
             (timedelta(seconds=45), _running(back, 5)),
@@ -592,7 +601,7 @@ def test_a_world_docker_is_restarting_while_docker_comes_back_is_starting_not_lo
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), docker.ContainerState("restarting", "", 3)),
         ],
     )
@@ -623,7 +632,7 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 2)),
             (grace + timedelta(seconds=5), docker.ContainerState("restarting", "", 4)),
             (later, _running(_stamp(NOW + later - timedelta(seconds=1)), 7)),
@@ -683,7 +692,7 @@ def test_strikes_from_before_docker_restarted_are_not_carried_into_the_new_run(
         [
             (timedelta(0), _running(up, 0)),
             (timedelta(seconds=5), _running(up, 2)),
-            (timedelta(seconds=10), docker.ContainerState()),
+            (timedelta(seconds=10), _AWAY),
             (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 2)),
             (after, _running(young, 3)),
         ],
@@ -710,7 +719,7 @@ def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Pat
         tmp_path,
         [
             (timedelta(0), _running(up, 0)),
-            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), _running(up, 0)),
             (timedelta(seconds=20), _running(young, 3)),
         ],
@@ -739,7 +748,7 @@ def test_the_grace_ends_once_the_restored_world_holds_its_run(tmp_path: Path) ->
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
             (timedelta(seconds=15), _running(back, 5)),
             (timedelta(seconds=20), _running(back, 5)),
@@ -764,7 +773,7 @@ def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path:
     watch, _clock = _clocked(
         tmp_path,
         [
-            (timedelta(0), docker.ContainerState()),
+            (timedelta(0), _AWAY),
             (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 0)),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
         ],
@@ -773,3 +782,61 @@ def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path:
     verdicts = [watch.tick() for _ in range(3)]
 
     assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_failed_read_that_was_not_docker_going_away_opens_no_window(tmp_path: Path) -> None:
+    """Codex adversarial review, 2026-10-05: a read can fail while the daemon is up.
+
+    Only a failure in which the CLI reached no daemon is evidence that Docker
+    itself went away. Any other failed read, followed by a crash-looping world's
+    next run, is that loop going on, and its restarts are counted.
+
+    Mutation: let any failed read open the window, and the last tick reads `up`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), docker.ContainerState(said="unexpected EOF")),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
+            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_the_real_state_reader_carries_dockers_words_to_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the unpatched `container_state()`: only the docker CLI is stood in for.
+
+    The window hangs on what Docker said when the read failed, so that has to
+    survive the trip from the CLI's stderr to the dashboard.
+
+    Mutation: drop stderr from the failed `ContainerState`, and the last tick
+    reads `restart_loop`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    answers = [
+        (0, f"running\t{up}\t0\n", ""),
+        (1, "", _AWAY.said + "\n"),
+        (0, f"running\t{_stamp(NOW + timedelta(seconds=9))}\t1\n", ""),
+        (0, f"running\t{_stamp(NOW + timedelta(seconds=13))}\t5\n", ""),
+    ]
+
+    def run(
+        cmd: list[str], cwd: object = None, timeout: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        code, out, err = answers.pop(0)
+        return subprocess.CompletedProcess(cmd, code, out, err)
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    watch = dashboard.Dashboard(SPEC, WOTLK, _install(tmp_path), sql=_FakeSql(), now=lambda: NOW)
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert [v.state for v in verdicts] == ["up", "unknown", "up", "up"]

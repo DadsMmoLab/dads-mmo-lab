@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker
+from yulon import dbreads, docker, docker_advice
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
@@ -90,9 +90,11 @@ starting docker.service:
 Those deaths are real exits, so neither the count, the exit code (0 again once
 it runs) nor `OOMKilled` tells them from a crash; only when they happened does.
 No daemon start time is reachable the same way on Linux, Docker Desktop and
-macOS, but the dashboard already sees Docker go away: its read fails. So the
-restarts in the window after Docker answers again are taken as Docker
-restoring the stack, and counting starts over when it closes.
+macOS, but the dashboard already sees Docker go away: its read fails with the
+CLI saying it reached no daemon (`docker_advice.unreachable()`, the words the
+Docker banner goes by). So the restarts in the window after Docker answers
+again are taken as Docker restoring the stack, and counting starts over when
+it closes.
 
 The window closes early, at the first tick that finds the world running on
 the same run as the tick before: its database answered, the race is over, and
@@ -103,8 +105,10 @@ so a database that takes T seconds to come up ends the race by about 2T: this
 covers one that takes a minute. A world that never holds a run is dying fast,
 spends most of its time `restarting`, and reads `restart_loop` on such a tick
 as soon as the window closes; its count starts over then. Only a read that
-failed opens the window, and only when the world's `StartedAt` changed across
-it, so `missing` (Docker answering), a Docker that went quiet without
+failed because no daemon answered opens the window, and only when the world's
+`StartedAt` changed across it, so any other failed read (Codex adversarial
+review: a crash loop's next run after one would be forgiven), `missing`
+(Docker answering), a Docker that went quiet without
 restarting anything, and a first look that failed (no run seen before it to
 compare with) open none. The cost is that delay, never a loop called
 steady: a server that was looping keeps `after_a_loop`.
@@ -300,7 +304,7 @@ class Dashboard:
             # T95: docker's own "no such container" is an answer, not a silence,
             # and the player whose containers were deleted by hand must be told so.
             kind: State = "missing" if state.missing else "unknown"
-            if not state.missing:
+            if docker_advice.unreachable(state.said):  # never "No such container"
                 self._docker_away = True
             return Verdict(kind, state.restart_count, state.started_at, uptime)
         restoring = self._docker_is_restoring(state)
