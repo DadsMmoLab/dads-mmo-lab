@@ -73,7 +73,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from secrets import token_hex
-from typing import Any, ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol, cast
 
 from yulon import (
     __version__,
@@ -5016,6 +5016,58 @@ def wait_ready_quietly(
     answered for the second, where it gave up on a container it could by then
     see. A branch whose only distinct behaviour is the wrong one.
     """
+    return watch_the_start(
+        spec,
+        ready,
+        wait=wait,
+        output=output,
+        monotonic=monotonic,
+        sleep=sleep,
+        wsl_distro=wsl_distro,
+    ).ready
+
+
+StartVerdict = Literal["ready", "stopped", "loop", "gone", "fatal", "quiet", "unreadable", "ceiling"]
+
+
+@dataclass(frozen=True)
+class StartAnswer:
+    """What became of a world server after a start, by the rule an install's ready stage uses.
+
+    `verdict` is `ready` only once the world reported ready AND stayed up for
+    `READY_GRACE_SECONDS` (`watch_after_ready()`). `stopped` is a world that said
+    ready and was gone inside that watch; the others are `_read_world()`'s, plus
+    `ceiling` for a server still printing when `management_ceiling()` ran out.
+
+    `words` is what the server itself last said (`_dying_words()`), for Details;
+    `""` when it said nothing or the answer is `ready` (T382).
+    """
+
+    verdict: StartVerdict
+    words: str = ""
+
+    @property
+    def ready(self) -> bool:
+        return self.verdict == "ready"
+
+
+def watch_the_start(
+    spec: docker.ContainerSpec,
+    ready: docker.ReadySpec,
+    *,
+    wait: Callable[..., bool] | None = None,
+    output: Callable[..., WorldOutput] | None = None,
+    monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    wsl_distro: str | None = None,
+) -> StartAnswer:
+    """`wait_ready_quietly()` with the verdict and the server's words kept (T382).
+
+    The bool answer is this one's `.ready`, so the two cannot drift into two
+    rules. Kept apart from the bool because the Tuning tab's restart says WHICH
+    way the world did not come up, with its own lines under Details: it said
+    `restart: done.` over a crash loop on Tortoise (T302 live check, 2026-10-05).
+    """
     wait = wait or docker.wait_ready_for
     look = output or _world_output
     clock = monotonic or time.monotonic
@@ -5028,13 +5080,12 @@ def wait_ready_quietly(
     while True:
         window = min(ready.timeout, ceiling - (clock() - started))
         if window <= 0:
-            return False
+            return StartAnswer("ceiling", _dying_words([before.text], ready.fatal))
         if wait(spec, replace(ready, timeout=window), wsl_distro=wsl_distro):
             # The banner is not the verdict (T71): a world that says `ready...`
             # and then aborts on a missing table is not a server this may
-            # answer True about. The bool half has nowhere to put the words —
-            # the five sentences are the spine's job — but it logs them, so a
-            # management wait that comes back False is not silent about why.
+            # answer True about. The words go back to the caller and to the log,
+            # so a management wait that comes back False is not silent about why.
             after = watch_after_ready(
                 lambda: look(spec, wsl_distro=wsl_distro),
                 clock,
@@ -5044,18 +5095,110 @@ def wait_ready_quietly(
                 fatal=ready.fatal,
             )
             if not after.stopped:
-                return True
+                return StartAnswer("ready")
             logger.warning(
                 f"{spec.world} reported ready and then stopped within "
                 f"{_spell_seconds(READY_GRACE_SECONDS)}: {after.words!r}"
             )
-            return False
+            return StartAnswer("stopped", after.words)
         now = look(spec, wsl_distro=wsl_distro)
         first_restarts = _restart_baseline(first_restarts, now)
         verdict, _ = _read_world(before, now, first_restarts, ready.restart_loop, ready.fatal)
         if verdict != "alive":
-            return False
+            # The current run's log first, then the one before it: after a
+            # restart the abort that ended the old run is not in the new one.
+            return StartAnswer(
+                cast(StartVerdict, verdict), _dying_words([now.text, before.text], ready.fatal)
+            )
         before = now
+
+
+def ready_after_start(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    *,
+    wsl_distro: str | None = None,
+    wait: Callable[..., bool] | None = None,
+    output: Callable[..., WorldOutput] | None = None,
+    monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> StartAnswer:
+    """Wait for `spec`'s world after a start with `entry`'s own ready markers (T382).
+
+    The markers an install's ready stage waits on (`ready_spec_for()`), so a
+    restart from the Tuning tab is held to the rule the install was. An entry
+    with no native block has no markers, and that is said rather than guessed.
+    """
+    native_block = entry.install.native
+    if native_block is None:
+        raise InstallerError(
+            f"{entry.name} has no ready markers, so whether its world came up cannot be asked."
+        )
+    return watch_the_start(
+        spec,
+        ready_spec_for(entry, native_block.ready),
+        wait=wait,
+        output=output,
+        monotonic=monotonic,
+        sleep=sleep,
+        wsl_distro=wsl_distro,
+    )
+
+
+def ready_spec_for(entry: CatalogEntry, markers: ReadyMarkers) -> docker.ReadySpec:
+    """`ReadyMarkers` with `{{REALM_HOST}}`/`{{WORLD_PORT}}` filled, then made a regex.
+
+    `wait_ready()` searches the log with `re.search`, so a literal marker
+    (`regex: false`, the default) is `re.escape`d after filling — otherwise
+    the `.` in `127.0.0.1` is a wildcard, the very thing
+    `docker.azerothcore_ready()` escapes (A5). Tortoise's alternations set
+    `regex: true` and are handed over as written.
+
+    Every pattern is COMPILED here, where `catalog.json` can still be named
+    as the thing to fix. `wait_ready()` calls `re.search` inside its poll
+    loop, so a `regex: true` marker with an unbalanced group would raise
+    `re.error` in the middle of the last stage of an install — after the
+    clone, the build and the import — and read as a crash rather than as a
+    typo in a data file (A.2 review finding).
+    """
+    tokens = {"REALM_HOST": INSTALL_REALM_HOST, "WORLD_PORT": str(entry.ports.world)}
+
+    def marker(text: str) -> str:
+        if markers.regex:
+            pattern = composegen.fill(text, tokens)
+        else:
+            # `{{REALM_HOST}}` becomes a wildcard rather than a literal, and
+            # the port beside it stays exact. See `REALM_ADDRESS_PATTERN`.
+            halves = text.split(REALM_HOST_TOKEN)
+            pattern = REALM_ADDRESS_PATTERN.join(
+                re.escape(composegen.fill(half, tokens)) for half in halves
+            )
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise InstallerError(
+                f"{entry.name}'s ready marker {text!r} is not a usable pattern "
+                f"({exc}). Fix its ready marker in catalog.json; nothing was started."
+            ) from exc
+        return pattern
+
+    try:
+        world = marker(markers.world)
+        auth = marker(markers.auth) if markers.auth is not None else None
+        fatal = marker(markers.fatal) if markers.fatal is not None else None
+    except composegen.ComposeGenError as exc:
+        raise InstallerError(f"{entry.name}'s ready markers are broken: {exc}") from exc
+    # The catalogue's `timeout_s` wins over `docker.ReadySpec`'s own 480s
+    # default, which covers only a spec written in Python. Data beats a
+    # constant wherever there is data, and this is the only place the two
+    # numbers meet.
+    return docker.ReadySpec(
+        world=world,
+        auth=auth,
+        fatal=fatal,
+        timeout=float(markers.timeout_s),
+        restart_loop=markers.restart_loop,
+    )
 
 
 @dataclass
@@ -12161,59 +12304,8 @@ class StagedInstaller:
         )
 
     def _ready_spec(self, markers: ReadyMarkers) -> docker.ReadySpec:
-        """`ReadyMarkers` with `{{REALM_HOST}}`/`{{WORLD_PORT}}` filled, then made a regex.
-
-        `wait_ready()` searches the log with `re.search`, so a literal marker
-        (`regex: false`, the default) is `re.escape`d after filling — otherwise
-        the `.` in `127.0.0.1` is a wildcard, the very thing
-        `docker.azerothcore_ready()` escapes (A5). Tortoise's alternations set
-        `regex: true` and are handed over as written.
-
-        Every pattern is COMPILED here, where `catalog.json` can still be named
-        as the thing to fix. `wait_ready()` calls `re.search` inside its poll
-        loop, so a `regex: true` marker with an unbalanced group would raise
-        `re.error` in the middle of the last stage of an install — after the
-        clone, the build and the import — and read as a crash rather than as a
-        typo in a data file (A.2 review finding).
-        """
-        tokens = {"REALM_HOST": INSTALL_REALM_HOST, "WORLD_PORT": str(self.entry.ports.world)}
-
-        def marker(text: str) -> str:
-            if markers.regex:
-                pattern = composegen.fill(text, tokens)
-            else:
-                # `{{REALM_HOST}}` becomes a wildcard rather than a literal, and
-                # the port beside it stays exact. See `REALM_ADDRESS_PATTERN`.
-                halves = text.split(REALM_HOST_TOKEN)
-                pattern = REALM_ADDRESS_PATTERN.join(
-                    re.escape(composegen.fill(half, tokens)) for half in halves
-                )
-            try:
-                re.compile(pattern)
-            except re.error as exc:
-                raise InstallerError(
-                    f"{self.entry.name}'s ready marker {text!r} is not a usable pattern "
-                    f"({exc}). Fix its ready marker in catalog.json; nothing was started."
-                ) from exc
-            return pattern
-
-        try:
-            world = marker(markers.world)
-            auth = marker(markers.auth) if markers.auth is not None else None
-            fatal = marker(markers.fatal) if markers.fatal is not None else None
-        except composegen.ComposeGenError as exc:
-            raise InstallerError(f"{self.entry.name}'s ready markers are broken: {exc}") from exc
-        # The catalogue's `timeout_s` wins over `docker.ReadySpec`'s own 480s
-        # default, which covers only a spec written in Python. Data beats a
-        # constant wherever there is data, and this is the only place the two
-        # numbers meet.
-        return docker.ReadySpec(
-            world=world,
-            auth=auth,
-            fatal=fatal,
-            timeout=float(markers.timeout_s),
-            restart_loop=markers.restart_loop,
-        )
+        """`ready_spec_for()` for this installer's entry."""
+        return ready_spec_for(self.entry, markers)
 
     # -- what the realm advertises, once everything else has finished ----
 

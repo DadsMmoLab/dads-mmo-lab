@@ -1856,6 +1856,14 @@ class ControllerServices:
     the read and the two writes share a fact -- which account is the app's own
     -- and splitting them would be three places to remember it.
     """
+    ready_after_start: Callable[[], native.StartAnswer] | None = None
+    """Wait for the world after a start by the install's ready rule, and say what it did (T382).
+
+    What the Tuning tab's Restart and Recreate wait on before they say done:
+    `native.ready_after_start()` with this game's entry and world container,
+    wired once for every game in `for_entry()`. None (a test's fake services)
+    makes the press say only that the server was started, never that it is up.
+    """
     module_sql: ModuleSqlRoute | None = None
     """Run this install's importer over the modules on disk, or None if it has none.
 
@@ -2240,12 +2248,16 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return factory(entry, server_dir, client_dir, wsl_distro)
+            return _with_the_ready_wait(factory(entry, server_dir, client_dir, wsl_distro), entry)
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
-        return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
+        return replace(
+            _with_the_ready_wait(services, entry),
+            client_dir=client_dir,
+            play_client_dir=play_client_dir,
+        )
 
     @classmethod
     def for_wotlk(
@@ -2269,6 +2281,25 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_the_ready_wait(services: ControllerServices, entry: CatalogEntry) -> ControllerServices:
+    """`services` with `ready_after_start` aimed at its own controller's world (T382).
+
+    In `for_entry()` rather than in each game's factory, so no game can be left
+    without it: every factory hands back a controller, and its spec and distro
+    are the container the start just started and the daemon it runs on.
+    """
+    controller = services.controller
+    return replace(
+        services,
+        ready_after_start=partial(
+            native.ready_after_start,
+            entry,
+            controller.spec,
+            wsl_distro=controller.wsl_distro,
+        ),
+    )
 
 
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
@@ -17603,9 +17634,11 @@ class ControllerView(QWidget):
             return
         self._set_busy(True, "Restart")
         self._hold_badge("restarting")
-        self.tuning_report.setPlainText("restarting the server…")
+        self.tuning_report.setPlainText(TUNING_RESTARTING)
         self._run(
-            lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
+            lambda: ("restart", self._do_restart(), self._world_after_start()),
+            self._tuning_job_done,
+            self._tuning_job_failed,
         )
 
     @Slot()
@@ -17626,9 +17659,9 @@ class ControllerView(QWidget):
             return
         self._set_busy(True, "Recreate containers")
         self._hold_badge("restarting")
-        self.tuning_report.setPlainText("recreating the containers…")
+        self.tuning_report.setPlainText(TUNING_RECREATING)
         self._run(
-            lambda: ("recreate", self._do_recreate()),
+            lambda: ("recreate", self._do_recreate(), self._world_after_start()),
             self._tuning_job_done,
             self._tuning_job_failed,
         )
@@ -17658,6 +17691,16 @@ class ControllerView(QWidget):
             controller.start()
         return removed
 
+    def _world_after_start(self) -> native.StartAnswer | None:
+        """After a Restart's or Recreate's start: wait for the world by the install's rule (T382).
+
+        On the worker, in the press's own job and AFTER the lifecycle command, so
+        a restore is held off for the stop and the start and not for a world's
+        whole load. None when the tab was handed no wait (`ready_after_start`).
+        """
+        wait = self.services.ready_after_start
+        return wait() if wait is not None else None
+
     @Slot(object)
     def _tuning_job_done(self, answer: object) -> None:
         """The handler for a finished restart or recreate: forget what it covered.
@@ -17671,7 +17714,7 @@ class ControllerView(QWidget):
         the worker thread, and this wrote the report and started the status
         read from there.
         """
-        job = cast(tuple[str, object], answer)[0]
+        job, _, world = cast(tuple[str, object, "native.StartAnswer | None"], answer)
         self._set_busy(False)
         self._tuning_owed.pop("restart", None)
         if job == "recreate":
@@ -17680,8 +17723,14 @@ class ControllerView(QWidget):
         zone = self._say_zone_problem()
         if self._tuning_from_banner and zone is None:
             self.problem_label.setText("")  # what this tab said before the press is past
+        said, details = _what_the_start_did(job, world, self.services.controller)
+        if self._tuning_from_banner and world is not None and not world.ready:
+            self.problem_label.setText(said)
         self._tuning_from_banner = False
-        self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
+        self.tuning_report.setPlainText(said + (f"\n{zone}" if zone else ""))
+        self.tuning_details.set_text(details)  # after the report: a new report clears it
+        if world is not None and not world.ready:
+            self.action_failed.emit(said)
         self.refresh_status()
 
     @Slot(object)
