@@ -28,6 +28,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- Long questions such as **Rebuild the server…** scroll inside a dialog that fits the screen; the buttons always show.
 - A fresh Centurion server no longer restarts over and over at the end of its install.
 - A fresh Centurion server no longer crashes on its first start while it makes its bots.
 - On Windows, Centurion no longer stalls at start-up; older installs need **Repair server files…**, then **Recreate containers…**.
