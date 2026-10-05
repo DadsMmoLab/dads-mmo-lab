@@ -196,6 +196,13 @@ MODULE_SURFACE_AFTER_7_2 = {
     # Added deliberately with T228: the mark two of this module's failure types
     # carry so the log panel shows them after a Stop. A marker class, imported.
     "TrueAfterStop",
+    # Added deliberately with T247/T250: Stop taking effect, as a type the log
+    # panel reads as "cancelled" (`StopTookEffect`, imported), and its two
+    # install kinds -- any stage, and the ready wait. Exception types, not
+    # machinery.
+    "StopTookEffect",
+    "InstallStopped",
+    "ReadyWaitStopped",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

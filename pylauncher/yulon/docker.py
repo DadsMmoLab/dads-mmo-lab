@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
 from yulon import ansi, platform, runner, wsl
+from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
 from yulon.ui import lines
@@ -3025,7 +3026,19 @@ WORLD_RESTARTED_STOPPING = (
 )
 """Said when `StopControl.restart_ends_the_wait` ends a wait on a new run (T159)."""
 
-LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED})
+STOP_WAITS_FOR_THE_LOAD = (
+    "Stop was pressed: Yu'lon lets the world server finish loading (stopping it mid-load can "
+    "damage the database), then puts the build from before back."
+)
+"""Said once when Stop lands in a rebuild's ready wait (T247, the lead's words, 2026-10-05).
+
+T158's rule reaches the ready wait: a new world still loading may be in the
+middle of its database update, so the Stop is heard at once and acted on once
+the load has ended -- ready, crashed or out of time. A member of
+`LOAD_WAIT_LINES`, so the panel offers "Stop now anyway" beside it.
+"""
+
+LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED, STOP_WAITS_FOR_THE_LOAD})
 """The sentences said while a stop is WAITING: the ones "Stop now anyway" is offered beside."""
 
 FORCE_STOP_WARNINGS = frozenset({WORLD_STOPPED_ANYWAY})
@@ -3045,13 +3058,14 @@ on. So a look takes at most a minute, and the events are read between looks and 
 pause, which wakes for them within a quarter of a second."""
 
 
-class StopAbandoned(DockerCommandError, SaidByYulon):
+class StopAbandoned(DockerCommandError, SaidByYulon, StopTookEffect):
     """The stop was given up while it waited for a loading world; NOTHING was sent (T158).
 
     Raised when the caller's `abandon` event is set -- the app closing, a
     rebuild cancelled before it replaced anything -- so the world is left
     running rather than signalled mid-load. Its own type so a caller that owns
-    the abandon can tell it from a stop that failed.
+    the abandon can tell it from a stop that failed, and `StopTookEffect`
+    (T250) so the log panel reads it as the job's Stop.
     """
 
 
@@ -3871,6 +3885,16 @@ class ReadySpec:
     timeout: float = _READY_TIMEOUT_SECONDS
     interval: float = _POLL_INTERVAL_SECONDS
     restart_loop: int = 4
+    cancel: threading.Event | None = field(default=None, compare=False, repr=False)
+    """The job's Stop (T247): once set, `wait_ready()` ends at its next look, answering False.
+
+    Not part of what "ready" means, so it takes no part in comparing two specs
+    or in the one-line form the wait logs. Carried here rather than as an
+    argument because every ready-wait seam already takes `(spec, ready)`, and
+    the one that must hear it is the real `wait_ready()` underneath them. Until
+    T247 a Stop pressed during the ready wait was acted on only when the wait
+    ended by itself: 83 s on m910q (2026-10-05), on a crash loop's verdict.
+    """
 
 
 AZEROTHCORE_READY_WORLD = "ready..."
@@ -3952,6 +3976,11 @@ def wait_ready(
 
     Worst-case wall-clock before `False` is `timeout + interval`, as for
     `wait_db_healthy()`. `spec.interval` must be positive (same reason).
+
+    `spec.cancel` set (T247, the job's Stop) is also `False`: the pause between
+    looks is a wait on it rather than a sleep, so the wait ends inside the pause
+    the press lands in, and no look is taken after it. The caller asks the
+    event to tell that answer from a server that is not up.
     """
     if spec.interval <= 0:
         raise ValueError(f"interval must be positive, got {spec.interval!r}")
@@ -3964,13 +3993,16 @@ def wait_ready(
     cli_missing_since: float | None = None
     first_restarts: int | None = None
     while time.monotonic() < deadline:
+        if spec.cancel is not None and spec.cancel.is_set():
+            logger.info(f"wait_ready(): Stop was pressed; ending the wait for {world_container}")
+            return False
         try:
             running = _status_safe(wsl_distro=wsl_distro)
         except DockerCliMissingError:
             cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_ready()")
             if give_up:
                 return False
-            time.sleep(spec.interval)
+            _ready_pause(spec)
             continue
         cli_missing_since = None
         if running is not None and all(name in running for name in wanted):
@@ -4011,8 +4043,16 @@ def wait_ready(
                 and _auth_ready(auth_container, spec, wsl_distro=wsl_distro)
             ):
                 return True
-        time.sleep(spec.interval)
+        _ready_pause(spec)
     return False
+
+
+def _ready_pause(spec: ReadySpec) -> None:
+    """`wait_ready()`'s pause between looks: a sleep, or a wait its Stop can end (T247)."""
+    if spec.cancel is None:
+        time.sleep(spec.interval)
+    else:
+        spec.cancel.wait(spec.interval)
 
 
 def _auth_ready(auth_container: str, spec: ReadySpec, *, wsl_distro: str | None = None) -> bool:
@@ -4760,6 +4800,14 @@ class AttachedRun:
 
     returncode: int
     tail: tuple[str, ...] = ()
+    stop_seen: bool = False
+    """The job's Cancel was already set when the command returned (T250 review).
+
+    Set by the engine's bridge (`native.StagedInstaller._pump()`), never here.
+    A bare exit 1 is how a docker CLI ended by Stop exits on Windows, and how
+    many real failures exit everywhere; only one that came after the Stop is
+    the Stop's.
+    """
 
 
 def cli_missing_run(run: AttachedRun) -> bool:

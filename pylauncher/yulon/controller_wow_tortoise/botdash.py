@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from yulon import docker
+from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.catalog import bot_dashboard as files
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
@@ -80,6 +81,19 @@ is there so a daemon that hangs can never hold the server's own Start."""
 
 class SwitchError(RuntimeError):
     """A refusal or a failure, in the words the log panel shows."""
+
+
+class SwitchStopped(SwitchError, StopTookEffect):
+    """The player's Stop ended a switch before it changed anything (T250): "cancelled"."""
+
+
+class RebuildLeftOwed(SwitchError, TrueAfterStop):
+    """A dashboard rebuild that did not finish: the old dashboard stopped, and a rebuild owed.
+
+    `TrueAfterStop` (T250 review): a Stop that ended the build ("the build was
+    stopped") is not a clean cancel here -- the old dashboard was stopped on
+    the way out, and the debt recorded -- so the sentence is shown after it.
+    """
 
 
 @dataclass
@@ -129,14 +143,14 @@ class Dashboard:
             cancel=cancel,
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
-            raise SwitchError("Stopped before anything was changed. The dashboard is still off.")
+            raise SwitchStopped("Stopped before anything was changed. The dashboard is still off.")
         if run.returncode != 0:
             raise SwitchError(
                 f"The dashboard could not be built (exit {run.returncode}), so nothing was "
                 f"changed. Its last words were: {docker.last_words(run.tail, from_build=True)}"
             )
         if cancel is not None and cancel.is_set():
-            raise SwitchError("Stopped before anything was changed. The dashboard is still off.")
+            raise SwitchStopped("Stopped before anything was changed. The dashboard is still off.")
         try:
             # A record an interrupted Off left behind would keep the next
             # Start from bringing this new dashboard up (T162).
@@ -308,7 +322,7 @@ class Dashboard:
         failed = yield from self._rebuild(cancel)
         if failed is not None:
             yield from self._stop_until_rebuilt(failed.why)
-            raise SwitchError(
+            raise RebuildLeftOwed(
                 f"The dashboard could not be rebuilt ({failed.why}). Press {REBUILD_PRESS} "
                 "to try again."
             )
