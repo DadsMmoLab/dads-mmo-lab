@@ -334,3 +334,76 @@ def test_a_server_that_takes_the_command_and_closes_is_not_a_dead_channel() -> N
 
     assert reply.outcome == "silent", reply.outcome
     assert "closed" in reply.text
+
+
+# -- T226: a command that ran and printed nothing ----------------------------
+
+_EMPTY = """<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:ns1="urn:AC">
+ <SOAP-ENV:Body>
+  <ns1:executeCommandResponse>{result}</ns1:executeCommandResponse>
+ </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+"""
+
+
+def test_a_command_that_ran_and_printed_nothing_is_answered_with_empty_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T226, measured on the Centurion proof (yulon-ubuntu2, 2026-10-04).
+
+    `revive Joradan` for an offline character came back HTTP 200 with
+    `<ns1:executeCommandResponse><result/></ns1:executeCommandResponse>`: the
+    offline branch prints nothing, and the server had run it (at_login=256, the
+    corpse gone). An empty print buffer is still a result.
+    """
+
+    def handle(handler: object, body: str) -> None:
+        _respond(handler, 200, _EMPTY.format(result="<result/>"))
+
+    with caplog.at_level(logging.WARNING), _server(handle) as endpoint:
+        reply = soap.execute(endpoint, "revive Joradan")
+
+    assert reply.outcome == "answered", reply
+    assert reply.text == ""
+    assert reply.http_status == 200
+    assert "neither a result nor a fault" not in caplog.text
+
+
+@pytest.mark.parametrize("result", ["<result />", '<result xsi:nil="true"/>'])
+def test_every_spelling_of_an_empty_result_element_is_an_answer(result: str) -> None:
+    """gSOAP may put a space before the slash or an attribute on the element."""
+    reply = soap._classify(200, _EMPTY.format(result=result))
+
+    assert reply.outcome == "answered", reply
+    assert reply.text == ""
+
+
+def test_a_result_element_with_an_attribute_still_carries_its_text() -> None:
+    reply = soap._classify(
+        200, _EMPTY.format(result='<result xsi:type="xsd:string">Done.</result>')
+    )
+
+    assert reply.outcome == "answered", reply
+    assert reply.text == "Done."
+
+
+def test_a_fault_beside_an_empty_result_is_still_a_refusal() -> None:
+    """Fault before result holds for the empty element too."""
+    body = (
+        "<SOAP-ENV:Fault><faultstring>Character not found</faultstring></SOAP-ENV:Fault>"
+        "<result/>"
+    )
+
+    reply = soap._classify(500, body)
+
+    assert reply.outcome == "refused"
+    assert reply.text == "Character not found"
+
+
+@pytest.mark.parametrize("element", ["<results/>", "<resultset/>", "<result-code/>"])
+def test_an_element_that_only_starts_with_result_is_not_a_result(element: str) -> None:
+    reply = soap._classify(200, _EMPTY.format(result=element))
+
+    assert reply.outcome == "unreadable", reply
