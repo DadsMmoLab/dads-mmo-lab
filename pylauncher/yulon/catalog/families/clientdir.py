@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from yulon import client_names
 from yulon.catalog.catalog import ClientSpec, MpqDepth
 from yulon.catalog.preflight import GIB, Check
 from yulon.log import get_logger
@@ -116,8 +117,10 @@ def validate(
         )
     checks: list[Check] = [Check(CLIENT_CHECK, "pass", f"{client_dir} has a {DATA_DIR} directory")]
     if spec.required_file is not None:
-        required = client_dir.joinpath(*spec.required_file.split("/"))
-        if not required.is_file():
+        # Found whatever its case, so `Data/lichking.mpq` is the file on a
+        # case-sensitive disk too, and named as the disk names it (T227).
+        required = client_names.find(client_dir, spec.required_file)
+        if required is None or not required.is_file():
             checks.append(
                 Check(
                     REQUIRED_CHECK,
@@ -129,7 +132,8 @@ def validate(
                 )
             )
             return tuple(checks)
-        checks.append(Check(REQUIRED_CHECK, "pass", f"{spec.required_file} is there"))
+        found = required.relative_to(client_dir).as_posix()
+        checks.append(Check(REQUIRED_CHECK, "pass", f"{found} is there"))
     wrong_locale = _wrong_locale(client_dir, data, spec)
     if wrong_locale is not None:
         checks.append(wrong_locale)

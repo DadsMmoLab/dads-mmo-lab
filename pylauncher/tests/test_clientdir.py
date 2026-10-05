@@ -621,3 +621,61 @@ def test_a_spec_naming_locales_must_also_require_the_locale_folder() -> None:
         ClientSpec(required_file=None, locales=("enUS",))
     with pytest.raises(ValidationError, match="String should match pattern"):
         ClientSpec(required_file=None, locale_mpq_required=True, locales=("en/US",))
+
+
+# -- T227: a client whose archives are named in lower case -------------------
+
+
+def _centurion_spec() -> ClientSpec:
+    """The real catalog's Centurion client rule: `Data/lichking.MPQ`, enUS archives."""
+    from yulon.catalog.catalog import load_catalog
+
+    native = load_catalog().get("wow-centurion").install.native
+    assert native is not None and native.trinitycore is not None
+    return native.trinitycore.client
+
+
+def _lowercase_335a(root: Path) -> Path:
+    """A complete 3.3.5a enUS client whose archive names are all lower case.
+
+    How the Centurion proof's client looked (yulon-ubuntu2, 2026-10-04), and how
+    clients copied from Windows or unpacked by some tools arrive.
+    """
+    data = root / "client" / "Data"
+    (data / "enus").mkdir(parents=True)
+    for name in ("common", "common-2", "expansion", "lichking", "patch", "patch-2", "patch-3"):
+        (data / f"{name}.mpq").write_bytes(b"MPQ")
+    for name in ("locale-enus", "speech-enus", "patch-enus"):
+        (data / "enus" / f"{name}.mpq").write_bytes(b"MPQ")
+    return root / "client"
+
+
+def test_a_lowercase_335a_client_passes_on_a_case_sensitive_disk(tmp_path: Path) -> None:
+    """T227: refused on Linux as 'Data/lichking.MPQ is missing' while it was right there."""
+    folder = _lowercase_335a(tmp_path)
+
+    checks = clientdir.validate(folder, _centurion_spec(), free_bytes=lambda _p: PLENTY)
+
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    required = next(check for check in checks if check.name == clientdir.REQUIRED_CHECK)
+    assert required.verdict == "pass"
+    assert "Data/lichking.mpq" in required.detail, "the name said is the one on disk"
+    assert sorted(p.name for p in (folder / "Data").iterdir() if p.is_file())[3] == (
+        "lichking.mpq"
+    ), "nothing in the player's client was renamed"
+    assert not (folder / "Data" / "lichking.MPQ").exists()
+
+
+def test_a_folder_wearing_the_required_file_s_name_in_another_case_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The match is on the name; a folder is not the archive whatever it is called."""
+    folder = _lowercase_335a(tmp_path)
+    (folder / "Data" / "lichking.mpq").unlink()
+    (folder / "Data" / "LICHKING.mpq").mkdir()
+
+    checks = clientdir.validate(folder, _centurion_spec(), free_bytes=lambda _p: PLENTY)
+
+    refused = [check for check in checks if check.verdict == "refuse"]
+    assert [check.name for check in refused] == [clientdir.REQUIRED_CHECK]
+    assert "Data/lichking.MPQ is missing" in refused[0].detail

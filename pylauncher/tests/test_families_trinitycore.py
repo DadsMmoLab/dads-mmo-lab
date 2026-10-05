@@ -622,7 +622,9 @@ STOCK = {
     *(f"Data/{name}.MPQ" for name in ("common", "common-2", "expansion", "lichking")),
     *(f"Data/{name}.MPQ" for name in ("patch", "patch-2", "patch-3")),
     "Data/enUS/locale-enUS.MPQ",
-    "Data/enUS/Patch-enUS.MPQ",
+    # The player's `Patch-enUS.MPQ` is kept and reaches the extractors under the
+    # catalog's `patch-enUS.MPQ`, the name map_extractor opens (T227).
+    "Data/enUS/patch-enUS.MPQ",
 }
 
 
@@ -644,6 +646,57 @@ def test_the_extraction_client_keeps_only_the_stock_archives_and_the_required_pa
     )
     for rel in ("Data/patch-4.MPQ", "Data/patch-Y.MPQ", "Data/enUS/Patch-enUS-5.MPQ"):
         assert (machine.client / rel).is_file(), f"{rel} went from the player's own client"
+
+
+def _lowercase_every_name_under_data(client: Path) -> None:
+    """The player's client as some zips and copies from Windows leave it (T227)."""
+    data = client / "Data"
+    for folder, dirs, files in os.walk(data, topdown=False):
+        for name in [*files, *dirs]:
+            if name != name.lower():
+                os.rename(Path(folder) / name, Path(folder) / name.lower())
+
+
+def test_a_lowercase_client_reaches_the_extractors_under_the_names_they_open(
+    machine: Machine,
+) -> None:
+    """T227: the extractors open `Data/lichking.MPQ` and `Data/enUS/locale-enUS.MPQ` exactly.
+
+    On a case-sensitive disk a client named in lower case gave them nothing to
+    open (map_extractor System.cpp:114-124, :1152-1218 spell every name). The copy
+    is Yu'lon's, so its archives are renamed there to the catalog's spelling; the
+    player's own client keeps its names.
+    """
+    _lowercase_every_name_under_data(machine.client)
+    for rel in ("Data/lichking.mpq", "Data/enus/locale-enus.mpq"):  # T196/T198: flags kept
+        (machine.client / rel).chmod(0o444)
+    before = snapshot(machine.client)
+    lay_for_client_data(machine)
+
+    run_stage(machine, "client-data")
+
+    for program, files in machine.tools.seen.items():
+        archives = {
+            rel for rel in files if rel.startswith("Data/") and rel.casefold().endswith(".mpq")
+        }
+        assert archives == STOCK | {"Data/patch-X.MPQ", "Data/enUS/patch-enUS-A.MPQ"}, program
+        assert files["Data/lichking.MPQ"] == b"MPQ lichking", program
+    assert snapshot(machine.client) == before, "the player's client was changed"
+
+
+def test_a_lowercase_client_s_extraction_is_vouched_for_on_the_next_press(
+    machine: Machine,
+) -> None:
+    """T227: the evidence measures `Data/lichking.mpq`, so a resume skips the hour again."""
+    _lowercase_every_name_under_data(machine.client)
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    runs = len(machine.rec.container_runs)
+
+    said = run_stage(machine, "client-data")
+
+    assert len(machine.rec.container_runs) == runs, "the extractors ran a second time"
+    assert said[0].startswith(f"The map data in {machine.server_dir / 'data'} was already made")
 
 
 def test_packs_that_lay_nothing_under_data_are_no_input_of_the_map_data(machine: Machine) -> None:
