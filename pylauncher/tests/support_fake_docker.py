@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 FAKE_DOCKER = """#!{python}
-import os, pathlib, sys, time
+import os, pathlib, subprocess, sys, time
 
 state = pathlib.Path({state!r})
 args = sys.argv[1:]
@@ -28,6 +28,41 @@ with open(state / "calls.log", "a", encoding="utf-8") as calls:
 if args[:1] == ["run"]:
     name = args[args.index("--name") + 1] if "--name" in args else "unnamed"
     box = state / "containers" / name
+    if (state / "late-create").exists():
+        # The daemon has the create request but not the name yet. It finishes
+        # the create only after the CLI is gone AND the first `rm -f` has asked
+        # for the name, which is the exact window a single `rm -f` misses.
+        daemon = (
+            "import os, pathlib, time\\n"
+            f"state = pathlib.Path({{str(state)!r}}); cli = {{os.getpid()}}\\n"
+            "deadline = time.monotonic() + 120\\n"
+            "def alive():\\n"
+            "    try:\\n"
+            "        os.kill(cli, 0)\\n"
+            "    except OSError:\\n"
+            "        return False\\n"
+            "    return True\\n"
+            f"wanted = 'rm -f {{name}}'\\n"
+            "while time.monotonic() < deadline:\\n"
+            "    log = (state / 'calls.log').read_text(encoding='utf-8')\\n"
+            "    asked = wanted in log.splitlines()\\n"
+            "    if not alive() and asked:\\n"
+            f"        made = state / 'containers' / {{name!r}}\\n"
+            "        made.write_text('created', encoding='utf-8')\\n"
+            "        break\\n"
+            "    time.sleep(0.01)\\n"
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", daemon],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.stderr.write("Unable to find image locally; pulling\\n")
+        sys.stderr.flush()
+        time.sleep({lasts})
+        sys.exit(0)
     box.write_text(str(os.getpid()), encoding="utf-8")
     sys.stderr.write("Cloning into '.'...\\n")
     sys.stderr.write("Receiving objects:   9% (21504/230316)\\r")
@@ -37,10 +72,24 @@ if args[:1] == ["run"]:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
 if args[:2] == ["rm", "-f"]:
+    box = state / "containers" / args[2]
     if (state / "refuse-rm").exists():
         sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
         sys.exit(1)
-    (state / "containers" / args[2]).unlink(missing_ok=True)
+    if (state / "rm-in-progress").exists() and box.exists():
+        # `--rm` got there first: Moby answers the second removal like this,
+        # and the first one finishes on its own.
+        box.unlink()
+        sys.stderr.write(
+            "Error response from daemon: removal of container "
+            f"{{args[2]}} is already in progress\\n"
+        )
+        sys.exit(1)
+    if not box.exists():
+        sys.stderr.write(f"Error response from daemon: No such container: {{args[2]}}\\n")
+        sys.exit(1)
+    box.unlink()
+    sys.stdout.write(args[2] + "\\n")
 sys.exit(0)
 """
 

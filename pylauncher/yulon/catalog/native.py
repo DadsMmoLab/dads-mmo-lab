@@ -2074,6 +2074,18 @@ class ServersLeftStopped(InstallerError, TrueAfterStop):
     """
 
 
+class RebuildChangedTheServer(InstallerError, TrueAfterStop):
+    """A failed rebuild that had already changed what the server runs (T228 cold review).
+
+    The new build replaced the containers with no rollback to put back, or the
+    rollback put the old build back on a database the new build may have written
+    to, running or not. Its sentence says which, and a Stop does not make it any
+    less true, so the log panel shows it after a Stop too. A failure that changed
+    nothing (a compile stopped before any container moved) stays a plain
+    `InstallerError`, which after a Stop is a clean cancel.
+    """
+
+
 class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
 
@@ -6114,6 +6126,8 @@ class StagedInstaller:
                 # back to. `touched` says whether the containers run it yet.
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
+                if touched:
+                    raise RebuildChangedTheServer(message) from exc
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
                 ctx, refs, kept, touched, str(exc), servers_down=servers_down
@@ -6133,6 +6147,10 @@ class StagedInstaller:
                     touched=message.touched,
                     mixed=message.mixed,
                 ) from exc
+            if touched:
+                # The old build is back, running or not, on whatever the new one
+                # wrote into the database: `_restore_rollback()` says so.
+                raise RebuildChangedTheServer(message) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -6685,6 +6703,10 @@ class StagedInstaller:
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does.
                     raise ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}") from exc
+                if isinstance(exc, RebuildChangedTheServer):
+                    # T228: the rebuild's sentence is true after a Stop, and so is
+                    # this one; the type carries that through.
+                    raise RebuildChangedTheServer(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The

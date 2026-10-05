@@ -3437,3 +3437,109 @@ def test_a_clone_that_fails_on_its_own_still_falls_back_and_ends_nothing(
     )
     assert len(host) == 1 and said[-1] == "host git cloned it"
     assert len(ran) == 1 and "--name" in ran[0], "the streamed clone is named"
+
+
+def _stop_mid_clone(
+    container_git: git.ContainerGit, spec: git.CloneSpec, state: Path
+) -> tuple[list[str], list[BaseException]]:
+    """Clone on a worker thread and send the panel's Stop once the docker CLI is running."""
+    said: list[str] = []
+    outcome: list[BaseException] = []
+
+    def clone() -> None:
+        try:
+            said.extend(container_git.clone_lines(spec))
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is asserted
+            outcome.append(exc)
+
+    worker = threading.Thread(target=clone)
+    worker.start()
+    deadline = time.monotonic() + HANG_BOUND
+    while not any(call.startswith("run ") for call in fake_calls(state)):
+        assert time.monotonic() < deadline, "the docker CLI never started"
+        time.sleep(0.01)
+    assert worker.ident is not None
+    while runner.end_streams_started_on(worker.ident) == 0:
+        assert time.monotonic() < deadline, "the clone's stream never went live"
+        time.sleep(0.01)
+    worker.join(HANG_BOUND)
+    assert not worker.is_alive(), "the stopped clone did not end"
+    return said, outcome
+
+
+def test_a_container_the_daemon_creates_after_the_stop_is_removed_too(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_docker: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T240 cold review: Stop can kill the CLI before the daemon has the name.
+
+    The first `rm -f` then answers "No such container", and the daemon goes on to
+    create the container. So a "gone" is asked again once, after a settle, and
+    the log says what actually happened instead of "ended and removed".
+    """
+    cli, state = fake_docker
+    (state / "late-create").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    caplog.set_level("INFO", logger="yulon.git")
+    said, outcome = _stop_mid_clone(
+        container_git, git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"), state
+    )
+
+    assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
+    removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
+    assert len(removals) == 2 and removals[0] == removals[1], removals
+    assert fake_containers(state) == [], "the late container is still there"
+    assert not [line for line in said if "could not be removed" in line], said
+    logged = [r.getMessage() for r in caplog.records if "clone container" in r.getMessage()]
+    assert any("created after the Stop" in message for message in logged), logged
+    assert not any("ended and removed" in message for message in logged), logged
+
+
+def test_a_removal_already_in_progress_is_a_container_going_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    """T240 cold review: Moby's answer when `--rm` is already removing the container.
+
+    It is the container going, so nothing is said to the player about one left behind.
+    """
+    cli, state = fake_docker
+    (state / "rm-in-progress").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    said, outcome = _stop_mid_clone(
+        container_git, git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"), state
+    )
+
+    assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
+    assert fake_containers(state) == []
+    assert not [line for line in said if "could not be removed" in line], said
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "answer"),
+    [
+        (0, "yulon-git-0\n", "", "removed"),
+        (0, "", "", "gone"),
+        (1, "", "Error response from daemon: No such container: yulon-git-0", "gone"),
+        (
+            1,
+            "",
+            "Error response from daemon: removal of container yulon-git-0 is already in progress",
+            "gone",
+        ),
+        (1, "", "Error response from daemon: the daemon is shutting down", "refused"),
+    ],
+)
+def test_each_answer_of_docker_rm_is_read_for_what_it_says_about_the_container(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, stderr: str, answer: str
+) -> None:
+    """T240: removed, gone (three spellings), or refused. An exit 0 that names nothing is gone."""
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    monkeypatch.setattr(runner, "run", run)
+    said = git._remove_container(["fake-docker"], "yulon-git-0")
+    expected = {"removed": git._REMOVED, "gone": git._GONE}.get(answer, stderr)
+    assert said == expected

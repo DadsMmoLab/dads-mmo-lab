@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
@@ -1204,6 +1205,38 @@ def container_left_line(name: str, dest: Path, reason: str) -> str:
         f"docker rm -f {name}"
     )
 
+
+_REMOVED = "removed"
+_GONE = "gone"
+
+
+def _remove_container(launcher: Sequence[str], name: str) -> str:
+    """One `docker rm -f name`: `_REMOVED`, `_GONE`, or the refusal in words (T240).
+
+    `_GONE` is "No such container", an exit 0 that named nothing (a CLI whose
+    `-f` ignores a missing name), and Moby's "removal of container ... is already
+    in progress", which is `--rm` getting there first: the container is going.
+    """
+    try:
+        done = runner.run([*launcher, "rm", "-f", name], timeout=_END_CONTAINER_TIMEOUT)
+    except OSError as exc:
+        return str(exc)
+    said = done.stderr.lower()
+    if done.returncode == 0:
+        return _REMOVED if done.stdout.strip() else _GONE
+    if "no such container" in said or "already in progress" in said:
+        return _GONE
+    return done.stderr.strip() or f"docker rm exited {done.returncode}"
+
+
+_LATE_CREATE_SETTLE = 1.0
+"""How long a stopped clone waits before asking a second time for a container that was gone.
+
+A create request the daemon received before the Stop killed its CLI finishes
+in milliseconds; a second has room for a slow daemon and costs the player one
+second on a Stop that has already been answered. Not a guarantee, and said as
+a bounded guess rather than a proof.
+"""
 
 _END_CONTAINER_TIMEOUT = 60.0
 """How long `docker rm -f` of a stopped clone's container may take before it is given up.
@@ -3008,22 +3041,34 @@ class ContainerGit:
     def _end_container(launcher: Sequence[str], name: str) -> str | None:
         """Kill the container `name` and remove it: `docker rm -f` (T240). Never raises.
 
-        Returns None once it is gone, or why it could not be removed. Already gone
-        is the usual answer and not a failure: `--rm` removes a container whose
-        git exited, and on Linux the CLI passes its own stop on. A refusal is
-        logged and returned rather than raised, because the Stop it serves has
+        Returns None once it is gone, or why it could not be removed; a refusal
+        is logged and returned rather than raised, because the Stop it serves has
         already happened and the run must still end.
+
+        **"Gone" is asked twice (cold review).** It is the usual answer: `--rm`
+        removed a container whose git exited, or Moby is already removing it. But
+        it is also the answer while the daemon is still creating a container
+        whose CLI the Stop killed mid-request: the name is not there yet, and a
+        never-started container appears a moment later. So a "gone" is asked
+        again once, `_LATE_CREATE_SETTLE` later, and the log says which of the
+        three it was.
         """
-        try:
-            done = runner.run([*launcher, "rm", "-f", name], timeout=_END_CONTAINER_TIMEOUT)
-        except OSError as exc:
-            logger.warning(f"could not remove the clone container {name}: {exc}")
-            return str(exc)
-        if done.returncode != 0 and "no such container" not in done.stderr.lower():
-            reason = done.stderr.strip() or f"docker rm exited {done.returncode}"
-            logger.warning(f"could not remove the clone container {name}: {reason}")
-            return reason
-        logger.info(f"the clone container {name} was ended and removed")
+        first = _remove_container(launcher, name)
+        if first is _REMOVED:
+            logger.info(f"the clone container {name} was ended and removed")
+            return None
+        if first is not _GONE:
+            logger.warning(f"could not remove the clone container {name}: {first}")
+            return first
+        time.sleep(_LATE_CREATE_SETTLE)
+        second = _remove_container(launcher, name)
+        if second is _REMOVED:
+            logger.info(f"the clone container {name} was created after the Stop and was removed")
+            return None
+        if second is not _GONE:
+            logger.warning(f"could not remove the clone container {name}: {second}")
+            return second
+        logger.info(f"the clone container {name} was already gone")
         return None
 
     @staticmethod

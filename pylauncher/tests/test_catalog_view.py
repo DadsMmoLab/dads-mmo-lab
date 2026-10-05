@@ -33,13 +33,18 @@ from tests.conftest import (
 from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.installer import InstallEngine, InstallOptions
+from yulon.catalog.installer import (
+    InstallEngine,
+    InstallerError,
+    InstallOptions,
+    WorldStoppedAfterReadyError,
+)
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import CloneSpec, RunnerGit
 from yulon.support import runlog
 from yulon.ui import catalog_view
-from yulon.ui.catalog_view import CatalogView, Identification
-from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.catalog_view import INSTALL_STOPPED_TITLE, CatalogView, Identification
+from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED, LogPanel
 
 
 def _completed() -> subprocess.CompletedProcess[str]:
@@ -751,6 +756,106 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     assert told[0][1] == events[0][3]
     assert panel.status_text() == "cancelled"
     assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back
+
+
+class _StoppedThenKeptInstaller(_CancellableInstaller):
+    """Stopped in the ready wait, then the world came up and stopped: the build is KEPT.
+
+    A double on purpose: what is under test is the view's popup against the
+    panel's header, and the engine raising `WorldStoppedAfterReadyError` after a
+    Stop is driven for real in `test_update_to_latest.py`.
+    """
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield from super().run(options, cancel=cancel, ask=ask)
+        raise WorldStoppedAfterReadyError("The world came up and then stopped; the build was KEPT.")
+
+
+def test_a_stopped_install_that_left_a_kept_build_says_so_in_the_popup_too(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T228 cold review: the header said "Stopped. FAILED: ..." and the popup "Install cancelled".
+
+    The popup now says what the header says, so the two never disagree.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append((a[1], a[2])))  # type: ignore[attr-defined]
+    warned: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append((a[1], a[2])))  # type: ignore[attr-defined]
+    panel = LogPanel()
+    made: list[_StoppedThenKeptInstaller] = []
+
+    def factory(entry: CatalogEntry) -> InstallEngine:
+        made.append(_StoppedThenKeptInstaller(entry))
+        return made[-1]
+
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: events.append((g, ok, m)))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    pump_until(lambda: made[0].streaming.is_set(), "the installer began streaming")
+    panel.stop()
+    wait_for_panel(panel)
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED) and "KEPT" in header, header
+    assert told == [], "a stop that left a kept build is not announced as a plain cancel"
+    assert warned == [(INSTALL_STOPPED_TITLE, header)], warned
+    assert events == [("wow-wotlk", False, header)], events
+
+
+class _FailingInstaller(_CancellableInstaller):
+    """Fails on its own, with nobody pressing Stop."""
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield "cloning"
+        raise InstallerError("The build failed.")
+
+
+def test_an_install_that_fails_without_a_stop_still_says_install_failed(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the popup rule: "Install stopped" only when Stop was pressed."""
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append((a[1], a[2])))  # type: ignore[attr-defined]
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        _FailingInstaller,
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    wait_for_panel(panel)
+
+    assert panel.cancelled is False
+    assert warned == [("Install failed", "InstallerError: The build failed.")], warned
 
 
 def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(

@@ -26,8 +26,9 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
+from tests.conftest import HANG_BOUND
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
+from tests.support_stop import compile_until_stopped, stop_when
 
 # The CMaNGOS half of this file drives a REAL TBC install, and the machinery
 # that lays the SQL a CMaNGOS plan names -- and the import gate it needs --
@@ -2343,38 +2344,29 @@ def _stopped_in_the_ready_wait(
     The new build's ready wait blocks until the panel's Stop sets the press's
     cancel, then answers "not ready", which is the order the m910q check met
     (P9): build, recreate, ready wait, Stop. What the rollback then does is the
-    test's `overrides`.
+    test's `overrides`; `answers` are the ready waits' answers in turn.
     """
-    cancel = threading.Event()
     waiting = threading.Event()
+    gate: list[threading.Event] = []
     answers = list(overrides.pop("answers", [False]))  # type: ignore[call-overload]
 
     def wait_ready(spec: object, ready: object) -> bool:
         if not waiting.is_set():
             waiting.set()
-            cancel.wait(HANG_BOUND)
+            gate[0].wait(HANG_BOUND)
         return bool(answers.pop(0) if len(answers) > 1 else answers[0])
 
     rebuild = bool(overrides.pop("rebuild", False))
     made = engine(rec, wait_ready=wait_ready, **overrides)
     options = InstallOptions(server_dir=server_dir)
-    panel = LogPanel()
-    finished: list[tuple[bool, str]] = []
-    panel.run_finished.connect(lambda ok, message: finished.append((ok, message)))
-    panel.run(
-        lambda: (
-            made.rebuild(options, cancel=cancel)
-            if rebuild
-            else made.update_to_latest(options, cancel=cancel)
-        ),
-        title="Updating",
-        cancel=cancel,
-    )
-    pump_until(waiting.is_set, "the press reached the new build's ready wait")
-    panel.stop()
-    wait_for_panel(panel)
-    process_events()
-    return panel, finished
+
+    def press(cancel: threading.Event) -> Iterator[str]:
+        gate.append(cancel)
+        if rebuild:
+            return made.rebuild(options, cancel=cancel)
+        return made.update_to_latest(options, cancel=cancel)
+
+    return stop_when(press, waiting, "the press reached the new build's ready wait")
 
 
 def test_a_stop_whose_rollback_stopped_early_shows_what_the_press_left(
@@ -2430,22 +2422,94 @@ def test_a_stopped_rebuild_whose_rollback_left_the_servers_stopped_says_start_is
     assert rec.calls.count("start") == 0, "the ground: nothing was started"
 
 
-def test_a_stop_whose_rollback_put_the_old_build_back_still_says_only_cancelled(
+def test_a_stop_whose_rollback_put_the_old_build_back_says_what_the_database_holds(
     qapp: object, tmp_path: Path
 ) -> None:
-    """The other half of T228: a rollback that did its job is a clean cancel.
+    """T228 cold review: "put back and is running" carries a note a Stop must not hide.
 
-    Same press, same Stop, same ready wait; the only difference is that the old
-    build is put back and comes up, so the failure is a plain `InstallerError`.
-    The panel decides by the failure's type, never by its words: this sentence
-    is as long as the other one and says "put back" too.
+    The old build is back and running, but on the database as the new build left
+    it, and the sources went back under it. Every word of that is true after a
+    Stop, so it is shown under "Stopped".
     """
     rec, server_dir = _ready(tmp_path)
     panel, finished = _stopped_in_the_ready_wait(rec, server_dir, answers=[False, True])
 
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "put back and is running again" in header, header
+    assert "is NOT put back by this" in header, header
+    assert header.endswith(native.SOURCES_PUT_BACK_NOTE), header
+    assert finished and finished[0][0] is False, finished
+    assert set(_heads(rec, server_dir).values()) == {OLD}, "the ground: the sources went back"
+
+
+def test_a_stop_whose_old_build_did_not_come_up_either_says_so(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228 cold review: the old build was put back and did not report ready either."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, answers=[False, False])
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "did not report ready either" in header, header
+    assert finished and finished[0][0] is False, finished
+
+
+def test_a_stop_in_the_replace_before_any_container_moved_says_only_cancelled(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The rollback's untouched return: the tags went back, no container moved, sources back.
+
+    The recreate waits on the world's load until Stop, then gives up before its
+    signal. Nothing that runs was changed, so this is a clean cancel.
+    """
+    rec, server_dir = _ready(tmp_path)
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+
+    def give_up(control: object) -> None:
+        reached.set()
+        gate[0].wait(HANG_BOUND)
+        raise docker.StopAbandoned("the world was still loading")
+
+    rec.on_recreate = give_up
+    made = engine(rec)
+    options = InstallOptions(server_dir=server_dir)
+
+    def press(cancel: threading.Event) -> Iterator[str]:
+        gate.append(cancel)
+        return made.update_to_latest(options, cancel=cancel)
+
+    panel, finished = stop_when(press, reached, "the replace was waiting on the world")
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
+    assert set(_heads(rec, server_dir).values()) == {OLD}
+
+
+def test_a_stop_during_the_compile_puts_everything_back_and_says_only_cancelled(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The clean cancel T228 keeps: stopped before any container moved, nothing left behind.
+
+    The compile is killed, the rollback names are released, the sources go back,
+    and the server runs the build it had. The failure is a plain `InstallerError`
+    as long as the others, so the panel tells them apart by type alone.
+    """
+    rec, server_dir = _ready(tmp_path)
+    compiling = threading.Event()
+    made = engine(rec, build=compile_until_stopped(compiling))
+    options = InstallOptions(server_dir=server_dir)
+    panel, finished = stop_when(
+        lambda cancel: made.update_to_latest(options, cancel=cancel), compiling, "compiling"
+    )
+
     assert panel.cancelled is True
     assert panel.status_text() == "cancelled"
     assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
     assert set(_heads(rec, server_dir).values()) == {OLD}, "the ground: the sources went back"
 
 
