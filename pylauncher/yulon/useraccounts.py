@@ -344,6 +344,10 @@ class DeletePlan:
     enough to know it is still that account: one deleted elsewhere and made
     again under the same name can have the same characters, or none (Codex,
     T301's two reviews)."""
+    character_ids: tuple[int, ...] = ()
+    """The characters' own rows (`guid`), beside `characters`, for the same
+    reason: a character deleted and made again under its old name is not the
+    one the person was asked about (Codex, T301's second normal review)."""
 
 
 def deletion_plan(
@@ -406,8 +410,8 @@ def deletion_plan(
     try:
         raw = sql.query(
             "characters",
-            f"SELECT name, {table.online} FROM {schemas['characters']}.{table.table} "
-            f"WHERE {table.account} = {account_id} ORDER BY name;",
+            f"SELECT guid, name, {table.online} FROM {schemas['characters']}.{table.table} "
+            f"WHERE {table.account} = {account_id} ORDER BY name, guid;",
         )
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         logger.warning(f"could not read {account}'s characters: {exc}")
@@ -418,19 +422,21 @@ def deletion_plan(
                 f"it would remove: {exc}"
             ),
         )
+    ids: list[int] = []
     names: list[str] = []
     online: list[str] = []
     for line in raw.splitlines():
         if not line.strip():
             continue
         fields = line.split("\t")
-        if len(fields) != 2 or not fields[1].strip().isdigit():
+        if len(fields) != 3 or not fields[0].strip().isdigit() or not fields[2].strip().isdigit():
             return DeletePlan(
                 account, problem=f"one of {account}'s characters came back as {line.strip()!r}"
             )
-        names.append(fields[0].strip())
-        if fields[1].strip() != "0":
-            online.append(fields[0].strip())
+        ids.append(int(fields[0]))
+        names.append(fields[1].strip())
+        if fields[2].strip() != "0":
+            online.append(fields[1].strip())
     if online:
         who = _names(online)
         verb = "is" if len(online) == 1 else "are"
@@ -444,7 +450,9 @@ def deletion_plan(
                 "delete the account."
             ),
         )
-    return DeletePlan(account, characters=tuple(names), account_id=account_id)
+    return DeletePlan(
+        account, characters=tuple(names), account_id=account_id, character_ids=tuple(ids)
+    )
 
 
 def delete_account(
@@ -682,7 +690,10 @@ class InstallAccounts:
                     "again while you were being asked. Nothing was deleted."
                 ),
             )
-        if plan.characters != tuple(confirmed.characters):
+        if (plan.characters, plan.character_ids) != (
+            tuple(confirmed.characters),
+            tuple(confirmed.character_ids),
+        ):
             now = _names(plan.characters) if plan.characters else "none"
             return Outcome(
                 False,

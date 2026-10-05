@@ -666,3 +666,23 @@ def test_the_right_click_delete_acts_on_the_row_clicked_not_the_one_chosen_befor
     assert controller_view_module.DELETE_ACCOUNT_LABEL in offered
     assert len(asked.questions) == 1 and "CAROL" in asked.questions[0][0]
     assert wotlk.wire.commands == ["account delete CAROL"]
+
+
+def test_a_character_made_again_under_the_same_name_is_not_the_one_confirmed(
+    wotlk: _Server,
+) -> None:
+    """Codex, the second normal review: a name is not a character either.
+
+    Guglu is deleted and made again on the same account while the question is
+    open; the names match what the person was shown, the rows do not.
+    """
+    plan = wotlk.admin.delete_plan("ALICE")
+    assert plan.characters == ("Ganaar", "Guglu")
+    wotlk.sql.conn.execute(f"DELETE FROM {wotlk.sql.chars}.characters WHERE name = 'Guglu'")
+    wotlk.sql.conn.execute(f"INSERT INTO {wotlk.sql.chars}.characters VALUES (5, 7, 'Guglu', 0)")
+
+    outcome = wotlk.admin.delete_account(plan)
+
+    assert outcome.done is False
+    assert outcome.problem.startswith("ALICE's characters changed while you were being asked")
+    assert wotlk.wire.commands == []
