@@ -23,7 +23,7 @@ from yulon import server_rates, tuning
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.manifest import ConfKey
 
-RATE = ConfKey(key="Rate.XP.Kill", type="float", min=0, max=100)
+RATE = ConfKey(key="Rate.XP.Kill", label="XP from kills", type="float", min=0, max=100)
 
 
 # -- the number rule ----------------------------------------------------------
@@ -36,7 +36,7 @@ def test_a_rate_spelled_with_an_underscore_is_refused_by_the_spelling_rule() -> 
     accepted on the same key, which proves the bound is not what fired.
     """
     tuning.check(RATE, "10")
-    with pytest.raises(tuning.TuningError, match=r"Rate\.XP\.Kill: `1_0` is not a number"):
+    with pytest.raises(tuning.TuningError, match=r"^XP from kills: 1_0 is not a number\. "):
         tuning.check(RATE, "1_0")
 
 
@@ -91,7 +91,7 @@ def test_a_rate_with_more_than_four_decimals_is_refused_so_none_is_too_small_to_
 
 @pytest.mark.parametrize("value", ["1,5", "nan", "inf", "2x", "", " "])
 def test_a_rate_that_is_not_a_decimal_number_is_refused(value: str) -> None:
-    with pytest.raises(tuning.TuningError, match="is not a number"):
+    with pytest.raises(tuning.TuningError, match="is not a number|is empty"):
         tuning.check(RATE, value)
 
 
@@ -109,6 +109,37 @@ def test_a_rate_above_its_ceiling_is_refused_naming_the_ceiling() -> None:
 def test_a_rate_below_its_floor_is_refused_naming_the_floor() -> None:
     with pytest.raises(tuning.TuningError, match="-0.5 is below the smallest allowed value 0"):
         tuning.check(RATE, "-0.5")
+
+
+@pytest.mark.parametrize(
+    ("value", "said"),
+    [
+        (
+            "0.00001",
+            "XP from kills: 0.00001 has too many decimals; use at most 4 digits after the "
+            "point, like 0.0001.",
+        ),
+        ("2,5", "XP from kills: 2,5 is not a number. Write it like 1, 2 or 1.5."),
+        ("", "XP from kills is empty. Write a number like 1, 2 or 1.5."),
+        ("1" + "0" * 39, "XP from kills: 1" + "0" * 39 + " is too large to be a number."),
+        ("150", "XP from kills: 150 is above the largest allowed value 100."),
+        ("-1", "XP from kills: -1 is below the smallest allowed value 0."),
+    ],
+)
+def test_a_rate_refusal_is_a_plain_sentence_naming_the_row_by_its_label(
+    value: str, said: str
+) -> None:
+    """Live test 2026-10-05: the line read "server-rates: ... Rate.XP.Kill: `0.00001` ...".
+
+    A `SaidByYulon` type, so the T248 player-lines guard reads every one of these
+    sentences in the source and fails on a backtick or a command.
+    """
+    from yulon.said import SaidByYulon
+
+    with pytest.raises(tuning.TuningError) as caught:
+        tuning.check(RATE, value)
+    assert str(caught.value) == said
+    assert isinstance(caught.value, SaidByYulon)
 
 
 def test_a_float_key_may_carry_bounds_and_a_text_key_still_may_not() -> None:
@@ -553,7 +584,7 @@ def test_tbc_keeps_its_old_world_and_outland_xp_twins_when_kill_xp_moves(
     [
         ("100.5", "100.5 is above the largest allowed value 100"),
         ("-1", "-1 is below the smallest allowed value 0"),
-        ("1_0", "`1_0` is not a number"),
+        ("1_0", "1_0 is not a number"),
     ],
 )
 def test_a_rate_out_of_range_is_refused_at_save_and_nothing_is_written(
@@ -570,7 +601,9 @@ def test_a_rate_out_of_range_is_refused_at_save_and_nothing_is_written(
     assert path.read_bytes() == before, "one bad value on the card writes none of them"
     assert not list(tmp_path.rglob("*.bak"))
     said = view.tuning_report.toPlainText()
-    assert "nothing was written" in said and f"Rate.Honor: {why}" in said
+    assert said.startswith(f"Nothing was written. Honor gained: {why}"), said
+    for internal in ("Rate.Honor", "`", "server-rates"):
+        assert internal not in said, said
     assert view.tuning_banner.isHidden()
 
 

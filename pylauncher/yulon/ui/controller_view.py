@@ -5848,6 +5848,9 @@ the file is one a person may also want to look at by hand.
 
 TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
 
+TUNING_RATES_REFUSED = "Nothing was written. {why}"
+"""The Server rates card's refusal (T302): the sentence names the row, so no card id."""
+
 TUNING_REFUSED = "{module}: nothing was written — {why}"
 """A refusal that names the key, in the box every other answer on this tab is read in.
 
@@ -18111,7 +18114,9 @@ class ControllerView(QWidget):
                     tuning.check(specs[file].get(key), value)
                 except tuning.TuningError as exc:
                     self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                        TUNING_RATES_REFUSED.format(why=exc)
+                        if (family, module_id) == server_rates.CARD
+                        else TUNING_REFUSED.format(module=module_id, why=exc)
                     )
                     self.action_failed.emit(str(exc))
                     return

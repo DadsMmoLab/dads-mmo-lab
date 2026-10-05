@@ -39,6 +39,7 @@ from typing import Literal
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest
 from yulon.manifest_store import FAMILY_FILES
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -380,6 +381,15 @@ class TuningError(RuntimeError):
     """A refusal that names the key it is about, raised before anything is written."""
 
 
+class RateRefused(TuningError, SaidByYulon):
+    """A `float` value refused in a sentence for the player, naming the row by its label.
+
+    `SaidByYulon` so the player-lines guard (`test_player_lines_name_no_commands`)
+    reads every one of these sentences in the source (live test of T302, 2026-10-05:
+    the line read "Rate.XP.Kill: `0.00001` ...", a key and backticks).
+    """
+
+
 _ADDED_BY = "# Added by Yu'lon on {date} — this key was not in the file."
 """The comment a key the file does not carry is appended under.
 
@@ -450,26 +460,33 @@ and `std::stof` throws `out_of_range` above it while Python's `float()` does not
 
 
 def _check_decimal(key: ConfKey, value: str) -> None:
-    """A `float` key's rule: a plain decimal, inside whichever bounds the key states."""
+    """A `float` key's rule: a plain decimal, inside whichever bounds the key states.
+
+    Each refusal is one plain sentence naming the row as the card does (its
+    label; the key only where a declaration has none).
+    """
+    row = key.label or key.key
     text = value.strip()
+    if not text:
+        raise RateRefused(f"{row} is empty. Write a number like 1, 2 or 1.5.")
     if DECIMAL.fullmatch(text) is None:
-        raise TuningError(f"{key.key}: `{value}` is not a number (write it like 1, 2 or 1.5)")
+        raise RateRefused(f"{row}: {text} is not a number. Write it like 1, 2 or 1.5.")
     _, point, places = text.partition(".")
     if point and len(places) > DECIMAL_PLACES:
-        raise TuningError(
-            f"{key.key}: `{value}` has too many decimals; use at most "
-            f"{DECIMAL_PLACES} digits after the point, like 0.0001"
+        raise RateRefused(
+            f"{row}: {text} has too many decimals; use at most "
+            f"{DECIMAL_PLACES} digits after the point, like 0.0001."
         )
     number = float(text)
     if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
         # Digits only, and still past what the server's float holds: `float()` says
         # `inf` or a large double, and the core's parser says out of range (Codex
         # review and cold review, 2026-10-05).
-        raise TuningError(f"{key.key}: `{value}` is too large to be a number")
+        raise RateRefused(f"{row}: {text} is too large to be a number.")
     if key.min is not None and number < key.min:
-        raise TuningError(f"{key.key}: {text} is below the smallest allowed value {key.min}")
+        raise RateRefused(f"{row}: {text} is below the smallest allowed value {key.min}.")
     if key.max is not None and number > key.max:
-        raise TuningError(f"{key.key}: {text} is above the largest allowed value {key.max}")
+        raise RateRefused(f"{row}: {text} is above the largest allowed value {key.max}.")
 
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false"})
