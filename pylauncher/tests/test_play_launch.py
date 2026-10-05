@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import platform, play_launch
 from yulon.play_launch import LaunchRefusal, LaunchSpec, launch, launch_spec
 
@@ -80,6 +81,18 @@ def test_windows_runs_wow_exe_itself_from_the_play_folder(tmp_path: Path) -> Non
     assert spec.argv == (str(play / "Wow.exe"),)
     assert spec.cwd == play
     assert dict(spec.env) == {}
+
+
+@needs_case_sensitive_disk
+def test_a_game_binary_named_in_lower_case_is_the_one_run(tmp_path: Path) -> None:
+    """T260 audit: `wow.exe`, as some unpackers leave it, is found by its own name on Linux."""
+    play = tmp_path / "play"
+    play.mkdir()
+    (play / "wow.exe").write_bytes(b"MZ")
+
+    spec = _spec(tmp_path, "windows", play=play)
+
+    assert spec.argv == (str(play / "wow.exe"),)
 
 
 # --------------------------------------------------------------------------

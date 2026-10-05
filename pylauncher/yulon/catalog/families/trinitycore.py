@@ -73,7 +73,6 @@ from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefused
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     InstallState,
     Seams,
@@ -82,11 +81,15 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    build_cancel_note,
+    folder_start_refusal,
     owed_start_refusal,
     past_the_tested_pin,
     read_state,
 )
+from yulon.catalog.snapshot import DatabaseSnapshot
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -124,6 +127,18 @@ rewrite that record, and Uninstall removes it with the folder.
 
 REEXTRACT_BUTTON = "Re-extract map data"
 """The Server tab's press for `reextract()`, named in the sentences that ask for it."""
+
+REEXTRACT_PUT_BACK = (
+    "The map data from before this press was put back as it was, with its pathfinding data if "
+    "it had finished, so the server runs on it as before."
+)
+"""What a failed `reextract()` ends with once the old map data is back in place (T241)."""
+
+REEXTRACT_CANCEL_NOTE = (
+    "A Stop puts the map data from before this press back as it was. The temporary copy of "
+    "your client is removed either way."
+)
+"""What a Stop costs in the re-extraction: nothing, the old map data comes back (T241)."""
 
 WORLD_REIMPORT_FILE = ".yulon-world-reimport.json"
 """In the server folder: world table files an update still has to import again (fix round 1).
@@ -249,6 +264,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         reset_unfinished: docker.ResetUnfinished | None = None,
         seams: Seams | None = None,
         mmaps_runner: mmaps.Runner | None = None,
+        database_snapshot: DatabaseSnapshot | None = None,
     ) -> None:
         """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
 
@@ -263,6 +279,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             import_probe=import_probe,
             reset_unfinished=reset_unfinished,
             seams=seams,
+            database_snapshot=database_snapshot,
         )
         self._mmaps_runner = (
             mmaps_runner
@@ -277,7 +294,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=CLIENT_DATA_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
@@ -698,7 +715,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Refuse before `up` when the start check would fail, and make the next press extract.
 
         The evidence file is removed with the refusal, so pressing Install again
-        runs this step's extraction again rather than finding it vouched for.
+        runs this step's extraction again rather than finding it vouched for. Not
+        said during "Re-extract map data" (its old data kept in
+        `extract.PREVIOUS_DIR`): that press puts the old map data and its record
+        back and says so itself (T241).
         """
         tc = self._tc()
         missing = extract.missing_map_data(data_dir, tc.required_maps)
@@ -707,17 +727,20 @@ class TrinityCoreInstaller(CmangosInstaller):
         evidence = data_dir / extract.EVIDENCE_FILE
         try:
             evidence.unlink(missing_ok=True)
-            cleared = "Its record was cleared, so pressing Install again runs client-data again."
         except OSError as exc:
             cleared = (
-                f"Its record {evidence} could not be cleared ({exc}); delete it, then press "
+                f" Its record {evidence} could not be cleared ({exc}); delete it, then press "
                 "Install again to run client-data again."
             )
+        else:
+            cleared = " Its record was cleared, so pressing Install again runs client-data again."
+        if os.path.lexists(data_dir / extract.PREVIOUS_DIR):
+            cleared = ""
         raise InstallerError(
             f"The map data the world server needs at start is not all there "
             f"({'; '.join(missing)}), and without it the server stops with 'Unable to load "
             f"critical files'. The client-data step made it from {original}: check that it is "
-            f"a complete {self.entry.client.version} client. Nothing was started. {cleared}"
+            f"a complete {self.entry.client.version} client. Nothing was started.{cleared}"
         )
 
     # -- conf ------------------------------------------------------------------
@@ -1142,6 +1165,18 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"that into {whose} safely yet. Nothing was changed."
         )
 
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """Nothing: this tree's world server applies no update of its own at start (T217).
+
+        `Updates.EnableDatabases` is 0 in its conf table, and the catalog refuses
+        any other value for this family
+        (`catalog.TrinityCoreConf._the_database_updater_stays_off`). The world
+        tables an update changes are imported with the servers stopped by
+        `servers_down_work()`, whose own `back()` imports them again from the old
+        checkout; the characters and accounts layouts are refused outright.
+        """
+        return ()
+
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """The spine's refusal, then a world update left unfinished (T179).
 
@@ -1157,6 +1192,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             return refused
         if owed_start_refusal(server_dir) is not None:
             return None  # reached by the Rebuild alone: any other press was refused above
+        return self.family_start_refusal(server_dir)
+
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """A world update left unfinished (T179); the spine's question, answered (T223)."""
         return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
@@ -1324,10 +1363,17 @@ class TrinityCoreInstaller(CmangosInstaller):
                         required=frozenset((*changes.reimport, *changes.parts)),
                     )
                 except InstallerError as also:
+                    # T223: the clause about Start only when nothing else refuses one --
+                    # an untouched exit has already left the untested start refusal.
+                    stops = (
+                        ""
+                        if owed_start_refusal(server_dir) is not None
+                        else ", so nothing stops this server starting its new build on the "
+                        "old world tables"
+                    )
                     raise InstallerError(
                         f"{exc} The world tables the new build needs could not be recorded "
-                        f"either ({also.__cause__ or also}), so nothing stops this server "
-                        "starting its new build on the old world tables."
+                        f"either ({also.__cause__ or also}){stops}."
                     ) from exc
                 raise
 
@@ -1412,7 +1458,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         # T197 fix round 8: the finish ends in a start, and mixed image tags refuse every
         # start but the Rebuild's, which goes first (`start_refusal()`). Cannot happen
         # today: a TrinityCore server builds one image, so its tags are never mixed.
-        mixed = owed_start_refusal(server_dir)
+        mixed = folder_start_refusal(server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(f"{mixed} Nothing was changed.")
         self._refuse_unless_the_checkout_is_built(server_dir, state)
@@ -1441,6 +1487,11 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"{rel} is no longer in {self.entry.name}'s sources; its table is left in "
                     "your world database as it is."
                 )
+        # T219: the start this ends in refuses on a map-data fingerprint that can be
+        # neither written nor removed; asked before the world is stopped for the tables.
+        warned = self._refresh_world_data(server_dir)
+        if warned is not None:
+            yield warned
         if runs:
             yield (
                 f"Importing {len(runs)} world tables again into {self.entry.databases.world}, "
@@ -1474,13 +1525,16 @@ class TrinityCoreInstaller(CmangosInstaller):
         Asks the mixed-tags record again (T197 fix round 8), the belt under the finish's
         own refusal of it: this start must not run two builds side by side either.
         """
-        mixed = owed_start_refusal(ctx.server_dir)
+        mixed = folder_start_refusal(ctx.server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(
                 f"The world update is finished, but {mixed} The server was not started."
             )
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         spec = self.entry.container_spec()
@@ -1844,14 +1898,25 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Run the client-data stage again, from a new temporary client; the movement maps go.
 
         The press `needs_reextract()` asks for. With the world server stopped (it
-        reads its map files while it runs): the movement-map job is stopped and its
-        set thrown away through `mmaps.discard()` -- pathfinding off, since the set
-        was made from the map data being replaced -- the extraction's evidence is
-        removed so nothing is vouched for, and `client-data` runs as the install
-        runs it: the same temporary extraction client, the same DBC overlay, the
-        same start check. Then the flag goes and the movement maps start again in
-        the background. The player's own client is the folder given, or the one
-        the map data was last made from.
+        reads its map files while it runs) and any movement-map job stopped, the
+        map data it replaces -- every extraction tool's folders and the record --
+        is moved aside within `data/` (`extract.set_aside()`, T241), so the tools
+        start into empty folders: `vmap4extractor` refuses a `Buildings/` holding
+        the `dir_bin` every finished extraction leaves. Then `client-data` runs as
+        the install runs it: the same temporary extraction client, the same DBC
+        overlay, the same start check.
+
+        Nothing old goes before the new data is in. Only then are the movement
+        maps thrown away through `mmaps.discard()` (they describe the old maps),
+        the set-aside data deleted, the flag removed, and the movement maps started
+        again in the background. A failure, a Stop or a closed stream puts the old
+        map data back with its record (`extract.put_back()`), and the movement maps
+        and pathfinding are as they were. A press that died harder than that (a
+        crash) leaves the old data aside, and the next press puts it back first;
+        only a press whose new data is in marks the old as superseded
+        (`extract.supersede()`), and only that is ever deleted.
+        The player's own client is the folder given, or the one the map data was
+        last made from.
 
         Raises:
             InstallerError: the folder is not one this app installed, no client
@@ -1873,6 +1938,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         if client is None:
             evidence = extract.read_evidence(data_dir)
             client = Path(evidence.client_path) if evidence and evidence.client_path else None
+            if client is None:
+                kept = extract.read_evidence(data_dir / extract.PREVIOUS_DIR)
+                client = Path(kept.client_path) if kept and kept.client_path else None
         if client is None:
             raise InstallerError(
                 f"Yu'lon does not know which game client {self.entry.name}'s map data was made "
@@ -1881,35 +1949,75 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         self._refuse_a_running_world_for_maps()
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
-        if mmaps.background_block(self.entry) is not None:
-            ident = self._install_id(server_dir)
+        background = mmaps.background_block(self.entry) is not None
+        ident = self._install_id(server_dir) if background else ""
+        if background:
             stopped = mmaps.stop_for_route(
                 server_dir,
                 self.entry,
                 "the extraction",
-                clear=True,
+                # Not cleared (T241): the old map data comes back unchanged if the
+                # extraction does not finish, and the tiles made from it with it;
+                # `mmaps.discard()` below throws them away once the new data is in.
+                clear=False,
                 press=REEXTRACT_BUTTON,
                 runner=self._mmaps_runner,
                 install_id=ident,
+                kept_note=(
+                    "If the extraction does not finish, the run continues from them; once it "
+                    "has, they are removed with the old map data."
+                ),
             )
             if stopped is not None:
                 yield stopped
-            mmaps.discard(server_dir, self.entry, install_id=ident)
-            yield (
-                "The pathfinding data made from the old map data was removed, and pathfinding "
-                "is off until it has been made again."
-            )
-        evidence_file = data_dir / extract.EVIDENCE_FILE
-        try:
-            evidence_file.unlink(missing_ok=True)
-        except OSError as exc:
-            raise InstallerError(
-                f"{evidence_file} could not be removed ({exc}), so the extraction would be "
-                f"skipped as done. Delete it, then press “{REEXTRACT_BUTTON}” again."
-            ) from exc
+        yield from self._settle_an_earlier_press(server_dir, data_dir)
+        plan = self._tc().extract
+        extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
         ctx = replace(probe, client_dir=client)
-        stage = replace(self.stage_named("client-data"), recorded=False)
-        yield from self._staged((stage,), ctx)
+        stage = replace(
+            self.stage_named("client-data"), recorded=False, cancel_note=REEXTRACT_CANCEL_NOTE
+        )
+        try:
+            # Inside the `try`: a stream closed at this very line is a way out too.
+            yield (
+                f"The map data in {data_dir} was moved aside, so the tools start into empty "
+                "folders; it is put back if this extraction does not finish."
+            )
+            yield from self._staged((stage,), ctx)
+        except BaseException as failure:
+            told = self._put_the_old_map_data_back(data_dir)
+            if isinstance(failure, InstallerError):  # its words are what the person reads
+                failure.args = (f"{failure} {told}",)  # same object: its type is kept
+            raise
+        try:
+            extract.supersede(data_dir)
+        except OSError as exc:
+            yield (
+                f"warning: the map data from before this press, in "
+                f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}). It takes "
+                "space; delete that folder when the server is stopped. Until it is gone, a "
+                f"later “{REEXTRACT_BUTTON}” may put it back if the map data in place no longer "
+                "matches the server's files by then."
+            )
+        if background:
+            # After the new map data is in, so a failure here must not fail the press
+            # (scoped re-review of e457b29e): the map data is done; this is said.
+            try:
+                mmaps.discard(server_dir, self.entry, install_id=ident)
+            except mmaps.MmapsError as exc:
+                logger.warning(f"the old pathfinding data could not be removed: {exc}")
+                yield (
+                    "warning: the pathfinding data made from the old map data could not be "
+                    f"removed ({exc}), and the server may go on using it. Stop the server and "
+                    f"delete {data_dir / mmaps.MMAPS_DIR}; Yu'lon then switches pathfinding off, "
+                    "and “Make the pathfinding data” on the Server tab makes it again from the "
+                    "new map data."
+                )
+            else:
+                yield (
+                    "The pathfinding data made from the old map data was removed, and "
+                    "pathfinding is off until it has been made again."
+                )
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -1922,6 +2030,85 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."
         )
+
+    def _settle_an_earlier_press(self, server_dir: Path, data_dir: Path) -> Iterator[str]:
+        """What an earlier press left under `data/`: replaced data deleted, kept data put back.
+
+        `extract.PREVIOUS_DIR` is deleted when it is marked replaced
+        (`extract.SUPERSEDED_MARK`), or when it is not but still holds its own
+        record while the map data in place is whole (`_map_data_whole()`): that
+        press finished and could not make the mark (cold review of 4d672a26), and
+        putting the old data back would throw the new away. Otherwise it is old
+        map data a press set aside and never settled -- it died part way, in the
+        extraction or in putting the data back -- so it is the last whole map
+        data, and it is put back over whatever is in place. Never decided from
+        the record in `data/` alone: a put-back restores the record first
+        (`extract.put_back()`), and an old record put back says nothing about the
+        folders still aside (Codex adversarial review, T241).
+        """
+        aside = data_dir / extract.PREVIOUS_DIR
+        try:
+            if extract.drop_superseded(data_dir) or not os.path.lexists(aside):
+                return
+            if os.path.lexists(aside / extract.EVIDENCE_FILE) and self._map_data_whole(
+                server_dir, data_dir
+            ):
+                extract.supersede(data_dir)
+                yield (
+                    f"An earlier “{REEXTRACT_BUTTON}” finished but left the map data from before "
+                    "it; that was deleted first."
+                )
+                return
+            extract.put_back(data_dir)
+        except OSError as exc:
+            raise InstallerError(
+                f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
+                f"settled ({exc}), so nothing was extracted. Close whatever is using that "
+                f"folder, then press “{REEXTRACT_BUTTON}” again."
+            ) from exc
+        yield (
+            f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "
+            "put back first."
+        )
+
+    def _map_data_whole(self, server_dir: Path, data_dir: Path) -> bool:
+        """Is the map data in `data/` what a finished client-data stage leaves? (T241)
+
+        Every tool recorded for its argv with its counts met, the server's own
+        DBCs laid over the extracted ones (`extract.overlaid()`), and the start
+        check's maps and vmaps there -- the three things the stage does, each
+        read off the disk. Anything unread answers False, and the old data comes
+        back.
+        """
+        tc = self._tc()
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return False
+        if not all(
+            extract.satisfied(tool.name, tool.argv, tool.produces, data_dir, current, current)
+            for tool in tc.extract.tools
+        ):
+            return False
+        if extract.missing_map_data(data_dir, tc.required_maps):
+            return False
+        return extract.overlaid(
+            server_dir / tc.checkout / tc.extract.dbc_overlay_from,
+            data_dir / tc.extract.dbc_overlay_to,
+        )
+
+    def _put_the_old_map_data_back(self, data_dir: Path) -> str:
+        """After a failed, stopped or closed extraction: the old map data back; what to say."""
+        try:
+            extract.put_back(data_dir)
+        except OSError as exc:
+            logger.warning(f"the map data set aside in {data_dir} could not be put back: {exc}")
+            return (
+                f"The map data from before this press could not be put back ({exc}); it is kept "
+                f"in {data_dir / extract.PREVIOUS_DIR}, and pressing “{REEXTRACT_BUTTON}” again "
+                "settles it first: it keeps the new map data if that is whole, and puts this "
+                "back otherwise."
+            )
+        return REEXTRACT_PUT_BACK
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""

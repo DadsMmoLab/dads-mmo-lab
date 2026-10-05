@@ -2410,6 +2410,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("catalog/snapshot.py", "prune_older"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to find the older copies "
+        '"Update the server to latest…" took of the databases its new build can change, '
+        "and removes those. It decides a DELETE, bounded twice: only files whose names carry "
+        "the update's own `_before-new-build_` label, and never the copy just taken, so a "
+        "backup the player took and a restore's safety copy are never touched. An OSError "
+        "listing it removes nothing and is logged; the copies stay, which costs disk and "
+        "nothing else"
+    ),
+    ("catalog/snapshot.py", "older_copies"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to NAME the older update copies "
+        "in the sentence a rollback says when the old build did not come up, newest first. It "
+        "decides no write: only files carrying the update's own `_before-new-build_` label, "
+        "never the copy just taken, so a backup the player took is never named as one. An "
+        "OSError listing it names none, and the sentence then says nothing about older copies"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
@@ -2437,6 +2453,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
     ),
+    ("catalog/world_data.py", "_folder_hash"): (
+        "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
+        "file's path, size and modification time into the fingerprint a Windows world "
+        "server's volume copy is compared by. It decides no write by itself: what it answers "
+        "is a line in `data/.yulon-world-data`, and the copy inside the container is what "
+        "acts on it. A folder that is not there answers `-` (the server sees it empty); one "
+        "that cannot be listed raises, and `refresh()` then writes nothing and says so, so "
+        "the copy keeps following the last fingerprint written"
+    ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "
         "preflight's credit to a resumed install; it never writes, never enters a link or a "
@@ -2462,6 +2487,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
+    ),
+    ("catalog/build_context.py", "_sorted_entries"): (
+        "T224. Lists the build context, the server folder, the way Docker's own walk "
+        "filters it, to fingerprint the files a finished build was made from. It decides no "
+        "write: it decides whether a kept build may be reused instead of compiling. Every "
+        "OSError, like every other fact it cannot read, answers None, and None never matches, "
+        "so the server is then compiled"
     ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
@@ -2841,6 +2873,25 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`data/dbc` in the server folder, through a temporary name renamed into place. "
         "Read-only on the checkout; it writes only under the install's own `data/`, and a "
         "folder with no files is a refusal, never a quiet no-op"
+    ),
+    ("catalog/families/extract.py", "_spelled"): (
+        "T260. Lists one folder of the player's client -- the client itself, its `Data/`, "
+        "a locale folder in it -- to name each entry in the view of links the CMaNGOS map "
+        "tools read it through. Read-only on the client; the links are written only under "
+        "the server folder's `.yulon-client-view`, and a listing that fails is an OSError "
+        "the extract stage refuses on, saying nothing was extracted"
+    ),
+    ("catalog/families/extract.py", "overlaid"): (
+        "T241. Lists the server's own checkout folder `dbc_overlay_from` to ask whether each "
+        "file is already under `data/dbc` with the same size and date, which is how a "
+        "re-extraction tells new map data that finished from a press that died. Read-only; "
+        "a folder that cannot be read answers False, which puts the old map data back"
+    ),
+    ("catalog/families/extract.py", "put_back"): (
+        "T241. Lists `data/.yulon-previous`, which only a re-extraction makes, to move each "
+        "folder of the old map data back over the new extraction's partial output. It "
+        "decides no write outside the install's own `data/`; a folder that is not there "
+        "answers that nothing was set aside"
     ),
     ("catalog/families/extract.py", "missing_map_data"): (
         "T179 Task 3. Lists `data/maps` under the server folder to ask whether a map file "

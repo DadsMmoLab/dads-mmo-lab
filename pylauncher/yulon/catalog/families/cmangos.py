@@ -66,7 +66,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
@@ -84,9 +84,9 @@ from yulon.catalog.catalog import (
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
+    ERROR_RUN_INSTALL,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
@@ -101,12 +101,14 @@ from yulon.catalog.native import (
     _put_all,
     _speaking,
     _stop_control,
+    build_cancel_note,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
     stop_abandoned_worker,
 )
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -258,7 +260,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("extract", self._extract, cancel_note=extract.EXTRACT_CANCEL_NOTE),
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),
@@ -354,6 +356,38 @@ class CmangosInstaller(StagedInstaller):
         yield "Source patches are in place."
 
     # -- what T64's update route needs from this family ------------------
+
+    AUTO_UPDATE_KEY: ClassVar[str] = "Database.AutoUpdate.Enabled"
+    """The conf key that switches a CMaNGOS-lineage world server's own start-time updater on."""
+
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """Login and characters when this tree's world server migrates them at start (T217).
+
+        Read off the entry's own conf table, never off its id: a tree whose
+        `mangosd.conf` sets `Database.AutoUpdate.Enabled` to 1 runs its AutoUpdater
+        on every start, and that applies the new core's (and TortoiseBots') login,
+        characters and world migrations (`controller_wow_tortoise/autoupdate.py`;
+        Tortoise's conf table, "5 character and 3 world module migrations applied at
+        first start", measured on yulon-arch 2026-09-11). TBC and Vanilla set no such
+        key and their `*-db` repositories stay on their pin, so their new build
+        changes nothing at its first start and nothing is copied.
+
+        World is left out on the owner's word of 2026-10-04: it is the biggest of
+        the three and the slowest to copy, so a rollback puts back login and
+        characters and says that the world database is not put back.
+        """
+        return ("auth", "characters") if self._updates_at_start() else ()
+
+    def databases_changed_but_not_copied(self) -> tuple[Db, ...]:
+        """World, on a tree whose updater migrates it at start but whose copy leaves it out."""
+        return ("world",) if self._updates_at_start() else ()
+
+    def _updates_at_start(self) -> bool:
+        """Whether this tree's conf table switches the world server's AutoUpdater on."""
+        return any(
+            table.keys.get(self.AUTO_UPDATE_KEY) == "1"
+            for table in self._data().conf.files.values()
+        )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """Which files in which checkout this app patches itself, for the dirty-tree guard.
@@ -986,6 +1020,53 @@ class CmangosInstaller(StagedInstaller):
             else:
                 yield f"{name} is already exactly what this install needs."
 
+    def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
+        """The folder the tools read the client from: itself, or a view of it in `view` (T260).
+
+        The CMaNGOS tools open the client's archives by fixed names
+        (`client_names.retail_archive()`), and a client named in another case
+        on a disk that tells cases apart (`Data/common.mpq`) gives them nothing
+        to read: the extraction would end short, with a sentence blaming the
+        client's completeness. The view is links under the names they open,
+        pointing at the player's files, so nothing of the player's is renamed or
+        changed. A view a crash left is removed first: it may point at another
+        client.
+
+        Raises:
+            InstallerError: the view could not be made. Nothing was extracted.
+        """
+        if not client_dir.is_dir():
+            return client_dir  # nothing to list; the run says what is wrong, as it always has
+        try:
+            extract.remove_case_view(view)
+            if not extract.lay_case_view(client_dir, view):
+                return client_dir
+        except OSError as exc:
+            try:
+                extract.remove_case_view(view)
+            except OSError as left:
+                logger.warning(f"the links in {view} could not be removed: {left}")
+            try:
+                renames = extract.renamed_in_view(client_dir)
+            except OSError:
+                renames = []
+            named = ", ".join(f"{theirs} to {ours}" for theirs, ours in renames[:3])
+            more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+            raise InstallerError(
+                f"Some of your client's files are named in another case than {self.entry.name}'s "
+                f"map tools open, and Yu'lon could not make the links that let the tools read "
+                f"them in {view} ({exc}). Nothing was extracted. Free that folder, or rename the "
+                f"client's files ({named}{more}), then press Install again."
+            ) from exc
+        renames = extract.renamed_in_view(client_dir)
+        named = ", ".join(f"{theirs} as {ours}" for theirs, ours in renames[:3])
+        more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+        yield (
+            f"Some of your client's files are named in another case than the map tools open; "
+            f"they read them through links in {view} ({named}{more}). Your client is not changed."
+        )
+        return view
+
     def _extract(self, ctx: StageContext) -> Iterator[str]:
         """Pull dbc/maps/vmaps out of the client, mounted read-only: one container per tool.
 
@@ -1039,23 +1120,36 @@ class CmangosInstaller(StagedInstaller):
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
-        yield from self._stream(
-            lambda sink: extract.run_plan(
-                data.extract,
-                image_ref=image_ref,
-                client_dir=client_dir,
-                data_dir=data_dir,
-                run_container=self._seams.run_container,
-                user_args=user_args,
-                sink=sink,
+        view = ctx.server_dir / extract.CASE_VIEW_DIR
+        read_from = client_dir
+        try:
+            # Inside the `try`: `_case_view()` yields after laying the view, and a
+            # stream closed there must take the view with it.
+            read_from = yield from self._case_view(client_dir, view)
+            yield from self._stream(
+                lambda sink: extract.run_plan(
+                    data.extract,
+                    image_ref=image_ref,
+                    client_dir=read_from,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    required_file=data.client.required_file,
+                    client_build=self.entry.client.build,
+                    selinux_enforcing=self._seams.ask_selinux,
+                    evidence_client_dir=client_dir,
+                    client_files=None if read_from == client_dir else client_dir,
+                ),
                 cancel=ctx.cancel,
-                required_file=data.client.required_file,
-                client_build=self.entry.client.build,
-                selinux_enforcing=self._seams.ask_selinux,
-            ),
-            cancel=ctx.cancel,
-            stage="extract",
-        )
+                stage="extract",
+            )
+        finally:
+            try:
+                extract.remove_case_view(view)
+            except OSError as exc:
+                logger.warning(f"the links in {view} could not be removed: {exc}")
         self._check_cancel(ctx.cancel)
         # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
         # gate that proves `patch-sources` took rather than as a shipped
@@ -1467,7 +1561,9 @@ class CmangosInstaller(StagedInstaller):
         for every install of the game, so a container without that label, or
         with another project's, is refused, never stopped (T206 review).
         """
-        if not ctx.state.last_error:
+        if not ctx.state.last_error or ctx.state.error_run != ERROR_RUN_INSTALL:
+            # T207: only a failed INSTALL's own world; a remembered server whose
+            # Rebuild or update failed is somebody's server, refused below.
             return
         container = self.entry.container_spec().world
         try:

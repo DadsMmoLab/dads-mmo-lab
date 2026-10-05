@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
-from yulon.catalog import composegen, native, preflight
+from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
@@ -56,6 +56,17 @@ file "the `docker-compose.yml` shipped in that repo", and the Linux installer's
 whole mechanism (write only an override, then `compose up -d --build`) only
 works because it is. A clone double that made only `.git` hid a blocker that
 refused every install.
+"""
+
+
+POLLUTED_OUTPUT_EXITS: Mapping[str, int] = {"vmap_extractor": 1, "vmap4extractor": 255}
+"""The extractors that refuse a `Buildings/` holding `dir` or `dir_bin`, and the status they exit.
+
+Read in the sources, not copied from `extract.py`: CMaNGOS's `vmap_extractor`
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp`, mangos-classic 8ec338a1)
+`return 1`s; TrinityCore's `vmap4extractor` (`src/tools/vmap4_extractor/
+vmapexport.cpp:529-541`, Centurion faac5fc9) `return scanf(...)`s, which with no
+stdin is EOF, and the live Centurion press exited 255 (T241).
 """
 
 
@@ -201,6 +212,11 @@ class Recorder:
     only ever succeed could not produce the refusal the engine has to make
     BEFORE it compiles over the only copy of the running build.
     """
+    ids_silent: bool = False
+    """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
+    answer `docker image inspect` does."""
+    image_ids: dict[str, str | None] = field(default_factory=dict)
+    """T225: what `image_id` answers for these names instead (a tag a stopped build moved)."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
@@ -518,10 +534,19 @@ class Recorder:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
         return self.diff_lines.get((dest, old, new, path))
 
+    restore_errors: dict[Path, Exception] = field(default_factory=dict)
+    """`restore_error` for ONE checkout (T217): the module will not go back, the core does.
+
+    The state a player was left in on 2026-10-04: a new module on an old core,
+    which no single `restore_error` for every source can produce.
+    """
+
     def restore_rev(self, dest: Path, rev: str) -> None:
         self.calls.append(f"restore:{dest.name}->{rev[:7]}")
         if self.restore_error is not None:
             raise self.restore_error
+        if dest in self.restore_errors:
+            raise self.restore_errors[dest]
         self.heads[dest] = rev
 
     def probe(self) -> docker.ImportState:
@@ -616,22 +641,29 @@ class Recorder:
           tool's own last words and writes nothing, which is `main()`'s first
           `if`.
 
-        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
-        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
-        no such check, and a double that refused for it would be inventing a
-        rule for a tool nobody has read at the pinned revision.
+        Keyed on `argv[0]`'s basename, from this double's OWN list
+        (`POLLUTED_OUTPUT_EXITS`) and never from `extract.DIRTY_OUTPUT_TOOLS`: a
+        double that followed the production list would stop refusing the day a
+        tool fell off it, and the test meant to catch that would pass.
+        `wow-tortoise`'s `vmapextractor` is a different binary with no such
+        check, and a double that refused for it would be inventing a rule for a
+        tool nobody has read at the pinned revision. TrinityCore's
+        `vmap4extractor` has the same check (T241), and exits 255.
         """
         self.calls.append(f"run:{spec.argv[0]}")
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
-        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        program = spec.argv[0].rsplit("/", 1)[-1]
+        extractor = program in POLLUTED_OUTPUT_EXITS
         buildings = None if out is None else out / extract.BUILDINGS_DIR
         if extractor and buildings is not None:
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
                 polluted = "Your output directory seems to be polluted, please use an empty "
                 sink(polluted + "directory!")
-                return docker.AttachedRun(1, (polluted + "directory!",))
+                return docker.AttachedRun(
+                    POLLUTED_OUTPUT_EXITS[program], (polluted + "directory!",)
+                )
         if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
@@ -781,6 +813,7 @@ class Recorder:
             images_built=self.images_built,
             build_cache_bytes=self.build_cache_bytes,
             folder_bytes=self.folder_bytes,
+            image_id=self.image_id,
             build=build,
             one_shot=one_shot,
             verify_import=verify,
@@ -856,6 +889,23 @@ class Recorder:
             return True
         return self.images
 
+    def image_id(self, ref: str) -> str | None:
+        """`docker.image_id()` on a machine where no tag ever moves (T225). NOT evidence.
+
+        A ref and its `-rollback` and `-failed` names answer the SAME id, so a rebuild that fails
+        reads "the live tags did not move" and keeps the path it took before T225;
+        a `-parked` name answers None, so no kept build is ever found (T224). Every
+        test about which image a name holds drives `test_rebuild._Daemon` instead,
+        whose names are moved by the build, the tags and the removals it is asked for.
+        """
+        if ref in self.image_ids:
+            return self.image_ids[ref]
+        if self.ids_silent or ref.endswith(native.PARKED_TAG_SUFFIX):
+            return None
+        for suffix in (native.ROLLBACK_TAG_SUFFIX, native.FAILED_TAG_SUFFIX):
+            ref = ref.removesuffix(suffix)
+        return "sha256:" + ref
+
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
         self.calls.append("gather")
         return preflight.Facts(
@@ -898,9 +948,17 @@ class Recorder:
         control: docker.StopControl | None = None,
         before_signal: Callable[[], None] | None = None,
     ) -> None:
-        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158)."""
+        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158).
+
+        `before_signal` is called after the wait and before the stop, as the real
+        one does (T217): the update route's stop is where `rebuild()` learns the
+        servers were touched, and a double that dropped it read a stop followed by
+        a failed copy as "no container was replaced".
+        """
         if self.on_stop_servers is not None:
             self.on_stop_servers(control)
+        if before_signal is not None:
+            before_signal()
         forced = control is not None and control.forced()
         self.calls.append("stop_servers:forced" if forced else "stop_servers")
 
@@ -932,6 +990,58 @@ class Recorder:
             before_signal()
         self.calls.append("recreate")
         return True
+
+
+SNAPSHOT_STAMP = "20261004_120000"
+"""The timestamp `FakeSnapshot` names its files with: a constant, so a test can name the file."""
+
+
+@dataclass
+class FakeSnapshot:
+    """`snapshot.DatabaseSnapshot` on a `Recorder`'s machine (T217): what was copied, and when.
+
+    Stands in for `install_wiring._MaintenanceSnapshot`, whose dump and restore
+    are the Maintenance tab's own and are driven in `test_install_wiring.py`.
+    Each call is appended to `rec.calls` -- `snapshot:<dbs>`, `put-back:<dbs>`,
+    `prune` -- so a test asserts WHERE in the press it happened against the
+    stops, tags, restores and recreates around it. It can refuse each way the
+    real one can (`take_error`, `put_back_error`), as this module's rule says a
+    double must.
+    """
+
+    rec: Recorder
+    take_error: Exception | None = None
+    put_back_error: Exception | None = None
+    taken: list[snapshot.Snapshot] = field(default_factory=list)
+    put_back_calls: list[snapshot.Snapshot] = field(default_factory=list)
+
+    def take(self, server_dir: Path, databases: Sequence[str]) -> snapshot.Snapshot:
+        self.rec.calls.append(f"snapshot:{','.join(databases)}")
+        if self.take_error is not None:
+            raise self.take_error
+        directory = server_dir / "sql_scripts" / "backups"
+        files = tuple(
+            directory / f"{SNAPSHOT_STAMP}_{snapshot.SNAPSHOT_LABEL}_{name}.sql"
+            for name in databases
+        )
+        made = snapshot.Snapshot(directory, files, tuple(databases), 2048 * len(files))
+        self.taken.append(made)
+        return made
+
+    def put_back(self, server_dir: Path, copy: snapshot.Snapshot) -> snapshot.PutBack:
+        self.rec.calls.append(f"put-back:{','.join(copy.databases)}")
+        self.put_back_calls.append(copy)
+        if self.put_back_error is not None:
+            raise self.put_back_error
+        safety = tuple(
+            copy.directory / f"{SNAPSHOT_STAMP}_{snapshot.ROLLBACK_SAFETY_LABEL}_{name}.sql"
+            for name in copy.databases
+        )
+        return snapshot.PutBack(restored=copy.databases, safety=safety)
+
+    def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        self.rec.calls.append("prune")
+        return ()
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

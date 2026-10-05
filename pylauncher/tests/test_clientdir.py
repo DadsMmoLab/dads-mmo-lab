@@ -694,60 +694,48 @@ def _native_client(game: str) -> ClientSpec:
 
 @needs_case_sensitive_disk
 @pytest.mark.parametrize(
-    ("game", "lower", "exact"),
+    ("game", "lower"),
     [
-        ("wow-tbc", "Data/expansion.mpq", "Data/expansion.MPQ"),
-        ("wow-vanilla", "Data/dbc.mpq", "Data/dbc.MPQ"),
+        ("wow-tbc", "Data/expansion.mpq"),
+        ("wow-vanilla", "Data/dbc.mpq"),
     ],
 )
-def test_a_cmangos_game_refuses_a_lowercase_client_its_map_tools_could_not_open(
-    tmp_path: Path, game: str, lower: str, exact: str
+def test_a_cmangos_game_accepts_a_lowercase_client_its_map_tools_read_through_links(
+    tmp_path: Path, game: str, lower: str
 ) -> None:
-    """T227 cold review: TBC and Vanilla extract from the player's own folder by exact names.
+    """T260: was the T227 refusal "named in lower case; this server's map tools open ... only".
 
-    Accepted, the install compiled for 30-60 minutes and then failed extraction
-    with "check that the client folder is a complete client", which is false: the
-    client is complete and named in lower case. So the check says so, up front,
-    until the extraction can handle it (T260).
+    The extraction now reads such a client through links carrying the names the
+    tools open (`extract.lay_case_view()`), so the check passes it and names the
+    file as the disk names it.
     """
     folder = client(tmp_path, required=False)
     (folder / lower).write_bytes(b"MPQ")
 
     checks = clientdir.validate(folder, _native_client(game), free_bytes=lambda _p: PLENTY)
 
-    refused = [check for check in checks if check.verdict == "refuse"]
-    assert [check.name for check in refused] == [clientdir.REQUIRED_CHECK]
-    assert refused[0].detail == (
-        f"{lower} is named in lower case; this server's map tools open {exact} only"
-    )
-    assert "missing" not in refused[0].detail
-    assert refused[0].remedy == (
-        f"Rename the client's archives to that spelling ({exact}), then try again."
-    )
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    required = next(check for check in checks if check.name == clientdir.REQUIRED_CHECK)
+    assert (required.verdict, required.detail) == ("pass", f"{lower} is there")
     assert (folder / lower).is_file(), "nothing in the player's client was renamed"
 
 
 @needs_case_sensitive_disk
-def test_a_name_in_mixed_case_is_said_as_another_case(tmp_path: Path) -> None:
+def test_a_spec_whose_tools_read_exact_names_still_refuses_another_case(tmp_path: Path) -> None:
+    """`archives_any_case` false: the refusal T227 wrote stays for a family that needs it."""
     folder = client(tmp_path, required=False)
     (folder / "Data" / "Expansion.mpq").write_bytes(b"MPQ")
 
-    checks = clientdir.validate(folder, _native_client("wow-tbc"), free_bytes=lambda _p: PLENTY)
+    checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
 
     (refused,) = [check for check in checks if check.verdict == "refuse"]
-    assert refused.detail.startswith("Data/Expansion.mpq is named in another case;")
+    assert refused.detail == (
+        "Data/Expansion.mpq is named in another case; this server's map tools open "
+        "Data/expansion.MPQ only"
+    )
 
 
-def test_a_cmangos_client_spec_may_not_accept_archives_in_any_case() -> None:
-    """Only the TrinityCore extraction copy renames archives; CMaNGOS reads them as named."""
-    from pydantic import ValidationError
-
-    from yulon.catalog.catalog import CmangosData, load_catalog
-
-    native = load_catalog().get("wow-tbc").install.native
-    assert native is not None and native.cmangos is not None
-    data = native.cmangos.model_dump()
-    data["client"]["archives_any_case"] = True
-
-    with pytest.raises(ValidationError, match="opens the client's archives by exact name"):
-        CmangosData.model_validate(data)
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_cmangos_client_spec_accepts_archives_in_any_case(game: str) -> None:
+    """T260: each CMaNGOS extraction reads another case through links, so each spec says so."""
+    assert _native_client(game).archives_any_case is True

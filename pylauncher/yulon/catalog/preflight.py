@@ -529,6 +529,19 @@ def free_bytes(path: Path) -> int | None:
         return None
 
 
+def world_data_gb(entry: CatalogEntry, platform_id: str) -> float:
+    """What a Windows TrinityCore world's map-data volume adds to Docker's disk; 0 elsewhere.
+
+    `composegen.world_data_dirs()` decides where the volume exists (T219), so the floor
+    grows exactly where a render declares it.
+    """
+    native = entry.install.native
+    trinitycore = native.trinitycore if native is not None else None
+    if trinitycore is None or not composegen.world_data_dirs(entry, lambda: platform_id):
+        return 0.0
+    return trinitycore.world_data_gb or 0.0
+
+
 def _same_volume(data_root: Path | None, server_dir: Path, platform_id: str) -> bool | None:
     """Do the images and the checkout share one pool of free space? None = unknown.
 
@@ -620,6 +633,15 @@ def evaluate(
         # floor a finished build is asked for: a cached build is not done.
         refuse_root = max(native.min_server_dir_gb, refuse_root - reused - held)
         warn_root = max(native.warn_server_dir_gb, warn_root - reused - held)
+        if facts.same_volume:
+            refuse_dir, warn_dir = refuse_root, warn_root
+    mirror = world_data_gb(entry, facts.platform_id)
+    if mirror:
+        # T219: on Windows a Centurion world server's map data is copied into a volume on
+        # Docker's disk at its first start, after the build, so it is owed whatever the
+        # build already spent; on one drive it comes out of the same pool.
+        refuse_root += mirror
+        warn_root += mirror
         if facts.same_volume:
             refuse_dir, warn_dir = refuse_root, warn_root
     if facts.same_volume and facts.platform_id != "macos":

@@ -2020,6 +2020,10 @@ class ControllerServices:
     for a server adopted from a WSL distro — which is a fact about the INSTALL,
     not about this view, so the view never asks about distros.
     """
+    rebuild_refusal: Callable[[], str | None] | None = None
+    """What the Rebuild press would refuse, asked BEFORE its question (T217 live proof).
+
+    `install_wiring.rebuild_refusal_for_app()`; None asks nothing first."""
     updates: native.UpdateRoute | None = None
     """Apply the install plan's re-runnable phases to this server; None when it has none.
 
@@ -2052,6 +2056,13 @@ class ControllerServices:
 
     `serverlock.route_for_app()` answers: Windows only, and never a server inside
     a WSL distro. `None` means no check.
+    """
+
+    kept_build: native.KeptBuildRoute | None = None
+    """T224's kept-build banner and "Remove kept build…"; None where builds are not kept.
+
+    `install_wiring.kept_build_for_app()` answers: every native install, never a
+    server inside a WSL distro (owner, D4). `None` means no banner and no check.
     """
 
     corrections: native.CorrectionRoute | None = None
@@ -2709,6 +2720,9 @@ def _assemble(
         # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
         # the same kind of checkout and its users patch it the same way.
         rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        rebuild_refusal=install_wiring.rebuild_refusal_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # HERE for the same reason the rebuild is, and offered to far fewer
         # installs: the phases exist or they do not, and that is a fact about
         # `catalog.json` which every game's tab reads the same way.
@@ -2746,6 +2760,9 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T224. Here for T106's reason: every native install can keep a build, and
+        # the distro (D4) is a fact of the install, answered in `install_wiring`.
+        kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -3970,6 +3987,7 @@ def _for_tortoise(
         world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
+        image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
     )
     return replace(
         services,
@@ -4294,10 +4312,37 @@ SERVER_BUILD_TIP = (
 )
 """The menu button's own tooltip; each entry keeps the one its button had (T89)."""
 
-PATHFINDING_START = "Make the pathfinding data"
+PATHFINDING_START = mmaps.START_PRESS
 PATHFINDING_STOP = "Stop making the pathfinding data"
 PATHFINDING_ASKING = "Pathfinding data: asking how far it has got…"
 PATHFINDING_UNREAD = "Could not read how far the pathfinding data has got: {exc}"
+
+
+def _start_said_holds(status: mmaps.MmapsStatus) -> bool:
+    """Start's "Making…" or "Continuing…" is true while a run is queued or running (T245)."""
+    return status.state in ("queued", "running")
+
+
+def _stop_said_holds(stopped: mmaps.MmapsStatus) -> Callable[[mmaps.MmapsStatus], bool]:
+    """Stop's sentence is true while the job reads as the first reading after the Stop did.
+
+    Its sentence says what that Stop left -- N tiles kept and continued from, or
+    nothing -- so it holds while the state, the kept count and whether the next run
+    begins again are still those (T245). A run started again, map data changed since
+    (Codex adversarial review, round 3), or tiles thrown away by Re-extract, Update or
+    Return, which forget the record and read as not started (cold review), each end
+    it. A reading where a press's sentence no longer holds removes it from the problem
+    line, and the pathfinding line (`MmapsStatus.line()`) says what happened and what
+    the press beside it does next.
+    """
+
+    def facts(status: mmaps.MmapsStatus) -> tuple[str, int, bool]:
+        return status.state, status.kept, bool(status.begins_again_because)
+
+    left = facts(stopped)
+    return lambda status: facts(status) == left
+
+
 WORLD_UPKEEP_UNREAD = "Could not read whether the last update left anything to finish: {exc}"
 WORLD_UPKEEP_BUSY = (
     "This server is busy with another action — wait for it to finish, then press this again. "
@@ -5924,7 +5969,8 @@ REPAIR_FILES_CONFIRM = (
     "Yu'lon writes for this server, either because another version wrote it or because it was "
     "edited by hand. Yu'lon writes it again the way this version installs it, with this "
     "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
-    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}\n\n"
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}{volume}"
+    "\n\n"
     "Nothing else changes: not your characters, not {others}, not docker-compose.override.yml "
     "or .env. The running containers keep the old file until they are recreated, which Yu'lon "
     "offers next."
@@ -5936,6 +5982,16 @@ REPAIR_FILES_CONFS = (
     "is kept beside itself as a backup too."
 )
 """T169's paragraph in the question, when the same repair sets a conf's folder setting."""
+
+REPAIR_FILES_WORLD_DATA = (
+    "\n\nIt also gives the world server a Docker volume of its own for the map data it reads, "
+    "so it no longer reads every map file through Windows' file share, which slowed the world "
+    "server's start. The first start after Recreate containers… copies the map data from the "
+    "server folder into it, which takes a few minutes, and once the pathfinding data is made "
+    "the copy takes up to about {gb:g} GB on Docker's disk. The server folder's data folder "
+    "stays where it is."
+)
+"""T219's paragraph in the question, when the same repair adds the `world-data` volume."""
 
 REPAIR_FILES_DONE = (
     "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
@@ -6748,6 +6804,9 @@ class ControllerView(QWidget):
         self._busy = False
         # T195: what `_set_busy()` was last told is running, for "Wait: Start is running.".
         self._busy_job = ""
+        # T219 (#309's live proof): the running Restart or Recreate was pressed on the
+        # Server tab's compose banner, so its outcome is said on the Server tab too.
+        self._tuning_from_banner = False
         # T188 C4/C5: the word the realm badge holds while a Start, Stop or
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
@@ -7115,6 +7174,11 @@ class ControllerView(QWidget):
         self._pathfinding_status: mmaps.MmapsStatus | None = None
         self._pathfinding_pending = False
         self._pathfinding_pressing = False
+        # T245: the sentence the last press put in `problem_label`, and the job's
+        # states it stays true in; None before the first press.
+        # A Stop's rule is made from the first reading after it (`_stop_said_holds`).
+        self._pathfinding_said: tuple[str, Callable[[mmaps.MmapsStatus], bool] | None] | None = None
+        self._pathfinding_holds: Callable[[mmaps.MmapsStatus], bool] | None = None
         # Bumped by every read and every press: a read whose generation is not
         # the newest lands after the state it describes has changed, and is dropped.
         self._pathfinding_generation = 0
@@ -7371,6 +7435,7 @@ class ControllerView(QWidget):
         self._build_server_banners(tab)
         box.addWidget(self.compose_banner)
         box.addWidget(self.corrections_banner)
+        box.addWidget(self.kept_build_banner)
 
         realm, realm_column = section("Realm", tab)
         for label in (
@@ -7551,6 +7616,20 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
+        # T224 (owner D3): a finished build kept by a rebuild that replaced no
+        # container, and the press that removes it now.
+        self.kept_build_banner = QWidget(tab)
+        kept_build_box = QHBoxLayout(self.kept_build_banner)
+        kept_build_box.setContentsMargins(8, 6, 8, 6)
+        self.kept_build_banner_label = QLabel("", self.kept_build_banner)
+        self.kept_build_banner_label.setWordWrap(True)
+        self.kept_build_banner_button = QPushButton(
+            native.REMOVE_KEPT_BUILD_LABEL, self.kept_build_banner
+        )
+        self.kept_build_banner_button.clicked.connect(self.remove_kept_build)
+        kept_build_box.addWidget(self.kept_build_banner_label, 1)
+        kept_build_box.addWidget(self.kept_build_banner_button)
+        self.kept_build_banner.setVisible(False)
 
     def _add_section(self, box: QVBoxLayout, group: QGroupBox, wired: bool) -> None:
         """Put a Server section in the column if this game has it; otherwise keep it hidden.
@@ -7866,7 +7945,22 @@ class ControllerView(QWidget):
         self._pathfinding_pending = False
         if isinstance(status, mmaps.MmapsStatus):
             self._pathfinding_status = status
+            self._take_down_an_ended_press_sentence(status)
         self._show_pathfinding()
+
+    def _take_down_an_ended_press_sentence(self, status: mmaps.MmapsStatus) -> None:
+        """A press's sentence leaves `problem_label` once the job is no longer as it said (T245).
+
+        Only while the line still shows it: anything written there since is
+        another press's, and stays.
+        """
+        said = self._pathfinding_said
+        if said is None or self.problem_label.text() != said[0]:
+            return
+        if said[1] is None:
+            self._pathfinding_said = (said[0], _stop_said_holds(status))
+        elif not said[1](status):
+            self.problem_label.setText("")
 
     @Slot(object)
     def _pathfinding_read_failed(self, exc: object) -> None:
@@ -7923,7 +8017,7 @@ class ControllerView(QWidget):
         seam = self.services.pathfinding
         if seam is None or self._busy or self._pathfinding_pressing:
             return
-        self._press_pathfinding(seam.start)
+        self._press_pathfinding(seam.start, _start_said_holds)
 
     @Slot()
     def stop_pathfinding(self) -> None:
@@ -7931,10 +8025,13 @@ class ControllerView(QWidget):
         seam = self.services.pathfinding
         if seam is None or self._pathfinding_pressing:
             return
-        self._press_pathfinding(seam.stop)
+        self._press_pathfinding(seam.stop, None)
 
-    def _press_pathfinding(self, press: Callable[[], str]) -> None:
+    def _press_pathfinding(
+        self, press: Callable[[], str], holds: Callable[[mmaps.MmapsStatus], bool] | None
+    ) -> None:
         self._pathfinding_pressing = True
+        self._pathfinding_holds = holds
         # Any read out now describes the job as it was before this press.
         self._pathfinding_generation += 1
         self._pathfinding_pending = False
@@ -7945,6 +8042,7 @@ class ControllerView(QWidget):
     def _pathfinding_pressed(self, said: object) -> None:
         self._pathfinding_pressing = False
         self.problem_label.setText(str(said))
+        self._pathfinding_said = (str(said), self._pathfinding_holds)
         self._pathfinding_pending = False
         self.refresh_pathfinding()
 
@@ -8914,9 +9012,17 @@ class ControllerView(QWidget):
         goes through, and it never refuses over the zone file: the server runs
         on UTC, and this line says so and names the presses that fix it.
         """
-        said = getattr(self.services.controller, "zone_problem", None)
-        if isinstance(said, str) and said:
-            text = f"The server started, but {said}"
+        said = [
+            problem
+            for problem in (
+                getattr(self.services.controller, "zone_problem", None),
+                # T219: a Windows Centurion world's map-data copy, said the same way.
+                getattr(self.services.controller, "world_data_problem", None),
+            )
+            if isinstance(problem, str) and problem
+        ]
+        if said:
+            text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None
@@ -16011,11 +16117,22 @@ class ControllerView(QWidget):
                 "Nothing was started.",
             )
             return False
+        # T217 live proof, item 3: a refusal the press would make anyway comes BEFORE
+        # the question, not after an hour's compile was agreed to.
+        refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
+        if refused is not None:
+            logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
+            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
+            return False
         if not said_yes(
             QMessageBox.question(
                 self,
                 f"Rebuild {self.entry.name}?",
-                rebuild_confirmation(self.entry, self.services.controller.server_dir),
+                rebuild_confirmation(
+                    self.entry,
+                    self.services.controller.server_dir,
+                    kept_build=self.services.kept_build is not None,
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -16725,6 +16842,8 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        # T224: any press of this panel may have kept a build, used one or removed one.
+        self.check_kept_build()
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
         # that failed leaves it stopped with a press on the Bots tab to retry.
         self.refresh_bot_dashboard()
@@ -17136,6 +17255,7 @@ class ControllerView(QWidget):
         # distro none runs until it is up (T174's is never wired for a distro).
         if self._waits_for_the_distro("server files", self.check_server_files):
             return
+        self.check_kept_build()
         confs = self.services.repair_confs
         if confs is not None and not self._confs_pending:
             self._confs_pending = True
@@ -17264,15 +17384,80 @@ class ControllerView(QWidget):
         else:
             self.compose_banner.setVisible(False)
 
+    # ------------------------------------------------- T224: a kept build
+
+    def check_kept_build(self) -> None:
+        """Ask, off the GUI thread, whether a build is kept (T224, D3). It reads one file."""
+        route = self.services.kept_build
+        if route is None:
+            self.kept_build_banner.setVisible(False)
+            return
+        self._run(route.check, self._kept_build_checked, self._kept_build_check_failed)
+
+    @Slot(object)
+    def _kept_build_checked(self, result: object) -> None:
+        if isinstance(result, str) and result:
+            self.kept_build_banner_label.setText(result)
+            self.kept_build_banner.setVisible(True)
+        else:
+            self.kept_build_banner.setVisible(False)
+
+    @Slot(object)
+    def _kept_build_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, no banner is drawn on it."""
+        logger.warning(f"{self.entry.id}: the kept build check failed: {exc}")
+        self.kept_build_banner.setVisible(False)
+
+    def remove_kept_build(self) -> bool:
+        """Ask, then remove the kept build in a job (T224, D3). False if nothing started."""
+        route = self.services.kept_build
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was removed.",
+            )
+            return False
+        if not self._confirm(native.REMOVE_KEPT_BUILD_LABEL, native.REMOVE_KEPT_BUILD_QUESTION):
+            return False
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.remove, self._kept_build_removed, self._kept_build_remove_failed)
+        return True
+
+    @Slot(object)
+    def _kept_build_removed(self, result: object) -> None:
+        self.problem_label.setText(str(result))
+        self._set_busy(False)
+        self.check_kept_build()
+
+    @Slot(object)
+    def _kept_build_remove_failed(self, exc: object) -> None:
+        self.problem_label.setText(f"The kept build was not removed: {exc}")
+        self._set_busy(False)
+        self.check_kept_build()
+
     @Slot()
     def _compose_banner_pressed(self) -> None:
-        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart."""
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart.
+
+        A Recreate or Restart pressed here says how it ended here as well, not only in
+        the Tuning tab's report (T219: a refused Recreate left this tab saying "The
+        server is already running.").
+        """
         if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
+            self._tuning_from_banner = True
             self.recreate_containers()
         elif self.compose_banner_button.text() == TUNING_RESTART_LABEL:
+            self._tuning_from_banner = True
             self.restart_server()
         else:
             self.repair_server_files()
+        if not self._busy:
+            self._tuning_from_banner = False  # declined, or done inline: nothing pending
 
     @Slot()
     def repair_server_files(self) -> None:
@@ -17317,7 +17502,12 @@ class ControllerView(QWidget):
             if last is not None and last.state == "upstream"
             else REPAIR_FILES_CONFIRM
         )
-        question = confirm.format(backup=backup, counts=counts, confs=confs, others=others)
+        # T219: a Windows Centurion's file from before the map-data volume.
+        gb = last.world_data_gb if last is not None and last.state == "stale" else 0.0
+        volume = REPAIR_FILES_WORLD_DATA.format(gb=gb) if gb else ""
+        question = confirm.format(
+            backup=backup, counts=counts, confs=confs, others=others, volume=volume
+        )
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
@@ -17519,6 +17709,9 @@ class ControllerView(QWidget):
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
         zone = self._say_zone_problem()
+        if self._tuning_from_banner and zone is None:
+            self.problem_label.setText("")  # what this tab said before the press is past
+        self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
@@ -17533,6 +17726,9 @@ class ControllerView(QWidget):
         else:
             self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
             self.tuning_details.set_text(str(exc))
+        if self._tuning_from_banner:
+            self.problem_label.setText(self.tuning_report.toPlainText())
+        self._tuning_from_banner = False
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

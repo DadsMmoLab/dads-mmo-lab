@@ -246,6 +246,13 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
             ),
         )
     },
+    **{
+        ("yulon/catalog/native.py", owner): (
+            f"putting a source folder back on the commit its build came from (T217): {_TYPED}",
+            frozenset({"git -C {…} checkout --detach --force {…}"}),
+        )
+        for owner in ("sources_off_refusal", "_refuse_sources_off_their_build")
+    },
     ("yulon/controller_wow_wotlk/maintenance.py", "plan_restore"): (
         f"unpacking a compressed backup so it can be restored: {_TYPED}",
         frozenset({"gunzip -k {…}"}),

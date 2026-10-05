@@ -81,6 +81,12 @@ from typing import TYPE_CHECKING
 
 from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
 from yulon.catalog import composegen
+from yulon.catalog.native import (
+    PARKED_TAG_SUFFIX,
+    ROLLBACK_TAG_SUFFIX,
+    forget_parked_build,
+    forget_stopped_build,
+)
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
@@ -663,6 +669,36 @@ class Uninstaller:
                 warnings.append(f"{ref} was left behind: {problem}")
             else:
                 removed_images.append(ref)
+        # T224: each ref's kept build too (`<ref>-parked`), which outlives a rebuild
+        # on purpose. Not reported as removed: a name that was never there is "no
+        # such image", which `docker.remove_image()` reads as done, so "" cannot
+        # tell a kept build removed from one that never existed.
+        parked_left = False
+        for ref in self.image_refs:
+            parked = ref + PARKED_TAG_SUFFIX
+            problem = self._remove_image(parked)
+            if problem:
+                parked_left = True
+                warnings.append(f"{parked} (a kept build) was left behind: {problem}")
+        if not parked_left:
+            # Its record too, for a folder the removal below leaves behind (cold
+            # review); kept while Docker keeps a name, so the name stays findable.
+            forgot = forget_parked_build(self.server_dir)
+            if forgot:
+                warnings.append(f"{forgot}.")
+        # T225 (live): a stopped compile keeps its `-rollback` names past its press,
+        # in case Docker finishes it later; they and their record go here too.
+        rollback_left = False
+        for ref in self.image_refs:
+            rollback = ref + ROLLBACK_TAG_SUFFIX
+            problem = self._remove_image(rollback)
+            if problem:
+                rollback_left = True
+                warnings.append(f"{rollback} (a build kept to put back) was left behind: {problem}")
+        if not rollback_left:
+            forgot = forget_stopped_build(self.server_dir)
+            if forgot:
+                warnings.append(f"{forgot}.")
 
         # BEFORE the folder: the record of where a leftover copy is lives in it. A
         # copy it could neither remove nor note elsewhere raises here, and the

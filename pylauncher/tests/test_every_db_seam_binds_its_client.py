@@ -67,12 +67,15 @@ over somebody's populated server, and the original audit did not look at it.
 
 PACKAGE = Path(__file__).resolve().parent.parent / "yulon"
 
-EXPECTED_SITES = 19
+EXPECTED_SITES = 20
 """Exactly how many seam constructions exist today.
 
 19 since T179 Task 5: `controller_wow_centurion.accounts.sql_for` and
 `controller_wow_centurion.maintenance.mysql_for`, each passing the client the
-entry declares (`install.native.db.client`).
+entry declares (`install.native.db.client`). 20 since T217:
+`install_wiring._MaintenanceSnapshot._mysql`, the dump/restore seam of the copy
+"Update the server to latest…" takes of the databases its new build can change,
+which passes the entry's client like `import_gate_for()` beside it.
 
 A floor would let a site vanish without a word -- which is the failure this
 whole file is about. If you add or remove a seam, this number moves in the same
