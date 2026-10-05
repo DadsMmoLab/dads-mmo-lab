@@ -1013,9 +1013,10 @@ def test_the_first_answer_after_a_silence_asks_the_daemon_even_with_no_new_resta
 ) -> None:
     """Docker resets the count on its restore, so the first answer can read lower than before.
 
-    Measured: 5 → 3 (`restarting`) → 5 across `systemctl restart docker`. With no
-    growth to prompt it, the silence itself must, or that first tick says "restart
-    loop" about Docker's own restart.
+    Measured: 5 → 3 (`restarting`) → 5 across `systemctl restart docker`, so the
+    first answer can even read the count it had before. With no change to prompt
+    it, the silence itself must, or that first tick says "restart loop" about
+    Docker's own restart.
 
     Mutation: never note the silence, and this reads `restart_loop`.
     """
@@ -1023,7 +1024,7 @@ def test_the_first_answer_after_a_silence_asks_the_daemon_even_with_no_new_resta
     watch, _handed = _clocked(
         tmp_path,
         [
-            (timedelta(0), _running(up, 5)),
+            (timedelta(0), _running(up, 3)),
             (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), docker.ContainerState("restarting", "", 3)),
         ],
@@ -1031,5 +1032,30 @@ def test_the_first_answer_after_a_silence_asks_the_daemon_even_with_no_new_resta
     )
 
     verdicts = [watch.tick() for _ in range(3)]
+
+    assert verdicts[-1].state == "starting"
+
+
+def test_a_docker_restart_between_two_ticks_that_lowered_the_count_is_told_too(
+    tmp_path: Path,
+) -> None:
+    """Docker's restore resets the count, so between two ticks it can read lower (5 → 3).
+
+    Codex review, 2026-10-05, round 8: only a growing count asked the daemon, and
+    the tick that found the world `restarting` at a lower count called it a loop.
+
+    Mutation: ask the daemon only when the count grew, and this reads `restart_loop`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 5)),
+            (timedelta(seconds=5), docker.ContainerState("restarting", "", 3)),
+        ],
+        daemons=_restart_at(3),
+    )
+
+    verdicts = [watch.tick() for _ in range(2)]
 
     assert verdicts[-1].state == "starting"

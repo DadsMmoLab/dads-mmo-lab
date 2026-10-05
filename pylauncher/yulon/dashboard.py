@@ -91,7 +91,7 @@ Those deaths are real exits, so neither the count, the exit code (0 again once
 it runs) nor `OOMKilled` tells them from a crash. What says Docker restarted is
 the daemon itself: `docker.daemon_identity()`, read when the dashboard first
 looks, when Docker answers after a read that failed and whenever the count
-grew, changes only when the daemon started again. A crash-looping world can start a new run while
+moved, changes only when the daemon started again. A crash-looping world can start a new run while
 the CLI cannot reach the daemon for a moment, so a new `StartedAt` after a
 silence proves nothing (Codex adversarial review, round 6). No identity seen
 before, or none readable now, opens no window: the restarts count as before.
@@ -317,8 +317,8 @@ class Dashboard:
             else:
                 self._docker_away = True
             return Verdict(kind, state.restart_count, state.started_at, uptime)
-        grew = self._last_restarts is not None and state.restart_count > self._last_restarts
-        restoring = self._docker_is_restoring(grew)
+        moved = self._last_restarts is not None and state.restart_count != self._last_restarts
+        restoring = self._docker_is_restoring(moved)
         if self._restarted(state) or restoring:
             self._loop_is_current = False
             self._strikes = 0
@@ -350,13 +350,14 @@ class Dashboard:
             self._restoring_until = None  # its database answered: the race is over
         return verdict
 
-    def _docker_is_restoring(self, grew: bool) -> bool:
+    def _docker_is_restoring(self, moved: bool) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker restarted (T306).
 
         The daemon's identity is read on the first answer, on the first answer
-        after a read that failed, and whenever the restart count grew, so a
+        after a read that failed, and whenever the restart count moved, so a
         Docker that stopped and started between two ticks is still told apart
-        before its restarts are counted (Codex review, round 7). A different one
+        before its restarts are counted (Codex review, rounds 7 and 8: its
+        restore resets the count, which can then read higher or lower). A different one
         opens the window; one that could not be read changes nothing, and the
         last one read stays what Docker was. Docker restarting itself starts
         every container again, which ends the run the loop evidence was about,
@@ -365,7 +366,7 @@ class Dashboard:
         called steady.
         """
         now = self._now()
-        if self._docker_away or grew or not self._daemon_asked:
+        if self._docker_away or moved or not self._daemon_asked:
             self._docker_away = False
             self._daemon_asked = True
             seen = self._daemon_of()
