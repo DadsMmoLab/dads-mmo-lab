@@ -87,9 +87,29 @@ def test_the_limit_structure_has_the_windows_x64_layout() -> None:
     flags at a fixed offset: a field of the wrong width moves `LimitFlags` and
     the call either fails (ERROR_BAD_LENGTH) or sets limits nobody asked for.
 
-    Mutations this catches: a `LARGE_INTEGER` as a 32-bit field (offset 8), the
-    IO counters dropped or narrowed, a `SIZE_T` spelled as a DWORD (size).
+    The widths are checked field by field as well, because alignment padding
+    hides a field that is too narrow or too wide where it is followed by an
+    8-byte one: a 32-bit `PerProcessUserTimeLimit` or a 64-bit `LimitFlags`
+    leaves every offset and the size unchanged (both survived the first
+    mutation run).
+
+    Mutations this catches: the IO counters dropped or narrowed, a `SIZE_T`
+    spelled as a DWORD (offsets, size), and any field of the wrong width (widths).
     """
+    widths = {
+        "PerProcessUserTimeLimit": 8,  # LARGE_INTEGER
+        "PerJobUserTimeLimit": 8,
+        "LimitFlags": 4,  # DWORD
+        "MinimumWorkingSetSize": 8,  # SIZE_T
+        "MaximumWorkingSetSize": 8,
+        "ActiveProcessLimit": 4,
+        "Affinity": 8,  # ULONG_PTR
+        "PriorityClass": 4,
+        "SchedulingClass": 4,
+    }
+    assert {name: getattr(winjob.BasicLimits, name).size for name in widths} == widths
+    assert all(getattr(winjob.IoCounters, name).size == 8 for name, _ in winjob.IoCounters._fields_)
+    assert ctypes.sizeof(winjob.IoCounters) == 48
     basic = winjob.ExtendedLimits.BasicLimitInformation
     assert ctypes.sizeof(winjob.ExtendedLimits) == 144
     assert basic.offset == 0
