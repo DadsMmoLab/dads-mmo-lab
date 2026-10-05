@@ -249,6 +249,23 @@ def test_a_receipt_that_cannot_be_written_is_said_in_the_report(tmp_path: Path) 
     assert said and module_answers.ANSWERS_FILE in said[0], report.skipped
 
 
+def test_no_receipt_when_the_conf_is_not_there(tmp_path: Path) -> None:
+    """The install writes nothing into a conf that is missing, and says so; a receipt then
+    would read the mod as installed over keys nobody wrote (cold review).
+
+    Mutation: drop the `is_file()` filter in `Applier._record_settings()` and the receipt
+    is written.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    Applier(server_dir).install(_manifest(tortoise_modules.store()), {"xp_rate": "2"})
+
+    assert not (server_dir / CMANGOS_CONF).exists()
+    assert "mod/xp-rates" not in module_answers.settings_keys(server_dir)
+    assert "xp-rates" not in apply_module.installed_modules(server_dir).get("mod", frozenset())
+
+
 def test_a_mod_with_sql_or_a_repository_gets_no_settings_receipt(tmp_path: Path) -> None:
     """Only mods that change settings and nothing else: a mob multiplier keeps its own
     record, and a cloned mod is marked by its folder."""

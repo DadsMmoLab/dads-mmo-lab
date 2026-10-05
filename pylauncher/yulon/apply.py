@@ -371,7 +371,10 @@ def _settings_still_written(
     1. Every question a key's value is built from has an answer saved for this
        install. An install saves the answers it was given (T104) and nothing
        else does, so a value set by hand or on the Server rates card that
-       happens to equal the mod's default is not taken for an install.
+       happens to equal the mod's default is not taken for an install on a
+       server where the mod was never installed. The answers outlive a Remove
+       (T104), so after one, keys set back by hand to exactly what the install
+       wrote do read as that install again (T392).
     2. Every key reads exactly the value the install writes with those answers.
     3. The remove patches would change one of those keys' values: a conf already
        at what Remove leaves has nothing to remove, whatever was installed once.
