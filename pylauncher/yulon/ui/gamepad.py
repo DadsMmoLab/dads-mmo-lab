@@ -787,7 +787,23 @@ class Navigator(QObject):
         ahead = [s for s in scored if s[0] > 0]
         if current is not None:
             here = _shown_edges(current, root)
-            inside = [(s[1], s[2], s[3]) for s in scored if current.isAncestorOf(s[3])]
+            inside = []
+            for offset, seen, other in ((s[1], s[2], s[3]) for s in scored):
+                if not current.isAncestorOf(other):
+                    continue
+                # Cut to what shows of the box itself (T195): a stop in a tile
+                # is measured uncut by the shelf the focus is in, while the
+                # tile's own edge here is cut by it. Uncut, an Install half
+                # under the shelf's bottom edge lay behind the tile's leading
+                # edge for Up, and the press went past it to the description.
+                cut = (
+                    max(seen[0], here[0]),
+                    max(seen[1], here[1]),
+                    min(seen[2], here[2]),
+                    min(seen[3], here[3]),
+                )
+                if cut[0] < cut[2] and cut[1] < cut[3]:
+                    inside.append((offset, cut, other))
             if inside:
                 # The focused widget is a box with stops in it that show -- the
                 # Modules list, the Catalog's shelf or one of its tiles: it is

@@ -69,6 +69,29 @@ class DockerCliMissingError(DockerCommandError):
     """
 
 
+class DockerUnansweredError(DockerCommandError):
+    """Raised when Docker did not answer the `docker ps` that says what is running.
+
+    A subclass, so every `except DockerCommandError` keeps catching it. What it
+    buys is the Server tab telling this apart from Docker refusing the stop
+    itself: its words were shown raw under the presses ("could not ask Docker
+    what is running, so the stop cannot be confirmed") on the Linux live test of
+    PR 291, and stayed there after Docker came back.
+    """
+
+
+class DockerTimedOutError(DockerCommandError):
+    """Raised when a `docker` command was given up on at its deadline: Docker did not answer.
+
+    A subclass, so every `except DockerCommandError` keeps catching it, and its
+    words are the generic failure's ("... exited 124: timed out after 30.0s").
+    What the type buys is the Server tab's banner telling it apart from an exit
+    status 124 a container gave: with Docker Desktop's engine VM killed, the CLI
+    hung past the realm poll's 30 s and the banner called that "an error Yu'lon
+    doesn't recognise" (PR 291's Windows live test, 2026-10-04).
+    """
+
+
 class SourceUnreadableError(RuntimeError):
     """Raised when the stream `exec_stdin()` was pumping stopped being readable.
 
@@ -337,9 +360,10 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerCommandError(problem)
-        raise DockerCommandError(
-            f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
-        )
+        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        if timeout is not None and runner.timed_out(proc):
+            raise DockerTimedOutError(said)
+        raise DockerCommandError(said)
     return proc
 
 
@@ -931,7 +955,7 @@ def _running(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None
     """
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
-        raise DockerCommandError(
+        raise DockerUnansweredError(
             "could not ask Docker what is running, so the stop cannot be confirmed"
         )
     running = {line.strip() for line in listed}
@@ -2627,6 +2651,37 @@ _NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECA
 No unreachable-daemon wording contains either; "no such file or directory" is not one.
 `container_state()` reads it as `missing`."""
 
+_UNREAD_SAID: dict[tuple[str, str | None], str] = {}
+"""What Docker last said when a container's state could not be read, by (name, distro).
+
+`_note_unread()` / `_note_read()` keep it, under `_UNREAD_LOCK`: the realm poll
+and a stop's waits read from worker threads.
+"""
+_UNREAD_LOCK = threading.Lock()
+
+
+def _note_unread(container: str, wsl_distro: str | None, said: str) -> None:
+    """Log a failed state read once per change of what Docker said.
+
+    The Server tab reads the world's state every five seconds. With the daemon
+    stopped, each read logged Docker's words again: 39 identical lines in three
+    minutes on the Linux live test of PR 291 (2026-10-04).
+    """
+    with _UNREAD_LOCK:
+        if _UNREAD_SAID.get((container, wsl_distro)) == said:
+            return
+        _UNREAD_SAID[(container, wsl_distro)] = said
+    logger.warning(f"could not read the state of {container}: {said}")
+
+
+def _note_read(container: str, wsl_distro: str | None) -> None:
+    """A read that answered after one that did not: say so once, and forget the failure."""
+    with _UNREAD_LOCK:
+        if _UNREAD_SAID.pop((container, wsl_distro), None) is None:
+            return
+    logger.info(f"Docker answers about {container} again")
+
+
 _STOP_SAYS_GONE = "No such container"
 """What `docker stop` says for a container that is already gone; `_run_docker_stop()`
 takes it as done. The stricter, older reading of `_NO_SUCH_CONTAINER`'s answer, kept
@@ -2706,7 +2761,7 @@ def _refuse_without_an_identity(
             have nothing to say it to — and naming it sends the user to edit
             their install's `.env` over a machine that has no Docker on it
             (review, 2026-08-23).
-        DockerCommandError: Docker was asked and would not answer.
+        DockerUnansweredError: Docker was asked and would not answer.
     """
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
@@ -2715,7 +2770,7 @@ def _refuse_without_an_identity(
         # the server had stopped while it was still serving. Socket permissions,
         # a wrong DOCKER_HOST and an API timeout under load all land here
         # (review, 2026-08-22).
-        raise DockerCommandError(
+        raise DockerUnansweredError(
             f"could not ask Docker what is running, and the install in {server_dir} has no "
             f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
             f"{nothing_was}"
@@ -3442,9 +3497,10 @@ def container_state(
     fmt = "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}"
     proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
-        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
         return ContainerState(missing=missing)
+    _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
@@ -5410,9 +5466,10 @@ def container_exit(
     fmt = "{{.Id}}\t{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.FinishedAt}}"
     proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
-        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
         return ContainerExit(missing=missing)
+    _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     cid, status, code, finished = (fields + ["", "", "", ""])[:4]
     exit_code = int(code) if code.lstrip("-").isdigit() else None

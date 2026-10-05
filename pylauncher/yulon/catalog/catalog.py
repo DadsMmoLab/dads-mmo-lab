@@ -297,6 +297,17 @@ class ClientSpec(_Strict):
         ),
     )
 
+    archives_any_case: bool = Field(
+        default=False,
+        description=(
+            "Whether the steps after the check open the client's archives whatever their case "
+            "(T227). True only where they do: TrinityCore's client-data stage renames them in "
+            "its temporary extraction client to the names its map tools open. False (CMaNGOS, "
+            "whose tools read the player's own folder by exact name): on a disk that tells "
+            "cases apart, a required file found only under another case is refused, saying so."
+        ),
+    )
+
     @field_validator("mpq_depth")
     @classmethod
     def _depth_is_positive(cls, value: MpqDepth) -> MpqDepth:
@@ -798,6 +809,17 @@ class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
     client: ClientSpec
+
+    @field_validator("client")
+    @classmethod
+    def _archives_by_exact_name(cls, value: ClientSpec) -> ClientSpec:
+        if value.archives_any_case:
+            raise ValueError(
+                "the CMaNGOS extraction opens the client's archives by exact name in the "
+                "player's own folder, so its client spec cannot set archives_any_case (T260)"
+            )
+        return value
+
     dockerfile: DockerfileSpec
     extract: ExtractPlan
     mmaps: MmapPlan
@@ -924,6 +946,42 @@ class TrinityCoreExtractPlan(ExtractPlan):
         return value
 
 
+class MmapTileHeader(_Strict):
+    """The header `mmaps_generator` writes at the start of every `.mmtile`, little-endian.
+
+    Centurion's (CENTURION faac5fc9, src/common/Collision/Maps/MapDefines.h:24-41):
+    `const uint32 MMAP_MAGIC = 0x4d4d4150`, then `struct MmapTileHeader { uint32
+    mmapMagic; uint32 dtVersion; uint32 mmapVersion; uint32 size; char usesLiquids;
+    char padding[3]; }`, 20 bytes (its own `static_assert`, :41). A tile is written
+    as that header and then exactly `size` bytes of navmesh data
+    (src/tools/mmaps_generator/MapBuilder.cpp:977-988). So a tile is finished when
+    it starts with the magic and is `length + size` bytes long; anything else was
+    cut off and is removed before a run continues.
+    """
+
+    length: Annotated[StrictInt, Field(ge=1)] = Field(
+        description="`sizeof(MmapTileHeader)`: the bytes before the data (Centurion: 20)."
+    )
+    magic: Annotated[StrictInt, Field(ge=0, lt=1 << 32)] = Field(
+        description=(
+            "The uint32 every tile starts with, read little-endian: `MMAP_MAGIC` "
+            "(Centurion: 0x4d4d4150, 1296908624)."
+        )
+    )
+    size_offset: Annotated[StrictInt, Field(ge=4)] = Field(
+        description="Where the uint32 data length (`size`) sits, after the magic (Centurion: 12)."
+    )
+
+    @model_validator(mode="after")
+    def _size_inside_the_header(self) -> MmapTileHeader:
+        if self.size_offset + 4 > self.length:
+            raise ValueError(
+                f"tile_header: the size at byte {self.size_offset} runs past the "
+                f"{self.length}-byte header"
+            )
+        return self
+
+
 class TrinityCoreMmaps(MmapPlan):
     """The movement-map generator, which on this family runs after the server is up."""
 
@@ -942,6 +1000,16 @@ class TrinityCoreMmaps(MmapPlan):
             "the cores of the Docker daemon that runs it (Docker Desktop's VM, not this host), at "
             "least 1 -- the generator's own default is every core (PathGenerator.cpp:343), and "
             "the world server runs beside it. A number: exactly that many."
+        ),
+    )
+    tile_header: MmapTileHeader | None = Field(
+        default=None,
+        description=(
+            "T209: how a finished `.mmtile` is told from one the generator was writing when it "
+            "stopped, so a run that stops part-way keeps its finished tiles and the next run "
+            "continues from them (the generator skips every tile whose header it can read, and "
+            "does not check the length: MapBuilder.cpp:1133-1152 at faac5fc9). None: nothing is "
+            "kept and every run starts from the beginning."
         ),
     )
 
@@ -2681,6 +2749,15 @@ class CatalogEntry(_Strict):
     )
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
+    )
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Facts about this server for the people who maintain the entry: which branch and "
+            "pull requests it rests on, which ticket measured what. Nothing reads them and "
+            "nothing may draw them; `description` is the sentence a player reads on the "
+            "Catalog tile (T194). The shape `Client.notes` and `SqlPhase.notes` already have."
+        ),
     )
 
     @model_validator(mode="after")

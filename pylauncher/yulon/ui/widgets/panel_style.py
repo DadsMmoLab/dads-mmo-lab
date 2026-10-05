@@ -26,12 +26,19 @@ What it changes, and the whole of it:
   there once stopped a pressed button lining up with its neighbours, so the
   box must not change size -- only the content moves, which is what makes it
   read as a press.
+* **The red edge (T193).** A sheet set on the panel outranks the window's,
+  whatever the selectors, so the bevel above would also paint over the theme's
+  `danger` border. A `danger` button here (Modules' Remove) gets
+  `COLOR_DANGER` on all four sides back, and a disabled one the muted
+  `COLOR_BRASS_DEEP` the theme gives it -- red on a button that cannot be
+  pressed would be the opposite lie.
 """
 
 from __future__ import annotations
 
 from yulon.ui.theme import (
     COLOR_BRASS_DEEP,
+    COLOR_DANGER,
     COLOR_GOLD_BRASS,
 )
 
@@ -63,6 +70,12 @@ QPushButton:pressed {{
     border-left: 1px solid {COLOR_BRASS_DEEP};
     border-right: 1px solid {COLOR_GOLD_BRASS};
     border-bottom: 1px solid {COLOR_GOLD_BRASS};
+}}
+QPushButton[danger="true"] {{
+    border-color: {COLOR_DANGER};
+}}
+QPushButton[danger="true"]:disabled {{
+    border-color: {COLOR_BRASS_DEEP};
 }}
 """
 

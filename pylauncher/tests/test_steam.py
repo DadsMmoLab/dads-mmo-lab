@@ -638,14 +638,36 @@ def test_the_confirmation_names_the_entries_the_file_the_backup_and_the_tool(
     client = _client(tmp_path)
     (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {}}))
 
-    said = steam.confirmation(_shortcuts(tmp_path, client_dir=client).add())
+    report = _shortcuts(tmp_path, client_dir=client).add()
+    said = steam.confirmation(report)
+    details = steam.confirmation_details(report)
 
+    # T194 C34: the sentence first, in words; every path and backup in the details.
+    assert said.startswith("Added to your Steam library"), said
     assert "Turtle WoW" in said and "Turtle WoW Server" in said
-    assert str(config / "shortcuts.vdf") in said
-    assert "shortcuts.vdf.yulon-bak-20260910-200500" in said
-    assert "GE-Proton11-6-x86_64" in said
-    assert "6 artwork files" in said
     assert "Restart Steam" in said
+    assert "/" not in said, said
+    assert str(config / "shortcuts.vdf") in details
+    assert "shortcuts.vdf.yulon-bak-20260910-200500" in details
+    assert "GE-Proton11-6-x86_64" in details
+    assert "6 artwork files" in details
+    assert str(config / "grid") in details
+
+
+def test_a_second_press_says_it_updated_the_entries(tmp_path: Path) -> None:
+    """A press over entries already there replaces them; the sentence says so in words."""
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {}}))
+    _shortcuts(tmp_path, client_dir=client).add()
+
+    report = _shortcuts(tmp_path, client_dir=client).add()
+
+    assert report.replaced
+    said = steam.confirmation(report)
+    assert said.startswith("Updated in your Steam library"), said
+    assert "/" not in said, said
 
 
 # --------------------------------------------------------------------------
@@ -914,3 +936,16 @@ def test_no_proton_at_all_is_no_proton_script(tmp_path: Path) -> None:
     root.mkdir(parents=True)
 
     assert steam.find_proton_script(root) is None
+
+
+def test_the_details_have_no_doubled_spaces(tmp_path: Path) -> None:
+    """Fix round 1, M6: "….vdf.  It was backed up" carried a space from the old sentence."""
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {}}))
+
+    details = steam.confirmation_details(_shortcuts(tmp_path, client_dir=client).add())
+
+    assert "  " not in details, details
+    assert ".vdf. It was backed up first as" in details, details

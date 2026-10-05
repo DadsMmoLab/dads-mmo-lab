@@ -68,3 +68,66 @@ def test_one_folder_two_games_is_not_a_collision() -> None:
         [("WoW WotLK", Path("/srv/DadsMmoLab")), ("WoW TBC", Path("/srv/DadsMmoLab"))]
     )
     assert titles == ["WoW WotLK — DadsMmoLab", "WoW TBC — DadsMmoLab"]
+
+
+# -- T192: the sidebar's own titles -- the short game name, a folder only when needed --
+
+
+def test_a_short_game_name_drops_the_shared_prefix_and_nothing_else() -> None:
+    from yulon.ui.sidebar import short_game_name
+
+    assert [
+        short_game_name(n)
+        for n in ("WoW WotLK", "WoW TBC", "WoW Vanilla", "WoW Tortoise", "Centurion")
+    ] == ["WotLK", "TBC", "Vanilla", "Tortoise", "Centurion"]
+
+
+def test_one_server_is_titled_with_its_short_game_name_alone() -> None:
+    """A3/B5/C9: "WoW WotLK — DadsMmoLab" was 235px on a 64px rail and drew as "WoW…"."""
+    from yulon.ui.tab_titles import sidebar_titles
+
+    assert sidebar_titles([("WoW WotLK", Path("/srv/DadsMmoLab"))]) == ["WotLK"]
+
+
+def test_two_games_in_one_folder_need_no_folder_to_tell_them_apart() -> None:
+    from yulon.ui.tab_titles import sidebar_titles
+
+    titles = sidebar_titles(
+        [("WoW WotLK", Path("/srv/DadsMmoLab")), ("WoW TBC", Path("/srv/DadsMmoLab"))]
+    )
+    assert titles == ["WotLK", "TBC"]
+
+
+def test_two_servers_of_one_game_carry_their_folders_on_a_second_line() -> None:
+    """Only the pair that shares a game grows, and only by the folders that differ."""
+    from yulon.ui.tab_titles import sidebar_titles
+
+    titles = sidebar_titles(
+        [
+            ("WoW WotLK", Path("/mnt/on-the-ssd/DadsMmoLab")),
+            ("WoW TBC", Path("/mnt/on-the-ssd/DadsMmoLab")),
+            ("WoW WotLK", Path("/mnt/on-the-spinner/DadsMmoLab")),
+        ]
+    )
+    first, tbc, second = titles
+    assert first.startswith("WotLK\n") and "on-the-ssd" in first, first
+    assert second.startswith("WotLK\n") and "on-the-spinner" in second, second
+    assert tbc == "TBC"
+    assert "/mnt" not in first and "/mnt" not in second, "the shared tail is not repeated"
+
+
+def test_an_ampersand_in_a_folder_is_shown_never_read_as_a_shortcut(qapp: object) -> None:
+    """T188 B7, kept on the new titles: they are tab text, so "&" arrives escaped."""
+    from PySide6.QtGui import QKeySequence
+
+    from yulon.ui.tab_titles import sidebar_titles
+
+    titles = sidebar_titles(
+        [
+            ("WoW WotLK", Path("/srv/Raids & Dungeons")),
+            ("WoW WotLK", Path("/srv/Quests & Loot")),
+        ]
+    )
+    for title in titles:
+        assert QKeySequence.mnemonic(title).isEmpty(), title
+    assert "Raids & Dungeons" in titles[0].replace("&&", "&")

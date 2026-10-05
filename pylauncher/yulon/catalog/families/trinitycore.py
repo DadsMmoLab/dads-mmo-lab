@@ -591,6 +591,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         except play_client.PlayClientError as exc:
             raise InstallerError(_no_copy_beside(original, temp, exc)) from exc
         left_out = self._drop_unlisted_archives(temp)
+        self._spell_archives_as_the_extractors_open_them(temp)
         if left_out:
             yield (
                 "Left out of the copy, because this server's map data is made from the stock "
@@ -649,6 +650,49 @@ class TrinityCoreInstaller(CmangosInstaller):
                 ) from exc
             left_out.append(rel.as_posix())
         return sorted(left_out)
+
+    def _spell_archives_as_the_extractors_open_them(self, temp: Path) -> None:
+        """Rename each kept archive in the copy to the catalog's spelling (T227).
+
+        The extractors open every archive by a fixed name (map_extractor
+        System.cpp:114-124, :1152-1218; vmapexport.cpp:295-331), and on a
+        case-sensitive disk `Data/lichking.mpq` is not `Data/lichking.MPQ`: a client
+        named in lower case would give them nothing to read. The copy is Yu'lon's,
+        so the rename happens there; the player's client keeps its own names.
+
+        A name the catalog's spelling already reaches is left alone: on a disk that
+        does not tell cases apart that is the same file, and on one that does it is
+        the catalog's own archive. A locale folder follows the retail `xxYY`
+        spelling (`enus` becomes `enUS`).
+
+        A rename and never a link: one name per archive, so the extractors see what
+        they would see in a retail client. On a case-sensitive disk the player's
+        file at the old name is never asked for its flag (an unlink there needs
+        only the folder's write bit), which is what `play_client.remove_folder()`
+        would otherwise put back.
+        """
+        kept = self._tc().extract.client_archives
+        data = temp / "Data"
+        moves: list[tuple[Path, Path]] = []
+        for folder, _dirs, files in os.walk(data):
+            for name in files:
+                path = Path(folder) / name
+                canonical = _canonical_archive(path.relative_to(data).as_posix(), kept)
+                if canonical is not None and canonical != path.relative_to(data).as_posix():
+                    moves.append((path, data.joinpath(*canonical.split("/"))))
+        for path, target in moves:
+            if os.path.lexists(target):
+                continue
+            try:
+                target.parent.mkdir(exist_ok=True)
+                os.rename(path, target)
+            except OSError as exc:
+                remedy = _close_and_press(exc, "Install")
+                raise InstallerError(
+                    f"{path} could not be renamed to {target.name} in the temporary copy of your "
+                    f"client ({exc}), so the map data was not extracted: the extractors open it "
+                    f"only by that name. Your own client was not changed.{remedy}"
+                ) from exc
 
     def _refuse_missing_map_data(self, data_dir: Path, original: Path) -> None:
         """Refuse before `up` when the start check would fail, and make the next press extract.
@@ -778,11 +822,18 @@ class TrinityCoreInstaller(CmangosInstaller):
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
     ) -> Iterator[str]:
-        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3)."""
+        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3).
+
+        T209 (owner, 2026-10-04): a Rebuild keeps the server's code, so the job's
+        finished tiles stay and the run started once it is ready continues from
+        them; every other press (Update to latest, Return to the tested pin) may
+        change the generator, so its tiles go and the next run starts from 0 %.
+        """
         said = mmaps.stop_for_route(
             server_dir,
             self.entry,
             route,
+            clear=press != server_build_presses.REBUILD,
             press=press,
             runner=self._mmaps_runner,
             install_id=self._install_id(server_dir),
@@ -811,7 +862,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def stop_mmaps(self, server_dir: Path) -> str:
-        """Stop the job and remove its partial output: `mmaps.stop_mmaps()`."""
+        """Stop the job and keep its finished tiles (T209): `mmaps.stop_mmaps()`."""
         return mmaps.stop_mmaps(
             server_dir,
             self.entry,
@@ -1836,6 +1887,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 server_dir,
                 self.entry,
                 "the extraction",
+                clear=True,
                 press=REEXTRACT_BUTTON,
                 runner=self._mmaps_runner,
                 install_id=ident,
@@ -2857,6 +2909,17 @@ def _no_copy_beside(original: Path, target: Path, exc: play_client.PlayClientErr
             "beside it, then press Install again."
         )
     return f"{head}, and that copy could not be made ({cause}). {tail} Fix that, then try again."
+
+
+def _canonical_archive(rel: str, kept: Sequence[str]) -> str | None:
+    """`rel`'s spelling in `kept`, `{locale}` as the retail `xxYY` (T227); None when not kept."""
+    folded = rel.casefold()
+    locale = rel.split("/", 1)[0] if "/" in rel else ""
+    spelled = locale[:2].lower() + locale[2:].upper() if len(locale) == 4 else locale
+    for entry in kept:
+        if entry.replace("{locale}", locale).casefold() == folded:
+            return entry.replace("{locale}", spelled)
+    return None
 
 
 def _kept_archive(rel: str, kept: Sequence[str]) -> bool:

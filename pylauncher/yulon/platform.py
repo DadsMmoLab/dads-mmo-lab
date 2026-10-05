@@ -988,11 +988,20 @@ def docker_programs() -> tuple[str, ...]:
     return ("docker", *_windows_docker_programs())
 
 
+_DOCKER_NOT_FOUND = "Docker could not be found on this machine."
+_DESKTOP_INSTALL_ADVICE = (
+    "Install Docker Desktop and try again — and if it is already installed, open Docker "
+    "Desktop once, wait for 'Engine running', and try again then."
+)
+_ENGINE_INSTALL_ADVICE = "Install Docker Engine and try again."
+DOCKER_MISSING_ON_DESKTOP = f"{_DOCKER_NOT_FOUND} {_DESKTOP_INSTALL_ADVICE}"
+"""No docker CLI, told to a Windows or macOS player (the Server tab's Docker banner, T194)."""
+DOCKER_MISSING_ON_LINUX = f"{_DOCKER_NOT_FOUND} {_ENGINE_INSTALL_ADVICE}"
+"""No docker CLI, told to a Linux player: no Docker Desktop in it (T194)."""
+
 DOCKER_CLI_MISSING_HELP = (
-    "Docker could not be found on this machine. Install Docker Desktop "
-    "(Windows/macOS) or Docker Engine (Linux) and try again — and if it is "
-    "already installed, open Docker Desktop once, wait for 'Engine running', "
-    "and try again then."
+    f"{_DOCKER_NOT_FOUND} On Windows or macOS: {_DESKTOP_INSTALL_ADVICE} "
+    f"On Linux: {_ENGINE_INSTALL_ADVICE}"
 )
 """What to tell the user when `docker_program()` comes back empty.
 
@@ -2640,11 +2649,23 @@ command a SECRET. Keeping them apart means a fake for one cannot be handed
 the other by accident, and the argv-level tests can record them separately.
 """
 
-SUDO_PASSWORD_QUESTION = (
-    "Installing Docker needs administrator rights. Enter your sudo password "
-    "(leave it empty to skip the steps that need it):"
-)
-"""The one sudo question. Asked at most once per provisioning run.
+
+def sudo_password_question(purpose: str) -> str:
+    """The sudo password question for one errand, in a player's words (T194 C29).
+
+    `SudoSession` runs `sudo -S -p ""`, so sudo prints no prompt of its own:
+    this sentence is the whole of what the player reads. It says whose password
+    (this computer's login one), what it is for, that it goes to sudo and is not
+    kept, and what an empty answer does.
+    """
+    return (
+        f"Yu'lon needs this computer's password (the one you log in with) to {purpose}. "
+        "It goes to sudo and is never saved. Leave it empty to skip the steps that need it."
+    )
+
+
+SUDO_PASSWORD_QUESTION = sudo_password_question("set up Docker for the install")
+"""The install's sudo question. Asked at most once per provisioning run.
 
 No `path`/`folder`/`(y/n)` wording on purpose: `ui/widgets/prompt.py`'s
 `is_secret()` masks everything that is not recognisably harmless, so this text
@@ -2652,6 +2673,9 @@ is echoed as dots without the widget knowing anything about sudo. That is a
 claim about another module's regex, so it is asserted rather than assumed —
 `test_the_sudo_question_is_masked_by_the_prompt_widget`.
 """
+
+SUDO_REPAIR_PASSWORD_QUESTION = sudo_password_question("reinstall Docker")
+"""The Steam Deck Docker repair's sudo question (T160), asked by its own `SudoSession`."""
 
 SudoOutcome = Literal["unasked", "verified", "declined", "refused", "unavailable"]
 """Where a `SudoSession` stands. One yes, one no, and three kinds of no-answer.
@@ -2719,8 +2743,17 @@ class SudoSession:
     carries WHY there is no password, which a `bool` cannot (see `SudoOutcome`).
     """
 
-    def __init__(self, ask: runner.Prompter, run_input: RunWithInput, *, attempts: int = 3) -> None:
+    def __init__(
+        self,
+        ask: runner.Prompter,
+        run_input: RunWithInput,
+        *,
+        attempts: int = 3,
+        question: str = SUDO_PASSWORD_QUESTION,
+    ) -> None:
+        """`question` is what `ask` is handed: the install's, unless the caller has its own."""
         self._ask = ask
+        self._question = question
         self._run_input = run_input
         self._attempts = attempts
         self._authorised: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None
@@ -2779,7 +2812,7 @@ class SudoSession:
             return self.outcome == "verified"
         for attempt in range(1, self._attempts + 1):
             self.asked += 1
-            reply = self._ask(SUDO_PASSWORD_QUESTION)
+            reply = self._ask(self._question)
             if not reply:
                 logger.info("sudo password: declined by the user")
                 self.outcome = "declined"
@@ -3783,7 +3816,11 @@ def _repair_docker_after_steamos_update(
         )
         return ProvisionReport("linux", manual_steps=(said,), docker_group="not-asked")
     consent = _settle_docker_group(do, who, False, cancel, ask)
-    session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
+    session = SudoSession(
+        ask,
+        run_input if run_input is not None else _run_with_input,
+        question=SUDO_REPAIR_PASSWORD_QUESTION,
+    )
     # What HAPPENED to the group, as `_ensure_docker_linux()` reports it: a yes
     # whose `usermod` never ran or did not work is `join-failed`, not `granted`.
     outcome: DockerGroupOutcome = "join-failed" if consent == "granted" else consent
@@ -4067,6 +4104,60 @@ def find_docker_desktop(run: RunCmd | None = None) -> Path | None:
 def _start_docker_desktop_command(exe: Path) -> list[str]:
     """`Start-Process <exe>`, with the path quoted (Program Files has a space in it)."""
     return ["powershell.exe", "-NoProfile", "-Command", f"Start-Process {_ps_quote(exe)}"]
+
+
+_MANUAL_START_DOCKER_DESKTOP_MAC = (
+    "Yu'lon could not open Docker Desktop on this Mac. Open it from Applications and wait "
+    "until it says 'Engine running' — then try again. If it is not in Applications it is not "
+    "installed: get it from https://www.docker.com/products/docker-desktop/"
+)
+
+
+_OPEN_DOCKER_DESKTOP_SECONDS = 30.0
+"""Each child `open_docker_desktop()` runs is given up on after this: the press comes back."""
+
+_NO_DOCKER_DESKTOP_ON_LINUX = (
+    'There is no Docker Desktop to open on Linux: run "sudo systemctl start docker" in a '
+    "terminal, then press Try again."
+)
+
+
+def open_docker_desktop(run: RunCmd | None = None) -> str | None:
+    """Start Docker Desktop for the Server tab's banner (T194); None once it is starting.
+
+    Otherwise the sentence that tells the player to start it themselves: it
+    is not installed, or Windows or macOS would not start it. Never raises,
+    and runs off the GUI thread: on Windows, finding the app is a PowerShell
+    probe (`find_docker_desktop()`). It does not wait for the engine; the
+    tab's own poll notices when it answers. Every child it runs is bounded,
+    so a PowerShell that never answers cannot hold the press grey for good.
+    """
+    here = detect()
+    if here == "linux":
+        return _NO_DOCKER_DESKTOP_ON_LINUX
+    do: RunCmd = run if run is not None else _DefaultRunner().bounded(_OPEN_DOCKER_DESKTOP_SECONDS)
+    if here == "macos":
+        try:
+            proc = do(["open", "-a", "Docker"])
+        except OSError as exc:
+            logger.warning(f"could not open Docker Desktop: {exc}")
+            return _MANUAL_START_DOCKER_DESKTOP_MAC
+        if proc.returncode != 0:
+            logger.warning(f"open -a Docker exited {proc.returncode}: {proc.stderr.strip()}")
+            return _MANUAL_START_DOCKER_DESKTOP_MAC
+        return None
+    exe = find_docker_desktop(do)
+    if exe is None:
+        return _MANUAL_START_DOCKER_DESKTOP
+    try:
+        proc = do(_start_docker_desktop_command(exe))
+    except OSError as exc:
+        logger.warning(f"could not start {exe}: {exc}")
+        return _MANUAL_START_DOCKER_DESKTOP
+    if proc.returncode != 0:
+        logger.warning(f"starting {exe} exited {proc.returncode}: {proc.stderr.strip()}")
+        return _MANUAL_START_DOCKER_DESKTOP
+    return None
 
 
 def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> ProvisionReport:

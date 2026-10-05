@@ -326,3 +326,95 @@ def test_the_reason_for_silence_does_not_depend_on_docker_being_askable() -> Non
     assert answer.outcome == "unknown"
     assert answer.indeterminate is True
     assert "nothing is known" not in answer.reason, answer.reason
+
+
+# -- T226: a command that ran and printed nothing ----------------------------
+
+
+def test_a_command_that_ran_and_printed_nothing_is_a_yes_end_to_end() -> None:
+    """The real wire, the real channel and the real verb answer, one empty `<result/>`.
+
+    Measured on the Centurion proof (yulon-ubuntu2, 2026-10-04): `revive Joradan`
+    came back HTTP 200 with an empty result, the server had run it, and Yu'lon
+    said "nothing is listening on the command channel".
+    """
+    import http.server
+
+    from yulon import actions
+
+    body = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
+        b'xmlns:ns1="urn:AC"><SOAP-ENV:Body>'
+        b"<ns1:executeCommandResponse><result/></ns1:executeCommandResponse>"
+        b"</SOAP-ENV:Body></SOAP-ENV:Envelope>\n"
+    )
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - the stdlib spells it this way
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            """Quiet."""
+
+    def _no_state() -> docker.ContainerState:
+        raise AssertionError("the server answered; docker has nothing to add")
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        live = channel.SoapChannel(
+            endpoint=soap.Endpoint(
+                host="127.0.0.1", port=httpd.server_address[1], account="YULON_AB", password="pw"
+            ),
+            state_of=_no_state,
+        )
+        answer = live.send("revive Joradan")
+        outcome = actions.send(live, "revive Joradan")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert answer.outcome == "yes", answer
+    assert answer.text == "" and answer.reason == ""
+    assert outcome.done is True, outcome
+    assert "listening" not in outcome.problem
+
+
+def test_a_reply_nobody_can_read_never_says_nothing_is_listening() -> None:
+    """Something answered over HTTP, so the channel is not off (T226).
+
+    The sentence for a closed port ("nothing is listening ... it may not be
+    turned on") is false for a server that sent a whole reply back; and since
+    it answered, the command may have run, so it must not be retried blindly.
+    """
+
+    def _no_state() -> docker.ContainerState:
+        raise AssertionError("the server answered; docker has nothing to add")
+
+    live = channel.SoapChannel(
+        endpoint=soap.Endpoint(host="127.0.0.1", port=7878, account="YULON_AB", password="pw"),
+        state_of=_no_state,
+        send=_Wire(soap.Reply("unreadable", "<html>a proxy got in the way</html>", 200)),
+    )
+
+    answer = live.send("revive Joradan")
+
+    assert answer.outcome == "unknown"
+    assert "listening" not in answer.reason, answer.reason
+    assert "could not be read" in answer.reason, answer.reason
+    assert answer.indeterminate is True
+
+
+def test_a_closed_port_on_a_running_server_still_says_nothing_is_listening() -> None:
+    """The neighbour of the rule above: the sentence stays where it is true."""
+    answer = _channel(_Wire(soap.Reply("unreachable", "connection refused")), _state()).send("x")
+
+    assert "nothing is listening" in answer.reason, answer.reason
+    assert answer.indeterminate is False

@@ -715,7 +715,7 @@ def run(
     """
     logger.debug(f"run() called: command={command} cwd={cwd}")
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             command,
             cwd=_cwd_arg(cwd),
             env=child_env(env),
@@ -729,10 +729,58 @@ def run(
             stdin=stdin,
         )
     except subprocess.TimeoutExpired as exc:
-        logger.warning(f"{command[0]} did not answer within {timeout}s; giving up")
+        _note_unanswered(command, timeout)
         return subprocess.CompletedProcess(
-            command, 124, _as_text(exc.stdout), f"timed out after {timeout}s"
+            command, TIMED_OUT_RETURNCODE, _as_text(exc.stdout), f"{_TIMED_OUT} {timeout}s"
         )
+    _note_answered(command)
+    return proc
+
+
+TIMED_OUT_RETURNCODE = 124
+"""The `returncode` `run()` reports when its `timeout` passed (`timeout(1)`'s own)."""
+
+_TIMED_OUT = "timed out after"
+
+_UNANSWERED: set[tuple[str, ...]] = set()
+"""The command lines whose last `run()` timed out, under `_UNANSWERED_LOCK`.
+
+Worker threads run commands (the realm poll among them), so it is locked."""
+_UNANSWERED_LOCK = threading.Lock()
+
+
+def timed_out(proc: subprocess.CompletedProcess[str]) -> bool:
+    """Whether `proc` is `run()` giving up at its `timeout`, not a command that exited 124."""
+    return proc.returncode == TIMED_OUT_RETURNCODE and proc.stderr.startswith(f"{_TIMED_OUT} ")
+
+
+def _note_unanswered(command: list[str], timeout: float | None) -> None:
+    """Log a timeout once per change: the same command line timing out again is not news.
+
+    With Docker Desktop's engine away the realm poll timed out every 35 s, and
+    each said "docker did not answer within 30.0s; giving up" again: nine
+    identical lines in five minutes on PR 291's Windows live test (2026-10-04).
+    """
+    key = tuple(command)
+    with _UNANSWERED_LOCK:
+        repeat = key in _UNANSWERED
+        _UNANSWERED.add(key)
+    if repeat:
+        logger.debug(f"{command[0]} still did not answer within {timeout}s")
+        return
+    logger.warning(f"{command[0]} did not answer within {timeout}s; giving up")
+
+
+def _note_answered(command: list[str]) -> None:
+    """A command line that timed out has answered: say so once, and forget the timeout."""
+    with _UNANSWERED_LOCK:
+        if not _UNANSWERED:
+            return
+        try:
+            _UNANSWERED.remove(tuple(command))
+        except KeyError:
+            return
+    logger.info(f"{command[0]} answers again")
 
 
 def _as_text(captured: object) -> str:

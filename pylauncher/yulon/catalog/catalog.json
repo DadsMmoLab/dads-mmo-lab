@@ -5,7 +5,10 @@
       "id": "wow-wotlk",
       "name": "WoW WotLK",
       "status": "stable",
-      "description": "WotLK (3.3.5a) on AzerothCore with Playerbots. The flagship install; module/ALE/mod/keg management is manifest-driven.",
+      "description": "Wrath of the Lich King (3.3.5a) on AzerothCore, with bots that quest, group and fight alongside you. The most complete server here: add modules, scripts and mods from its Modules tab.",
+      "notes": [
+        "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\""
+      ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
         "sources": [
@@ -30,7 +33,7 @@
           "macos",
           "windows"
         ],
-        "default_server_dir": "wow-server-playerbots",
+        "default_server_dir": "yulon-wotlk",
         "password": {
           "mode": "fixed",
           "value": "password"
@@ -178,7 +181,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-tbc-server",
+        "default_server_dir": "yulon-tbc",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -605,7 +608,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-vanilla-server",
+        "default_server_dir": "yulon-vanilla",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -998,7 +1001,14 @@
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
       "status": "beta",
-      "description": "Tortoise on the Penqle core: tortoise-wow/tortoise-wow branch 1181dev, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. 1181dev is main plus the SOAP interface (PR #491, merged there 2026-09-17); it carries the headless bot sessions (PR #438, bot-helpers is fully merged into main) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots. It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated. Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17). Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
+      "description": "Turtle WoW's world on the Tortoise core, the code the Turtle WoW V2 servers are built from, with the TortoiseBots bots built in. Yu'lon compiles it from source in Docker.",
+      "notes": [
+        "Penqle core: tortoise-wow/tortoise-wow branch 1181dev, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker.",
+        "1181dev is main plus the SOAP interface (PR #491, merged there 2026-09-17); it carries the headless bot sessions (PR #438, bot-helpers is fully merged into main) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots.",
+        "It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated.",
+        "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
+        "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86)."
+      ],
       "emulator": {
         "name": "tortoise-wow/tortoise-wow @ 1181dev (the Penqle core) + Sagiroth/TortoiseBots",
         "sources": [
@@ -1022,7 +1032,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "tortoise-wow-server",
+        "default_server_dir": "yulon-tortoise",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -1323,7 +1333,7 @@
         "rename_command": "rename",
         "rename_offline_refusal": "has to be logged in before a rename can be flagged on this server -- the same command run on an offline character here replaces the name with the character's guid instead, so it is not sent",
         "set_level_command": null,
-        "set_level_absent_reason": "No set-level control on this server. Nothing its console can run moves an existing character to a level you pick: `.levelup` is the one that would, and the console is not allowed to run it, while `.rndbot level <bot>` ignores the number it is handed and re-rolls that bot at the level it already has. What the console can do is `.reset level`, which puts a character who is logged in back to the configured starting level, and `.rndbot create level=<n>`, which makes a NEW character at the level you name rather than moving one that is already there."
+        "set_level_absent_reason": "This server can't move a character to a level you pick. From the Console it can reset a logged-in character to the starting level, or make a new bot at the level you name."
       },
       "accounts": {
         "level": { "level_column": "rank", "max_level": 4 },
@@ -1396,7 +1406,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-centurion-server",
+        "default_server_dir": "yulon-centurion",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -1431,6 +1441,7 @@
             "checkout": "src/centurion",
             "client": {
               "required_file": "Data/lichking.MPQ",
+              "archives_any_case": true,
               "min_mpq": 6,
               "mpq_depth": "recursive",
               "locale_mpq_required": true,
@@ -1521,7 +1532,12 @@
                 "{{THREADS}}"
               ],
               "min_files": 500,
-              "background": true
+              "background": true,
+              "tile_header": {
+                "length": 20,
+                "magic": 1296908624,
+                "size_offset": 12
+              }
             },
             "conf": {
               "source_dir": "/opt/trinitycore/etc",

@@ -684,6 +684,62 @@ def test_a_script_that_exits_0_without_installing_is_not_remembered(
     assert warned and "docker-compose.yml" in warned[0]
 
 
+class _RefusingInstaller(_FakeInstaller):
+    """Streams its lines, then refuses the way the engine does: an `InstallerError`."""
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield from self.lines
+        raise InstallerError("The source clone failed: the network went away. Press Install again.")
+
+
+def test_the_install_failed_box_says_the_reason_without_a_class_name(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T194 C8: the box read "InstallerError: The source clone failed: ...".
+
+    The class name is a fact for the app log, not for the player reading why
+    their install stopped. The reason itself is carried whole.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(),  # type: ignore[arg-type]
+    )
+    warned: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append((a[1], a[2])))  # type: ignore[attr-defined]
+    # No docker-group restart to offer, so the plain warning is what shows
+    # (the premise the clean-exit-without-a-compose-file test states).
+    monkeypatch.setattr(platform, "_process_group_names", lambda gids: {"docker"})
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _RefusingInstaller(e, ["Step 3 of 9 (33%): clone-core"]),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    finished: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    wait_for_panel(panel)
+
+    reason = "The source clone failed: the network went away. Press Install again."
+    assert warned == [("Install failed", reason)]
+    assert finished == [("wow-wotlk", False, reason)]
+    assert "Error" not in panel.status_text(), panel.status_text()
+
+
 def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -855,7 +911,7 @@ def test_an_install_that_fails_without_a_stop_still_says_install_failed(
     wait_for_panel(panel)
 
     assert panel.cancelled is False
-    assert warned == [("Install failed", "InstallerError: The build failed.")], warned
+    assert warned == [("Install failed", "The build failed.")], warned
 
 
 def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(
@@ -2390,6 +2446,55 @@ def test_a_real_no_on_the_suggestion_dialog_reads_as_no(
     assert _ask_with_real_dialog(monkeypatch, tmp_path, QMessageBox.StandardButton.No) is False
 
 
+def _escape_active_message_box(seen: list[list[str]], deadline: object) -> None:
+    """Press Escape on the active modal `QMessageBox`, noting its buttons, once it appears."""
+    from PySide6.QtCore import QDeadlineTimer, Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    assert isinstance(deadline, QDeadlineTimer)
+    app = QApplication.instance()
+    widget = app.activeModalWidget() if app is not None else None
+    if isinstance(widget, QMessageBox):
+        seen.append([button.text() for button in widget.buttons()])
+        QTest.keyClick(widget, Qt.Key.Key_Escape)
+        return
+    if deadline.hasExpired():
+        return
+    QTimer.singleShot(_DIALOG_POLL_MS, lambda: _escape_active_message_box(seen, deadline))
+
+
+def test_escape_on_the_install_folder_question_closes_it_and_opens_no_picker(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR 291's Windows live test: Escape opened "Where should WoW WotLK be installed?"."""
+    from PySide6.QtCore import QDeadlineTimer
+
+    monkeypatch.setattr(QMessageBox, "exec", _REAL_QMESSAGEBOX_EXEC)
+    seen: list[list[str]] = []
+    _escape_active_message_box(seen, QDeadlineTimer(_REAL_DIALOG_BOUND_MS))
+
+    answer = catalog_view._qt_suggestion_asker(None, "WoW WotLK", tmp_path / "suggested")
+
+    assert seen, "the question never opened"
+    assert catalog_view.CANCEL_LABEL in seen[0], seen
+    assert answer is None, f"Escape read as {answer!r}"
+
+    picked: list[str] = []
+    started: list[str] = []
+    view = CatalogView(
+        CATALOG,
+        lambda e: started.append(e.id) or _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda _parent, title, _start: picked.append(title),
+        ask_suggestion=lambda *_: None,
+        platform_id=lambda: "linux",
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert picked == [] and started == [], (picked, started)
+
+
 # -- "Installed" on a tile whose server the app already knows (owner, 2026-09-04)
 
 
@@ -2582,7 +2687,7 @@ def test_the_modal_guard_covers_a_dialog_built_as_an_instance(qapp: object) -> N
     """The guard has to cover `box.exec()`, not only `QMessageBox.question(...)`.
 
     `_qt_suggestion_asker` is built as a `QMessageBox` instance so its buttons
-    can read "Yes, default location" / "No, custom location", and an instance
+    can read "Use this folder" / "Choose another folder…", and an instance
     plus `exec()` never goes through the static `question` the `_no_modal_dialogs`
     fixture used to patch. When that happened,
     `test_install_asks_for_folders_then_streams_the_installer` stopped failing
@@ -2669,3 +2774,237 @@ def test_the_install_button_on_a_tile_is_drawn_amber(qapp: object) -> None:
     view.hide()
 
     assert near >= 0.8 * len(points), f"{near} of {len(points)} sampled pixels are the amber fill"
+
+
+# -- what a tile says (T194) ---------------------------------------------------
+
+
+def test_every_tile_subtitle_names_the_client_version_the_game_needs(qapp: object) -> None:
+    """C18 (T194): the Tortoise tile said 1.17.2 while its client must be 1.18.1."""
+    from PySide6.QtWidgets import QLabel
+
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    for entry in CATALOG.games:
+        subtitle = view.button_for(entry.id).parentWidget().findChild(QLabel, "tile-subtitle")
+        assert subtitle is not None, entry.id
+        assert entry.client.version in subtitle.text(), (entry.id, subtitle.text())
+
+
+def test_the_wotlk_tile_does_not_describe_itself_in_developer_words(qapp: object) -> None:
+    """C19 (T194): "module/ALE/mod/keg management is manifest-driven" was on the tile."""
+    from PySide6.QtWidgets import QLabel
+
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    frame = view.button_for("wow-wotlk").parentWidget()
+    description = frame.findChild(QLabel, "tile-desc")
+
+    assert description is not None and description.text()
+    assert "manifest" not in description.text().lower(), description.text()
+
+
+# -- T195 C23/C24/C30: the first-run tiles and the folders they suggest --------------
+
+
+def _tile_labels(view: CatalogView, game_id: str) -> list[str]:
+    from PySide6.QtWidgets import QLabel
+
+    tile = view.findChild(QWidget, f"catalog-tile-{game_id}")
+    assert tile is not None, game_id
+    return [label.text() for label in tile.findChildren(QLabel) if label.isVisibleTo(tile)]
+
+
+def test_only_the_wotlk_tile_says_recommended(qapp: object) -> None:
+    """C23 (T195): a first-time player is told where to start, on one tile only."""
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    marked = [game.id for game in CATALOG.games if "Recommended" in _tile_labels(view, game.id)]
+    assert marked == ["wow-wotlk"]
+
+
+def test_the_emulator_is_named_on_hover_not_on_the_tile(qapp: object) -> None:
+    """C23 (T195): the emulator line is for the curious; the tile keeps to what a player picks.
+
+    F8 (T194 final fix): in words -- the Tortoise tile said "Server software:
+    tortoise-wow/tortoise-wow @ 1181dev ...", a repository and a branch.
+    """
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    for game in CATALOG.games:
+        tile = view.findChild(QWidget, f"catalog-tile-{game.id}")
+        assert tile is not None
+        tip = tile.toolTip()
+        assert tip.startswith("Server software: "), (game.id, tip)
+        named = tip.removeprefix("Server software: ")
+        assert named.strip(), (game.id, tip)
+        assert "@" not in tip and "/" not in tip, (game.id, tip)
+        for source in game.emulator.sources:
+            if source.branch:
+                assert source.branch not in tip, (game.id, source.branch, tip)
+        assert named not in _tile_labels(view, game.id), game.id
+    tortoise = view.findChild(QWidget, "catalog-tile-wow-tortoise")
+    assert tortoise is not None
+    assert tortoise.toolTip() == "Server software: the Tortoise WoW core with TortoiseBots"
+
+
+def test_a_short_description_does_not_stretch_its_box(qapp: object) -> None:
+    """C24 (T195): the description box took every spare pixel of a tall tile."""
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    tile = view.findChild(QWidget, "catalog-tile-wow-wotlk")
+    assert tile is not None
+    layout = tile.layout()
+    stretched = [
+        layout.itemAt(index).widget().objectName()
+        for index in range(layout.count())
+        if layout.stretch(index) and layout.itemAt(index).widget() is not None
+    ]
+    assert stretched == []
+
+
+def test_every_default_folder_is_named_yulon_and_the_game(qapp: object) -> None:
+    """C30 (T195): five developer names (`wow-server-playerbots`, `tortoise-wow-server`…)
+    become one pattern, for NEW installs only; each is a compose project name as it
+    stands, so `docker.pin_project_name` pins it unchanged, and no two collide.
+    """
+    import re
+
+    folders = {game.id: game.install.default_server_dir for game in CATALOG.games}
+    assert all(re.fullmatch(r"yulon-[a-z]+", name) for name in folders.values()), folders
+    assert len(set(folders.values())) == len(folders), folders
+    assert folders["wow-wotlk"] == "yulon-wotlk"
+
+
+def test_use_existing_still_opens_in_a_server_under_the_old_folder_name(
+    qapp: object, tmp_path: Path
+) -> None:
+    """C30 (T195): the rename is for new installs; "Use existing…" finds an old one where it was."""
+    starts: list[Path | None] = []
+
+    def pick(_parent: object, _title: str, start: Path | None) -> Path | None:
+        starts.append(start)
+        return None
+
+    view = CatalogView(
+        CATALOG, lambda e: _FakeInstaller(e, []), LogPanel(), pick_dir=pick, home=tmp_path
+    )
+    wotlk = CATALOG.get("wow-wotlk")
+    assert view.attach_existing(wotlk) is False
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert view.attach_existing(wotlk) is False
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert view.attach_existing(wotlk) is False
+    assert starts == [
+        tmp_path / "yulon-wotlk",
+        tmp_path / "wow-server-playerbots",
+        tmp_path / "yulon-wotlk",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# F1 (T195 final fix): the `yulon-<game>` default must never build a second
+# server beside one installed under the former default name. The rule lives in
+# `installer.default_server_dir()`, which the Install suggestion here and the
+# engine's own default (the CLI harness, no --server-dir) both ask.
+
+
+def _with_install(folder: Path) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    return folder
+
+
+def _suggested(tmp_path: Path) -> Path:
+    entry = CATALOG.get("wow-wotlk")
+    view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None, installs=False)
+    assert view.start_install(entry) is True
+    ((_game, suggested),) = asked
+    return suggested
+
+
+def test_install_suggests_the_new_folder_when_no_server_exists(
+    qapp: object, tmp_path: Path
+) -> None:
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_suggests_the_former_folder_when_only_it_holds_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def test_install_suggests_the_new_folder_when_the_former_one_holds_no_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_prefers_the_new_folder_when_both_hold_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    _with_install(tmp_path / "yulon-wotlk")
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_keeps_the_former_folder_when_the_new_one_is_empty(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def _install_question(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The Install dialog's words, from the REAL asker: only its `exec()` is stood in for."""
+    said: list[str] = []
+
+    def answer_no(box: QMessageBox) -> object:
+        said.append(box.text())
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "exec", answer_no)
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, [], installs=False),
+        LogPanel(),
+        pick_dir=lambda *_: None,
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    (text,) = said
+    return text
+
+
+def test_the_install_question_says_a_new_folder_only_when_it_is_new(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this new folder?" in text and str(tmp_path / "yulon-wotlk") in text
+    assert "Yu'lon makes the folder when the install starts." in text
+
+
+def test_the_install_question_for_an_old_server_folder_says_it_uses_that_server(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux live test of PR 291, item 3: ~/wow-server-playerbots found and offered.
+
+    The dialog said "into this new folder" and "Yu'lon makes the folder when
+    the install starts" about a folder that held a server already.
+
+    Mutation: drop the existing-folder wording, and "new folder" is back.
+    """
+    _with_install(tmp_path / "wow-server-playerbots")
+    text = _install_question(tmp_path, monkeypatch)
+    assert str(tmp_path / "wow-server-playerbots") in text
+    assert "into this existing server folder?" in text
+    assert "already in this folder, and Yu'lon uses it" in text
+    assert "new folder" not in text and "makes the folder" not in text
+
+
+def test_the_install_question_for_an_empty_folder_says_it_is_already_there(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "yulon-wotlk").mkdir()
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this folder?" in text and "The folder is already there." in text
+    assert "new folder" not in text and "makes the folder" not in text

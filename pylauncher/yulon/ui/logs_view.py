@@ -28,13 +28,21 @@ the zip, redacted.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QUrl, Slot, qVersion
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QShowEvent
+from PySide6.QtGui import (
+    QDesktopServices,
+    QGuiApplication,
+    QPalette,
+    QShowEvent,
+    QSyntaxHighlighter,
+    QTextDocument,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
@@ -53,6 +61,7 @@ from yulon.support.redact import Redactor
 from yulon.ui.folder_picker import pick_save_file
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, threaded_job_runner
+from yulon.ui.widgets.log_panel import line_format
 
 logger = get_logger(__name__)
 
@@ -118,7 +127,9 @@ class _ReadFailed(Exception):
     """
 
     def __init__(self, generation: int, cause: Exception) -> None:
-        super().__init__(f"{type(cause).__name__}: {cause}")
+        # Only the class: the job runner logs this message, and the cause's own
+        # text can quote a credential file (`_logged()`).
+        super().__init__(type(cause).__name__)
         self.generation = generation
         self.cause = cause
 
@@ -160,8 +171,8 @@ def _read_logs(
             for item in support_sources.viewables(sources)
         )
     except Exception as exc:  # boundary: the tab says so rather than losing the read
-        logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}")
-        return _Read(generation, (), None, f"The logs could not be listed ({type(exc).__name__}).")
+        logger.warning(f"the Logs tab could not list its files: {_logged(exc)}")
+        return _Read(generation, (), None, LOGS_NOT_LISTED)
     shown = next((item.path for item in items if str(item.path) == wanted), None)
     if shown is None and items:
         shown = items[0].path
@@ -192,6 +203,72 @@ def _size_text(size: int) -> str:
     return f"{max(1, round(size / 1000))} KB"
 
 
+def _logged(error: object) -> str:
+    """What the app log may say about an error met while reading logs and credentials.
+
+    `yulon.log` is not redacted, and these reads open the credential files
+    (`gather_known`): a parse error can quote the line it choked on, password
+    and all. So the class only -- except for an `OSError`, whose text is the
+    system's own words about a file (fix round 1, M5).
+    """
+    if isinstance(error, OSError):
+        return f"{type(error).__name__}: {error}"
+    return type(error).__name__
+
+
+_RECORD = re.compile(
+    r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:,\d+)? (DEBUG|INFO|WARNING|ERROR|CRITICAL) "
+)
+"""The head of one `yulon.log` record: `log.py`'s `%(asctime)s %(levelname)s ...`."""
+
+_LEVEL_KINDS = ("", "marker", "warning", "failure", "failure")
+"""Block states, by index: plain, DEBUG, WARNING, ERROR/CRITICAL, inside a bare traceback."""
+
+_STATE_OF_LEVEL = {"DEBUG": 1, "INFO": 0, "WARNING": 2, "ERROR": 3, "CRITICAL": 3}
+_TRACEBACK = 4
+
+
+class LevelHighlighter(QSyntaxHighlighter):
+    """Paints the viewer's WARNING, ERROR and DEBUG records the install log's way (T195 C33).
+
+    Through `log_panel.line_format`, so a warning is the same amber on both
+    tabs. A record's later lines (a multi-line message, a logged traceback) keep
+    its colour until the next record starts. A bare `Traceback` with no record
+    around it is red through its indented lines and the exception line after
+    them, and no further: a log without records must not turn red to the end.
+    """
+
+    def __init__(self, document: QTextDocument, palette_of: Callable[[], QPalette]) -> None:
+        super().__init__(document)
+        self._palette_of = palette_of
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt's name
+        previous = self.previousBlockState()
+        record = _RECORD.match(text)
+        if record is not None:
+            state = _STATE_OF_LEVEL[record.group(1)]
+            kind = _LEVEL_KINDS[state]
+        elif text.startswith("Traceback"):
+            state, kind = _TRACEBACK, "failure"
+        elif previous == _TRACEBACK:
+            # Indented frames carry on; the unindented exception line is the last.
+            state = _TRACEBACK if text[:1].isspace() else 0
+            kind = "failure"
+        else:
+            state = max(previous, 0)
+            kind = _LEVEL_KINDS[state]
+        self.setCurrentBlockState(state)
+        if kind:
+            self.setFormat(0, len(text), line_format(kind, self._palette_of()))
+
+
+LOGS_NOT_LISTED = "The logs could not be listed. Yu'lon's own log has the details."
+"""The viewer's text when the list of logs could not be made (T194 C8: no class name)."""
+
+LOGS_NOT_READ = "The logs could not be read. Yu'lon's own log has the details."
+"""The viewer's text when a read failed past `_read_logs` (T194 C8: no class name)."""
+
+
 def _why_not_saved(name: str, error: object) -> str:
     """One line for the status bar: which file, what the OS said, and what to try."""
     if isinstance(error, OSError):
@@ -204,10 +281,7 @@ def _why_not_saved(name: str, error: object) -> str:
         else:
             hint = "Try again, or pick another folder."
         return f"Could not save {name}: {said}. {hint}"
-    return (
-        f"Could not save {name}: something went wrong ({type(error).__name__}). "
-        "Yu'lon's own log has the details."
-    )
+    return f"Could not save {name}: something went wrong. Yu'lon's own log has the details."
 
 
 class LogsView(QWidget):
@@ -257,10 +331,11 @@ class LogsView(QWidget):
         self.viewer.setReadOnly(True)
         self.viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.viewer.setPlaceholderText(NOTHING_LOGGED)
+        self.highlighter = LevelHighlighter(self.viewer.document(), self.viewer.palette)
         self.save_button = QPushButton("Save logs for support…", self)
         self.save_button.setToolTip(
             "One zip of every log and settings file, passwords taken out, to send to support "
-            "(MANIFEST.txt inside says if one was too short to take out everywhere)"
+            "(a list inside the zip says if one was too short to take out everywhere)"
         )
         self.save_button.clicked.connect(self.save_for_support)
         self.open_folder_button = QPushButton("Open log folder", self)
@@ -352,10 +427,10 @@ class LogsView(QWidget):
             if error.generation != self._generation:
                 return
             error = error.cause
-        logger.debug(f"a Logs tab read failed: {type(error).__name__}")
+        logger.warning(f"a Logs tab read failed: {_logged(error)}")
         if self._reading:
             self._reading = False
-            self.viewer.setPlainText(f"The logs could not be read ({type(error).__name__}).")
+            self.viewer.setPlainText(LOGS_NOT_READ)
 
     def shown_text(self) -> str:
         """What the viewer shows -- already redacted."""
@@ -441,8 +516,8 @@ class LogsView(QWidget):
         if report.size > bundle.ZIP_CAP:
             text += (
                 f" It is larger than the {bundle.ZIP_CAP // 1_000_000} MB Yu'lon aims for, so it "
-                "may not fit Discord's free upload limit; MANIFEST.txt inside lists what was "
-                "trimmed."
+                "may not fit Discord's free upload limit; the list of contents inside the zip "
+                "says what was trimmed."
             )
         self.status.setText(text)
         logger.info(f"support file saved: {len(report.included)} files, {report.size} bytes")
@@ -451,6 +526,9 @@ class LogsView(QWidget):
     def _save_failed(self, error: object) -> None:
         name = self._saving_to.name if self._saving_to is not None else "the support file"
         self._set_saving(None)
+        if not isinstance(error, OSError):
+            # The line on screen names no class (T194 C8); this is the log it points at.
+            logger.warning(f"support file not saved: {_logged(error)}")
         self.status.setText(_why_not_saved(name, error))
 
     def _set_saving(self, dest: Path | None) -> None:
