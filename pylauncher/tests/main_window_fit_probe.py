@@ -198,7 +198,8 @@ def _build(scratch: Path) -> QMainWindow:
 
     server_dir = scratch / "wotlk-server"
     server_dir.mkdir()
-    remembered = state.AppState(installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)])
+    known = state.KnownInstall(game="wow-wotlk", server_dir=server_dir)
+    remembered = state.AppState(installs=[known])
     update.check_with_cache = lambda **kwargs: None  # type: ignore[assignment]
     update_state.update_state_path = lambda config_dir=None: scratch / "update.json"  # type: ignore[assignment]
     state.load_state = lambda path=None, repair=True: remembered  # type: ignore[assignment]

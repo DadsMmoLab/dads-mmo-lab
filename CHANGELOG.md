@@ -29,6 +29,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - The main window fits a Steam Deck or a small screen instead of hanging off its edges, and scrolls when it is cramped.
+- Long error and warning messages scroll inside their box, so its OK button always stays on screen.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.

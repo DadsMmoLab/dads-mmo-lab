@@ -263,9 +263,10 @@ def _warn_about_the_log_file(parent: Any) -> None:
     problem = file_log_problem()
     if problem is None:
         return
-    from PySide6.QtWidgets import QMessageBox
 
-    QMessageBox.warning(parent, "Yu'lon could not write its log", problem)
+    from yulon.ui.message_box import show_warning
+
+    show_warning(parent, "Yu'lon could not write its log", problem)
 
 
 def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
@@ -286,9 +287,10 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
         return True
     except OSError as exc:
         logger.error(f"state.json could not be written: {exc}")
-        from PySide6.QtWidgets import QMessageBox
 
-        QMessageBox.warning(
+        from yulon.ui.message_box import show_warning
+
+        show_warning(
             parent,
             "Yu'lon cannot remember this server",
             "This server is set up and its tab works, but state.json could not be "
@@ -1107,7 +1109,9 @@ def build_window() -> object:
             return
         refusal = view.forget_refusal()
         if refusal is not None:
-            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            from yulon.ui.message_box import show_information
+
+            show_information(window, forgetting.REFUSED_TITLE, refusal)
             return
         folder_gone = view.folder_is_gone()
         facts = forgetting.Facts(
@@ -1164,7 +1168,9 @@ def build_window() -> object:
         # dropping the tab now would cut it off (T95 review, round 1).
         refusal = view.forget_refusal()
         if refusal is not None:
-            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            from yulon.ui.message_box import show_information
+
+            show_information(window, forgetting.REFUSED_TITLE, refusal)
             return
         finish_removal(key)
 
@@ -1184,7 +1190,9 @@ def build_window() -> object:
             _forget_live_record(game, folder)()
         except OSError as exc:
             logger.error(f"could not forget {game} at {folder}: {exc}")
-            QMessageBox.warning(
+            from yulon.ui.message_box import show_warning
+
+            show_warning(
                 window, forgetting.SAVE_FAILED_TITLE, forgetting.save_failed(folder, exc)
             )
             return
@@ -1429,7 +1437,9 @@ def build_window() -> object:
                 # rather than at exit. The close guard already refuses for this
                 # reason; so does this. The tab keeps addressing the old daemon
                 # until it is reopened, which is stated rather than silent.
-                QMessageBox.warning(
+                from yulon.ui.message_box import show_warning
+
+                show_warning(
                     window,
                     "Cannot switch this server over yet",
                     f"{reason}\n\nThe WSL distro has been saved, and this tab will use it "
@@ -1887,7 +1897,9 @@ def build_window() -> object:
             reason = self.refusal()
             if reason is not None:
                 logger.info(f"update refused while busy: {reason}")
-                QMessageBox.information(
+                from yulon.ui.message_box import show_information
+
+                show_information(
                     window,
                     "Yu'lon is still working",
                     f"Yu'lon can update when this is finished: {reason}",
@@ -2423,7 +2435,7 @@ def main() -> int:
             pass
 
     from PySide6.QtCore import QEvent, QObject
-    from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+    from PySide6.QtWidgets import QApplication, QMainWindow
 
     from yulon.ui.icons import get_app_icon
     from yulon.ui.single_instance import UNANSWERED_TEXT, UNANSWERED_TITLE, InstanceGuard
@@ -2441,7 +2453,9 @@ def main() -> int:
     if claim == "raised":
         return 0
     if claim == "unanswered":
-        QMessageBox.warning(None, UNANSWERED_TITLE, UNANSWERED_TEXT)
+        from yulon.ui.message_box import show_warning
+
+        show_warning(None, UNANSWERED_TITLE, UNANSWERED_TEXT)
         return 1
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a
@@ -2500,7 +2514,9 @@ def main() -> int:
                 if reason is None:
                     return False
                 logger.info(f"close refused: {reason}")
-                QMessageBox.information(None, "Yu'lon is still working", reason)
+                from yulon.ui.message_box import show_information
+
+                show_information(None, "Yu'lon is still working", reason)
                 event.ignore()
                 return True
 

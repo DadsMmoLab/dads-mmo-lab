@@ -160,7 +160,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox, ask_yes_no
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -8149,7 +8149,7 @@ class ControllerView(QWidget):
     ) -> bool:
         """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
         if self._upkeep_held():
-            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            show_information(self, "Something else is running", WORLD_UPKEEP_BUSY)
             return False
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
@@ -9837,7 +9837,7 @@ class ControllerView(QWidget):
     def _client_dir_refused(self, message: str) -> None:
         """One place both refusal paths in `change_client_dir()` report through."""
         self.action_failed.emit(message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
 
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
@@ -9855,7 +9855,7 @@ class ControllerView(QWidget):
         """
         if not self._busy and not self._play_client_running:
             return False
-        QMessageBox.information(
+        show_information(
             self,
             "Something else is running",
             "This server is busy with another action — wait for it to finish on the "
@@ -10126,7 +10126,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self._play_parent(), self.entry.name, message)
+        show_warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -10156,7 +10156,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
+        show_information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -10164,7 +10164,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -10240,7 +10240,7 @@ class ControllerView(QWidget):
             return
         original = self.services.client_dir
         if original is None:
-            QMessageBox.information(
+            show_information(
                 self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
@@ -10532,7 +10532,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
+        show_information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -10608,7 +10608,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -11366,7 +11366,7 @@ class ControllerView(QWidget):
             said += " " + left_out_sentence(compared.left_out)
         if compared.flags_lost:  # T198: on the label and in front of the player
             said += " " + compared.flags_lost
-            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
+            show_warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -12982,7 +12982,7 @@ class ControllerView(QWidget):
             return False
         refusal = self._bot_rebuild_refusal()
         if refusal is not None:
-            QMessageBox.information(self, "Something else is running", refusal)
+            show_information(self, "Something else is running", refusal)
             return False
         choice = ask_backup_choice(
             self,
@@ -13044,7 +13044,7 @@ class ControllerView(QWidget):
         log = self.bot_rebuild_log
         if log is None or not log.running:
             return False
-        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        show_information(self, "Something else is running", BOT_REBUILD_RUNNING)
         self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
         return True
 
@@ -13086,7 +13086,7 @@ class ControllerView(QWidget):
 
     def _say_restart_owed(self) -> None:
         """The owed restart could not be made: never dropped silently."""
-        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        show_information(self, "Restart the server", RESTART_OWED_LEFT)
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
@@ -13798,7 +13798,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -13853,7 +13853,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -15715,7 +15715,7 @@ class ControllerView(QWidget):
         )
         if self.services.set_client_dir is None:
             # No write seam, so no button to offer: say it, and stop.
-            QMessageBox.information(
+            show_information(
                 self, f"{manifest.name} needs your game client", client_notice(manifest)
             )
             return True
@@ -16095,7 +16095,7 @@ class ControllerView(QWidget):
         if source is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self, "Already rebuilding", "This server is already being rebuilt."
             )
             return False
@@ -16106,7 +16106,7 @@ class ControllerView(QWidget):
             # Refused rather than queued: the honest outcome of two actions
             # wanting the same containers is that one of them waits, and the
             # user is the one who should choose which.
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16122,7 +16122,7 @@ class ControllerView(QWidget):
         refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
         if refused is not None:
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
-            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
+            show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
         if not ask_yes_no(
             self,
@@ -16273,7 +16273,7 @@ class ControllerView(QWidget):
         watching succeed.
         """
         if self._backup_before_update:
-            QMessageBox.information(
+            show_information(
                 self,
                 "A backup is running",
                 "This server is being backed up before an update. Wait for the backup to "
@@ -16281,14 +16281,14 @@ class ControllerView(QWidget):
             )
             return True
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return True
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16428,7 +16428,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
 
     def _start_update_to_latest(self) -> bool:
@@ -16523,14 +16523,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16542,7 +16542,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database updates for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -16620,7 +16620,7 @@ class ControllerView(QWidget):
         if route is None or check is None or check.state != "stale":
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -16632,7 +16632,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database corrections for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -16684,14 +16684,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16703,7 +16703,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"adopting {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17383,7 +17383,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
