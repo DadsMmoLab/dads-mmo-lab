@@ -2302,6 +2302,29 @@ def _with_the_ready_wait(services: ControllerServices, entry: CatalogEntry) -> C
     )
 
 
+def _what_the_start_did(
+    job: str, world: native.StartAnswer | None, controller: Controller
+) -> tuple[str, str]:
+    """The Tuning report's line and its Details after a Restart's or Recreate's start (T382).
+
+    `done` only for a world that reported ready and stayed up; no answer at all
+    (no wait was handed to the tab) says the start and nothing more. Every other
+    answer is one plain sentence, and what the server printed plus the command
+    that prints the rest go under Details, never on the line (T248).
+    """
+    if world is None:
+        return TUNING_STARTED_UNASKED.format(job=job), ""
+    if world.ready:
+        return TUNING_STARTED_UP.format(job=job), ""
+    said = TUNING_WORLD_SAID[world.verdict].format(
+        job=job, grace=f"{round(native.READY_GRACE_SECONDS)} seconds"
+    )
+    spec = controller.spec
+    read_it = docker.logs_command(spec.service_for(spec.world), controller.server_dir)
+    details = "\n\n".join(part for part in (world.words.strip(), read_it) if part)
+    return said, details
+
+
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
     """The player's own client folder(s) a ready-to-play client stands in for (T181).
 
@@ -5966,6 +5989,58 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
+TUNING_RESTARTING = (
+    "restarting the server… then waiting for the world server to report ready and stay up."
+)
+TUNING_RECREATING = (
+    "recreating the containers… then waiting for the world server to report ready and stay up."
+)
+"""What the Tuning tab says while its Restart or Recreate runs (T382): the press now
+waits for the world, which can take minutes on a big load, and says so."""
+
+TUNING_STARTED_UP = "{job}: done. The world server reported ready and stayed up."
+TUNING_STARTED_UNASKED = "{job}: the server was started."
+"""No ready wait was handed to the tab, so whether the world came up was not asked."""
+
+_SEE_DETAILS = " What it printed is under Details."
+TUNING_WORLD_SAID: dict[str, str] = {
+    "loop": (
+        "{job}: the containers were started, but the world server is crash-looping: it stops "
+        "and Docker starts it again, over and over. It is not up." + _SEE_DETAILS
+    ),
+    "stopped": (
+        "{job}: the world server said ready and then stopped again within "
+        "{grace}, so it is not up." + _SEE_DETAILS
+    ),
+    "gone": (
+        "{job}: the containers were started, but the world server is not running any more, so "
+        "it is not up." + _SEE_DETAILS
+    ),
+    "fatal": (
+        "{job}: the containers were started, but the world server printed an error that means "
+        "it will not come up." + _SEE_DETAILS
+    ),
+    "quiet": (
+        "{job}: the containers were started, but the world server stopped printing anything "
+        "before it reported ready, so it looks stuck rather than slow." + _SEE_DETAILS
+    ),
+    "unreadable": (
+        "{job}: the containers were started, but Docker stopped answering while Yu'lon waited, "
+        "so whether the world server came up is not known. Check that Docker is running."
+    ),
+    "ceiling": (
+        "{job}: the containers were started, but the world server was still loading when "
+        "Yu'lon stopped waiting. The Server tab shows when it is up."
+    ),
+    "cancelled": (
+        "{job}: the containers were started; the wait for the world server was stopped, so "
+        "whether it came up is not known. The Server tab shows when it is up."
+    ),
+}
+"""T382: one plain sentence per way a start can end that is not `ready`
+(`native.StartVerdict`). The server's own lines and the command that prints the
+rest go under Details, never on the line (T248)."""
+
 DISTRO_STOPPED = (
     "This server's WSL distro {distro} is stopped. Yu'lon reads nothing inside it while it is, "
     "because reading it would start it: press Start to start it, and the other tabs fill in "
@@ -6848,6 +6923,11 @@ class ControllerView(QWidget):
         # stop's own read answered made it "stale", and STOPPING stayed on the
         # badge for the whole rebuild (T188 final review).
         self._hold_ends_at: int | None = None
+        # T391: whether the last verdict shown called the world a crash loop, and
+        # the last status poll's answer, so either one landing second can set the
+        # badge. A crash-looping world is in `docker ps` between its restarts.
+        self._world_loops = False
+        self._last_polled: InstallStatus | None = None
         # How many status reads were asked, and which one is out.
         self._status_asks = 0
         self._status_ask_out = 0
@@ -7938,11 +8018,33 @@ class ControllerView(QWidget):
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
+        self._world_loops = result.state == "restart_loop"
+        if self._last_polled is not None:
+            # T391: a loop seen after the poll takes REALM ONLINE down now, and
+            # the first verdict past it gives the badge back, not a poll later.
+            self.realm_badge.set_status(self._badge_word(self._last_polled))
+
+    def _badge_word(self, status: InstallStatus) -> str:
+        """The realm badge's word for a status poll, with the verdict's word on the world (T391).
+
+        A crash-looping world is in `docker ps` between its restarts, so the
+        poll alone reads all up and the badge said REALM ONLINE over it (m910q
+        sitting, 2026-10-06, after a failed rollback). The verdict line already
+        said restart loop; the badge now says CRASH LOOP with it.
+        """
+        if self._world_loops and status.world:
+            return "loop"
+        return _realm_badge_status(status)
 
     def _clear_the_verdict(self) -> None:
-        """No verdict line: the distro is not known to run, so no world to describe (T133)."""
+        """No verdict line: the distro is not known to run, so no world to describe (T133).
+
+        Its loop goes with it (T391): a held badge, a stopped distro or Docker's
+        banner leaves no verdict that could still be about this world.
+        """
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
+        self._world_loops = False
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -8417,8 +8519,9 @@ class ControllerView(QWidget):
             # to the reading from before the press flashed REALM ONLINE between
             # STOPPING and OFFLINE (T188 fix round 1).
             self._badge_held = None
+        self._last_polled = status
         if self._badge_held is None:
-            self.realm_badge.set_status(_realm_badge_status(status))
+            self.realm_badge.set_status(self._badge_word(status))
         if not stale and status.any_running:
             # T95: something brought the server back without Start, so "nothing
             # to remove" is no longer true, and a lit "Remove from Yu'lon…" beside

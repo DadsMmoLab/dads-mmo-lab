@@ -28,6 +28,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
+- Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
+- The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
+- A rebuild whose rollback did not come up says its containers are still running and to press Stop.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.

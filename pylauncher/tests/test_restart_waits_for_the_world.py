@@ -32,6 +32,7 @@ from yulon import docker, runner
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.widgets.job import run_inline
 
 TORTOISE = load_catalog().get("wow-tortoise")
 
@@ -236,7 +237,7 @@ def _view(
     services = _services(ps, tmp_path, [])
     if world is not None:
         object.__setattr__(services, "ready_after_start", partial(_after_start, WOTLK, world))
-    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
     monkeypatch.setattr(view, "_confirm", lambda *_a, **_k: True)
     return view
 
@@ -307,6 +308,7 @@ def test_a_restart_that_cannot_ask_after_the_world_does_not_say_done(
         ("quiet", "stopped printing"),
         ("unreadable", "Docker stopped answering"),
         ("ceiling", "still loading"),
+        ("cancelled", "wait for the world server was stopped"),
     ],
 )
 def test_every_way_a_start_can_end_has_its_own_plain_sentence(
@@ -320,7 +322,7 @@ def test_every_way_a_start_can_end_has_its_own_plain_sentence(
     services = _services(ps, tmp_path, [])
     answer = native.StartAnswer(verdict, "the server's last line")  # type: ignore[arg-type]
     object.__setattr__(services, "ready_after_start", lambda: answer)
-    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
     monkeypatch.setattr(view, "_confirm", lambda *_a, **_k: True)
 
     view.restart_server()
@@ -362,7 +364,10 @@ def test_every_game_s_services_wait_for_its_own_world_after_a_start(
     def output(spec: docker.ContainerSpec, **_kw: object) -> native.WorldOutput:
         looked.append(spec.world)
         return native.WorldOutput(
-            "loading\nready...\nAvg Diff: 15ms\nWorld server is up and running", 0, "running"
+            "loading\nready...\n(worldserver-daemon) ready...\nAvg Diff: 15ms\n"
+            "World server is up and running",
+            0,
+            "running",
         )
 
     monkeypatch.setattr(docker, "wait_ready_for", wait)

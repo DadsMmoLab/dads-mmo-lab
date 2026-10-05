@@ -2443,6 +2443,15 @@ class _Parking:
     record were not touched, so it is still kept and nothing new is."""
 
 
+ROLLBACK_LEFT_RUNNING = (
+    "Its containers are still up, but its world server is not ready, so nobody can log in. "
+    "Press Stop on the Server tab to stop them."
+)
+"""T391: said last when a rollback's old build did not come up and was left running.
+
+On m910q (2026-10-06) the world crash-looped under it while the header read
+REALM ONLINE, and nothing in the failure said the containers were still up."""
+
 ROLLBACK_LEFT_STOPPED_DATABASE = (
     "\nWhat the new build wrote into the database on its first start, if anything, is NOT put "
     "back by this, so the old build will start on the database as the new one left it."
@@ -5209,8 +5218,8 @@ class StartAnswer:
     `ceiling` for a server still printing when `management_ceiling()` ran out
     and `cancelled` for a wait its `cancel` ended (T247: the world left loading).
 
-    `words` is what the server itself last said (`_dying_words()`), for Details;
-    `""` when it said nothing or the answer is `ready` (T382).
+    `words` is what the server itself last said (`_dying_words()`, colour codes
+    stripped), for Details; `""` when it said nothing or the answer is `ready` (T382).
     """
 
     verdict: StartVerdict
@@ -5258,7 +5267,7 @@ def watch_the_start(
     while True:
         window = min(ready.timeout, ceiling - (clock() - started))
         if window <= 0:
-            return StartAnswer("ceiling", _dying_words([before.text], ready.fatal))
+            return StartAnswer("ceiling", ansi.strip(_dying_words([before.text], ready.fatal)))
         if wait(spec, replace(ready, timeout=window), wsl_distro=wsl_distro):
             # The banner is not the verdict (T71): a world that says `ready...`
             # and then aborts on a missing table is not a server this may
@@ -5283,7 +5292,7 @@ def watch_the_start(
                 f"{spec.world} reported ready and then stopped within "
                 f"{_spell_seconds(READY_GRACE_SECONDS)}: {after.words!r}"
             )
-            return StartAnswer("stopped", after.words)
+            return StartAnswer("stopped", ansi.strip(after.words))
         if heard():
             return StartAnswer("cancelled")
         now = look(spec, wsl_distro=wsl_distro)
@@ -5293,7 +5302,8 @@ def watch_the_start(
             # The current run's log first, then the one before it: after a
             # restart the abort that ended the old run is not in the new one.
             return StartAnswer(
-                cast(StartVerdict, verdict), _dying_words([now.text, before.text], ready.fatal)
+                cast(StartVerdict, verdict),
+                ansi.strip(_dying_words([now.text, before.text], ready.fatal)),
             )
         before = now
 
@@ -9544,7 +9554,7 @@ class StagedInstaller:
                 return _LeftStopped(said_down)
             return _NotUpEither(
                 f"{failure} The build from before this rebuild was put back, but it did not "
-                f"report ready either: {second}{said}{database}"
+                f"report ready either: {second}{said}{database}{self._left_running(spec)}"
             )
         yield from self._release(letting_go)
         if servers_down is not None:
@@ -9556,6 +9566,15 @@ class StagedInstaller:
         # T247 live review: the old build is up AND its databases went back (T217)
         # -- nothing of the press is left -- so a Stop that led here reads "Stopped".
         return _PutBackWhole(ending) if whole else ending
+
+    def _left_running(self, spec: docker.ContainerSpec) -> str:
+        """`ROLLBACK_LEFT_RUNNING` on its own line when the world is still up, else "" (T391).
+
+        Asked of Docker, not assumed: a world that exited is not "still up", and
+        a Docker that did not answer is not asked to be believed either way.
+        """
+        status = self._seams.world_output(spec).status
+        return f"\n{ROLLBACK_LEFT_RUNNING}" if status in ("running", "restarting") else ""
 
     def _stop_the_old_build(self, ctx: StageContext) -> Generator[str, None, str | None]:
         """Stop the old build that did not come up after a rollback (T217). Never raises.

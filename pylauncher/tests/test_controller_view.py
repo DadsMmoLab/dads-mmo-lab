@@ -13388,7 +13388,8 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     )
     view.tuning_recreate_button.click()
     pump_until(
-        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+        lambda: view.tuning_report.toPlainText() == "recreate: the server was started.",
+        "the recreate's report",
     )
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 

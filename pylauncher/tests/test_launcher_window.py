@@ -386,6 +386,7 @@ _REASONS = {
     "restarting": launcher_window.RESTARTING_REASON,
     "unknown": launcher_window.UNKNOWN_REASON,
     "partial": launcher_window.PARTIAL_REASON,
+    "loop": launcher_window.LOOP_REASON,
 }
 """The line under PLAY for each badge word that is neither REALM ONLINE nor OFFLINE."""
 
@@ -406,6 +407,16 @@ def test_the_line_under_play_says_what_the_badge_says(
     said = window.play_reason_label.text()
     assert said == _REASONS[state], said
     assert not said.startswith("The server is stopped"), said
+
+
+def test_a_crash_looping_realm_says_so_above_play(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T391: the tab's badge says CRASH LOOP; the banner neither says starting nor offline."""
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status("loop")
+
+    assert window.online_label.text() == launcher_window.LOOP_BANNER
 
 
 def test_the_line_under_play_for_a_stopped_server_is_unchanged(

@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import dbreads, docker
+from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -115,6 +117,20 @@ takes the daemon answering next as the one to compare with, since whatever runs
 next is a new container, not Docker's restore of the old one. The
 cost of the window is that delay, never a loop called steady: a server that was
 looping keeps `after_a_loop`.
+"""
+
+RECOVERED_AFTER = timedelta(seconds=native.READY_GRACE_SECONDS)
+"""How long a run that said ready must stay up to end a crash loop (T390). Start's own rule.
+
+An install's ready stage calls a world up once it printed its ready marker and
+was still the same run `READY_GRACE_SECONDS` later (`native.watch_after_ready()`),
+and a world that did that after a loop is up by that rule too. Until T390 only
+`SETTLED_AFTER` ended a loop whose count did not go back, so a loop fixed in
+place read "restart loop — 13 restarts, this run up 9m" with 500 bots online
+(m910q, 2026-10-05). The ready marker is read from this run's log only while a
+loop is current, and only until it is seen: a healthy tick still reads no log.
+Ending the loop moves the sentence, not the interlock: `after_a_loop` stays
+until `SETTLED_AFTER`, as after any loop.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
@@ -279,6 +295,7 @@ class Dashboard:
         wsl_distro: str | None = None,
         state_of: Callable[[str], docker.ContainerState] | None = None,
         daemon_of: Callable[[], str] | None = None,
+        log_of: Callable[[str, str], str] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.spec = spec
@@ -289,6 +306,12 @@ class Dashboard:
             lambda container: docker.container_state(container, wsl_distro=wsl_distro)
         )
         self._daemon_of = daemon_of or (lambda: docker.daemon_identity(wsl_distro=wsl_distro))
+        self._log_of = log_of or (
+            lambda container, since: docker._logs(
+                container, this_run_only=True, since=since, wsl_distro=wsl_distro
+            )
+        )
+        self._banner = _ready_banner(entry)
         self._now = now or (lambda: datetime.now(UTC))
         self._last_restarts: int | None = None
         self._strikes = 0
@@ -298,6 +321,11 @@ class Dashboard:
         self._daemon: str | None = None
         self._daemon_asked = False
         self._last_started: str | None = None
+        # T390: the dead run Docker was backing off at the last tick, and the run
+        # whose log said ready while a loop was current, with when that was seen.
+        self._restarting_run: str | None = None
+        self._ready_run: str | None = None
+        self._ready_seen_at: datetime | None = None
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -338,6 +366,21 @@ class Dashboard:
         elif self._looping and uptime is not None and uptime >= SETTLED_AFTER:
             self._looping = False
             self._strikes = 0
+        if state.status == "restarting" and not restoring:
+            if self._restarting_run == state.started_at:
+                # T390: Docker still backing off the same dead run a tick later is
+                # a loop on Docker's own word, counted or not. A loop whose restarts
+                # all fell in the T306 window had no strikes, so it was never
+                # recorded, and the run that was fixed read steady at once.
+                self._looping = True
+                self._loop_is_current = True
+            self._restarting_run = state.started_at
+        else:
+            self._restarting_run = None
+        if self._looping and self._loop_is_current and state.status == "running":
+            if self._said_ready_and_stayed_up(state.started_at):
+                self._loop_is_current = False
+                self._strikes = 0
 
         if restoring and state.status == "restarting":
             return Verdict("starting", state.restart_count, state.started_at, uptime)
@@ -351,6 +394,24 @@ class Dashboard:
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
         return verdict
+
+    def _said_ready_and_stayed_up(self, run: str) -> bool:
+        """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).
+
+        The log is read until the marker is seen in it, once per tick, and only
+        from here: while a loop is current and the world is running. Seen is
+        timed from this watcher's clock, not the log's, so a marker printed
+        before the first look is given the whole watch again, never less.
+        """
+        if self._banner is None:
+            return False
+        now = self._now()
+        if self._ready_run != run:
+            if not self._banner.search(self._log_of(self.spec.world, run)):
+                return False
+            self._ready_run = run
+            self._ready_seen_at = now
+        return self._ready_seen_at is not None and now - self._ready_seen_at >= RECOVERED_AFTER
 
     def _docker_is_restoring(self, new_run: bool) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker restarted (T306).
@@ -434,6 +495,22 @@ class Dashboard:
     def _uptime(self, started_at: str) -> timedelta | None:
         """How long the current run has lasted (`run_length`), at this watcher's clock."""
         return run_length(started_at, self._now())
+
+
+def _ready_banner(entry: CatalogEntry) -> re.Pattern[str] | None:
+    """`entry`'s world ready marker, as the install waits on it (T390); None if it has none.
+
+    A marker that does not compile is logged and leaves the loop to the settle
+    rule, as before T390: an instrument must not break the tab.
+    """
+    block = entry.install.native
+    if block is None:
+        return None
+    try:
+        return re.compile(native.ready_spec_for(entry, block.ready).world)
+    except InstallerError as exc:
+        logger.warning(f"the dashboard cannot read {entry.id}'s ready marker: {exc}")
+        return None
 
 
 def run_length(started_at: str, now: datetime) -> timedelta | None:
