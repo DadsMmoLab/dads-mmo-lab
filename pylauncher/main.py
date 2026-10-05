@@ -745,6 +745,12 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+    # T388: where the screen is smaller than the 960x640 floor the contents
+    # scroll inside the window. Here and not in `build_catalog_tab`, whose
+    # callers measure the unwrapped contents below the floor.
+    from yulon.ui.window_fit import fit_to_screen, scroll_wrapped
+
+    window.setCentralWidget(scroll_wrapped(window.takeCentralWidget(), MINIMUM_WINDOW_SIZE))
     # T93: directly under Catalog, the owner's placement. INSERTED rather than
     # added: every server tab is appended by `add_controller()` and found by
     # `indexOf()`, so index 1 is this tab's for the life of the window. The
@@ -2197,8 +2203,7 @@ def build_window() -> object:
         # yet. The window is built either way, which is what the smoke run
         # exists to prove.
         logger.info("YULON_SMOKE_TEST set: the launch update check is not started")
-        window.resize(*DEFAULT_WINDOW_SIZE)
-        window.setMinimumSize(*MINIMUM_WINDOW_SIZE)
+        fit_to_screen(window, DEFAULT_WINDOW_SIZE, MINIMUM_WINDOW_SIZE)
         window.setProperty("tabs", tabs)
         window.yulon_log_panels = panels
         window.yulon_controllers = controller_views
@@ -2249,8 +2254,7 @@ def build_window() -> object:
     window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
     update_thread.start()
-    window.resize(*DEFAULT_WINDOW_SIZE)
-    window.setMinimumSize(*MINIMUM_WINDOW_SIZE)
+    fit_to_screen(window, DEFAULT_WINDOW_SIZE, MINIMUM_WINDOW_SIZE)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels

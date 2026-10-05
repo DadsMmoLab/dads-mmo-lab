@@ -168,3 +168,10 @@ def test_moved_back_the_floor_is_960x640_again(moved: dict[str, Any]) -> None:
     assert moved["moved"]["minimum"] == [800 - 2 * FRAME, 600 - 2 * FRAME], moved["moved"]
     assert moved["back"]["screen"] == "big", moved["back"]
     assert moved["back"]["minimum"] == FLOOR, moved["back"]
+
+
+def test_the_contents_keep_their_floor_and_scroll_inside_a_window_below_it(opened: Any) -> None:
+    """Where the window is smaller than 960×640 the contents are not squeezed: they scroll."""
+    name, seen = opened
+    assert seen["scrolls"], name
+    assert seen["content_minimum"] == FLOOR, (name, seen)

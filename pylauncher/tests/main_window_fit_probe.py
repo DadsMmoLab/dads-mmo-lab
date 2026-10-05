@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QMainWindow,
+    QScrollArea,
     QTabWidget,
     QWidget,
 )
@@ -174,6 +175,13 @@ def measure(window: QMainWindow) -> dict[str, Any]:
         "client": _rect(window.geometry()),
         "minimum": [window.minimumWidth(), window.minimumHeight()],
         "inside": available.contains(frame),
+        "scrolls": isinstance(window.centralWidget(), QScrollArea),
+        "content_minimum": [
+            window.centralWidget().widget().minimumWidth(),
+            window.centralWidget().widget().minimumHeight(),
+        ]
+        if isinstance(window.centralWidget(), QScrollArea)
+        else None,
         "tabs": titles,
         "unreachable": unreachable,
         "checked": len(CHECKED),
