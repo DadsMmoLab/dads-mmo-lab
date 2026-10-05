@@ -131,6 +131,22 @@ REEXTRACT_PUT_BACK = (
 )
 """What a failed `reextract()` ends with once the old map data is back in place (T241)."""
 
+
+def reextract_kept_tiles(kept: int) -> str:
+    """What a failed `reextract()` adds when a part-made pathfinding run's tiles stay (T263).
+
+    Said only when the next run really continues from them (`mmaps.continues_from()`):
+    the old map data came back unchanged, and the run that stopped part-way was made
+    from it. The live test of T241 saw exactly that (35 tiles kept, continued to 80)
+    while the message said nothing of it.
+    """
+    return (
+        f"The {kept} finished tiles of the pathfinding data that had stopped part-way were "
+        "kept too, and \u201cMake the pathfinding data\u201d on the Server tab continues from "
+        "them."
+    )
+
+
 REEXTRACT_CANCEL_NOTE = (
     "A Stop puts the map data from before this press back as it was. The temporary copy of "
     "your client is removed either way."
@@ -1984,6 +2000,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
             told = self._put_the_old_map_data_back(data_dir)
+            if told == REEXTRACT_PUT_BACK and background:
+                tiles = self._kept_for_the_next_run(server_dir, ident)
+                if tiles:
+                    told = f"{told} {reextract_kept_tiles(tiles)}"
             if isinstance(failure, InstallerError):  # its words are what the person reads
                 failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
@@ -2093,6 +2113,14 @@ class TrinityCoreInstaller(CmangosInstaller):
             server_dir / tc.checkout / tc.extract.dbc_overlay_from,
             data_dir / tc.extract.dbc_overlay_to,
         )
+
+    def _kept_for_the_next_run(self, server_dir: Path, ident: str) -> int:
+        """`mmaps.continues_from()`, or 0 when it cannot be asked: a failure is being told."""
+        try:
+            return mmaps.continues_from(server_dir, self.entry, install_id=ident)
+        except Exception as exc:  # noqa: BLE001 - the press's own failure is what is said
+            logger.warning(f"could not tell whether the pathfinding tiles are kept: {exc}")
+            return 0
 
     def _put_the_old_map_data_back(self, data_dir: Path) -> str:
         """After a failed, stopped or closed extraction: the old map data back; what to say."""

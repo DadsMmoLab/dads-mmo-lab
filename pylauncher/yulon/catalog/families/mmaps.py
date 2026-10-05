@@ -1173,6 +1173,42 @@ def _file_facts(folder: Path, prefix: str) -> list[str]:
     return facts
 
 
+def _resumable(job: Job, before: Record | None) -> bool:
+    """A readable record of a failed run that kept tiles, for an entry that can tell a whole one."""
+    return (
+        before is not None
+        and not before.unreadable
+        and before.state == "failed"
+        and before.resumable
+        and job.block.mmaps.tile_header is not None
+    )
+
+
+def continues_from(
+    server_dir: Path,
+    entry: CatalogEntry,
+    *,
+    platform_id: Callable[[], str] | None = None,
+    install_id: str | None = None,
+) -> int:
+    """How many finished tiles the next run would continue from; 0 when it would start over (T263).
+
+    Asked of the record and the map data as they are now, by the same rule a
+    start applies (`_resume_or_clear()`): a readable record of a failed run that
+    kept tiles, made from the map data `data/` holds now (`_evidence()`). For a
+    sentence that promises the continuation, so it is said only when a start
+    would keep it. Never raises: a record or map data that cannot be read
+    answers 0, which says nothing.
+    """
+    if background_block(entry) is None:
+        return 0
+    before = read_record(server_dir)
+    job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
+    if before is None or not _resumable(job, before) or not before.evidence:
+        return 0
+    return before.kept if before.evidence == _evidence(job) else 0
+
+
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
     """Before a start: the whole tiles a resumable run kept, or `data/mmaps` emptied (0).
 
@@ -1181,13 +1217,7 @@ def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
     says how to tell a whole tile (`tile_header`). The tiles are checked again
     here, because files can change between the failure and the start.
     """
-    resumable = (
-        before is not None
-        and not before.unreadable
-        and before.state == "failed"
-        and before.resumable
-        and job.block.mmaps.tile_header is not None
-    )
+    resumable = _resumable(job, before)
     if resumable and before is not None and (not before.evidence or before.evidence != evidence):
         logger.warning(
             f"the map data in {job.data_dir} changed since the pathfinding run that stopped "

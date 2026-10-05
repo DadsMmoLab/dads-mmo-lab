@@ -1573,11 +1573,44 @@ def test_a_failed_reextract_leaves_a_pathfinding_run_that_continues_from_its_til
         tiles = _a_run_that_crashed(box, 12)
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
-    with pytest.raises(InstallerError):
+    with pytest.raises(InstallerError) as failed:
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert box.engine().mmaps_status(box.server_dir).kept == 12
+    assert str(failed.value).endswith(
+        f"{trinitycore.REEXTRACT_PUT_BACK} {trinitycore.reextract_kept_tiles(12)}"
+    ), "T263: the kept tiles are said, as the live test saw them kept"
     box.engine().start_mmaps(box.server_dir)
     assert fake.mmaps_at_run[-1] == tiles, "continued from its tiles, not from 0 %"
+
+
+def test_the_kept_tiles_say_how_many_and_what_continues_them() -> None:
+    """T263: the sentence a failed Re-extract adds when a part-made run's tiles were kept."""
+    assert trinitycore.reextract_kept_tiles(35) == (
+        "The 35 finished tiles of the pathfinding data that had stopped part-way were kept "
+        "too, and \u201cMake the pathfinding data\u201d on the Server tab continues from them."
+    )
+
+
+def test_a_failed_reextract_says_nothing_of_kept_tiles_a_next_run_would_not_continue(
+    box: Box,
+) -> None:
+    """T263: only when the record is really kept for a resume. Here the run that crashed
+    could not tell which map data it was made from (an empty `evidence`), so the next run
+    starts from the beginning and the sentence would promise what does not happen."""
+    _a_run_that_crashed(box, 12)
+    record = box.server_dir / mmaps.RECORD_FILE
+    raw = json.loads(record.read_text("utf-8"))
+    assert raw["resumable"] is True and raw["kept"] == 12 and raw["evidence"]
+    raw["evidence"] = ""
+    record.write_text(json.dumps(raw), "utf-8")
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
+    assert box.engine().mmaps_status(box.server_dir).kept == 12, "the record itself is kept"
 
 
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:

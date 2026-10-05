@@ -732,6 +732,54 @@ def remove_case_view(view_dir: Path) -> bool:
     return _remove_tree(view_dir)
 
 
+_BAR = re.compile(r"[\[\]# ]*")
+"""A line that is nothing but a progress bar or a piece of one: `[####]`, `###]`, `#`, `[`."""
+
+_GLUED_BAR = re.compile(r"\[?#+(?=[^\s#\]])")
+"""A bar's `#` run glued onto the front of the next line: `[###Extracting ...`, `#Extracting ...`.
+
+Only `#` directly followed by a word: `# a sentence` is a sentence, and a `#` inside
+a line (`a#b.wmo`) is part of it.
+"""
+
+
+def without_progress(line: str) -> str | None:
+    """`line` without a progress bar's residue; None when that is all it was (T263).
+
+    The extraction tools draw progress bars for a terminal: `vmap4extractor`
+    prints `#` after `#` with no newline, so on a pipe its bar arrives as lines of
+    `#` alone or glued onto the front of the next line, and a tool that redraws
+    with a carriage return leaves every reading on one line. Seen on yulon-ubuntu2
+    (2026-10-05): a lone `#` was the last line of a killed `vmap4extractor`, and
+    so stood in its last words between the file it was extracting and the
+    sentence saying the old map data was put back. A redraw keeps its last
+    reading; a blank line stays blank.
+    """
+    if "\r" in line:
+        line = next((part for part in reversed(line.split("\r")) if part), "")
+    if line and _BAR.fullmatch(line) and any(mark in line for mark in "[#]"):
+        return None
+    return _GLUED_BAR.sub("", line, count=1) if line.startswith(("#", "[#")) else line
+
+
+def _quiet(run_container: RunContainer) -> RunContainer:
+    """`run_container` whose output reaches the sink and the last words without bar residue."""
+
+    def run(
+        spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        def said(line: str) -> None:
+            kept = without_progress(line)
+            if kept is not None:
+                sink(kept)
+
+        ran = run_container(spec, sink=said, cancel=cancel)
+        tail = tuple(kept for kept in map(without_progress, ran.tail) if kept is not None)
+        return replace(ran, tail=tail) if tail != ran.tail else ran
+
+    return run
+
+
 class RunContainer(Protocol):
     """`docker.run_container`'s shape, as a seam the tests fill with a recorder."""
 
@@ -1127,6 +1175,7 @@ def run_plan(
             all, or exited 0 with too few files.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
+    run_container = _quiet(run_container)  # no progress bar in the log or last words (T263)
     ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
     security_args = container_security_args(enforcing=ask())
     expected = expected_evidence(
@@ -1939,7 +1988,7 @@ def run_mmaps(
         # (review, 2026-09-02).
         raise InstallerError(f"{exc}{cleared}") from exc
     yield f"mmaps: running {' '.join(plan.argv)}"
-    run = run_container(
+    run = _quiet(run_container)(
         docker.ContainerRun(
             image=image_ref,
             argv=tuple(plan.argv),
