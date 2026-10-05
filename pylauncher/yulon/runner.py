@@ -26,6 +26,7 @@ import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
 
+from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -70,7 +71,7 @@ class _Child:
         """Set by `end_streams_started_on()` BEFORE it ends `proc` (T240): the exit is a Stop's."""
 
 
-class StreamEnded(subprocess.CalledProcessError):
+class StreamEnded(subprocess.CalledProcessError, StopTookEffect):
     """A stream's child exited non-zero because `end_streams_started_on()` ended it (T240).
 
     A `CalledProcessError`, so every caller that already treats a non-zero exit
@@ -79,6 +80,9 @@ class StreamEnded(subprocess.CalledProcessError):
     fell back to host git when the Stop killed its docker CLI, and cloned the
     whole repository again after the player had pressed Stop (yulon-win11,
     2026-10-04).
+
+    `StopTookEffect` (T250): the log panel reads it, and what is raised `from`
+    it, as the Stop and not as a failure.
     """
 
 

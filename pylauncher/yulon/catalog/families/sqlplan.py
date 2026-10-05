@@ -109,7 +109,7 @@ from typing import BinaryIO, Protocol, cast
 from yulon import docker
 from yulon.catalog.catalog import SqlPhase, SqlPlan
 from yulon.catalog.composegen import ComposeGenError, fill
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.catalog.native import IMPORT_CANCEL_NOTE
 from yulon.catalog.released_plans import RELEASED_PHASE_DIGESTS
 from yulon.log import get_logger
@@ -809,7 +809,7 @@ def _check_cancel(cancel: threading.Event | None, note: str) -> None:
     this function's own default.
     """
     if cancel is not None and cancel.is_set():
-        raise InstallerError(f"The import was stopped. {note}")
+        raise InstallStopped(f"The import was stopped. {note}")
 
 
 def create_schemas(

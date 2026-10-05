@@ -268,6 +268,21 @@ def test_a_failed_build_changes_nothing(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
 
+def test_a_stopped_build_is_a_stop_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T250: the build Stop ended is raised as a Stop, so the panel says "cancelled" for it."""
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    fake.build_code = docker.CANCELLED_RETURNCODE
+    before = _base(server_dir)
+
+    with pytest.raises(botdash.SwitchStopped, match="Stopped before anything was changed"):
+        list(_switch(server_dir).switch_on(lan=False))
+
+    assert _base(server_dir) == before
+
+
 def test_a_daemon_that_will_not_start_puts_both_files_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

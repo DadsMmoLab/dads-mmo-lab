@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
 from yulon import platform, runner, wsl
+from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.ui import lines
 
@@ -2929,13 +2930,14 @@ on. So a look takes at most a minute, and the events are read between looks and 
 pause, which wakes for them within a quarter of a second."""
 
 
-class StopAbandoned(DockerCommandError):
+class StopAbandoned(DockerCommandError, StopTookEffect):
     """The stop was given up while it waited for a loading world; NOTHING was sent (T158).
 
     Raised when the caller's `abandon` event is set -- the app closing, a
     rebuild cancelled before it replaced anything -- so the world is left
     running rather than signalled mid-load. Its own type so a caller that owns
-    the abandon can tell it from a stop that failed.
+    the abandon can tell it from a stop that failed, and `StopTookEffect`
+    (T250) so the log panel reads it as the job's Stop.
     """
 
 

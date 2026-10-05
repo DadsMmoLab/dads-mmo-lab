@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -27,7 +27,14 @@ from tests.conftest import (
 from yulon import runner
 from yulon.support import runlog
 from yulon.ui import lines
-from yulon.ui.widgets.log_panel import PALETTE, LogPanel, Seams, _StreamWorker, tone_colour
+from yulon.ui.widgets.log_panel import (
+    PALETTE,
+    STOPPED_THEN_FAILED,
+    LogPanel,
+    Seams,
+    _StreamWorker,
+    tone_colour,
+)
 
 STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
 """The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
@@ -1339,10 +1346,12 @@ def _route_with_cleanup(cancel: threading.Event, put_back: list[str]) -> Iterato
     try:
         for n in range(1000):
             if cancel.is_set():
-                raise RuntimeError("the compile was killed")
+                # What a killed child really raises (T250): a `RuntimeError` here
+                # read as the Stop only while the panel decided by timing.
+                raise runner.StreamEnded(143, ["make"])
             yield f"compiling {n}"
             time.sleep(JOB_PACE)
-    except RuntimeError:
+    except runner.StreamEnded:
         for name in ("core", "module"):
             put_back.append(name)
             yield f"{name} was put back on its old commit."
@@ -1438,10 +1447,10 @@ def test_a_rebuilds_own_rollback_lines_survive_a_stop_too(qapp: object) -> None:
         try:
             while True:
                 if cancel.is_set():
-                    raise RuntimeError("build stopped")
+                    raise runner.StreamEnded(143, ["make"])
                 yield "compiling"
                 time.sleep(JOB_PACE)
-        except RuntimeError:
+        except runner.StreamEnded:
             for said in ("Putting the build you had back.", "The containers were replaced."):
                 steps.append(said)
                 yield said
@@ -1456,6 +1465,91 @@ def test_a_rebuilds_own_rollback_lines_survive_a_stop_too(qapp: object) -> None:
 
     assert steps == ["Putting the build you had back.", "The containers were replaced."]
     assert "The containers were replaced." in panel.text()
+
+
+# ------------------------------------------------------------ T250: a stop is a type
+
+
+def _stopped_then(raise_: Callable[[], None]) -> tuple[LogPanel, list[tuple[bool, str]]]:
+    """Run a source that waits for Stop and then calls `raise_`; press Stop; wait for the end."""
+    cancel = threading.Event()
+
+    def source() -> Iterator[str]:
+        yield "working"
+        assert cancel.wait(HANG_BOUND), "Stop never came"
+        raise_()
+        yield "never"
+
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    panel.run(source, title="Rebuilding", cancel=cancel)
+    pump_until(lambda: "working" in panel.text(), "the job produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+    return panel, finished
+
+
+def test_a_failure_that_is_not_the_stop_is_shown_under_stopped(qapp: object) -> None:
+    """T250: a real failure landing as Stop is pressed is a failure, not "cancelled".
+
+    Until T250 anything raised after Stop was read as the Stop, by timing: a
+    disk that filled in the same moment was shown as a clean cancel.
+    """
+
+    def disk_full() -> None:
+        raise OSError(28, "No space left on device")
+
+    panel, finished = _stopped_then(disk_full)
+
+    assert panel.cancelled is True
+    assert panel.status_text() == STOPPED_THEN_FAILED + "[Errno 28] No space left on device"
+    assert finished == [(False, "[Errno 28] No space left on device")], finished
+
+
+def test_a_routes_own_sentence_raised_from_a_stopped_child_is_a_clean_cancel(
+    qapp: object,
+) -> None:
+    """T250: a route that turns the killed child into its own sentence keeps the Stop's type.
+
+    `raise ... from` the stopped child is how every route in this tree says
+    "this is because of that" (ruff's B904), and the panel follows it.
+    """
+
+    def wrapped() -> None:
+        try:
+            raise runner.StreamEnded(143, ["git", "fetch"])
+        except runner.StreamEnded as exc:
+            raise RuntimeError("Fetching the core failed: git fetch was stopped.") from exc
+
+    panel, finished = _stopped_then(wrapped)
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+
+
+def test_a_cleanup_that_failed_while_the_stop_was_handled_is_shown(qapp: object) -> None:
+    """T250: a failure that only CARRIES the Stop as its context is its own failure.
+
+    The stop was being handled when the cleanup broke; what the cleanup left is
+    the sentence the player needs, so it is not folded into "cancelled".
+    """
+
+    def cleanup_broke() -> None:
+        try:
+            raise runner.StreamEnded(143, ["make"])
+        except runner.StreamEnded as stop:
+            caught = stop
+        broke = OSError("the sources could not be put back: read-only file system")
+        broke.__context__ = caught
+        raise broke
+
+    panel, finished = _stopped_then(cleanup_broke)
+
+    assert panel.status_text().startswith(STOPPED_THEN_FAILED), panel.status_text()
+    assert "read-only file system" in panel.status_text()
+    assert finished and finished[0][0] is False, finished
 
 
 # ------------------------------------------------------------ T93: record_as

@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
-from yulon.after_stop import TrueAfterStop
+from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.ui import lines
@@ -78,11 +78,14 @@ class Seams:
 
 
 STOPPED_THEN_FAILED = "Stopped. FAILED: "
-"""The header's opening when a stopped job ended on a failure that says what it left (T228).
+"""The header's opening when a stopped job ended on a failure (T228, T250).
 
 Stop was pressed, so "Stopped" comes first; the failure's own sentence follows
-because it says what state the server is in and what to press. Which failures
-those are is decided by type (`yulon.after_stop.TrueAfterStop`), never by words.
+because it says what state the server is in and what to press. Two kinds reach
+it, both decided by type and never by words: a failure that says what the press
+left (`yulon.after_stop.TrueAfterStop`, T228), and any failure that is not the
+Stop taking effect at all (`StopTookEffect`, T250) -- a real one that landed as
+the button was pressed.
 """
 
 _MAX_BLOCKS = 5000
@@ -417,19 +420,25 @@ class _StreamWorker(QObject):
                 # sentence describes, and that sentence is the one the player
                 # needs. Kept as a failure; `_on_finished` puts "Stopped" first.
                 logger.warning(f"log panel job failed after a stop: {raised}")
-            elif self._stop:
-                # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
-                # `request_stop()` ends the job's children, and a terminated
-                # child exits non-zero, so `runner.stream()` raises
-                # `CalledProcessError` on the way out — exit 143 on the live box
-                # (the last line of the 7.10 probe's own log). Reporting that as
-                # `ok=False` would put a refusal on screen for a button the user
-                # pressed, which is the twin of the "finished: stopped" bug
-                # `_on_finished` exists to fix. The text is kept in the log, at
-                # debug, so a genuine failure that happened to land in the same
-                # millisecond is not lost.
+            elif self._stop and stop_took_effect(exc):
+                # THE STOP TAKING EFFECT, said so by type (T250). `request_stop()`
+                # ends the job's children, and a terminated child exits non-zero,
+                # so `runner.stream()` raises `StreamEnded` on the way out — exit
+                # 143 on the live box (the last line of the 7.10 probe's own log);
+                # the engine raises `InstallStopped` where it hears the cancel. A
+                # route that turns either into its own sentence raises `from` it.
+                # Reporting that as `ok=False` would put a refusal on screen for a
+                # button the user pressed, which is the twin of the "finished:
+                # stopped" bug `_on_finished` exists to fix.
                 logger.debug(f"log panel job ended after a stop was asked for: {raised}")
                 ok, message = True, "stopped"
+            elif self._stop:
+                # T250: NOT the Stop. Until T250 everything raised after a Stop
+                # was read as it, by timing alone, so a real failure that landed
+                # as the button was pressed -- a full disk, a lost daemon, a crash
+                # loop seen in the same moment -- was shown as "cancelled". Kept
+                # as a failure; `_on_finished` puts "Stopped" first.
+                logger.warning(f"log panel job failed as it was being stopped: {raised}")
             else:
                 logger.warning(f"log panel job failed: {raised}")
         if self._stop and ok:
@@ -1143,9 +1152,10 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            # T228: a stopped job that still FAILED carries a sentence about what
-            # it left (`TrueAfterStop`; the worker decides by type), shown under
-            # "Stopped". Every other stopped job is a clean cancel.
+            # T228/T250: a stopped job that still FAILED -- with a sentence about
+            # what it left (`TrueAfterStop`), or on something that was not the
+            # Stop (`StopTookEffect`; the worker decides both by type) -- is shown
+            # under "Stopped". Every other stopped job is a clean cancel.
             verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
         elif ok and self._ended is not None:
             verdict = self._ended

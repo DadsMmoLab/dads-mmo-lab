@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from yulon import docker, platform, resources, runner
-from yulon.after_stop import TrueAfterStop
+from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.catalog.upstream import UpstreamNews
@@ -139,7 +139,19 @@ class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
 
-class ReadyWaitStopped(InstallerError):
+class InstallStopped(InstallerError, StopTookEffect):
+    """The player's Stop, taking effect in an install, a rebuild or a server press (T250).
+
+    Raised wherever the engine hears the Stop and ends -- between stages, at a
+    run the Stop cancelled, between import runs, at a stop it gave up -- with
+    the sentence of what the Stop costs there. An `InstallerError`, so every
+    handler written for one still runs; `StopTookEffect`, so the log panel
+    says "cancelled" for it, and a plain `InstallerError` raised after a Stop
+    is shown as the failure it is.
+    """
+
+
+class ReadyWaitStopped(InstallStopped):
     """Stop was pressed while the world server was being waited for (T247).
 
     Raised by `StagedInstaller.wait_for_ready()` as soon as it hears the Stop,

@@ -102,6 +102,7 @@ from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
+    InstallStopped,
     ReadyWaitStopped,
     RollbackNotDone,
     UnsupportedPlatformError,
@@ -5405,7 +5406,7 @@ class StagedInstaller:
         try:
             yield from _with_hint(_speaking(stop_it, control.abandon), CORRECTIONS_WAIT_HINT)
         except docker.StopAbandoned as exc:
-            raise InstallerError(
+            raise InstallStopped(
                 f"This was stopped while {self.entry.name}'s world server was still loading, so "
                 f"the world server was not stopped and nothing was applied. It is still running."
             ) from exc
@@ -5880,7 +5881,7 @@ class StagedInstaller:
             try:
                 yield from _with_hint(_speaking(stop_them, control.abandon), REBUILD_WAIT_HINT)
             except docker.StopAbandoned as exc:
-                raise InstallerError(
+                raise InstallStopped(
                     "The rebuild was cancelled while the world was still loading, so its "
                     "containers were not replaced -- the server you have is still the one that "
                     "was running before this rebuild. Nothing was touched."
@@ -5906,7 +5907,7 @@ class StagedInstaller:
                 ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
             )
         except docker.StopAbandoned as exc:
-            raise InstallerError(
+            raise InstallStopped(
                 "The rebuild was cancelled while the world was still loading, so its "
                 "containers were not replaced -- the server you have is still the one that was "
                 "running before this rebuild. Nothing was touched."
@@ -8162,6 +8163,11 @@ class StagedInstaller:
             # the one thing standing between them and a server. See
             # `installer.provision_lines()`.
             yield from provision_lines(report)
+            # T250: a Stop comes back from provisioning as a report that is not
+            # ready -- and, pressed on the docker-group question, as a consent
+            # declined -- never as an error. Read as a refusal it would put
+            # "Docker is not available" on screen for a button the player pressed.
+            self._check_cancel(cancel)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
@@ -9726,7 +9732,7 @@ class StagedInstaller:
             stage="import",
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
-            raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
+            raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
@@ -10380,7 +10386,7 @@ class StagedInstaller:
         A default here is the shape that mistake had.
         """
         if run.returncode == docker.CANCELLED_RETURNCODE:
-            raise InstallerError(_cancelled_message(what, note))
+            raise InstallStopped(_cancelled_message(what, note))
         if run.returncode != 0 and from_build and docker.builder_connection_lost(run.tail):
             # T202: said in words before the quote, which alone told the
             # player nothing (a raw gRPC line, left-truncated).
@@ -10397,7 +10403,7 @@ class StagedInstaller:
 
     def _check_cancel(self, cancel: threading.Event | None) -> None:
         if cancel is not None and cancel.is_set():
-            raise InstallerError(_cancelled_message("the install"))
+            raise InstallStopped(_cancelled_message("the install"))
 
     @contextmanager
     def _held_awake(self) -> Iterator[str]:

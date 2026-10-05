@@ -71,7 +71,12 @@ from yulon.catalog.catalog import (
 )
 from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefused
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    InstallStopped,
+    UpdateRefused,
+)
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -1488,7 +1493,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         try:
             self._seams.recreate(spec, ctx.server_dir, control=control)
         except docker.StopAbandoned as exc:
-            raise InstallerError(
+            raise InstallStopped(
                 f"The world update is finished, but starting the server was cancelled: {exc}. "
                 "Press Start on the Server tab."
             ) from exc

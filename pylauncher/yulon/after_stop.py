@@ -13,7 +13,13 @@ dropped with the rest, so the panel said "cancelled" over a server it had left
 in a state nobody was told about (m910q, 2026-10-04, P9).
 
 The mark is positive and on the type, so the panel never reads the words: a
-type that carries it is shown after a Stop, and everything else is the Stop.
+type that carries it is shown after a Stop.
+
+The other side has its own mark since T250. What IS the Stop taking effect --
+a child the Stop ended, a stage that heard the cancel -- carries
+`StopTookEffect`, and only that is "cancelled"; any other failure after a Stop
+is shown too, because it is a real failure that landed as the button was
+pressed, not the press.
 """
 
 from __future__ import annotations
@@ -27,3 +33,39 @@ class TrueAfterStop(Exception):
     catches it. `LogPanel` reads it (`_StreamWorker.run()`): a job that raises one
     after Stop was pressed ends with the sentence, under "Stopped".
     """
+
+
+class StopTookEffect(Exception):
+    """Mixed into an exception type that IS the player's Stop taking effect (T250).
+
+    The other half of `TrueAfterStop`, and the one that decides "cancelled".
+    Until T250 the log panel read every exception that arrived after Stop as
+    the Stop, by timing alone, so a real failure that landed in the same
+    moment -- a full disk, a lost daemon, a crash loop seen as the press came
+    -- was shown as a clean cancel. Now a stopped job is a clean cancel only
+    when what ended it says so by type: this mark, on the exception or on one
+    it was raised `from` (`stop_took_effect()`). Anything else is a failure,
+    shown under "Stopped".
+
+    Mixed in after the type's own base, as `TrueAfterStop` is, so every
+    `except` already written still catches it.
+    """
+
+
+def stop_took_effect(exc: BaseException) -> bool:
+    """Is `exc` the Stop taking effect: marked `StopTookEffect`, or raised `from` one that is?
+
+    `__cause__` only, never `__context__`. A route that turns a stopped child
+    into its own sentence raises `from` it (ruff's B904 holds every handler in
+    this tree to that); a cleanup that FAILED while a Stop was being handled
+    carries the Stop only as its context, and that failure is the cleanup's
+    own, so it is shown.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, StopTookEffect):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
