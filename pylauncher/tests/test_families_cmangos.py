@@ -3802,6 +3802,18 @@ def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_
         assert kept.is_file(), f"attempt {attempt}: the client lost content to a refused install"
 
 
+def test_the_cmangos_build_stage_says_this_platforms_cancel_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows a Stop ends the build at once (T246); elsewhere Docker finishes the step."""
+    monkeypatch.setattr(native.sys, "platform", "win32")
+    notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
+    assert notes["build"] == native.BUILD_CANCEL_NOTE_WINDOWS
+    monkeypatch.setattr(native.sys, "platform", "linux")
+    notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
+    assert notes["build"] == native.BUILD_CANCEL_NOTE
+
+
 def test_extract_and_mmaps_carry_the_stage_kinds_own_cancel_notes() -> None:
     notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
     assert notes["extract"] == extract.EXTRACT_CANCEL_NOTE

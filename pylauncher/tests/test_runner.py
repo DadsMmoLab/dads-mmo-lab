@@ -1251,3 +1251,329 @@ def test_a_command_exiting_124_on_its_own_did_not_time_out() -> None:
     proc = run([sys.executable, "-c", "import sys; sys.exit(124)"], timeout=HANG_BOUND)
     assert proc.returncode == 124
     assert not runner.timed_out(proc)
+
+
+# ---------------------------------------------------------------------------
+# T246: on Windows a Stop ends the whole process tree it started.
+#
+# Measured on yulon-win11 2026-10-05 (`.notes/gates/t246-probe-yulon-win11-2026-10-05/`):
+# Yu'lon's child docker.exe started docker-compose.exe, which started
+# `docker-buildx.exe bake`. `terminate()` is TerminateProcess on docker.exe
+# alone, so the other two ran on as orphans for 12.5 minutes and the build
+# moved the live image tag 10 min 38 s after Stop. `taskkill /T /F /PID
+# <docker.exe>` ended all three, the build ended in the engine as `Error`, and
+# no tag moved in the 15 minutes watched.
+
+_TREE_ROOT_PID = 4242
+"""The pid the `_TreeRoot` double answers to; any value the test can recognise in an argv."""
+
+
+class _TreeRoot:
+    """A `Popen` double for docker.exe: alive until a tree kill, `terminate()` or `kill()` ends it.
+
+    `events` is shared with the `subprocess.run` double, so one list says what
+    happened in which order. `ignores_terminate` is a root that is still alive
+    after `terminate()`, so its bounded wait expires and `kill()` is needed.
+    """
+
+    pid = _TREE_ROOT_PID
+
+    def __init__(
+        self, events: list[object], *, alive: bool = True, ignores_terminate: bool = False
+    ):
+        self.events = events
+        self.alive = alive
+        self.ignores_terminate = ignores_terminate
+
+    def poll(self) -> int | None:
+        return None if self.alive else 1
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        if not self.ignores_terminate:
+            self.alive = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.events.append("wait")
+        if self.alive and timeout is not None:
+            raise subprocess.TimeoutExpired("docker", timeout)
+        self.alive = False
+        return 1
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self.alive = False
+
+
+def _as_windows(monkeypatch: pytest.MonkeyPatch, platform: str = "win32") -> None:
+    """Pretend to be `platform`. On win32 `CREATE_NO_WINDOW` must exist for `creationflags()`."""
+    monkeypatch.setattr(runner.sys, "platform", platform)
+    monkeypatch.setattr(runner.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setenv("SystemRoot", r"D:\Win")
+
+
+def _taskkill_double(
+    monkeypatch: pytest.MonkeyPatch,
+    root: _TreeRoot,
+    *,
+    outcome: str = "ends the tree",
+) -> list[dict[str, object]]:
+    """Stand in for `subprocess.run` running taskkill; every call is recorded and returned.
+
+    `outcome` is what the real taskkill did: ended the tree (the root is then
+    dead, as on the box), exited 128 with the root still running, timed out, or
+    could not be started at all.
+    """
+    calls: list[dict[str, object]] = []
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": list(argv), "root_alive": root.alive, **kw})
+        root.events.append("taskkill")
+        if outcome == "times out":
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))  # type: ignore[arg-type]
+        if outcome == "cannot start":
+            raise FileNotFoundError(2, "No such file", argv[0])
+        if outcome == "exits 128":
+            return subprocess.CompletedProcess(
+                argv, 128, "", 'ERROR: The process "4242" not found.'
+            )
+        root.alive = False
+        return subprocess.CompletedProcess(
+            argv, 0, f"SUCCESS: The process with PID {root.pid} has been terminated.\n", ""
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    return calls
+
+
+def test_on_windows_a_stop_ends_the_tree_with_taskkill_before_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`taskkill /T /F /PID <docker.exe>` first, while docker.exe still anchors the tree.
+
+    Order is the point: taskkill finds descendants by their parent pid, so once
+    `terminate()` has ended docker.exe the compose and buildx processes have a
+    dead parent and `/T` cannot reach them from it. The system copy of
+    taskkill.exe, not whatever PATH finds first; no console window; bounded.
+
+    Mutations this catches: no tree kill at all (no call); the tree kill after
+    `terminate()` (order, and `root_alive` False); `/T` or `/F` dropped, or the
+    wrong pid (argv); `creationflags()` not passed; no timeout.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert len(calls) == 1, calls
+    call = calls[0]
+    assert call["argv"] == [r"D:\Win\System32\taskkill.exe", "/T", "/F", "/PID", "4242"]
+    assert call["root_alive"] is True, "taskkill ran after docker.exe was already gone"
+    assert events.index("taskkill") < events.index("terminate"), events
+    assert call["creationflags"] == 0x08000000
+    bound = call.get("timeout")
+    assert isinstance(bound, (int, float)) and 0 < bound <= runner._SHUTDOWN_TIMEOUT_SECONDS
+    assert not root.alive
+
+
+@pytest.mark.parametrize("outcome", ["exits 128", "times out", "cannot start"])
+def test_on_windows_a_taskkill_that_fails_falls_back_to_terminate(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """A tree kill that did not end the root leaves the old ending in charge, and raises nothing.
+
+    `exits 128` is taskkill refusing with the root still running; `times out`
+    and `cannot start` are the two exceptions `subprocess.run` raises. A Stop
+    must never be lost to its own helper: the worst case is today's behaviour.
+
+    Mutations this catches: `terminate()` skipped on win32 (the root stays
+    alive); either exception not caught (it escapes `_end_child`).
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root, outcome=outcome)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert len(calls) == 1
+    assert events[:2] == ["taskkill", "terminate"], events
+    assert not root.alive
+
+
+def test_on_windows_without_systemroot_the_tree_kill_uses_the_default_windows_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset `SystemRoot` must not cost the Stop: taskkill is looked for under C:\\Windows.
+
+    Mutation this catches (cold review N2): dropping the `C:\\Windows` default,
+    after which `ntpath.join(None, ...)` raised a TypeError that no taskkill was
+    ever run for.
+    """
+    _as_windows(monkeypatch)
+    monkeypatch.delenv("SystemRoot", raising=False)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert [call["argv"] for call in calls] == [
+        [r"C:\Windows\System32\taskkill.exe", "/T", "/F", "/PID", "4242"]
+    ]
+
+
+def test_on_windows_any_error_in_the_tree_kill_still_ends_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not only the two exceptions `subprocess.run` documents: nothing may cost a Stop its ending.
+
+    Mutation this catches (cold review N2): catching only `OSError` and
+    `TimeoutExpired`, so any other error escapes `_end_child` before
+    `terminate()` and the Stop ends nothing at all.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+
+    def broken_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        events.append("taskkill")
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(runner.subprocess, "run", broken_run)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert events[:2] == ["taskkill", "terminate"], events
+    assert not root.alive
+
+
+def test_on_windows_a_root_that_outlives_terminate_is_still_killed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last rung of the fallback: tree kill failed, terminate ignored, so `kill()`."""
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events, ignores_terminate=True)
+    _taskkill_double(monkeypatch, root, outcome="times out")
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert events == ["taskkill", "terminate", "wait", "kill", "wait"], events
+    assert not root.alive
+
+
+def test_on_windows_a_child_that_already_exited_is_not_tree_killed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every stream's `finally` calls `_end_child`, finished or not; a finished one is left alone.
+
+    That is what keeps a normal, completed command's ending exactly as it was:
+    no taskkill is spawned after every `docker ps`.
+
+    Mutation this catches: the tree kill moved outside the `poll() is None` check.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events, alive=False)
+    calls = _taskkill_double(monkeypatch, root)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert calls == [] and events == []
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_off_windows_a_stop_never_runs_taskkill(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """Linux, the Steam Deck and macOS keep `terminate()` then `kill()`, unchanged.
+
+    Mutation this catches: the platform check dropped or widened (`!= "linux"`
+    would still pass here on linux and fail on darwin).
+    """
+    _as_windows(monkeypatch, platform)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert calls == []
+    assert events == ["terminate", "wait"], events
+
+
+_TALKS_THEN_SLEEPS = "import sys, time\nprint('started')\nsys.stdout.flush()\ntime.sleep(60)\n"
+
+
+def test_every_way_a_stream_is_stopped_ends_its_child_through_end_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stream()`, `stream_progress()` and `interact()` all end a running child through one helper.
+
+    The tree kill lives in `_end_child`; a path with its own copy of
+    terminate-then-kill would end docker.exe alone on Windows again.
+    `interact()` had exactly that copy until T246. Each child is still running
+    when it is stopped, so `_end_child` must have been asked about THAT child
+    while it was alive — a spy that only saw finished children would prove
+    nothing about the Stop.
+
+    Mutation this catches: `interact()`'s `finally` restored to its inline
+    `terminate()`/`kill()`.
+    """
+    alive_when_asked: list[bool] = []
+    real_end = runner._end_child
+
+    def note(proc: subprocess.Popen[str]) -> None:
+        alive_when_asked.append(proc.poll() is None)
+        real_end(proc)
+
+    monkeypatch.setattr(runner, "_end_child", note)
+
+    gen = stream(_python_cmd(_TALKS_THEN_SLEEPS))
+    assert next(gen) == "started"
+    gen.close()
+
+    progress = runner.stream_progress(_python_cmd(_TALKS_THEN_SLEEPS))
+    assert next(progress) == "started"
+    progress.close()
+
+    cancel = threading.Event()
+    said: list[str] = []
+    for line in runner.interact(
+        _python_cmd(_TALKS_THEN_SLEEPS), respond=lambda _line: None, cancel=cancel
+    ):
+        said.append(line)
+        cancel.set()
+
+    assert said == ["started"]
+    assert alive_when_asked == [True, True, True], alive_when_asked
+
+
+def test_only_end_child_terminates_a_child_in_the_runner() -> None:
+    """The enumerating half: no function in `runner.py` but `_end_child` calls `.terminate()`.
+
+    A per-path test covers the paths that exist today; this one fails on the
+    next function that grows its own copy, which is how `interact()` came to
+    miss the tree kill's predecessor fixes. `.kill()` is not audited: the one
+    other call is `interact()`'s for a child whose reader thread could not even
+    be started, which is not a Stop.
+    """
+    import ast
+
+    source = Path(runner.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    callers: set[str] = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "terminate"
+            ):
+                callers.add(function.name)
+    assert callers == {"_end_child"}, callers
