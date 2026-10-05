@@ -12,8 +12,11 @@ count and whether the current run has lasted.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from yulon import dashboard, docker
 from yulon.catalog import catalog as catalog_module
@@ -471,3 +474,36 @@ def test_a_read_that_failed_does_not_become_a_restart_loop_on_the_next_tick(
     assert watch.tick().state == "up"
     assert watch.tick().state == "unknown"
     assert watch.tick().state == "up"
+
+
+def test_the_realm_poll_logs_a_silent_docker_once_not_every_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The realm poll's own reader, unpatched (Linux live test of PR 291, item 1).
+
+    With docker.service and docker.socket stopped, a Server tab left open logged
+    "could not read the state of ac-worldserver" once per five-second tick. This
+    ticks the dashboard's DEFAULT state reader, so the real `container_state()`
+    runs and only the docker CLI is stood in for.
+
+    Mutation: log on every failed read in `container_state()`, and this counts six.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(
+            cmd,
+            1,
+            "",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?\n",
+        ),
+    )
+    watch = dashboard.Dashboard(SPEC, WOTLK, _install(tmp_path), sql=_FakeSql(), now=lambda: NOW)
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        verdicts = [watch.tick() for _ in range(6)]
+    assert {v.state for v in verdicts} == {"unknown"}
+    said = [
+        r for r in caplog.records if f"could not read the state of {SPEC.world}" in r.getMessage()
+    ]
+    assert len(said) == 1, [r.getMessage() for r in said]

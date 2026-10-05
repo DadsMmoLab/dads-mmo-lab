@@ -969,7 +969,9 @@ def test_the_header_takes_an_action_left_of_the_badge(qapp: object) -> None:
     header.add_action(button)
 
     layout = header.layout()
-    assert layout.indexOf(button) == layout.indexOf(header._badge) - 1
+    # T192: the server's name sits between, beside the badge it belongs to.
+    assert layout.indexOf(header._realm_title) == layout.indexOf(header._badge) - 1
+    assert layout.indexOf(button) == layout.indexOf(header._realm_title) - 1
     assert button.parent() is header
 
 

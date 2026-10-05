@@ -518,8 +518,9 @@ class PartyPanel(QWidget):
     def refresh_party(self) -> None:
         """Read this character's party, off the GUI thread. A press of its own.
 
-        It is also the way out of an armed "dismiss every bot", which is what
-        the tab's own armed paragraph tells people ("Press Refresh to cancel").
+        It is also the way out of an armed "dismiss every bot", as the Server
+        tab's armed paragraph once told people with "Press Refresh to cancel"
+        (it has a Cancel of its own since T195).
 
         The busy check is here as well as in `_master()` because this press
         starts three jobs and only one of them goes through that: a refresh

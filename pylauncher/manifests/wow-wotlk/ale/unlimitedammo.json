@@ -76,7 +76,7 @@
   "prompts": [
     {
       "key": "enabled",
-      "question": "Enable by default?",
+      "question": "Unlimited ammo on for every character by default?",
       "kind": "bool",
       "default": "true"
     },

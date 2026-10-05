@@ -572,6 +572,75 @@ def test_container_state_reads_the_restart_count_in_the_same_inspect(
     assert docker.container_state("x") == docker.ContainerState("running", "T", 0)
 
 
+_DAEMON_DOWN = (
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+    "Is the docker daemon running?\n"
+)
+
+
+def test_a_state_read_docker_will_not_answer_is_logged_once_per_change(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Linux live test of PR 291: a stopped daemon logged this line every 5 s, 39 in 3 min.
+
+    The Server tab's realm poll reads the world's state every five seconds, and
+    each read that failed logged Docker's words again. Now: one line when what
+    Docker says changes, one when it answers again, and a failure after that is
+    a change again. Each container (and each WSL distro's daemon) is its own.
+
+    Mutation: log on every failed read, and the first assert counts five.
+    """
+    answers: list[subprocess.CompletedProcess[str]] = []
+    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None, timeout=None: answers.pop(0))
+
+    def read(*results: subprocess.CompletedProcess[str], container: str = "ac-worldserver") -> None:
+        answers.extend(results)
+        for _ in results:
+            assert docker.container_state(container).status in ("", "running")
+
+    down = _completed(returncode=1, stderr=_DAEMON_DOWN)
+    up = _completed(stdout="running\t2026-10-04T21:31:00Z\t0\n")
+
+    def lines(word: str) -> list[str]:
+        return [r.getMessage() for r in caplog.records if word in r.getMessage()]
+
+    with caplog.at_level("INFO", logger="yulon.docker"):
+        read(down, down, down, down, down)
+        assert len(lines("could not read the state of ac-worldserver")) == 1
+        read(down, container="ac-authserver")
+        assert len(lines("could not read the state of ac-authserver")) == 1
+        timeout = _completed(returncode=124, stderr="timed out after 30.0s")
+        read(timeout, timeout)
+        assert len(lines("could not read the state of ac-worldserver")) == 2, "a new wording"
+        read(up, up, up)
+        assert lines("answers about ac-worldserver again") == [
+            "Docker answers about ac-worldserver again"
+        ]
+        read(down, down)
+        assert len(lines("could not read the state of ac-worldserver")) == 3, "down again"
+
+
+def test_a_job_state_read_shares_the_once_per_change_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`container_exit()` logs the same line as `container_state()`, so it is de-duplicated too.
+
+    Mutation: leave `container_exit()` logging on every read, and this counts three.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(returncode=1, stderr=_DAEMON_DOWN),
+    )
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        for _ in range(3):
+            assert docker.container_exit("yulon-mmaps").status == ""
+    said = [
+        r for r in caplog.records if "could not read the state of yulon-mmaps" in r.getMessage()
+    ]
+    assert len(said) == 1
+
+
 def test_container_state_says_missing_only_when_docker_answered_no_such_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

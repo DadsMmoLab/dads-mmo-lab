@@ -453,7 +453,10 @@ def test_a_realm_yulon_cannot_ask_about_is_not_called_stopped(
     view.refresh_status()
 
     assert window.realm_badge.status == "unknown"
-    assert window.online_label.text() == launcher_window.UNKNOWN_BANNER
+    # T194 C7: the launcher, the Server tab's banner and its badge say it one way.
+    assert window.online_label.text() == view.docker_banner.title_label.text()
+    assert window.online_label.text() == "Yu'lon can't ask Docker about this server right now"
+    assert not view.docker_banner.isHidden()
     said = window.play_reason_label.text()
     assert "Docker" in said, said
     assert "stopped" not in said and "starts it" not in said, said
