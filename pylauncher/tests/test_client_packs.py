@@ -2126,6 +2126,44 @@ def test_a_read_only_aside_with_one_name_is_made_writable_and_deleted(
     assert [n for _, n in windows_read_only] == [1]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_deleting_the_client_after_a_pack_over_a_shared_read_only_archive_keeps_its_flag(
+    rig: _Rig, windows_read_only: list[tuple[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T196: the install could not delete the aside of the player's read-only archive.
+
+    Delete has to clear the flag on that inode to remove it (Windows), and puts it
+    back on the player's own `Data/patch-X.MPQ`, the name the aside was moved from.
+    """
+    original = rig.original / "Data" / "patch-X.MPQ"
+    _REAL_CHMOD(original, 0o444)  # the player's own file, hard-linked into the client
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    aside = rig.play / "Data" / ("patch-X.MPQ" + client_packs._ASIDE)
+    assert os.path.samefile(aside, original), "the fixture must leave the player's file aside"
+    refused: list[str] = []
+
+    def windows_unlink(path: Any) -> None:
+        if not os.lstat(path).st_mode & 0o200:
+            refused.append(os.fspath(path))
+            raise PermissionError(errno.EACCES, "Access is denied", os.fspath(path))
+        os.unlink(path)
+
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, unlink=windows_unlink, **kw),
+    )
+
+    play_client.delete(rig.play, game=GAME, server_dir=rig.server)
+
+    assert not rig.play.exists()
+    assert set(refused) == {os.fspath(aside)}, "the read-only rule was not what the delete met"
+    assert original.stat().st_mode & 0o777 == 0o444, "the player's own file left writable"
+    _REAL_CHMOD(original, 0o644)
+    rig.untouched()
+
+
 def _fail_staging(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EIO, "Input/output error")
