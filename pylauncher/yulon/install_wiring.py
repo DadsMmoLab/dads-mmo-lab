@@ -25,8 +25,10 @@ import getpass
 import logging
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yulon import docker, platform, wsl
 from yulon.catalog import upstream
@@ -55,15 +57,29 @@ from yulon.catalog.native import (
     RewrittenHistory,
     Seams,
     SourceVersion,
+    StagedInstaller,
     correction_phases,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
     source_version,
+    sources_still_off,
     update_to_latest_confirmation,
+)
+from yulon.catalog.snapshot import (
+    ROLLBACK_SAFETY_LABEL,
+    SNAPSHOT_LABEL,
+    CopyNotUsable,
+    DatabaseSnapshot,
+    PutBack,
+    Snapshot,
+    prune_older,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
 from yulon.ui import lines
+
+if TYPE_CHECKING:
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
 logger = get_logger(__name__)
 
@@ -156,6 +172,161 @@ def import_gate_for(
     return probe, reset
 
 
+SNAPSHOT_LEASE_REASON = (
+    "Yu'lon is copying or putting back this server's databases for an update to latest"
+)
+"""What a Backup or Restore of the same server is refused with while the update's copy runs."""
+
+
+class _MaintenanceSnapshot:
+    """`snapshot.DatabaseSnapshot` on the Maintenance tab's own dump and restore (T217).
+
+    `catalog/` must not import a controller package, so the binding is made here,
+    like the import probe's. Every call holds `docker.maintenance_lease()` for its
+    whole length, so a Backup or Restore pressed on the same server meanwhile is
+    refused instead of interleaving with it. `take()` and `put_back()` start the
+    database alone when it is down (the update's stop leaves it up; a server that
+    was stopped before the press has it down) and leave it running, since the
+    recreate that follows needs it. The world and login servers are never started
+    here, and `restore()` refuses while either runs.
+    """
+
+    def __init__(self, entry: CatalogEntry, *, wsl_distro: str | None) -> None:
+        self.entry = entry
+        self.wsl_distro = wsl_distro
+
+    def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
+        from yulon.controller_wow_wotlk import maintenance
+
+        password = self.entry.install.db_password(server_dir) or fixed_db_password(self.entry)
+        client = native.db.client if (native := self.entry.install.native) is not None else None
+        return maintenance.DockerMysql(
+            self.entry.container_spec().db, password, wsl_distro=self.wsl_distro, client=client
+        )
+
+    def _database_up(self, server_dir: Path) -> None:
+        spec = self.entry.container_spec()
+        if spec.db in set(docker.status(wsl_distro=self.wsl_distro)):
+            return
+        docker.start_database(
+            spec,
+            server_dir,
+            because="nothing was copied or put back",
+            wsl_distro=self.wsl_distro,
+        )
+
+    def take(self, server_dir: Path, databases: Sequence[str]) -> Snapshot:
+        from yulon.controller_wow_wotlk import maintenance
+
+        spec = self.entry.container_spec()
+        try:
+            with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                self._database_up(server_dir)
+                report = maintenance.backup(
+                    server_dir,
+                    self._mysql(server_dir),
+                    only=tuple(databases),
+                    label=SNAPSHOT_LABEL,
+                    spec=spec,
+                    core_databases=self.entry.core_databases(),
+                    wsl_distro=self.wsl_distro,
+                )
+        except (
+            maintenance.MaintenanceError,
+            docker.DockerCommandError,
+            docker.MaintenanceLeaseTaken,
+            OSError,
+        ) as exc:
+            raise InstallerError(str(exc)) from exc
+        return Snapshot(
+            directory=report.directory,
+            files=tuple(dump.path for dump in report.dumps),
+            databases=report.databases,
+            size_bytes=report.total_bytes,
+        )
+
+    def put_back(self, server_dir: Path, snapshot: Snapshot) -> PutBack:
+        from yulon.controller_wow_wotlk import maintenance
+
+        spec = self.entry.container_spec()
+        restored: list[str] = []
+        safety: list[Path] = []
+        try:
+            # Every file is checked before anything is dropped or loaded: a copy
+            # cut short, or one holding no table list, drops nothing (cold review
+            # of 23361ca3, the lead's decision of 2026-10-04).
+            holds: dict[Path, dict[str, tuple[str, ...]]] = {}
+            for path in snapshot.files:
+                try:
+                    holds[path] = maintenance.tables_in_copy(path)
+                except maintenance.MaintenanceError as exc:
+                    raise CopyNotUsable(
+                        f"the copy {path} is not complete ({exc}), so nothing was dropped or "
+                        "put back"
+                    ) from exc
+            with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                self._database_up(server_dir)
+                mysql = self._mysql(server_dir)
+                for path in snapshot.files:
+                    plan = maintenance.plan_restore(
+                        path, server_dir, spec=spec, wsl_distro=self.wsl_distro
+                    )
+                    if plan.refusals:
+                        raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    # A replacement, not the Maintenance tab's merge: the tables
+                    # the copy does not hold -- made by the new build or by its
+                    # database updates -- are dropped before the copy loads.
+                    tables = holds[path]
+                    report = maintenance.restore(
+                        plan,
+                        mysql,
+                        confirm=plan.token,
+                        spec=spec,
+                        core_databases=self.entry.core_databases(),
+                        wsl_distro=self.wsl_distro,
+                        safety_label=ROLLBACK_SAFETY_LABEL,
+                        before_load=partial(_drop_what_the_copy_lacks, mysql, tables),
+                    )
+                    restored.extend(report.databases)
+                    safety.extend(report.safety_backup)
+        except (
+            maintenance.MaintenanceError,
+            docker.DockerCommandError,
+            docker.MaintenanceLeaseTaken,
+            OSError,
+        ) as exc:
+            done = f" ({', '.join(restored)} went back before that)" if restored else ""
+            raise InstallerError(f"{exc}{done}") from exc
+        return PutBack(restored=tuple(restored), safety=tuple(safety))
+
+    def prune(self, server_dir: Path, snapshot: Snapshot) -> tuple[Path, ...]:
+        return prune_older(snapshot.directory, snapshot.files)
+
+
+def _drop_what_the_copy_lacks(
+    mysql: wotlk_maintenance.SchemaMysql, tables: Mapping[str, Sequence[str]]
+) -> None:
+    """`restore()`'s `before_load` for the update copy: each database loses what the copy lacks."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    for database, keep in tables.items():
+        maintenance.drop_tables_not_in(mysql, database, keep)
+
+
+def database_snapshot_for(
+    entry: CatalogEntry, *, wsl_distro: str | None = None
+) -> DatabaseSnapshot | None:
+    """The update route's database copy for `entry` (T217), or None for an entry with no engine.
+
+    Built for every entry with a native block: whether a copy is taken is the
+    family's answer (`databases_a_new_build_changes()`), asked by the engine, so an
+    entry whose new build changes nothing never calls it.
+    """
+    if entry.install.native is None:
+        return None
+    return _MaintenanceSnapshot(entry, wsl_distro=wsl_distro)
+
+
 def installer_for_app(
     entry: CatalogEntry,
     *,
@@ -173,6 +344,7 @@ def installer_for_app(
     (`pyplan/wsl-resident-servers.md` §7).
     """
     probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
+    copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
     if wsl_distro is None:
         return installer_for(
             entry,
@@ -180,6 +352,7 @@ def installer_for_app(
             installers_root=installers_root,
             import_probe=probe,
             reset_unfinished=reset,
+            database_snapshot=copy,
         )
     return installer_for(
         entry,
@@ -187,6 +360,7 @@ def installer_for_app(
         import_probe=probe,
         reset_unfinished=reset,
         seams=Seams.in_wsl(wsl_distro),
+        database_snapshot=copy,
     )
 
 
@@ -282,6 +456,32 @@ def rebuild_for_app(
     return rebuild
 
 
+def rebuild_refusal_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    engine: Callable[[], InstallEngine] | None = None,
+) -> Callable[[], str | None]:
+    """What the Rebuild press would refuse before compiling, asked before its question (T217).
+
+    `StagedInstaller.rebuild_refusal_before_asking()`, on an engine built per
+    ask (`engine`, for a test's seams; else `installer_for(entry)`). A server
+    inside a WSL distro answers None: reading its checkout from Windows goes
+    through `\\\\wsl.localhost`, and the press still makes its own check there.
+    """
+
+    def ask() -> str | None:
+        if wsl_distro is not None:
+            return None
+        made = engine() if engine is not None else installer_for(entry)
+        if not isinstance(made, StagedInstaller):
+            return None
+        return made.rebuild_refusal_before_asking(server_dir)
+
+    return ask
+
+
 def update_to_latest_for_app(
     entry: CatalogEntry,
     server_dir: Path,
@@ -355,7 +555,13 @@ def update_to_latest_for_app(
         said = dict(met) if (elsewhere or stopped) else rewritten()
         acknowledged.clear()
         acknowledged.update(said)
-        text = update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
+        # T217: the databases the press copies, asked of the family (no git, no docker).
+        family = installer_for(entry)
+        copied = family.snapshot_databases() if isinstance(family, StagedInstaller) else ()
+        not_copied = family.snapshot_left_out() if isinstance(family, StagedInstaller) else ()
+        text = update_to_latest_confirmation(
+            entry, server_dir, repo, tuple(said.values()), copied=copied, not_copied=not_copied
+        )
         return f"{text}\n\n{WSL_DISTRO_STOPPED_NOTE}" if stopped else text
 
     def engine() -> InstallEngine:
@@ -379,7 +585,7 @@ def update_to_latest_for_app(
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
-        return source_version(read_state(server_dir, valid=()))
+        return source_version(read_state(server_dir, valid=()), sources_still_off(server_dir))
 
     def news() -> upstream.UpstreamNews:
         # T124. Built per call like the presses: it is asked off the GUI thread

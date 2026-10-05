@@ -846,7 +846,18 @@ def test_finish_whose_world_cannot_be_stopped_imports_nothing(box: Box) -> None:
 
 
 def test_a_plain_rebuild_replaces_the_containers_in_one_call(box: Box) -> None:
-    """No update route, no work between the stop and the start: the rebuild as it always was."""
+    """No update route, no work between the stop and the start: the rebuild as it always was.
+
+    The record says the build came from `OLD`, where the box's checkout is: a plain
+    Rebuild refuses a source off the commit its running build came from (T217).
+    """
+    state = native.read_state(box.server_dir, valid=())
+    assert state is not None
+    revs = tuple(
+        native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
+        for source in box.engine().sources_that_move()
+    )
+    native.write_state(box.server_dir, replace(state, source_revs=revs))
     list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
     assert "recreate" in box.m.rec.calls
     assert "stop_servers" not in box.m.rec.calls

@@ -2020,6 +2020,10 @@ class ControllerServices:
     for a server adopted from a WSL distro — which is a fact about the INSTALL,
     not about this view, so the view never asks about distros.
     """
+    rebuild_refusal: Callable[[], str | None] | None = None
+    """What the Rebuild press would refuse, asked BEFORE its question (T217 live proof).
+
+    `install_wiring.rebuild_refusal_for_app()`; None asks nothing first."""
     updates: native.UpdateRoute | None = None
     """Apply the install plan's re-runnable phases to this server; None when it has none.
 
@@ -2709,6 +2713,9 @@ def _assemble(
         # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
         # the same kind of checkout and its users patch it the same way.
         rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        rebuild_refusal=install_wiring.rebuild_refusal_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # HERE for the same reason the rebuild is, and offered to far fewer
         # installs: the phases exist or they do not, and that is a fact about
         # `catalog.json` which every game's tab reads the same way.
@@ -15954,6 +15961,13 @@ class ControllerView(QWidget):
                 f"{server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)} again. "
                 "Nothing was started.",
             )
+            return False
+        # T217 live proof, item 3: a refusal the press would make anyway comes BEFORE
+        # the question, not after an hour's compile was agreed to.
+        refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
+        if refused is not None:
+            logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
+            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
             return False
         if not said_yes(
             QMessageBox.question(
