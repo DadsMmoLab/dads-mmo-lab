@@ -1529,6 +1529,12 @@ The failed build is stopped before any tag moves back, and it may be force-stopp
 is still loading, the rollback waits and a press stops it regardless.
 """
 
+OLD_BUILD_STOPPING = (
+    "The build from before this update did not come up either; stopping its servers so they "
+    "do not restart over and over."
+)
+"""Said before the old build that failed after a rollback is stopped (T217 live proof, item 5)."""
+
 ROLLBACK_WAIT_HINT = (
     "The new build's world is still loading and cannot be stopped cleanly yet. Yu'lon waits "
     'for it; "Stop now anyway" or Stop stops it regardless -- it may then be force-stopped '
@@ -2074,7 +2080,8 @@ SOURCES_PUT_BACK_DATABASE_NOT_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk is the "
     "build that was put back; it stays stopped until its databases are restored."
 )
-"""`SOURCES_PUT_BACK_NOTE` when the update's copy of the databases could not go back (T217)."""
+"""`SOURCES_PUT_BACK_NOTE` when the update's copy of the databases could not go back, or went
+back and the old build still did not come up (T217)."""
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -2222,6 +2229,20 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str) -> str:
     )
 
 
+def copy_old_build_down(copy: snapshot.Snapshot, put: snapshot.PutBack) -> str:
+    """The old build did not come up on the databases put back (T217 live proof, item 5)."""
+    names = put.restored
+    left = f", as the new build left them in {_in_backups(put.safety)}" if put.safety else ""
+    return (
+        f"Its source folders and {_listed(names)} were put back, and the build from before "
+        "this update still did not come up, so its servers were stopped. Every copy is kept: "
+        f"{_listed(copy.databases)} as they were just before the new build started are in "
+        f"{_in_backups(copy.files)}{left}, and the copies earlier updates took are still in "
+        "the backups folder too. Restore the one you want on Maintenance (it works with the "
+        "server stopped), then press Start."
+    )
+
+
 def copy_kept_note(copy: snapshot.Snapshot) -> str:
     """Added when the new build stays: its copy was not needed (T217, T197's exits)."""
     names = copy.databases
@@ -2300,6 +2321,21 @@ def forget_sources_off(server_dir: Path) -> None:
         logger.warning(f"could not remove {path}: {exc}")
 
 
+def source_off_its_build(dest: Path, head: str, built: str) -> str:
+    """Rebuild's refusal of a folder off the commit its build came from (T217): one sentence.
+
+    Said by the press (`_refuse_sources_off_their_build()`) and, before its
+    question, by the view (`rebuild_refusal_before_asking()`).
+    """
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    return (
+        f"{dest} is on {head[:7]}, but this server was built from {built[:7]}, so rebuilding "
+        f"it now would compile a mix of the two. Put it back with `git -C {dest} checkout "
+        f"--detach --force {built}`, or press {update} to move every source together. Nothing "
+        "was changed."
+    )
+
+
 def read_head_file(dest: Path) -> str | None:
     """The commit a checkout is on, read off `.git/HEAD` with no git run; None = cannot say.
 
@@ -2371,6 +2407,7 @@ class _UpdateCopy:
     put: snapshot.PutBack | None = None
     take_failed: bool = False
     put_failed: bool = False
+    old_build_down: bool = False
 
 
 REPAIR_FILES_LABEL = "Repair server files…"
@@ -3133,6 +3170,20 @@ class ServersDownWork:
     puts back its copy of the databases a new build changes (`snapshot`), and then
     this says what went back, or that nothing was changed because the new build
     never started.
+    """
+    came_back: Callable[[], None] = lambda: None
+    """Once the old build the rollback started has REPORTED READY (T217 live proof, item 5).
+
+    The update route forgets its older copies here and nowhere earlier in a
+    rollback: until the old build is up, an older copy may be the only one that
+    can bring it back. Must not raise.
+    """
+    did_not_come_back: Callable[[], str | None] = lambda: None
+    """When the old build the rollback started did not report ready (T217 live proof, item 5).
+
+    A sentence means: stop its servers rather than leave them restarting, and say
+    this (the copies that can restore it) in place of `database()`'s. None keeps
+    the rollback's own sentence, with the servers as they are. Must not raise.
     """
     finishes_start_refusal: bool = True
     """This work finishes what refuses a start, so `rebuild()` need not ask first (T217).
@@ -6844,6 +6895,8 @@ class StagedInstaller:
                 keep=family.keep if family is not None else lambda: iter(()),
                 done=family.done if family is not None else lambda: iter(()),
                 database=lambda: self._copy_database_sentence(copy),
+                came_back=lambda: self._forget_older_copies(server_dir, copy),
+                did_not_come_back=lambda: self._old_build_down(copy),
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
             try:
@@ -6914,8 +6967,8 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
-                # T217: the database stays with the new build too; its copy is kept.
-                self._forget_older_copies(server_dir, copy)
+                # T217: the database stays with the new build too; its copy is kept, and
+                # so are the older ones -- no build reported ready (live proof, item 5).
                 also += self._copy_kept(copy)
                 self._record_source_revs(
                     server_dir,
@@ -6950,7 +7003,7 @@ class StagedInstaller:
                     # note says that instead.
                     if sources_failed:
                         note = SOURCES_NOT_ALL_BACK_NOTE
-                    elif copy.put_failed:
+                    elif copy.put_failed or copy.old_build_down:
                         note = SOURCES_PUT_BACK_DATABASE_NOT_NOTE
                     else:
                         note = SOURCES_PUT_BACK_STOPPED_NOTE
@@ -7292,7 +7345,8 @@ class StagedInstaller:
                 logger.warning(f"could not put {dest} back on {old}: {exc}")
                 yield (
                     f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
-                    f"folder is now ahead of the server that is running: put it back with "
+                    "folder is still on the commit this press moved it to, not the commit the "
+                    "build this server has was made from: put it back with "
                     f"`git -C {dest} checkout --detach --force {old}`."
                 )
                 failed.append((source, dest, old, str(exc)))
@@ -7335,7 +7389,9 @@ class StagedInstaller:
             copy.put_failed = True
             raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
         yield copy_put_back_line(copy.put)
-        self._forget_older_copies(server_dir, copy)
+        # NOT forgotten here: the old build has not started yet, and until it reports
+        # ready an older copy may be the only one that brings it back (live proof
+        # 2026-10-05, item 5). `came_back` forgets them.
 
     @staticmethod
     def _copy_kept(copy: _UpdateCopy) -> str:
@@ -7351,6 +7407,14 @@ class StagedInstaller:
         if copy.put is not None:
             return copy_put_back_database(copy.put, not_copied=copy.not_copied)
         return None
+
+    @staticmethod
+    def _old_build_down(copy: _UpdateCopy) -> str | None:
+        """`did_not_come_back` for the update route: a sentence once its copy went back."""
+        if copy.taken is None or copy.put is None:
+            return None
+        copy.old_build_down = True
+        return copy_old_build_down(copy.taken, copy.put)
 
     def _forget_older_copies(self, server_dir: Path, copy: _UpdateCopy) -> None:
         """Keep only this press's copy (owner, 2026-10-04), once it is not the only good one."""
@@ -7803,15 +7867,51 @@ class StagedInstaller:
             # already reporting a failure.
             yield from self._release(named)
             yield from self._release(kept)
+            down = servers_down.did_not_come_back() if servers_down is not None else None
+            if down is not None:
+                # T217 live proof, item 5: the old build crash-looped on the
+                # databases put back. Its servers are stopped rather than left
+                # restarting, and the sentence names the copies that can restore
+                # it, never "starts on the databases it knows".
+                stopped = yield from self._stop_the_old_build(ctx)
+                return _LeftStopped(
+                    f"{failure} The build from before this rebuild was put back, but it did "
+                    f"not come up either: {second}{said}\n{down}{stopped}{back_failed}"
+                )
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
         yield from self._release(kept)
+        if servers_down is not None:
+            servers_down.came_back()
         return (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _stop_the_old_build(self, ctx: StageContext) -> Generator[str, None, str]:
+        """Stop the old build that did not come up after a rollback (T217). Never raises.
+
+        Returns "" once its servers are stopped, else the sentence saying they
+        could not be, so the press never claims a stop it did not make.
+        """
+        spec = self.entry.container_spec()
+        yield OLD_BUILD_STOPPING
+        control = _stop_control(ctx, rollback=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_servers(spec, ctx.server_dir, control=replace(control, say=say))
+
+        try:
+            yield from _speaking(stop_it, control.abandon)
+        except docker.DockerCommandError as exc:
+            logger.warning(f"could not stop the old build of {self.entry.id}: {exc}")
+            return (
+                f" Its servers could not be stopped ({exc}), so they may still be restarting: "
+                "press Stop on the Server tab."
+            )
+        return ""
 
     def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
         """Take the transient names off the daemon. Returns the ones still there.
@@ -8111,14 +8211,31 @@ class StagedInstaller:
                     )
                 continue
             if not head.startswith(expected):
-                raise InstallerError(
-                    f"{dest} is on {head[:7]}, but this server was built from {expected[:7]}, "
-                    "so rebuilding it now would compile a mix of the two. Put it back with "
-                    f"`git -C {dest} checkout --detach --force {expected}`, or press "
-                    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}"
-                    " to move every source together. Nothing was changed."
-                )
+                raise InstallerError(source_off_its_build(dest, head, expected))
         return tuple(unchecked)
+
+    def rebuild_refusal_before_asking(self, server_dir: Path) -> str | None:
+        """What `_refuse_sources_off_their_build()` would refuse, asked before the question.
+
+        T217 live proof (item 3): Rebuild asked its whole question -- an hour's
+        compile, the server down -- and then refused in no time. The view asks
+        this first. It reads `.git/HEAD` (`read_head_file()`), never runs git, and
+        answers only a refusal the press itself makes: no record, no recorded
+        build, or a HEAD it cannot read is None, and the press says the rest.
+        """
+        state = read_state(server_dir, valid=self.stage_names())
+        if state is None:
+            return None
+        for source in self.sources_that_move():
+            recorded = state.rev_for(source.repo)
+            built = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            if not built:
+                continue
+            dest = server_dir / source.dest
+            head = read_head_file(dest)
+            if head is not None and not head.startswith(built):
+                return source_off_its_build(dest, head, built)
+        return None
 
     def _claim_before_writing(
         self, server_dir: Path, state: InstallState, started_empty: bool

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import FakeSnapshot, Recorder
+from tests.support_native import SNAPSHOT_STAMP, FakeSnapshot, Recorder
 from tests.test_update_to_latest import (  # noqa: F401 - `_gated` is an autouse fixture
     ABORTED_AFTER_READY,
     EARLY_RETURNS,
@@ -36,7 +36,7 @@ from tests.test_update_to_latest import (  # noqa: F401 - `_gated` is an autouse
     _recreate_given_up,
     _spine,
 )
-from yulon import git, server_build_presses
+from yulon import docker, git, server_build_presses
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import (
@@ -404,6 +404,92 @@ def test_an_update_that_comes_up_keeps_its_copy_and_forgets_the_older_ones(
     assert any("before starting the new build" in line for line in said)
 
 
+def _asked_ready(rec: Recorder, answers: list[bool]) -> Callable[[object, object], bool]:
+    """`wait_ready` that records each ask in `rec.calls` and answers from `answers` in turn."""
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        rec.calls.append(f"ready?{'yes' if answer else 'no'}")
+        return answer
+
+    return wait_ready
+
+
+def test_a_rollback_forgets_older_copies_only_after_the_old_build_reported_ready(
+    tmp_path: Path,
+) -> None:
+    """Live proof 2026-10-05, item 5: the copies went in the second the old build was recreated.
+
+    It then crash-looped, and the last copies holding the tables it needed were gone.
+    """
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_asked_ready(rec, [False, True]))
+    made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert "is running again" in str(raised.value)
+    old_up = _at(rec.calls, "ready?yes")
+    assert _at(rec.calls, "put-back:") < old_up
+    assert rec.calls.count("prune") == 1 and _at(rec.calls, "prune") > old_up, rec.calls
+
+
+def test_an_old_build_that_does_not_come_up_after_the_put_back_keeps_every_copy_and_stops(
+    tmp_path: Path,
+) -> None:
+    """Live proof 2026-10-05, item 5: no copy is forgotten, the servers do not crash-loop.
+
+    The sentence says the old build did not come up and names the copies that can
+    restore it -- never "starts on the databases it knows" or "agree again".
+    """
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert "prune" not in rec.calls, rec.calls
+    old_down = _at(rec.calls, "ready?no", _at(rec.calls, "put-back:"))
+    _at(rec.calls, "stop_servers", old_down)
+    assert "recreate" not in rec.calls[old_down:], "nothing started again after the stop"
+    assert "did not come up either" in text
+    for path in (*fake.taken[0].files, *_safety_of(fake)):
+        assert path.name in text, path
+    assert "Maintenance" in text
+    assert "starts on the databases it knows" not in text
+    assert "agree again" not in text and "is running" not in text
+    assert text.endswith(native.SOURCES_PUT_BACK_DATABASE_NOT_NOTE)
+    assert _moving_heads(rec, server_dir, made) == {OLD}
+
+
+def _safety_of(fake: FakeSnapshot) -> tuple[Path, ...]:
+    from yulon.catalog.snapshot import ROLLBACK_SAFETY_LABEL
+
+    copy = fake.taken[0]
+    return tuple(
+        copy.directory / f"{SNAPSHOT_STAMP}_{ROLLBACK_SAFETY_LABEL}_{name}.sql"
+        for name in copy.databases
+    )
+
+
+def test_an_old_build_that_cannot_be_stopped_after_failing_says_so(tmp_path: Path) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    made._snapshot = FakeSnapshot(rec)
+
+    def refuse(control: object) -> None:
+        if rec.calls.count("recreate") == 2:
+            raise docker.DockerCommandError("the daemon did not answer the stop")
+
+    rec.on_stop_servers = refuse
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert "could not be stopped" in text and "the daemon did not answer the stop" in text
+    assert "Stop on the Server tab" in text
+    assert "prune" not in rec.calls
+
+
 def test_a_mixed_tags_record_refuses_the_update_before_anything_is_fetched(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +540,8 @@ def test_a_rollback_that_stops_early_keeps_the_database_with_the_new_build(
     text = str(raised.value)
     assert "it was not needed" in text and fake.taken[0].files[0].name in text
     assert text.endswith(native.SOURCES_LEFT_NOTE)
+    # No build reported ready, so no older copy is forgotten (live proof, item 5).
+    assert "prune" not in rec.calls
 
 
 def test_mixed_tags_put_the_sources_back_then_the_copy_and_still_refuse_every_start(
@@ -552,6 +640,32 @@ def test_a_module_that_will_not_go_back_leaves_the_servers_stopped_and_names_the
     assert native.sources_off_warning(server_dir) is not None, "Start will warn"
 
 
+@pytest.mark.parametrize("when", ["rollback", "compile-failed"])
+def test_a_folder_that_will_not_go_back_is_never_said_to_be_ahead_of_a_running_server(
+    tmp_path: Path, when: str
+) -> None:
+    """Live proof 2026-10-05, item 3: the line said "the server that is running" while nothing ran.
+
+    It names what is true in both places it is said: the folder is on another
+    commit than the build the server was made from.
+    """
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _module_will_not_go_back(rec, server_dir)
+    if when == "rollback":
+        made = make(wait_ready=_old_build_comes_back())
+    else:
+        rec.build_result = AttachedRun(2, ("error: no",))
+        made = make()
+    made._snapshot = FakeSnapshot(rec)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    line = next(line for line in said if "could NOT be put back" in line)
+    assert "is running" not in line, line
+    assert "not the commit the build this server has was made from" in line, line
+
+
 def test_a_module_that_will_not_go_back_after_a_failed_compile_never_says_agree_again(
     tmp_path: Path,
 ) -> None:
@@ -592,6 +706,48 @@ def test_rebuild_refuses_a_module_that_is_not_on_the_commit_the_server_was_built
     assert f"git -C {server_dir / MODULE} checkout --detach --force {OLD[:7]}" in text
     assert "Nothing was changed" in text
     assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
+
+
+def _detached_on(dest: Path, sha: str) -> None:
+    (dest / ".git").mkdir(parents=True, exist_ok=True)
+    (dest / ".git" / "HEAD").write_text(f"{sha}\n", encoding="utf-8")
+
+
+def test_the_rebuild_refusal_before_the_question_reads_the_record_and_the_head_file(
+    tmp_path: Path,
+) -> None:
+    """The view asks this before its Rebuild question (live proof, item 3). No git is run.
+
+    Through `install_wiring.rebuild_refusal_for_app()` and the real engine: the
+    same sentence the press itself refuses with, and None wherever the press
+    would go on (no record, a HEAD it cannot read, every folder where it was built).
+    """
+    from yulon import install_wiring
+
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    ask = install_wiring.rebuild_refusal_for_app(WOTLK, server_dir)
+    module = server_dir / MODULE
+    _detached_on(server_dir, OLD)
+    _detached_on(module, NEW)
+    assert ask() is None, "no record: an older pin is rebuilt as it is"
+    _built_from(
+        server_dir,
+        rec,
+        {"mod-playerbots/azerothcore-wotlk": OLD, "mod-playerbots/mod-playerbots": OLD},
+    )
+    refused = ask()
+    assert refused is not None
+    assert f"{module} is on {NEW[:7]}, but this server was built from {OLD[:7]}" in refused
+    assert f"git -C {module} checkout --detach --force {OLD[:7]}" in refused
+    rec.heads[module] = NEW
+    with pytest.raises(InstallerError) as pressed:
+        list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert str(pressed.value) == refused, "one sentence, asked twice"
+    _detached_on(module, OLD)
+    assert ask() is None
+    (module / ".git" / "HEAD").unlink()
+    assert ask() is None, "a HEAD it cannot read is the press's to report"
+    assert install_wiring.rebuild_refusal_for_app(WOTLK, server_dir, wsl_distro="Ubuntu")() is None
 
 
 def test_rebuild_goes_on_and_says_so_when_git_cannot_say_where_a_source_is(
@@ -653,6 +809,12 @@ def test_start_warns_while_a_source_is_off_its_commit_and_stops_once_it_is_back(
 def test_the_controllers_start_carries_the_warning_and_still_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Current behaviour, documented: Start warns and still starts.
+
+    Waits for the owner's decision on T217 (a): the live proof (2026-10-05, item 3)
+    showed this warned Start lets the old world apply the off-commit module's SQL
+    and crash-loop. Do not change it, or this test, before that decision.
+    """
     from yulon import docker
     from yulon.controller import Controller
 

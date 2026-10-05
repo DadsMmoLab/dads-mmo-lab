@@ -7409,6 +7409,42 @@ def test_declining_the_rebuild_confirmation_starts_nothing(
     assert view.rebuild_log.running is False
 
 
+def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T217 live proof, item 3: Rebuild asked its full question and then refused in 0 s.
+
+    A folder off the commit its build came from is refused first, with the
+    engine's own sentence, and the question is never asked.
+    """
+    asked: list[str] = []
+    told: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    def warning(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        told.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", warning)
+    services, started = _rebuild_services(ps, tmp_path)
+    services.rebuild_refusal = lambda: "modules/mod-playerbots is on 037c014. Nothing was changed."
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert asked == [], "asked before refusing"
+    assert told == ["modules/mod-playerbots is on 037c014. Nothing was changed."]
+    assert started == [] and view.rebuild_log.running is False
+
+    services.rebuild_refusal = lambda: None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    assert len(asked) == 1, "nothing to refuse: the question is asked as before"
+
+
 def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

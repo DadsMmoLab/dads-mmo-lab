@@ -455,6 +455,30 @@ def rebuild_for_app(
     return rebuild
 
 
+def rebuild_refusal_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> Callable[[], str | None]:
+    """What the Rebuild press would refuse before compiling, asked before its question (T217).
+
+    `StagedInstaller.rebuild_refusal_before_asking()`, on an engine built per
+    ask. A server inside a WSL distro answers None: reading its checkout from
+    Windows goes through `\\\\wsl.localhost`, and the press refuses there anyway.
+    """
+
+    def ask() -> str | None:
+        if wsl_distro is not None:
+            return None
+        engine = installer_for(entry)
+        if not isinstance(engine, StagedInstaller):
+            return None
+        return engine.rebuild_refusal_before_asking(server_dir)
+
+    return ask
+
+
 def update_to_latest_for_app(
     entry: CatalogEntry,
     server_dir: Path,
