@@ -173,6 +173,7 @@ def set_password(
     account: str,
     password: str,
     app_account: str,
+    digits_are_ids: bool,
     password_is_in_force: Callable[[str, str], bool | None] | None = None,
 ) -> Outcome:
     """`account set password <user> <pass> <pass>`, through the server itself.
@@ -225,7 +226,7 @@ def set_password(
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_password(account, password)
+        line = commands.account_set_password(account, password, digits_are_ids=digits_are_ids)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     outcome = _send(channel, line)
@@ -277,7 +278,14 @@ def _in_force(
 
 
 def set_gm_level(
-    channel: object, *, account: str, level: int, app_account: str, realms: bool, highest: int
+    channel: object,
+    *,
+    account: str,
+    level: int,
+    app_account: str,
+    realms: bool,
+    highest: int,
+    digits_are_ids: bool,
 ) -> Outcome:
     """`account set gmlevel <user> <n>`, with the realm argument where there are realms.
 
@@ -290,7 +298,9 @@ def set_gm_level(
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_gm_level(account, level, realms=realms, highest=highest)
+        line = commands.account_set_gm_level(
+            account, level, realms=realms, highest=highest, digits_are_ids=digits_are_ids
+        )
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     return _send(channel, line)
@@ -522,9 +532,21 @@ def digits_are_ids(entry: CatalogEntry) -> bool:
     """Does this tree read an all-digit account argument as an account id?
 
     True unless the tree is one measured to look names up by name alone, so a
-    tree added later starts on the safe side (T301's cold review).
+    tree added later starts on the safe side (T301's cold review). It holds for
+    `account delete` and `account set gmlevel`; `account set password` has its
+    own answer, `password_digits_are_ids()`.
     """
     return entry.id not in _NAMES_ARE_NAMES
+
+
+def password_digits_are_ids(entry: CatalogEntry) -> bool:
+    """`digits_are_ids()` for `account set password`, which the tortoise fork reads by name.
+
+    mangos-classic and mangos-tbc resolve it with `ExtractAccountId`
+    (`Level3.cpp:1097`, `:1136`); tortoise-wow 187af788 calls
+    `sAccountMgr.GetId(szAccountName)` (`src/game/Commands/Commands.cpp:338`) (T340).
+    """
+    return entry.id not in _NAMES_ARE_NAMES | {"wow-tortoise"}
 
 
 _NAMES_ARE_NAMES = frozenset({"wow-wotlk", "wow-centurion"})
@@ -619,6 +641,7 @@ class InstallAccounts:
             account=account,
             password=password,
             app_account=self.app_account,
+            digits_are_ids=password_digits_are_ids(self.entry),
             password_is_in_force=self._password_is_in_force,
         )
 
@@ -677,6 +700,7 @@ class InstallAccounts:
             app_account=self.app_account,
             realms=level_block is not None and level_block.table is not None,
             highest=level_block.max_level if level_block is not None else 3,
+            digits_are_ids=digits_are_ids(self.entry),
         )
 
     def delete_plan(self, account: str) -> DeletePlan:

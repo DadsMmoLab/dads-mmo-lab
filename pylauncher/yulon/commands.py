@@ -74,24 +74,36 @@ def valid_character_name(name: str) -> bool:
     return bool(_CHARACTER_NAME.fullmatch(name))
 
 
-def digits_read_as_an_id(account: str) -> str:
+DELETE_BY_ID = ("delete it", "account delete ID")
+GM_LEVEL_BY_ID = ("change its GM level", "account set gmlevel ID LEVEL")
+PASSWORD_BY_ID = ("change its password", "account set password ID NEWPASSWORD NEWPASSWORD")
+"""What each refused command does, and the line the player can type instead (T301, T340).
+
+With the account's id in place of a name, `ExtractAccountId` reaches exactly
+that account, so the console line is the safe way to do it on these trees.
+"""
+
+
+def digits_read_as_an_id(account: str, refused: tuple[str, str] = DELETE_BY_ID) -> str:
     """The refusal for an all-digit account name on a tree that reads digits as an id.
 
     The CMaNGOS trees' `ExtractAccountId` tries the argument as a number before
     it tries it as a name (mangos-classic `src/game/Chat/Chat.cpp:3358`,
     mangos-tbc `:3420`, tortoise-wow `:3549`), so `account delete 123` there
-    deletes account id 123, whatever it is called. Empty for any other name.
+    deletes account id 123, whatever it is called, and `account set gmlevel 123 3`
+    makes account id 123 a GM. Empty for any other name.
     """
     if not account.isdigit():
         return ""
+    doing, console = refused
     # The command is one the player has to type, since no press can do it
     # safely, so it stays on the line: on a line of its own, never in
     # backticks (owner rule, T296).
     return (
         f"{account} is a name made only of digits, and this server reads digits in its account "
-        "commands as an account number, so the delete could reach a different account. "
-        "Yu'lon does not delete it. To delete it, type this on the Console tab, with the "
-        "account's id from the list in place of ID:\naccount delete ID"
+        "commands as an account number, so the command could reach a different account. "
+        f"Yu'lon does not {doing} from here. To do it, type this on the Console tab, with the "
+        f"account's id from the list in place of ID:\n{console}"
     )
 
 
@@ -111,7 +123,9 @@ def account_create(account: str, password: str, *, digits_are_ids: bool) -> str:
     return line(f"account create {account} {password}")
 
 
-def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int) -> str:
+def account_set_gm_level(
+    account: str, level: int, *, realms: bool, highest: int, digits_are_ids: bool
+) -> str:
     """`account set gmlevel <user> <n>`, with `-1` for every realm where there are realms.
 
     `realms` is required and not defaulted, because the two cores disagree and
@@ -138,8 +152,16 @@ def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int
     (measured live, 2026-09-07: `4` was accepted and `5` answered "Incorrect
     values."). A number in this file would refuse a level the server accepts,
     in this app's own voice, as though the SERVER had said no.
+
+    `digits_are_ids` is required for the reason `account_delete()` gives: the
+    CMaNGOS handlers resolve the account with `ExtractAccountId` (mangos-classic
+    `Level3.cpp:1047`, mangos-tbc `:1086`, tortoise-wow `Commands.cpp:281`), so
+    an all-digit name would raise ANOTHER account's rights (T340).
     """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account, GM_LEVEL_BY_ID)
+        _require(not refusal, refusal)
     _require(0 <= level <= highest, f"{level} is not a GM level this server has")
     every_realm = " -1" if realms else ""
     return line(f"account set gmlevel {account} {level}{every_realm}")
@@ -171,9 +193,17 @@ def account_delete(account: str, *, digits_are_ids: bool) -> str:
     return line(f"account delete {account}")
 
 
-def account_set_password(account: str, password: str) -> str:
-    """`account set password <user> <pass> <pass>` — the server wants it twice."""
+def account_set_password(account: str, password: str, *, digits_are_ids: bool) -> str:
+    """`account set password <user> <pass> <pass>` — the server wants it twice.
+
+    `digits_are_ids` is the tree's own for THIS command: mangos-classic and
+    mangos-tbc resolve it with `ExtractAccountId` (`Level3.cpp:1097`, `:1136`),
+    while the tortoise fork looks the name up (`Commands.cpp:338`) (T340).
+    """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account, PASSWORD_BY_ID)
+        _require(not refusal, refusal)
     _require(valid_account_password(password), "that password is not one this server would accept")
     return line(f"account set password {account} {password} {password}")
 

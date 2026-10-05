@@ -54,6 +54,10 @@ CMANGOS = ["wow-tbc", "wow-vanilla", "wow-tortoise"]
 id before it tries it as a name: mangos-classic `src/game/Chat/Chat.cpp:3358`,
 mangos-tbc `Chat.cpp:3420`, tortoise-wow `Chat.cpp:3549` (`checkAccountId`
 defaults to true, `Chat.h:858`)."""
+PASSWORD_BY_ID = ["wow-tbc", "wow-vanilla"]
+"""`account set password` goes through `ExtractAccountId` there (mangos-classic
+`src/game/Chat/Level3.cpp:1097`, mangos-tbc `:1136`); the tortoise fork looks the
+name up instead (`src/game/Commands/Commands.cpp:338`)."""
 NAME_ONLY = ["wow-wotlk", "wow-centurion"]
 """`AccountMgr::GetId(accountName)` and nothing else: AzerothCore
 `cs_account.cpp:347`, TrinityCore112 `cs_account.cpp:303`."""
@@ -153,6 +157,32 @@ class _Sql:
         if row is not None:
             self.remove(row[0])
 
+    def account_id(self, argument: str, *, digits_are_ids: bool) -> int | None:
+        """Which account a command's account argument reaches, as the server reads it."""
+        if digits_are_ids and argument.isdigit():
+            return int(argument)
+        with self.lock:
+            row = self.conn.execute(
+                f"SELECT id FROM {self.auth}.account WHERE UPPER(username) = ?",
+                (argument.upper(),),
+            ).fetchone()
+        return None if row is None else int(row[0])
+
+    def set_level(self, account_id: int, level: int) -> None:
+        """What `account set gmlevel` writes, wherever this tree keeps the level."""
+        block = self.entry.accounts.level
+        assert block is not None
+        with self.lock:
+            if block.table is None:
+                self.conn.execute(
+                    f"UPDATE {self.auth}.account SET {block.level_column} = ? WHERE id = ?",
+                    (level, account_id),
+                )
+            else:
+                self.conn.execute(
+                    f"INSERT INTO {self.auth}.{block.table} VALUES (?, ?)", (account_id, level)
+                )
+
     def usernames(self) -> list[str]:
         with self.lock:
             return [r[0] for r in self.conn.execute(f"SELECT username FROM {self.auth}.account")]
@@ -194,6 +224,8 @@ class _Soap:
     mode: str = "result"
     text: str = "Account ALICE deleted."
     commands: list[str] = field(default_factory=list)
+    passwords_set: list[int] = field(default_factory=list)
+    """The account ids a password change reached, as the server resolved them."""
     port: int = 0
 
     def handler(self) -> type[http.server.BaseHTTPRequestHandler]:
@@ -223,6 +255,21 @@ class _Soap:
                         stand_in.sql.remove_id(int(hit.group(1)))
                     elif hit:
                         stand_in.sql.remove(hit.group(1))
+                    sql, game = stand_in.sql, stand_in.sql.entry.id
+                    level = re.fullmatch(
+                        r"account set gmlevel ([A-Za-z0-9_]+) (\d+)(?: -1)?", command
+                    )
+                    if level:
+                        target = sql.account_id(level.group(1), digits_are_ids=game in CMANGOS)
+                        if target is not None:
+                            sql.set_level(target, int(level.group(2)))
+                    secret = re.fullmatch(r"account set password ([A-Za-z0-9_]+) \S+ \S+", command)
+                    if secret:
+                        target = sql.account_id(
+                            secret.group(1), digits_are_ids=game in PASSWORD_BY_ID
+                        )
+                        if target is not None:
+                            stand_in.passwords_set.append(target)
                     result = (
                         "<result/>"
                         if stand_in.mode == "empty"
@@ -281,6 +328,16 @@ def wotlk(tmp_path: Path) -> Iterator[_Server]:
 @pytest.fixture(params=CMANGOS)
 def cmangos(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_Server]:
     yield from _server(request.param, tmp_path)
+
+
+@pytest.fixture(params=PASSWORD_BY_ID)
+def password_by_id(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_Server]:
+    yield from _server(request.param, tmp_path)
+
+
+@pytest.fixture
+def tortoise(tmp_path: Path) -> Iterator[_Server]:
+    yield from _server("wow-tortoise", tmp_path)
 
 
 @pytest.fixture(params=NAME_ONLY)
@@ -825,3 +882,99 @@ def test_the_line_itself_refuses_an_all_digit_name_where_digits_are_ids() -> Non
     assert commands.account_delete("123", digits_are_ids=False) == "account delete 123"
     with pytest.raises(commands.CommandError, match="only of digits"):
         commands.account_create("123", "pw1234", digits_are_ids=True)
+
+
+# -- T340, folded in: the other account commands on those trees ---------------
+
+
+def _levels(view: ControllerView) -> dict[str, int]:
+    return {
+        str(view.account_list.item(i).data(controller_view_module.Qt.ItemDataRole.UserRole)): int(
+            view.account_list.item(i).data(controller_view_module.Qt.ItemDataRole.UserRole + 1)
+        )
+        for i in range(view.account_list.count())
+    }
+
+
+def test_a_gm_level_for_an_all_digit_name_is_refused_where_digits_are_ids(
+    cmangos: _Server, tmp_path: Path
+) -> None:
+    """`account set gmlevel 123 3` there would make account id 123 a GM."""
+    _digits(cmangos)
+    view, failed = _tab(cmangos, tmp_path)
+    _choose(view, "123")
+    view.selected_gm.setValue(3)
+
+    view.set_gm_button.click()
+
+    report = view.account_report.text()
+    assert report.startswith("123 is a name made only of digits"), report
+    assert report.splitlines()[-1] == "account set gmlevel ID LEVEL"
+    assert cmangos.wire.commands == []
+    view.refresh_accounts()
+    assert _levels(view)["VICTIM"] == 0
+    assert failed == [report]
+
+
+def test_a_gm_level_for_an_all_digit_name_is_set_by_name_where_names_are_names(
+    name_only: _Server, tmp_path: Path
+) -> None:
+    _digits(name_only)
+    view, _ = _tab(name_only, tmp_path)
+    _choose(view, "123")
+    view.selected_gm.setValue(2)
+
+    view.set_gm_button.click()
+
+    assert name_only.wire.commands == ["account set gmlevel 123 2 -1"]
+    assert _levels(view)["123"] == 2 and _levels(view)["VICTIM"] == 0
+
+
+def test_a_password_for_an_all_digit_name_is_refused_where_digits_are_ids(
+    password_by_id: _Server, tmp_path: Path
+) -> None:
+    _digits(password_by_id)
+    view, failed = _tab(password_by_id, tmp_path)
+    _choose(view, "123")
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_password_button.click()
+
+    report = view.account_report.text()
+    assert report.startswith("123 is a name made only of digits"), report
+    assert report.splitlines()[-1] == "account set password ID NEWPASSWORD NEWPASSWORD"
+    assert password_by_id.wire.commands == []
+    assert password_by_id.wire.passwords_set == []
+    assert failed == [report]
+
+
+def test_tortoise_looks_a_password_change_up_by_name_so_it_is_sent(
+    tortoise: _Server, tmp_path: Path
+) -> None:
+    """The neighbour: the fork's `account set password` calls `GetId(name)`."""
+    _digits(tortoise)
+    view, _ = _tab(tortoise, tmp_path)
+    _choose(view, "123")
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_password_button.click()
+
+    assert tortoise.wire.commands == ["account set password 123 n3w-p@ss n3w-p@ss"]
+    assert tortoise.wire.passwords_set == [50]
+
+
+def test_the_lines_themselves_refuse_an_all_digit_name_where_digits_are_ids() -> None:
+    from yulon import commands
+
+    with pytest.raises(commands.CommandError, match="only of digits"):
+        commands.account_set_gm_level("123", 1, realms=False, highest=3, digits_are_ids=True)
+    with pytest.raises(commands.CommandError, match="only of digits"):
+        commands.account_set_password("123", "pw1234", digits_are_ids=True)
+    assert (
+        commands.account_set_gm_level("123", 1, realms=False, highest=3, digits_are_ids=False)
+        == "account set gmlevel 123 1"
+    )
+    assert (
+        commands.account_set_password("123", "pw1234", digits_are_ids=False)
+        == "account set password 123 pw1234 pw1234"
+    )

@@ -121,9 +121,9 @@ def test_the_gm_level_command_carries_the_realm_argument_this_core_needs() -> No
     no `RealmID` filter; the prior art's builder passes `-1` for the same reason
     (`soap_cmds.rs:95`).
     """
-    assert commands.account_set_gm_level("YULON_AB12CD34", 3, realms=True, highest=3) == (
-        "account set gmlevel YULON_AB12CD34 3 -1"
-    )
+    assert commands.account_set_gm_level(
+        "YULON_AB12CD34", 3, realms=True, highest=3, digits_are_ids=False
+    ) == ("account set gmlevel YULON_AB12CD34 3 -1")
 
 
 def test_a_command_refuses_an_argument_the_server_would_refuse() -> None:
@@ -163,11 +163,11 @@ def test_the_realm_argument_belongs_to_the_core_that_has_realms_in_its_level_tab
     is not something to guess at either.
     """
     assert (
-        commands.account_set_gm_level("BOB", 2, realms=True, highest=3)
+        commands.account_set_gm_level("BOB", 2, realms=True, highest=3, digits_are_ids=False)
         == "account set gmlevel BOB 2 -1"
     )
     assert (
-        commands.account_set_gm_level("BOB", 2, realms=False, highest=3)
+        commands.account_set_gm_level("BOB", 2, realms=False, highest=3, digits_are_ids=False)
         == "account set gmlevel BOB 2"
     )
 
@@ -198,15 +198,15 @@ def test_the_level_ceiling_is_the_trees_and_not_a_number_in_this_file() -> None:
     reason `realms` is: the trees disagree and the disagreement is silent.
     """
     assert (
-        commands.account_set_gm_level("BOB", 4, realms=False, highest=4)
+        commands.account_set_gm_level("BOB", 4, realms=False, highest=4, digits_are_ids=False)
         == "account set gmlevel BOB 4"
     )
 
     with pytest.raises(commands.CommandError) as refused:
-        commands.account_set_gm_level("BOB", 4, realms=False, highest=3)
+        commands.account_set_gm_level("BOB", 4, realms=False, highest=3, digits_are_ids=False)
     assert "4" in str(refused.value)
 
     with pytest.raises(commands.CommandError):
-        commands.account_set_gm_level("BOB", 5, realms=False, highest=4)
+        commands.account_set_gm_level("BOB", 5, realms=False, highest=4, digits_are_ids=False)
     with pytest.raises(commands.CommandError):
-        commands.account_set_gm_level("BOB", -1, realms=False, highest=4)
+        commands.account_set_gm_level("BOB", -1, realms=False, highest=4, digits_are_ids=False)
