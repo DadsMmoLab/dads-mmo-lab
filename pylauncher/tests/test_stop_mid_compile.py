@@ -463,3 +463,36 @@ def test_a_new_build_that_came_up_and_stopped_settles_the_record(tmp_path: Path)
         )
     assert native.read_stopped_build(server_dir) is None
     assert daemon.transient() == [], daemon.transient()
+
+
+def test_a_settled_landing_keeps_its_record_until_the_press_succeeds(tmp_path: Path) -> None:
+    """The tags went back, then the press failed: the stop is not settled until one succeeds."""
+    rec, daemon, server_dir = _recorded(tmp_path)
+    daemon.compiled()
+    rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+    with pytest.raises(InstallerError):
+        list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert native.read_stopped_build(server_dir) is not None
+    assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
+
+
+def test_the_tortoise_bot_rebuild_asks_the_servers_own_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-check's image question goes where the server is: a WSL server's distro."""
+    from yulon.catalog.catalog import load_catalog
+    from yulon.controller_wow_tortoise import poolreset
+    from yulon.ui.controller_view import ControllerServices
+
+    asked: list[object] = []
+    monkeypatch.setattr(
+        docker, "image_id", lambda ref, *, wsl_distro=None: asked.append(wsl_distro) or None
+    )
+    services = ControllerServices.for_entry(
+        load_catalog().get("wow-tortoise"), tmp_path, wsl_distro="Ubuntu-24.04"
+    )
+    seam = services.bot_pool_rebuild
+    assert isinstance(seam, poolreset.PoolRebuild)
+    seam.image_id("yulon.local/tortoise:native-0")
+    assert asked == ["Ubuntu-24.04"]
