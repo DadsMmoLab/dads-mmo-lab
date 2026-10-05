@@ -845,3 +845,45 @@ def test_a_hard_linked_archive_is_replaced_as_before_and_not_set_aside(tmp_path:
     assert (data / "Patch-A.MPQ").read_bytes() == MPQ
     assert players.read_bytes() == b"the player's own"
     assert [copy.aside for copy in log.client_copies] == [""]
+
+
+def test_a_file_set_aside_in_the_original_is_put_back_in_the_ready_to_play_client_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The aside is rebased like the receipt's path: installed before the switch, it is in
+    the original and the ready-to-play client holds a copy of it. Remove after the switch
+    puts that copy back there; the original's own files are never moved out of it."""
+    manifest = _manifest(ARAC)
+    _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    play = _make_play_client(original, server_dir)
+    applier = _play_applier(monkeypatch, server_dir, original, play, manifest)
+
+    applier.remove(manifest)
+
+    assert (play / "Data" / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert not (play / "Data" / ("Patch-A.MPQ" + ASIDE)).exists()
+    assert (original / "Data" / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"the player's own"
+    assert (original / "Data" / "Patch-A.MPQ").read_bytes() == MPQ, "reached into the original"
+
+
+@needs_case_sensitive_disk
+def test_two_source_names_of_one_name_set_the_players_file_aside_once(tmp_path: Path) -> None:
+    """The step's own first copy is not the player's: the twin overwrites it, no second aside."""
+    from yulon import apply as apply_module
+
+    manifest = _manifest(SOD)
+    clone = tmp_path / "clone"
+    for step in manifest.client:
+        (clone / step.src).mkdir(parents=True)
+    folder = clone / manifest.client[0].src
+    _write(folder / "Patch-4.MPQ", b"first")
+    _write(folder / "patch-4.mpq", b"second")
+    data = tmp_path / "client" / "Data"
+    _write(data / "Patch-4.MPQ", b"the player's own")
+    log = apply_module._Log()
+
+    Applier(tmp_path / "server", client_dir=tmp_path / "client")._client(manifest, clone, log)
+
+    assert _names(data) == ["Patch-4.MPQ", "Patch-4.MPQ" + ASIDE]
+    assert (data / ("Patch-4.MPQ" + ASIDE)).read_bytes() == b"the player's own"
