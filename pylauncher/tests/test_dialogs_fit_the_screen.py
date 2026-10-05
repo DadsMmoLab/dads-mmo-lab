@@ -35,6 +35,9 @@ SCREENS = {
     "handheld-960x640": (960, 640),
     "steam-deck-1280x800": (1280, 800),
     "desktop-1920x1080": (1920, 1080),
+    # A 1366×768 laptop at Windows' 125 %: the one size here where `QMessageBox`'s
+    # own width limit (screen - 480 above 1024) is narrower than the question's column.
+    "laptop-1366x768-at-125": (1093, 614),
 }
 
 DIALOGS = (
