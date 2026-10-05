@@ -19,6 +19,7 @@ level store has not been measured refuses rather than guessing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -610,12 +611,14 @@ class InstallAccounts:
         sql: SqlReader,
         channel_for_saved: Callable[[], object | None],
         app_account: str,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
         self._sql = sql
         self._channel_for_saved = channel_for_saved
         self.app_account = app_account
+        self._sleep = sleep
 
     @property
     def sql(self) -> SqlReader:
@@ -763,16 +766,55 @@ class InstallAccounts:
                     f"{now}. Nothing was deleted. Press delete again to be asked about these."
                 ),
             )
-        return delete_account(
+        outcome = delete_account(
             channel,
             account=account,
             app_account=self.app_account,
             characters=plan.characters,
             digits_are_ids=digits_are_ids(self.entry),
         )
+        if not outcome.done or self._gone(plan.account_id):
+            return outcome
+        logger.info(f"the server said {account} was deleted and its row is still there")
+        return Outcome(
+            True,
+            text=(
+                f"{outcome.text} The server is still removing it, so it may stay in the list "
+                "for a moment; Refresh the list will show it gone."
+            ),
+        )
+
+    def _gone(self, account_id: int) -> bool:
+        """Wait, about ten seconds at most, for a deleted account's row to go.
+
+        AzerothCore answers "deleted" before the row is: `AccountMgr::DeleteAccount`
+        queues its deletes on the database's asynchronous queue
+        (`AccountMgr.cpp:139,178`), so a list read at once still showed the account
+        until Refresh (T301's live test on yulon-ubuntu, 2026-10-05). Runs on the
+        tab's worker thread, never the GUI one. A read that fails ends the wait:
+        the server's own answer stands, and nothing more is claimed.
+        """
+        auth = self.entry.schema_map()["auth"]
+        statement = f"SELECT COUNT(*) FROM {auth}.account WHERE id = {account_id};"
+        for step in range(_GONE_READS):
+            if step:
+                self._sleep(_GONE_STEP_SECONDS)
+            try:
+                left = self._sql.query("auth", statement).strip()
+            except Exception as exc:  # noqa: BLE001 - a failed read only ends the wait
+                logger.info(f"could not read whether account {account_id} is gone: {exc}")
+                return True
+            if left == "0":
+                return True
+        return False
 
     def _channel(self) -> object | None:
         return self._channel_for_saved()
+
+
+_GONE_STEP_SECONDS = 0.5
+_GONE_READS = 21
+"""Twenty-one reads half a second apart: about ten seconds, the bound the live test asked for."""
 
 
 _NO_CHANNEL = (

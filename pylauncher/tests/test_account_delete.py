@@ -82,6 +82,11 @@ class _Sql:
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.conn.create_function("LEFT", 2, lambda text, n: None if text is None else text[:n])
         self.asked: list[tuple[str, str]] = []
+        self.lag: int | None = None
+        """None: a delete lands at once. N: the row is still there for the next N reads
+        of the account table, as AzerothCore's asynchronous delete leaves it
+        (`AccountMgr.cpp:139,178`, measured live on yulon-ubuntu, 2026-10-05)."""
+        self.pending: str | None = None
         schemas = entry.schema_map()
         for name in sorted(set(schemas.values())):
             self.conn.execute(f"ATTACH DATABASE ':memory:' AS {name}")
@@ -137,7 +142,13 @@ class _Sql:
             self.conn.execute(f"INSERT INTO {schema}.{registry.table} VALUES (?, 1)", (id,))
 
     def remove(self, username: str) -> None:
-        """What the server's own `AccountMgr::DeleteAccount` does to the rows."""
+        """What the server's own `AccountMgr::DeleteAccount` does, now or after `lag` reads."""
+        if self.lag:
+            self.pending = username
+            return
+        self._remove_now(username)
+
+    def _remove_now(self, username: str) -> None:
         with self.lock:
             row = self.conn.execute(
                 f"SELECT id FROM {self.auth}.account WHERE UPPER(username) = ?",
@@ -189,6 +200,12 @@ class _Sql:
 
     def query(self, db: str, statement: str) -> str:
         self.asked.append((db, statement))
+        if self.pending is not None and f"{self.auth}.account" in statement:
+            if self.lag:
+                self.lag -= 1
+            else:
+                self._remove_now(self.pending)
+                self.pending = None
         translated = re.sub(
             r"_utf8mb4 X'([0-9A-F]*)'",
             lambda m: "'" + bytes.fromhex(m.group(1)).decode("utf-8").replace("'", "''") + "'",
@@ -295,6 +312,7 @@ class _Server:
     sql: _Sql
     wire: _Soap
     admin: useraccounts.InstallAccounts
+    slept: list[float] = field(default_factory=list)
 
 
 def _seed(sql: _Sql) -> None:
@@ -361,15 +379,17 @@ def _server(game: str, tmp_path: Path) -> Iterator[_Server]:
         state_of=lambda: docker.ContainerState("running", "2026-10-05T10:00:00Z", 0),
         timeout=5.0,
     )
+    slept: list[float] = []
     admin = useraccounts.InstallAccounts(
         entry,
         tmp_path / entry.id,
         sql=sql,
         channel_for_saved=lambda: live,
         app_account=APP_ACCOUNT,
+        sleep=slept.append,
     )
     try:
-        yield _Server(entry, sql, wire, admin)
+        yield _Server(entry, sql, wire, admin, slept)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1038,3 +1058,61 @@ def test_the_lines_themselves_refuse_an_all_digit_name_where_digits_are_ids() ->
         commands.account_set_password("123", "pw1234", digits_are_ids=False)
         == "account set password 123 pw1234 pw1234"
     )
+
+
+# -- the live test's one defect: AzerothCore deletes in the background --------
+
+
+def _row_reads(sql: _Sql, account_id: int) -> int:
+    return sum(1 for _db, s in sql.asked if f"WHERE id = {account_id}" in s)
+
+
+def test_a_delete_the_server_finishes_later_is_waited_for_before_the_list_is_read(
+    wotlk: _Server, tmp_path: Path, asked: _Asked
+) -> None:
+    """Measured live: the list still showed the account until Refresh.
+
+    The stand-in says "deleted" and keeps the row for two more reads, so the
+    press must read it three times, a short sleep apart, before re-reading the list.
+    """
+    view, failed = _tab(wotlk, tmp_path)
+    _choose(view, "ALICE")
+    wotlk.sql.lag = 2
+    wotlk.sql.asked.clear()
+
+    view.delete_account_button.click()
+
+    assert wotlk.wire.commands == ["account delete ALICE"]
+    assert _row_reads(wotlk.sql, 7) == 3
+    assert len(wotlk.slept) == 2 and all(0 < step <= 1 for step in wotlk.slept)
+    assert view.account_report.text().startswith("Deleted the account ALICE")
+    assert "ALICE" not in _listed(view)
+    assert failed == []
+
+
+def test_a_delete_still_unfinished_after_the_wait_says_so_plainly(
+    wotlk: _Server, tmp_path: Path, asked: _Asked
+) -> None:
+    """Bounded at about ten seconds, then the truth: still being removed, Refresh shows it."""
+    view, failed = _tab(wotlk, tmp_path)
+    _choose(view, "ALICE")
+    wotlk.sql.lag = 1000
+
+    view.delete_account_button.click()
+
+    assert 8 <= sum(wotlk.slept) <= 12, wotlk.slept
+    report = view.account_report.text()
+    assert report.startswith("Deleted the account ALICE"), report
+    assert "still removing it" in report and "Refresh the list" in report
+    assert failed == []
+    from tests.support_player_text import command_faults, text_faults
+
+    assert text_faults(report) == [] and command_faults(report) == []
+
+
+def test_a_delete_that_lands_at_once_does_not_wait(wotlk: _Server) -> None:
+    outcome = wotlk.admin.delete_account(wotlk.admin.delete_plan("ALICE"))
+
+    assert outcome.done is True
+    assert wotlk.slept == []
+    assert "still removing" not in outcome.text
