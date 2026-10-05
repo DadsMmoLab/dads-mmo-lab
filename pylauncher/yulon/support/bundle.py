@@ -15,9 +15,11 @@ failure is a manifest line, so a missing log never reads as "nothing was wrong".
 every install's `collect_live_logs` and then to `system_info`, so a daemon that
 ran into a bound is not asked again by a later install or for its version.
 **It stays under 8 MB** (Discord's free limit is 10): each file keeps its last
-2 MiB, and over the cap the oldest snapshots go first, then the oldest runs;
+2 MiB, and over the cap the oldest snapshots go first, then the oldest runs
+but never the newest (T249: a failed install's only record of its servers);
 then what is left is cut shorter, its END kept -- the container logs first,
-then the app log's rotations, the app log, and last the confs -- halving the
+then the app log's rotations, the app log, the confs, and last the newest
+run -- halving the
 largest of the earliest kind each time, never below `MIN_TAIL` (Codex T93
 review: dropping alone left a zip twice the cap). Every drop and cut is a
 manifest line. Only when every file is at its floor is a zip written over the
@@ -75,8 +77,11 @@ A container's log is read whether or not the container runs (a stopped one
 after a crash is the point), so its line says what it is and never that it ran.
 """
 
-_CUTTABLE = frozenset({"live", "app", "conf"})
-"""The groups `_fit()` may cut shorter; their members keep their text before redaction."""
+_CUTTABLE = frozenset({"live", "app", "conf", "runs"})
+"""The groups `_fit()` may cut shorter; their members keep their text before redaction.
+
+Of the runs, only the newest is ever cut (`_cut_tier`); the rest are left out whole.
+"""
 
 SilentTargets = set[str | None]
 """The dockers (`None` = this machine's, else a WSL distro) that already ran into a bound."""
@@ -421,15 +426,18 @@ class _Fit:
     """Member name -> the bytes of its text still kept, in the order first cut."""
 
 
-def _cut_tier(member: _Member) -> int | None:
+def _cut_tier(member: _Member, newest_run: str | None = None) -> int | None:
     """Which files are cut shorter first: container logs, then the app log's rotations,
-    then the app log itself, then the confs. None: never cut (dropped whole, or tiny)."""
+    then the app log itself, then the confs, and last the newest run log (T249).
+    None: never cut (dropped whole, or tiny)."""
     if member.group == "live":
         return 0
     if member.group == "app":
         return 1 if member.name.rpartition(".")[2].isdigit() else 2
     if member.group == "conf":
         return 3
+    if member.group == "runs" and member.name == newest_run:
+        return 4
     return None
 
 
@@ -437,12 +445,14 @@ def _raw_size(member: _Member) -> int:
     return len(member.raw.encode("utf-8")) if member.raw is not None else 0
 
 
-def _next_cut(kept: Sequence[_Member], weight: Mapping[str, int]) -> int | None:
+def _next_cut(
+    kept: Sequence[_Member], weight: Mapping[str, int], newest_run: str | None = None
+) -> int | None:
     """Index of the heaviest member of the earliest tier that can still be cut, or None."""
     candidates = [
         (tier, -weight[member.name], index)
         for index, member in enumerate(kept)
-        if (tier := _cut_tier(member)) is not None and _raw_size(member) > MIN_TAIL
+        if (tier := _cut_tier(member, newest_run)) is not None and _raw_size(member) > MIN_TAIL
     ]
     return min(candidates)[2] if candidates else None
 
@@ -466,9 +476,17 @@ def _fit(
     redact: Callable[[str], str],
 ) -> tuple[_Fit, bytes]:
     """Leave out the oldest snapshots, then the oldest runs, then cut the rest shorter,
-    until the zip fits `cap` or nothing can give any more."""
+    until the zip fits `cap` or nothing can give any more.
+
+    The NEWEST run is never left out, only cut, END kept, after everything else
+    (T249). It is the job the player is most likely asking about, and for an
+    install that failed it is the only copy of its servers' last lines: a failed
+    install is never remembered, so there is no container to read again.
+    """
     queue = sorted((m for m in members if m.group == "snapshots"), key=lambda m: m.mtime)
-    queue += sorted((m for m in members if m.group == "runs"), key=lambda m: m.mtime)
+    runs = sorted((m for m in members if m.group == "runs"), key=lambda m: m.mtime)
+    newest_run = runs[-1].name if runs else None
+    queue += runs[:-1]
     weight = {m.name: _estimate(m) for m in members}
     fit = _Fit(kept=list(members), dropped=[], cuts={})
 
@@ -479,7 +497,7 @@ def _fit(
             fit.kept.remove(victim)
             fit.dropped.append(victim)
             return True
-        index = _next_cut(fit.kept, weight)
+        index = _next_cut(fit.kept, weight, newest_run)
         if index is None:
             return False
         shorter = _shorter(fit.kept[index], redact)

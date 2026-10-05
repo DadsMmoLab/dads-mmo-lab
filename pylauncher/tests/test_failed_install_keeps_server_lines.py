@@ -20,6 +20,8 @@ last tests, which drive the real `docker.last_lines` against the fake CLI from
 
 from __future__ import annotations
 
+import os
+import secrets
 import threading
 import zipfile
 from collections.abc import Iterator
@@ -35,6 +37,7 @@ from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.installer import InstallerError, installer_for
 from yulon.support import bundle, runlog
+from yulon.support.redact import Redactor
 from yulon.support.sources import Sources
 from yulon.ui import lines
 
@@ -314,6 +317,85 @@ def test_a_longer_log_keeps_its_end_and_whole_lines(tmp_path: Path) -> None:
     assert len(kept.encode("utf-8")) <= native.FAILURE_TAIL_BYTES + 64 * 1024
     assert len(kept.encode("utf-8")) >= native.FAILURE_TAIL_BYTES // 2
     assert all(line.startswith(f"{WORLD} | filler line ") for line in world[:-1])
+
+
+def _noise(size: int) -> str:
+    """`size` bytes of lines that deflate hardly at all."""
+    return "".join(secrets.token_urlsafe(57) + "\n" for _ in range(size // 77 + 1))
+
+
+def test_the_newest_run_is_cut_to_its_end_and_never_left_out_to_fit_the_cap(
+    tmp_path: Path,
+) -> None:
+    """Codex T249 review: the run log is the only copy, so the size cap must not drop it.
+
+    Older runs still go first, oldest first. The newest is cut shorter instead,
+    its END kept, which is where a failed install's server lines are.
+    """
+    config = tmp_path / "config"
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    older = []
+    for n in range(3):
+        path = runs / f"install-wow-tortoise-2026100{n}T101010Z.log"
+        path.write_text(_noise(150_000), encoding="utf-8")
+        os.utime(path, (1_000_000 + n, 1_000_000 + n))
+        older.append(f"runs/{path.name}")
+    newest = runs / "install-wow-tortoise-20261004T165226Z.log"
+    newest.write_text(_noise(600_000) + f"{WORLD} | {CRASH}\n", encoding="utf-8")
+    os.utime(newest, (2_000_000, 2_000_000))
+    dest = tmp_path / "support.zip"
+    cap = 300_000
+
+    report = bundle.build(
+        dest,
+        Sources(config_dir=config, app_log=None, installs=()),
+        Redactor.build([]),
+        seams=bundle.Seams(
+            live_logs=lambda install, silent: [],
+            docker_version=lambda distro: None,
+            now=lambda: datetime(2026, 10, 4, 16, 52, tzinfo=UTC),
+        ),
+        cap_bytes=cap,
+    )
+
+    assert os.path.getsize(dest) <= cap
+    assert report.dropped == tuple(older)
+    assert f"runs/{newest.name}" in report.cut
+    with zipfile.ZipFile(dest) as archive:
+        kept = archive.read(f"runs/{newest.name}").decode("utf-8")
+    assert kept.startswith("[earlier lines dropped")
+    assert kept.endswith(f"{WORLD} | {CRASH}\n")
+
+
+def test_the_newest_run_is_cut_only_after_the_app_log(tmp_path: Path) -> None:
+    """Last of all: Yu'lon's own log gives way first, and here that alone fits the cap."""
+    config = tmp_path / "config"
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    run = runs / "install-wow-tortoise-20261004T165226Z.log"
+    run.write_text(_noise(300_000) + f"{WORLD} | {CRASH}\n", encoding="utf-8")
+    app_log = config / "yulon.log"
+    app_log.write_text(_noise(600_000), encoding="utf-8")
+    dest = tmp_path / "support.zip"
+    cap = 400_000
+
+    report = bundle.build(
+        dest,
+        Sources(config_dir=config, app_log=app_log, installs=()),
+        Redactor.build([]),
+        seams=bundle.Seams(
+            live_logs=lambda install, silent: [],
+            docker_version=lambda distro: None,
+            now=lambda: datetime(2026, 10, 4, 16, 52, tzinfo=UTC),
+        ),
+        cap_bytes=cap,
+    )
+
+    assert os.path.getsize(dest) <= cap
+    assert report.dropped == ()
+    assert "app/yulon.log" in report.cut
+    assert f"runs/{run.name}" not in report.cut
 
 
 # -- the real read, against the fake docker CLI --------------------------------
