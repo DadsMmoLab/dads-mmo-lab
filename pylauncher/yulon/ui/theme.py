@@ -208,6 +208,14 @@ def _touch(base: int, scale: float) -> str:
     return f"{max(TOUCH_TARGET_PX, round(base * eased))}px"
 
 
+def _scroller_width(base: int, scale: float) -> str:
+    """A tab bar's two scroll arrows side by side: each `_touch()` plus a 1 px border either side.
+
+    Qt's style sheet gives each arrow half of `QTabBar::scroller`'s width.
+    """
+    return f"{2 * (int(_touch(base, scale).removesuffix('px')) + 2)}px"
+
+
 def _px(base: int, scale: float) -> str:
     """A font size at `scale`, floored so text never becomes unreadable."""
     return f"{max(MIN_FONT_PX, round(base * scale))}px"
@@ -407,6 +415,15 @@ QTabBar QToolButton {{
     border-radius: 3px;
     min-width: {_touch(30, scale)};
     min-height: {_touch(30, scale)};
+}}
+
+/* Where QTabBar PUTS its two arrows: it places them by this width, halved for
+   each (PM_TabBarScrollButtonWidth, 16 px each unset), not by their min-width
+   above, so at 960x640 each arrow was drawn 34 px wide in a 16 px slot and the
+   right one ran off the bar's end (PR 291 Windows live test). Two arrows, each
+   the floor plus its 1 px border either side. */
+QTabBar::scroller {{
+    width: {_scroller_width(30, scale)};
 }}
 
 QTabBar QToolButton:hover {{

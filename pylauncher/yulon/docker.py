@@ -80,6 +80,18 @@ class DockerUnansweredError(DockerCommandError):
     """
 
 
+class DockerTimedOutError(DockerCommandError):
+    """Raised when a `docker` command was given up on at its deadline: Docker did not answer.
+
+    A subclass, so every `except DockerCommandError` keeps catching it, and its
+    words are the generic failure's ("... exited 124: timed out after 30.0s").
+    What the type buys is the Server tab's banner telling it apart from an exit
+    status 124 a container gave: with Docker Desktop's engine VM killed, the CLI
+    hung past the realm poll's 30 s and the banner called that "an error Yu'lon
+    doesn't recognise" (PR 291's Windows live test, 2026-10-04).
+    """
+
+
 class SourceUnreadableError(RuntimeError):
     """Raised when the stream `exec_stdin()` was pumping stopped being readable.
 
@@ -348,9 +360,10 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerCommandError(problem)
-        raise DockerCommandError(
-            f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
-        )
+        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        if timeout is not None and runner.timed_out(proc):
+            raise DockerTimedOutError(said)
+        raise DockerCommandError(said)
     return proc
 
 

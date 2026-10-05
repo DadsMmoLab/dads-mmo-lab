@@ -7223,6 +7223,10 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
         self.uninstall_confirm_button.setProperty("danger", True)
         self.uninstall_confirm_button.setVisible(False)
+        # Beside the red press, with the plan (PR 291's Windows live test: the
+        # plan could not be put away once shown).
+        self.uninstall_cancel_button = QPushButton(ARM_CANCEL, tab)
+        self.uninstall_cancel_button.setVisible(False)
         self.uninstall_label = QLabel("", tab)
         self.uninstall_label.setWordWrap(True)
         self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -7247,6 +7251,7 @@ class ControllerView(QWidget):
             self.uninstall_button = QPushButton("Uninstall\u2026", tab)
             self.uninstall_button.clicked.connect(self.show_uninstall_plan)
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
+            self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
             self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
             self.uninstall_label.setVisible(True)
@@ -7383,7 +7388,9 @@ class ControllerView(QWidget):
             danger_column.addWidget(self.uninstall_label)
             danger_column.addWidget(self.keep_characters_check)
             danger_column.addWidget(self.delete_play_client_check)
-            danger_column.addWidget(self.uninstall_confirm_button)
+            danger_column.addWidget(
+                _bar(danger, self.uninstall_confirm_button, self.uninstall_cancel_button)
+            )
         box.addWidget(danger)
         box.addStretch(1)
         for press in self._server_presses():
@@ -7410,6 +7417,7 @@ class ControllerView(QWidget):
                 self.keep_characters_check,
                 self.delete_play_client_check,
                 self.uninstall_confirm_button,
+                self.uninstall_cancel_button,
             )
             if press is not None
         )
@@ -8729,6 +8737,7 @@ class ControllerView(QWidget):
             if self.forget_install_button is not None:
                 self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
+            self.uninstall_cancel_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
             if self.set_client_dir_button is not None:
                 self.set_client_dir_button.setEnabled(True)
@@ -9347,11 +9356,28 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         self._play_delete_offered = False
         self.delete_play_client_check.setVisible(False)
         self.uninstall_label.setText("Working out what would be removed\u2026")
         self._run(self.services.uninstall.plan, self._uninstall_plan_ready, self._uninstall_failed)
+
+    @Slot()
+    def put_away_uninstall_plan(self) -> None:
+        """Cancel beside the plan: take the plan, its two boxes and its press off the tab.
+
+        Removes nothing, and the next Uninstall… asks for a fresh plan.
+        """
+        if self._uninstall_running:
+            return
+        self._uninstall_plan = None
+        self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
+        self._play_delete_offered = False
+        self.delete_play_client_check.setVisible(False)
+        self.uninstall_label.setText("")
 
     @Slot(object)
     def _uninstall_plan_ready(self, result: object) -> None:
@@ -9363,11 +9389,13 @@ class ControllerView(QWidget):
             # visible Uninstall button would be an offer the app cannot keep.
             self._uninstall_plan = None
             self.uninstall_confirm_button.setVisible(False)
+            self.uninstall_cancel_button.setVisible(False)
             self.keep_characters_check.setVisible(False)
             self.uninstall_label.setText(result.refusal)
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
+        self.uninstall_cancel_button.setVisible(True)
         # T188 fix round 1: a plan that found no database volume has nothing to
         # keep, so a tick left from an earlier plan must not promise it.
         if not result.character_volume:
@@ -9498,6 +9526,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         play_said: str | None = None
         if isinstance(result, _UninstallOutcome):
@@ -9549,6 +9578,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         message = str(exc)
         self.uninstall_label.setText(message)

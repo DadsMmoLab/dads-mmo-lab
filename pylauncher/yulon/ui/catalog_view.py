@@ -108,8 +108,14 @@ def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | No
     return pick_folder(parent, title, _existing_ancestor(start))
 
 
-SuggestionAsker = Callable[[QWidget, str, Path], bool]
-"""Offer the default folder, new or already there: True to take it, False to open the picker."""
+SuggestionAsker = Callable[[QWidget, str, Path], "bool | None"]
+"""Offer the default folder, new or already there: True to take it, False to open the picker,
+None when the question was closed (Cancel, Escape, the window's X) and nothing is to start."""
+
+USE_THIS_FOLDER_LABEL = "Use this folder"
+CHOOSE_ANOTHER_FOLDER_LABEL = "Choose another folder\u2026"
+CANCEL_LABEL = "Cancel"
+"""The Install question's three presses, named once for the dialog and its tests."""
 
 
 def _suggestion_question(game: str, suggested: Path) -> str:
@@ -137,8 +143,8 @@ def _suggestion_question(game: str, suggested: Path) -> str:
     )
 
 
-def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
-    """ "Install into this folder?" - Yes takes it, No opens the picker.
+def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool | None:
+    """ "Install into this folder?" - Yes takes it, No opens the picker, Cancel closes it.
 
     **This exists because a file picker cannot say "make this one".** The
     suggestion is a folder that by definition does not exist on a first install,
@@ -161,23 +167,36 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     Default is Yes. The suggestion is right for nearly every install, and the
     one it is wrong for - a second install of the same game - is a folder the
     user is already thinking about.
+
+    Cancel is the Escape button, named. With only Yes and No, Qt made No the
+    escape button, so Escape opened the folder picker instead of closing the
+    question (PR 291's Windows live test, 2026-10-04).
     """
     box = FittedMessageBox(
         QMessageBox.Icon.Question,
         f"Install {game}",
         _suggestion_question(game, suggested),
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.No
+        | QMessageBox.StandardButton.Cancel,
         parent,
     )
     box.setDefaultButton(QMessageBox.StandardButton.Yes)
-    yes_btn = box.button(QMessageBox.StandardButton.Yes)
-    if yes_btn is not None:
-        yes_btn.setText("Use this folder")
-    no_btn = box.button(QMessageBox.StandardButton.No)
-    if no_btn is not None:
-        no_btn.setText("Choose another folder…")
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    for which, label in (
+        (QMessageBox.StandardButton.Yes, USE_THIS_FOLDER_LABEL),
+        (QMessageBox.StandardButton.No, CHOOSE_ANOTHER_FOLDER_LABEL),
+        (QMessageBox.StandardButton.Cancel, CANCEL_LABEL),
+    ):
+        button = box.button(which)
+        if button is not None:
+            button.setText(label)
     answer = box.exec()
-    return said_yes(answer)
+    if said_yes(answer):
+        return True
+    if answer == QMessageBox.StandardButton.No:
+        return False
+    return None
 
 
 def _pin_compose_project(server_dir: Path) -> None:
@@ -962,7 +981,10 @@ class CatalogView(QWidget):
         # window manager at 91 characters before it reached the name itself
         # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
         suggested = default_server_dir(entry, self._home)
-        if self._ask_suggestion(self, entry.name, suggested):
+        taken = self._ask_suggestion(self, entry.name, suggested)
+        if taken is None:
+            return False
+        if taken:
             server_dir: Path | None = suggested
         else:
             server_dir = self._pick_dir(

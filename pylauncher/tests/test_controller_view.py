@@ -6239,6 +6239,36 @@ def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
     assert "Show the uninstall plan first" in view.uninstall_label.text()
 
 
+def test_the_uninstall_plan_can_be_put_away_with_cancel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """PR 291's Windows live test: the plan, its two boxes and its red press stayed open for
+    good; a second Uninstall… press and a tab switch left them there."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    cancel = view.uninstall_cancel_button
+    assert cancel.isHidden(), "a Cancel with nothing to cancel"
+
+    view.show_uninstall_plan()
+    assert not cancel.isHidden() and cancel.text() == controller_view_module.ARM_CANCEL
+    assert cancel in view._server_presses(), "a job of ours would leave it live"
+    cancel.click()
+
+    for widget in (
+        view.uninstall_confirm_button,
+        view.keep_characters_check,
+        view.delete_play_client_check,
+        cancel,
+    ):
+        assert widget.isHidden(), widget.text()
+    assert view.uninstall_label.text() == ""
+    view.run_uninstall()
+    assert fake.runs == [], "the plan put away was still armed"
+
+    view.show_uninstall_plan()
+    assert not view.uninstall_confirm_button.isHidden() and not cancel.isHidden()
+
+
 def test_a_plan_that_refuses_shows_the_refusal_and_offers_no_uninstall(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -10112,6 +10142,52 @@ def test_docker_desktop_down_is_one_banner_in_words_with_open_and_try_again(
     assert view.status_label.text() == "Status unknown (see above)"
     assert view.realm_badge.status == "unknown"
     assert player_text_faults(view) == []
+
+
+ENGINE_KILLED = {
+    "timeout": (124, "timed out after 30.0s"),
+    "502": (
+        1,
+        "request returned 502 Bad Gateway for API route and version "
+        "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.55/containers/json, check if the "
+        "server supports the requested API version",
+    ),
+}
+"""How Docker answered once its engine VM was killed on PR 291's Windows live test: the poll
+hung past its 30 s (the runner's own words for that), or Docker 29 said 502 Bad Gateway."""
+
+
+@pytest.mark.parametrize("answer", sorted(ENGINE_KILLED))
+def test_a_killed_engine_is_docker_desktop_not_running_with_its_open_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """Fix round 2, 8b: the box said "an error Yu'lon doesn't recognise" with only Try again."""
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    code, said = ENGINE_KILLED[answer]
+
+    def killed(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:1] == ["docker"]:
+            if code == 124:
+                assert timeout is not None, "the poll waits on Docker with no deadline"
+            return subprocess.CompletedProcess(cmd, code, "", said)
+        return down(cmd, cwd, timeout)
+
+    monkeypatch.setattr(runner, "run", killed)
+
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.body_label.text().startswith(
+        "Docker Desktop isn't running."
+    ), banner.body_label.text()
+    assert _shown(view, banner.open_button) and banner.open_button.text() == "Open Docker Desktop"
+    assert _shown(view, banner.retry_button)
 
 
 def test_the_banner_sits_in_realm_above_the_status_line(
@@ -18144,13 +18220,22 @@ def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
         )
         assert _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
         stops = [landed]
+        # The plan's last row is the uninstall press and its Cancel (PR 291's
+        # Windows live test). Down lands on whichever is best centred under the
+        # boxes above, Cancel; the uninstall press is one Left from it.
+        last_row = (view.uninstall_confirm_button, view.uninstall_cancel_button)
         for _press in range(40):
-            if landed is view.uninstall_confirm_button:
+            if landed in last_row:
                 break
             nav.navigate(Direction.DOWN)
             process_events()
             landed = QApplication.focusWidget()
             assert not isinstance(landed, ScrollPage), "the page itself took the focus"
+            stops.append(landed)
+        if landed is view.uninstall_cancel_button:
+            nav.navigate(Direction.LEFT)
+            process_events()
+            landed = QApplication.focusWidget()
             stops.append(landed)
         assert (
             landed is view.uninstall_confirm_button
@@ -18441,6 +18526,55 @@ def test_a_tab_bar_too_narrow_for_its_names_scrolls_them_whole(
         rect = bar.tabRect(index)
         assert bar.rect().contains(rect), f"{bar.tabText(index)!r} is not whole in the bar"
         assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+
+
+def test_a_scrolling_tab_bars_arrows_are_touch_sized_and_draw_their_glyph_whole(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """PR 291's Windows live test at 960x640: the two arrows were 16 px slivers at the bar's
+    end, the right one's glyph cut by its own edge; the sheet's touch floor never reached
+    them, because QTabBar sizes its scroll buttons itself (`QTabBar::scroller`)."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QToolButton
+
+    from yulon.ui import theme
+
+    view, _window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert len(arrows) == 2, "the bar does not scroll at 960x640: this proves nothing"
+
+    def glyph_columns(arrow: QToolButton) -> list[int]:
+        image = arrow.grab().toImage()
+        inks = [QColor(theme.COLOR_TEXT_PRIMARY), QColor(theme.COLOR_TEXT_MUTED)]
+
+        def ink(colour: QColor) -> bool:
+            return any(
+                abs(colour.red() - want.red()) <= 24
+                and abs(colour.green() - want.green()) <= 24
+                and abs(colour.blue() - want.blue()) <= 24
+                for want in inks
+            )
+
+        return sorted(
+            {
+                x
+                for x in range(image.width())
+                for y in range(image.height())
+                if ink(image.pixelColor(x, y))
+            }
+        )
+
+    for arrow in arrows:
+        name = arrow.arrowType().name
+        assert arrow.width() >= theme.TOUCH_TARGET_PX, f"{name} is {arrow.width()} px wide"
+        assert arrow.geometry().right() < bar.width(), f"{name} runs past the bar"
+        columns = glyph_columns(arrow)
+        assert columns, f"{name} draws no glyph"
+        assert columns[0] > 1 and columns[-1] < arrow.width() - 2, (
+            f"{name}'s glyph is cut by its edge: columns {columns[0]}..{columns[-1]} "
+            f"of {arrow.width()}"
+        )
 
 
 def test_down_from_a_scrolling_tab_bar_goes_into_the_page_not_to_an_arrow(
