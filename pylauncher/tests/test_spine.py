@@ -612,7 +612,7 @@ def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -
     with pytest.raises(InstallerError, match="install family this app does not have"):
         family_for(stranger)
     bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
-    with pytest.raises(InstallerError, match="install.native"):
+    with pytest.raises(InstallerError, match="native install section"):
         family_for(bare)
 
 
@@ -787,7 +787,7 @@ def test_a_folder_installed_as_another_family_is_refused_not_reinterpreted(
         ),
     )
     rec = Recorder()
-    with pytest.raises(InstallerError, match="installed as `cmangos`"):
+    with pytest.raises(InstallerError, match="installed as cmangos"):
         install(rec, server_dir)
     assert "clone" not in " ".join(rec.calls)
 

@@ -379,14 +379,18 @@ def check_manifest(manifest: Manifest) -> None:
         if step.applied_by == "db-import"
     ]
     if deferred:
-        raise AutoUpdateRefused(
-            f"{manifest.id}: this item defers SQL to the server's own importer "
-            f"({', '.join(deferred)}), and on this fork that importer is the database "
-            "auto-update path INSIDE the worldserver: World.cpp calls "
-            "sAutoUpdater.ProcessUpdates() at startup and cancels the whole world with "
-            "exit(1) if one migration fails. Tortoise items must run their SQL themselves "
-            '(`"applied_by": "direct"`).'
+        refused = AutoUpdateRefused(
+            f"{manifest.id} cannot be installed on this server: it leaves its database changes "
+            "to the server's own database auto-update, which here runs inside the world server "
+            "as it starts and stops the whole server if one change fails. Nothing was changed."
         )
+        # T248: the developer's half, for Details -- what was deferred and the rule it broke.
+        refused.detail = (
+            f"Deferred to the importer: {', '.join(deferred)}. On this fork World.cpp calls "
+            "sAutoUpdater.ProcessUpdates() at startup and exits if one migration fails, so a "
+            'Tortoise item runs its SQL itself ("applied_by": "direct").'
+        )
+        raise refused
 
 
 def check_restart_is_survivable(

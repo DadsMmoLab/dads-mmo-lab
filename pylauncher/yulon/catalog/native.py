@@ -126,6 +126,7 @@ from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
+from yulon.said import SaidByYulon, carry_detail
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -1768,10 +1769,14 @@ def build_cancel_note() -> str:
 BUILDER_LOST = (
     "because it lost its connection to Docker's builder part-way through: Docker closed it. "
     "That happens when Docker's engine is restarted or killed under the build, and the commonest "
-    "reason is Docker running out of memory while it compiles. Check how much memory Docker has "
-    "with `docker info` (Total Memory). On Windows, Docker Desktop's WSL 2 engine has no memory "
-    "slider: Windows sizes it, through `memory=` in %UserProfile%\\.wslconfig, then "
-    "`wsl --shutdown` and start Docker Desktop again. On a Mac, and with Docker Desktop's "
+    "reason is Docker running out of memory while it compiles. To see how much memory Docker "
+    "has (Total Memory), run this in a terminal:\n"
+    "docker info\n"
+    "On Windows, Docker Desktop's WSL 2 engine has no memory slider: Windows sizes it, through "
+    "the memory= line in %UserProfile%\\.wslconfig. Change that line, run this, then start "
+    "Docker Desktop again:\n"
+    "wsl --shutdown\n"
+    "On a Mac, and with Docker Desktop's "
     "Hyper-V engine, it is Settings → Resources → Memory; Docker Engine on Linux uses the "
     "machine's own memory. Then run it again: the steps the build had finished are kept in "
     "Docker's build cache, so it picks up from the last of them instead of starting over. If it "
@@ -1843,8 +1848,10 @@ def build_stalled_notice() -> str:
     return (
         f"The build has printed nothing for {_minutes(BUILD_STALLED_SECONDS)} and looks stalled: "
         "a working build is never that quiet. It is still running, and Yu'lon will not stop it. "
-        "To check: `docker info` should answer at once, and Docker's CPU use (Task Manager on "
-        "Windows, `top` on Linux or a Mac) should not sit near zero. If it has stalled, restart "
+        "To check, Docker's CPU use (Task Manager on Windows, top on Linux or a Mac) should not "
+        "sit near zero, and this should answer at once:\n"
+        "docker info\n"
+        "If it has stalled, restart "
         "Docker Desktop (on Linux, the docker service): the build then ends, and pressing Install "
         "again -- or, for a rebuild, "
         f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} -- resumes it, "
@@ -2641,9 +2648,9 @@ def copy_kept_note(copy: snapshot.Snapshot) -> str:
 
 
 SOURCES_NOT_ALL_BACK_NOTE = (
-    "Not every source folder went back to the commit it was on -- the line above names it and "
-    "the `git` command that puts it back -- so what is on disk and the build your server has do "
-    "NOT agree until that command is run."
+    "Not every source folder went back to the commit it was on -- the line above names it, "
+    "and Start says how to put it back -- so what is on disk and the build your server has do "
+    "NOT agree until it is back."
 )
 """`SOURCES_PUT_BACK_NOTE` when a source would not go back (T217): never "agree again"."""
 
@@ -2719,9 +2726,9 @@ def source_off_its_build(dest: Path, head: str, built: str) -> str:
     update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
     return (
         f"{dest} is on {head[:7]}, but this server was built from {built[:7]}, so rebuilding "
-        f"it now would compile a mix of the two. Put it back with `git -C {dest} checkout "
-        f"--detach --force {built}`, or press {update} to move every source together. Nothing "
-        "was changed."
+        f"it now would compile a mix of the two. Nothing was changed. Press {update} to move "
+        "every source together, or put the folder back with this:\n"
+        f"git -C {dest} checkout --detach --force {built}"
     )
 
 
@@ -5193,7 +5200,8 @@ class Seams:
     # stage ignores that -- it wants the database up, and it is up either way --
     # and the annotation says "whatever it answers" rather than pinning a
     # return this seam's own fakes do not have to produce.
-    start_db: Callable[[docker.ContainerSpec, Path], object] = docker.start_database
+    start_db: Callable[..., object] = docker.start_database
+    """Called with `because=`, which ends `start_database()`'s timeout sentence (T248)."""
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     recreate: Callable[..., bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
@@ -5973,7 +5981,7 @@ class StagedInstaller:
             if stage.name == name:
                 return stage
         raise InstallerError(
-            f"{self.entry.name} has no `{name}` stage, so this app cannot rebuild it. "
+            f"{self.entry.name} has no {name} stage, so this app cannot rebuild it. "
             f"That is a bug in this build, not something you did. Nothing was started."
         )
 
@@ -6203,7 +6211,7 @@ class StagedInstaller:
         guarded = [stage for stage in planned if stage.name == "import"]
         if not guarded:
             raise InstallerError(
-                f"{self.entry.name} cannot be updated safely: its update tuple has no `import` "
+                f"{self.entry.name} cannot be updated safely: its update has no import "
                 f"stage to guard, so the second reading of the world would never happen. That "
                 f"is a bug in this build, not something you did. Nothing was started."
             )
@@ -6674,7 +6682,7 @@ class StagedInstaller:
                 f"which it plainly did not. Nothing was written."
             )
         yield (
-            f"Writing one row into `{row.schema}`.`{row.table}`: this install plan "
+            f"Writing one row into {row.schema}.{row.table}: this install plan "
             f"({row.plan_hash}) is recorded as finished. Nothing else is run."
         )
         # The reading that counts is the one immediately before the write: the
@@ -6838,7 +6846,7 @@ class StagedInstaller:
         # cost when a stage was later prepended to the rebuild's tuple.
         if not [stage for stage in planned if stage.name == "adopt"]:
             raise InstallerError(
-                f"{self.entry.name} cannot be adopted safely: its adopt tuple has no `adopt` "
+                f"{self.entry.name} cannot be adopted safely: its adoption has no adopt "
                 f"stage to guard, so the second reading of the world would never happen. That "
                 f"is a bug in this build, not something you did. Nothing was started."
             )
@@ -7369,7 +7377,7 @@ class StagedInstaller:
             # silently never fires.
             raise InstallerError(
                 f"{self.entry.name} cannot be rebuilt safely: its rebuild has no "
-                f"`{sorted(wrappers)[0]}` stage to watch, so a failure could not be rolled "
+                f"{sorted(wrappers)[0]} stage to watch, so a failure could not be rolled "
                 f"back. That is a bug in this build, not something you did. Nothing was "
                 f"started."
             )
@@ -7427,7 +7435,7 @@ class StagedInstaller:
                 # keep. Nothing was replaced, so nothing needed putting back.
                 message = f"{exc} {NO_ROLLBACK_NOT_BUILT}"
                 self._record_error(server_dir, ctx.state, message)
-                raise InstallerError(message) from exc
+                raise carry_detail(exc, InstallerError(message)) from exc
             if isinstance(exc, WorldStoppedAfterReadyError):
                 # The owner's answer, 2026-09-16: keep the new build and report
                 # the abort. The compile finished, the containers were replaced,
@@ -7451,7 +7459,7 @@ class StagedInstaller:
                     f"press Start.{also}"
                 )
                 self._record_error(server_dir, ctx.state, kept_build)
-                raise WorldStoppedAfterReadyError(kept_build) from exc
+                raise carry_detail(exc, WorldStoppedAfterReadyError(kept_build)) from exc
             if not kept:
                 # T170: the compile finished with no build from before to go
                 # back to. `touched` says whether the containers run it yet.
@@ -7460,8 +7468,8 @@ class StagedInstaller:
                 message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 if touched:
-                    raise RebuildChangedTheServer(message, up=False) from exc
-                raise InstallerError(message) from exc
+                    raise carry_detail(exc, RebuildChangedTheServer(message, up=False)) from exc
+                raise carry_detail(exc, InstallerError(message)) from exc
             message = yield from self._restore_rollback(
                 ctx,
                 refs,
@@ -7480,9 +7488,9 @@ class StagedInstaller:
             message_said = f"{message}{also}"
             self._record_error(server_dir, ctx.state, message_said)
             if isinstance(message, _LeftStopped):
-                raise ServersLeftStopped(message_said) from exc
+                raise carry_detail(exc, ServersLeftStopped(message_said)) from exc
             if isinstance(message, _NotStopped):
-                raise OldBuildNotStopped(message_said) from exc
+                raise carry_detail(exc, OldBuildNotStopped(message_said)) from exc
             if isinstance(message, _NotPutBack):
                 # T197: the tags still name the new build (or are mixed), so the
                 # update route must not put the old sources back under it.
@@ -7504,18 +7512,22 @@ class StagedInstaller:
                             "Start is refused until this server is rebuilt: press "
                             f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
                         )
-                raise RollbackNotDone(
-                    f"{message_said} {warned}" if warned else message_said,
-                    touched=message.touched,
-                    mixed=message.mixed,
+                raise carry_detail(
+                    exc,
+                    RollbackNotDone(
+                        f"{message_said} {warned}" if warned else message_said,
+                        touched=message.touched,
+                        mixed=message.mixed,
+                    ),
                 ) from exc
             if touched:
                 # The old build is back, running or not, on whatever the new one
                 # wrote into the database: `_restore_rollback()` says so.
-                raise RebuildChangedTheServer(
-                    message_said, up=not isinstance(message, _NotUpEither)
+                raise carry_detail(
+                    exc,
+                    RebuildChangedTheServer(message_said, up=not isinstance(message, _NotUpEither)),
                 ) from exc
-            raise InstallerError(message_said) from exc
+            raise carry_detail(exc, InstallerError(message_said)) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
             # `KeyboardInterrupt`, or a consumer that stopped reading (which
@@ -8123,8 +8135,11 @@ class StagedInstaller:
                     yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
                 except InstallerError as after:
                     also = f" {after}"
-                raise WorldStoppedAfterReadyError(
-                    f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                raise carry_detail(
+                    exc,
+                    WorldStoppedAfterReadyError(
+                        f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                    ),
                 ) from exc
             except RollbackNotDone as exc:
                 if exc.mixed:
@@ -8150,10 +8165,13 @@ class StagedInstaller:
                         if not failed
                         else f"{SOURCES_NOT_ALL_BACK_NOTE} {SOURCES_MIXED_REBUILD}"
                     )
-                    raise RollbackNotDone(
-                        f"{exc} {sources}{database}",
-                        touched=exc.touched,
-                        mixed=True,
+                    raise carry_detail(
+                        exc,
+                        RollbackNotDone(
+                            f"{exc} {sources}{database}",
+                            touched=exc.touched,
+                            mixed=True,
+                        ),
                     ) from exc
                 # T197: the rollback stopped before the old build was back on its
                 # tags, which still name the NEW build, and a start runs them. Its
@@ -8195,8 +8213,9 @@ class StagedInstaller:
                     if exc.touched
                     else untouched_note(self.start_refusal(server_dir))
                 )
-                raise RollbackNotDone(
-                    f"{exc}{also} {left}", touched=exc.touched, sources_kept=True
+                raise carry_detail(
+                    exc,
+                    RollbackNotDone(f"{exc}{also} {left}", touched=exc.touched, sources_kept=True),
                 ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
@@ -8210,7 +8229,9 @@ class StagedInstaller:
                 if isinstance(exc, OldBuildNotStopped):
                     # T217: the old build may still be restarting; no "stopped", and
                     # no "agree again" about a server that does not run.
-                    raise OldBuildNotStopped(f"{exc} {SOURCES_PUT_BACK_NOT_STOPPED_NOTE}") from exc
+                    raise carry_detail(
+                        exc, OldBuildNotStopped(f"{exc} {SOURCES_PUT_BACK_NOT_STOPPED_NOTE}")
+                    ) from exc
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does. T217: and
                     # when it is a folder or the database that did not go back, the
@@ -8221,7 +8242,7 @@ class StagedInstaller:
                         note = SOURCES_PUT_BACK_DATABASE_NOT_NOTE
                     else:
                         note = SOURCES_PUT_BACK_STOPPED_NOTE
-                    raise ServersLeftStopped(f"{exc} {note}") from exc
+                    raise carry_detail(exc, ServersLeftStopped(f"{exc} {note}")) from exc
                 if isinstance(exc, RebuildChangedTheServer):
                     # T228: the rebuild's sentence is true after a Stop, and so is
                     # this one; the type carries that through. T217: never "agree
@@ -8230,8 +8251,12 @@ class StagedInstaller:
                         note = SOURCES_NOT_ALL_BACK_NOTE
                     else:
                         note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
-                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
-                raise InstallerError(f"{exc} {_sources_note(sources_failed)}") from exc
+                    raise carry_detail(
+                        exc, RebuildChangedTheServer(f"{exc} {note}", up=exc.up)
+                    ) from exc
+                raise carry_detail(
+                    exc, InstallerError(f"{exc} {_sources_note(sources_failed)}")
+                ) from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
                 # record of tables to import is put back if nothing was imported
@@ -8565,12 +8590,17 @@ class StagedInstaller:
             try:
                 self._seams.restore_rev(dest, old)
             except (git.GitError, OSError) as exc:
-                logger.warning(f"could not put {dest} back on {old}: {exc}")
+                # T248: the command is for whoever reads the log; the line is words.
+                logger.warning(
+                    f"could not put {dest} back on {old}: {exc}. To do it by hand: "
+                    f"git -C {dest} checkout --detach --force {old}"
+                )
                 yield (
                     f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
                     "folder is still on the commit this press moved it to, not the commit the "
-                    "build this server has was made from: put it back with "
-                    f"`git -C {dest} checkout --detach --force {old}`."
+                    f"build this server has was made from: put it back on commit {old[:7]}, or "
+                    "press "
+                    f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}."
                 )
                 failed.append((source, dest, old, str(exc)))
                 continue
@@ -9619,11 +9649,15 @@ class StagedInstaller:
         """
         left = self._let_go(kept)
         if left:
+            logger.warning(
+                f"to remove the rebuild's leftover names once the server is stopped: "
+                f"docker image rm -f {' '.join(left)}"
+            )
             yield (
                 f"Docker would not take {len(left)} transient name(s) off the daemon: "
                 f"{', '.join(left)}. They are this rebuild's own bookkeeping and nothing "
-                f"needs them; the log says what docker objected to. `docker image rm -f` "
-                f"each one once this server is stopped."
+                f"needs them; the log says what docker objected to, and how to remove them once "
+                f"this server is stopped."
             )
         return left
 
@@ -9810,8 +9844,8 @@ class StagedInstaller:
                 f"{server_dir} is missing the compose files Yu'lon builds with, or they were "
                 f"not written by Yu'lon: {', '.join(missing)}. Nothing was started. "
                 f"{composegen.BUILD_FILE} is the only file that carries the build "
-                f"instructions — compose never loads it on its own, so without it "
-                f"`docker compose build` here builds nothing and reports success — and this "
+                f"instructions — compose never loads it on its own, so without it a build "
+                f"here builds nothing and reports success — and this "
                 f"app will not overwrite a compose file it did not write, because doing that "
                 f"can orphan the volumes your characters are in. A server built by another "
                 f"launcher has to be rebuilt by that launcher."
@@ -10167,7 +10201,7 @@ class StagedInstaller:
         native = self.entry.install.native
         if native is None:
             raise InstallerError(
-                f"{self.entry.name} has no `install.native` section, so nothing was started."
+                f"{self.entry.name} has no native install section, so nothing was started."
             )
         return native
 
@@ -10185,12 +10219,12 @@ class StagedInstaller:
         if self.entry.install.native is None:
             raise InstallerError(
                 f"{self.entry.name} is not set up for a native install on {here} — its "
-                "catalog entry has no `install.native` section. Nothing was started."
+                "catalog entry has no native install section. Nothing was started."
             )
         if self.entry.install.native.family != self.family:
             raise InstallerError(
-                f"{self.entry.name} is catalogued as a `{self.entry.install.native.family}` "
-                f"install but was handed to the `{self.family}` engine. That is a bug in the "
+                f"{self.entry.name} is catalogued as a {self.entry.install.native.family} "
+                f"install but was handed to the {self.family} engine. That is a bug in the "
                 "app, not something to fix on this machine."
             )
         if self.entry.containers.db_import and self._probe is None:
@@ -10439,8 +10473,8 @@ class StagedInstaller:
             )
         if existing is not None and existing.family and existing.family != self.family:
             raise InstallerError(
-                f"{server_dir} was installed as `{existing.family}`, but the catalog now says "
-                f"{self.entry.name} is `{self.family}`. A folder is never reinterpreted: pick "
+                f"{server_dir} was installed as {existing.family}, but the catalog now says "
+                f"{self.entry.name} is {self.family}. A folder is never reinterpreted: pick "
                 "another folder, or remove that install first."
             )
         if existing is not None and not existing.family:
@@ -10665,14 +10699,14 @@ class StagedInstaller:
             raise InstallerError(
                 f"{dest} is a git checkout of {url}, and the {STATE_FILE} beside it cannot be "
                 "read, so this app cannot tell whether the checkout is its own unfinished work "
-                "or yours. Continuing would run `git fetch` and `git reset --hard` over it, so "
+                "or yours. Continuing would reset it to a fresh copy of that repository, so "
                 "nothing was touched. Delete that file if it is left over from an interrupted "
                 "install, or install into an empty folder instead."
             )
         raise InstallerError(
             f"{dest} is already a git checkout of {url}, and there is no record here of an "
-            "install this app made. Continuing would run `git fetch` and `git reset --hard` "
-            "over it, which throws away anything you have changed, so nothing was touched. "
+            "install this app made. Continuing would reset it to a fresh copy of that "
+            "repository, which throws away anything you have changed, so nothing was touched. "
             "Install into an empty folder instead — and if this folder is a half-finished "
             "download from an earlier attempt, delete it first."
         )
@@ -10870,7 +10904,7 @@ class StagedInstaller:
         if replaceable:
             yield (
                 f"Replacing the {composegen.BASE_FILE} that came with the repository; it is "
-                "unchanged from what git has, so `git checkout` brings it back."
+                "unchanged from what git has, so git can bring it back."
             )
         try:
             written = composegen.write_plan(plan, ctx.server_dir, replaceable=replaceable)
@@ -10895,8 +10929,9 @@ class StagedInstaller:
             # for a SECOND relabel somewhere, not for a longer timeout on this
             # one.
             yield (
-                f"{ctx.server_dir} could not be relabelled for containers (chcon); if the "
-                "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
+                f"{ctx.server_dir} could not be relabelled for containers. If the server "
+                "refuses to start under SELinux, run this:\n"
+                f"chcon -Rt container_file_t {ctx.server_dir}"
             )
 
     def _refresh_world_data(self, server_dir: Path) -> str | None:
@@ -11767,11 +11802,18 @@ class StagedInstaller:
         """
         yield "Starting the database, which the import writes into."
         try:
-            self._seams.start_db(self.entry.container_spec(), ctx.server_dir)
+            self._seams.start_db(
+                self.entry.container_spec(), ctx.server_dir, because="nothing was imported"
+            )
         except docker.DockerCommandError as exc:
-            raise InstallerError(
-                f"The database could not be started, so nothing was imported: {exc}"
-            ) from exc
+            # T248: Yu'lon's own sentence already ends "so nothing was imported";
+            # Docker's own words get the engine's opening in front of them.
+            said = (
+                str(exc)
+                if isinstance(exc, SaidByYulon)
+                else f"The database could not be started, so nothing was imported: {exc}"
+            )
+            raise carry_detail(exc, InstallerError(said)) from exc
         yield "The database is up."
 
     def stage_import(
@@ -11890,7 +11932,7 @@ class StagedInstaller:
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
-            raise InstallerError(str(exc)) from exc
+            raise carry_detail(exc, InstallerError(str(exc))) from exc
         yield f"The databases now read as {after.state}."
 
     def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
@@ -11940,7 +11982,7 @@ class StagedInstaller:
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
-            raise InstallerError(f"The server would not start: {exc}") from exc
+            raise carry_detail(exc, InstallerError(f"The server would not start: {exc}")) from exc
 
     def stage_ready(self, ctx: StageContext) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
@@ -11956,8 +11998,8 @@ class StagedInstaller:
         yield "Waiting for the database."
         if not self._seams.wait_db_healthy(spec):
             raise InstallerError(
-                f"The database never reported healthy. `docker compose logs "
-                f"{spec.service_for(spec.db)}` in {ctx.server_dir} will say why."
+                "The database never reported healthy. Its own log says why.",
+                detail=docker.logs_command(spec.service_for(spec.db), ctx.server_dir),
             )
         yield from self.wait_for_ready(ctx, self._native().ready)
 
@@ -12035,7 +12077,9 @@ class StagedInstaller:
         spec = self.entry.container_spec()
         ready = self._ready_spec(markers)
         service, container = spec.service_for(spec.world), spec.world
-        logs = f"`docker compose logs {service}` in {ctx.server_dir}"
+        # T248: the line says whose log in words; the command is under Details.
+        logs = f"{container}'s own log"
+        read_it = docker.logs_command(service, ctx.server_dir)
         quiet = markers.timeout_s
         never_ready = "The server started but never reported ready"
 
@@ -12091,7 +12135,8 @@ class StagedInstaller:
                     f"ready marker and was gone again inside "
                     f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
                     f"even though it started. {logs} has the rest."
-                    f"{_missing_table_hint(after.words, self.entry)}{said}"
+                    f"{_missing_table_hint(after.words, self.entry)}{said}",
+                    detail=read_it,
                 )
             now = self._seams.world_output(spec)
             first_restarts = _restart_baseline(first_restarts, now)
@@ -12103,25 +12148,29 @@ class StagedInstaller:
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
                     f"which is a crash loop and not a slow start. {logs} has what it printed "
-                    f"before each one.{_corrections_hint(self.entry, now.text)}"
+                    f"before each one.{_corrections_hint(self.entry, now.text)}",
+                    detail=read_it,
                 )
             if verdict == "gone":
                 raise InstallerError(
                     f"{never_ready}: {container} is not running any more (docker says "
                     f"{detail!r}), so nothing is going to print it. {logs} has its "
-                    f"last words."
+                    f"last words.",
+                    detail=read_it,
                 )
             if verdict == "fatal":
                 raise InstallerError(
                     f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest.{_corrections_hint(self.entry, now.text)}"
+                    f"{detail!r}. {logs} has the rest.{_corrections_hint(self.entry, now.text)}",
+                    detail=read_it,
                 )
             if verdict == "quiet":
                 silent_for = self._seams.monotonic() - window_started
                 raise InstallerError(
                     f"{never_ready}, and it stopped printing anything at all for the last "
                     f"{_spell_seconds(silent_for)} — a server that is still loading says so as "
-                    f"it goes, so this one is stuck rather than slow. {logs} has its last words."
+                    f"it goes, so this one is stuck rather than slow. {logs} has its last words.",
+                    detail=read_it,
                 )
             if verdict == "unreadable":
                 blind_for = self._seams.monotonic() - window_started
@@ -12130,7 +12179,8 @@ class StagedInstaller:
                     f"for the last {_spell_seconds(blind_for)} neither its state nor its log "
                     f"could be read, so nothing here knows whether the server is still "
                     f"loading, finished, or gone. The install itself got as far as starting "
-                    f"the containers. Check the docker daemon is up, then {logs}."
+                    f"the containers. Check the docker daemon is up, then read {logs}.",
+                    detail=read_it,
                 )
             before = now
             yield (f"Still loading after {_spell_seconds(spent)}, and still printing — waiting on.")
@@ -12140,7 +12190,8 @@ class StagedInstaller:
             f"without finishing it. This wait gives a server that keeps talking another "
             f"{_spell_seconds(quiet)} every time it prints, up to a ceiling of "
             f"{_spell_seconds(READY_CEILING_SECONDS)}, which is many times the slowest first "
-            f"boot this has been measured against. {logs} has what it is doing."
+            f"boot this has been measured against. {logs} has what it is doing.",
+            detail=read_it,
         )
 
     def _ready_spec(self, markers: ReadyMarkers) -> docker.ReadySpec:
@@ -12176,7 +12227,7 @@ class StagedInstaller:
             except re.error as exc:
                 raise InstallerError(
                     f"{self.entry.name}'s ready marker {text!r} is not a usable pattern "
-                    f"({exc}). Fix `install.native.ready` in catalog.json; nothing was started."
+                    f"({exc}). Fix its ready marker in catalog.json; nothing was started."
                 ) from exc
             return pattern
 
