@@ -36,7 +36,12 @@ from tests.test_update_to_latest import OLD, _heads, _ready
 from yulon import docker
 from yulon.catalog import native
 from yulon.catalog.installer import InstallOptions, ReadyWaitStopped
-from yulon.ui.widgets.log_panel import FINISHED_AFTER_A_LATE_STOP, STOPPED_THEN_FAILED, LogPanel
+from yulon.ui.widgets.log_panel import (
+    FINISHED_AFTER_A_LATE_STOP,
+    STOPPED_PUT_BACK,
+    STOPPED_THEN_FAILED,
+    LogPanel,
+)
 
 Step = Callable[[docker.ReadySpec], bool]
 
@@ -490,3 +495,98 @@ def test_a_stop_ends_a_management_wait_and_leaves_the_world_loading(
     assert up is False
     assert asked[0].cancel is cancel, "the wait underneath was not handed the cancel"
     assert native.MANAGEMENT_WAIT_STOPPED in caplog.text
+
+
+# ------------------------------------------- after the merge with T217 (live review)
+
+
+def _update_with_a_copy(
+    tmp_path: Path, waits: _Waits, reached: threading.Event, **seams: object
+) -> tuple[Recorder, LogPanel, list[tuple[bool, str]], object]:
+    """An Update to latest on WotLK with T217's database copy, stopped in its ready wait."""
+    from tests.support_native import FakeSnapshot
+    from tests.test_update_to_latest import _spine
+
+    rec, server_dir, make = _spine(tmp_path, ENTRY)
+    made = make(wait_ready=waits, **seams)
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake  # type: ignore[attr-defined]
+    options = InstallOptions(server_dir=server_dir)
+    panel, finished = stop_when(
+        lambda c: made.update_to_latest(options, cancel=c),
+        reached,
+        "the update's ready wait",
+        cancel=docker.CancelWithForce(),
+    )
+    return rec, panel, finished, fake
+
+
+def test_a_stop_in_the_load_puts_the_database_copy_back_and_reads_stopped_not_failed(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The lead's ruling: a Stop that ends in a CLEAN rollback -- the old build up again and,
+    with T217, the databases back too -- is a plain "Stopped:", not a red FAILED."""
+    reached = threading.Event()
+    waits = _Waits(_until_stop(reached), _answers(True), _answers(True))
+    rec, panel, finished, fake = _update_with_a_copy(tmp_path, waits, reached)
+
+    calls = rec.calls
+    put_back = next(i for i, c in enumerate(calls) if c.startswith("put-back:"))
+    assert put_back < len(calls) - 1 - calls[::-1].index("recreate"), "copy back after the start"
+    assert fake.put_back_calls == fake.taken, "the copy taken is the copy put back"  # type: ignore[attr-defined]
+    header = panel.status_text()
+    assert header.startswith(STOPPED_PUT_BACK + native.READY_STOPPED_AFTER_LOADING), header
+    assert not header.startswith(STOPPED_THEN_FAILED), header
+    assert "put back and is running again" in header, header
+    assert finished and finished[0][0] is True, "a clean put-back is not a failure"
+    assert panel.cancelled is True, "nothing the press set out to do was kept"
+
+
+def test_a_stop_whose_rollback_left_something_wrong_still_reads_failed(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The other half: the old build did not come up again, so FAILED stays."""
+    reached = threading.Event()
+    waits = _Waits(_until_stop(reached), _answers(True), _answers(False))
+    _rec, panel, finished, _fake = _update_with_a_copy(tmp_path, waits, reached)
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert finished and finished[0][0] is False, finished
+
+
+def test_the_end_message_shows_the_worlds_last_lines_without_terminal_colour_codes(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Live on m910q: the excerpt read "[0m[36m311/500 Bot Mahuni logged in"."""
+    reached = threading.Event()
+    coloured = native.WorldOutput(
+        text=(
+            "ready...\nWorld server is up and running\n"
+            "\x1b[0m\x1b[36m311/500 Bot Mahuni logged in\x1b[0m"
+        ),
+        restarts=0,
+        status="running",
+    )
+    waits = _Waits(_until_stop(reached), _answers(True), _answers(True))
+    _rec, panel, _finished, _fake = _update_with_a_copy(
+        tmp_path, waits, reached, world_output=lambda spec: coloured
+    )
+
+    header = panel.status_text()
+    assert "311/500 Bot Mahuni logged in" in header, header
+    assert "[0m" not in header and "[36m" not in header and "\x1b" not in header, header
+
+
+def test_no_rollback_sentence_says_the_lines_above_show_the_updater(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Live on m910q: the lines above were the last five bot logins, and the sentence said
+    they showed whether the updater ran. A rollback says nothing it cannot back up."""
+    rec, server_dir = _ready(tmp_path)
+    reached = threading.Event()
+    waits = _Waits(_until_stop(reached), _answers(True), _answers(True))
+    panel, _finished = _update(rec, server_dir, waits, reached, rebuild=True)
+
+    assert "whether its updater ran" not in panel.status_text(), panel.status_text()
+    assert "whether its updater ran" not in native.ROLLBACK_LEFT_STOPPED_DATABASE

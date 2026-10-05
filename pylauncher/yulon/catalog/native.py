@@ -76,6 +76,7 @@ from secrets import token_hex
 from typing import Any, ClassVar, Literal, Protocol
 
 from yulon import (
+    ansi,
     dbsecret,
     docker,
     git,
@@ -87,7 +88,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
-from yulon.after_stop import TrueAfterStop, withdraw_stop
+from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
 from yulon.catalog import bot_count, composegen, preflight, snapshot, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -2285,6 +2286,20 @@ class StoppedInTheWatch(ReadyWaitStopped):
     """
 
 
+class StoppedAndPutBack(RebuildChangedTheServer, PutBackAfterStop):
+    """A Stop during the load, then a CLEAN rollback (T247 live review, the lead's ruling).
+
+    The build from before is up again and its databases were put back (T217), so
+    nothing the press did is left: the panel shows "Stopped:" with the sentence,
+    not "Stopped. FAILED". A `RebuildChangedTheServer`, so every handler of that
+    still runs.
+    """
+
+
+class _PutBackWhole(str):
+    """`_restore_rollback()`'s sentence when the old build is up and its databases went back."""
+
+
 class _NotUpEither(str):
     """`_restore_rollback()`'s sentence when the old build was put back and did not come up."""
 
@@ -2350,8 +2365,7 @@ class _NotPutBack(str):
 
 ROLLBACK_LEFT_STOPPED_DATABASE = (
     "\nWhat the new build wrote into the database on its first start, if anything, is NOT put "
-    "back by this -- the lines above say whether its updater ran -- so the old build will start "
-    "on the database as the new one left it."
+    "back by this, so the old build will start on the database as the new one left it."
 )
 """The rollback's database sentence for servers it left stopped: "will start", not "is running"."""
 
@@ -3976,7 +3990,7 @@ lead's ruling, 2026-10-05). Without a Stop that crash keeps the build (T71's
 `WorldStoppedAfterReadyError`); with one, the press and the crash both point back."""
 
 ROLLBACK_WAIT_UNSTOPPABLE = (
-    "Putting the build from before back, and waiting for it to come up. Stop cannot end this "
+    "Waiting for the build from before to come up, now that it is back. Stop cannot end this "
     "wait: the rollback has already replaced the new build, and only this wait can say whether "
     "the build it put back is up."
 )
@@ -7206,6 +7220,9 @@ class StagedInstaller:
                     touched=message.touched,
                     mixed=message.mixed,
                 ) from exc
+            if touched and isinstance(message, _PutBackWhole) and isinstance(exc, ReadyWaitStopped):
+                # The lead's ruling: Stop during the load, and a clean rollback.
+                raise StoppedAndPutBack(str(message), up=True) from exc
             if touched:
                 # The old build is back, running or not, on whatever the new one
                 # wrote into the database: `_restore_rollback()` says so.
@@ -7871,7 +7888,14 @@ class StagedInstaller:
                         note = SOURCES_NOT_ALL_BACK_NOTE
                     else:
                         note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
-                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
+                    # T247 live review: a clean put-back stays one only if the
+                    # sources went back too.
+                    kind = (
+                        StoppedAndPutBack
+                        if isinstance(exc, StoppedAndPutBack) and not sources_failed
+                        else RebuildChangedTheServer
+                    )
+                    raise kind(f"{exc} {note}", up=exc.up) from exc
                 raise InstallerError(f"{exc} {_sources_note(sources_failed)}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -8580,7 +8604,9 @@ class StagedInstaller:
         spec = self.entry.container_spec()
         last_words = ""
         if touched:
-            printed = self._seams.world_output(spec).text.strip().splitlines()
+            # Without terminal colour codes (#305): read live as "[0m[36m311/500 Bot
+            # Mahuni logged in" in the press's closing message.
+            printed = ansi.strip(self._seams.world_output(spec).text).strip().splitlines()
             last_words = "\n".join(printed[-5:])
             # T158, round 3: the failed build's servers go down BEFORE a single tag
             # moves back -- a tag moved under a running container names a binary
@@ -8701,10 +8727,11 @@ class StagedInstaller:
         # is told it here rather than left to find out (adversarial review).
         database = (
             "\nWhat the new build wrote into the database on its first start, if anything, "
-            "is NOT put back by this -- the lines above say whether its updater ran -- so "
-            "the old build is running on the database as the new one left it."
+            "is NOT put back by this, so the old build is running on the database as the new "
+            "one left it."
         )
         back_failed = ""
+        whole = False
         stay: str | None = None
         stopped_database = ROLLBACK_LEFT_STOPPED_DATABASE
         if servers_down is not None:
@@ -8722,6 +8749,7 @@ class StagedInstaller:
                 # new build), so the sentence says that instead of "NOT put back".
                 database = f"\n{put_back}"
                 stopped_database = database
+                whole = not back_failed
             database = f"{database}{back_failed}"
         # Asked on every rollback, not only the update route's (T197 fix round 8): a
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
@@ -8810,10 +8838,13 @@ class StagedInstaller:
         yield from self._release(kept)
         if servers_down is not None:
             servers_down.came_back()
-        return (
+        ending = (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+        # T247 live review: the old build is up AND its databases went back (T217)
+        # -- nothing of the press is left -- so a Stop that led here reads "Stopped".
+        return _PutBackWhole(ending) if whole else ending
 
     def _stop_the_old_build(self, ctx: StageContext) -> Generator[str, None, str | None]:
         """Stop the old build that did not come up after a rollback (T217). Never raises.
@@ -11386,7 +11417,7 @@ class StagedInstaller:
                     yield "The server is up."
                     return
                 said = (
-                    f" Its last words were:\n{after.words}"
+                    f" Its last words were:\n{ansi.strip(after.words)}"
                     if after.words
                     # NOT "it printed nothing": this watch may have seen the
                     # container only after docker had already restarted it, in

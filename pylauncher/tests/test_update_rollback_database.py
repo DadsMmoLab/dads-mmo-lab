@@ -559,7 +559,7 @@ def test_an_old_build_that_fails_another_way_says_how(
     made._snapshot = FakeSnapshot(rec)
     failures = iter(["the new world aborted on a missing table.", "the old world crashed."])
 
-    def wait_for_ready(ctx: object, ready: object) -> Iterator[str]:
+    def wait_for_ready(ctx: object, ready: object, **_kw: object) -> Iterator[str]:
         raise InstallerError(next(failures))
         yield ""  # pragma: no cover - a generator, like the real one
 

@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
-from yulon.after_stop import TrueAfterStop, stop_took_effect
+from yulon.after_stop import PutBackAfterStop, TrueAfterStop, stop_took_effect
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.ui import lines
@@ -86,6 +86,16 @@ it, both decided by type and never by words: a failure that says what the press
 left (`yulon.after_stop.TrueAfterStop`, T228), and any failure that is not the
 Stop taking effect at all (`StopTookEffect`, T250) -- a real one that landed as
 the button was pressed.
+"""
+
+STOPPED_PUT_BACK = "Stopped: "
+"""The header's opening when a stopped press put everything back cleanly (T247 live review).
+
+The lead's ruling: a Stop during a rebuild's load that ends in a CLEAN rollback -- the
+build from before up again and, with T217, its databases back too -- is a plain stop
+whose sentence says what was put back, not a red FAILED. Decided by type
+(`yulon.after_stop.PutBackAfterStop`), never by words. `STOPPED_THEN_FAILED` stays for
+a rollback that left something wrong.
 """
 
 FINISHED_AFTER_A_LATE_STOP = "finished: Stop came too late to change anything; the job finished."
@@ -389,6 +399,7 @@ class _StreamWorker(QObject):
     def run(self) -> None:
         ok = True
         message = "done"
+        put_back = False
         # Published BEFORE the source is touched, because that is the only
         # moment at which this thread's ident is knowable to `request_stop()`
         # while the source can still be reached: everything after this line may
@@ -420,7 +431,14 @@ class _StreamWorker(QObject):
             # below, not for the screen and not for `run_finished`'s readers.
             message = str(exc) or UNDESCRIBED_FAILURE
             raised = f"{type(exc).__name__}: {exc}"
-            if self._stop and isinstance(exc, TrueAfterStop):
+            if self._stop and isinstance(exc, PutBackAfterStop):
+                # T247 live review: everything was put back cleanly after the
+                # Stop. Not a failure; its sentence says what was put back, and
+                # `_on_finished` shows it under "Stopped:".
+                logger.info(f"log panel job put everything back after a stop: {raised}")
+                ok, put_back = True, True
+                self.stopped_by.emit(type(exc))
+            elif self._stop and isinstance(exc, TrueAfterStop):
                 # T228: NOT the Stop taking effect. What the route did after the
                 # Stop -- a rollback that stopped early, sources left on the new
                 # commits, a start now refused -- left the server in a state its
@@ -449,7 +467,7 @@ class _StreamWorker(QObject):
                 logger.warning(f"log panel job failed as it was being stopped: {raised}")
             else:
                 logger.warning(f"log panel job failed: {raised}")
-        if self._stop and ok:
+        if self._stop and ok and not put_back:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
             # cancel (`runner.interact()`) reached the end of its iterator and
@@ -1193,7 +1211,14 @@ class LogPanel(QWidget):
             # what it left (`TrueAfterStop`), or on something that was not the
             # Stop (`StopTookEffect`; the worker decides both by type) -- is shown
             # under "Stopped". Every other stopped job is a clean cancel.
-            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
+            if (
+                ok
+                and self._stopped_by is not None
+                and issubclass(self._stopped_by, PutBackAfterStop)
+            ):
+                verdict = STOPPED_PUT_BACK + message
+            else:
+                verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
         elif ok and self._ended is not None:
             verdict = self._ended
         else:

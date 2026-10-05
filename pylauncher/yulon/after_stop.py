@@ -92,3 +92,15 @@ def withdraw_stop(cancel: threading.Event | None) -> None:
     if isinstance(anyway, threading.Event):
         anyway.clear()
     cancel.clear()
+
+
+class PutBackAfterStop(TrueAfterStop):
+    """A stopped press that put EVERYTHING back cleanly: shown as "Stopped:", not FAILED.
+
+    The lead's ruling (T247 live review, 2026-10-05): a Stop during a rebuild's
+    load that ends in a clean rollback -- the build from before up again, and
+    with T217 its databases put back too -- left nothing wrong, so the header is
+    a plain stop whose sentence says what was put back. A `TrueAfterStop`,
+    because the sentence is still the one the player needs; anything that left
+    something wrong stays a plain `TrueAfterStop`, under "Stopped. FAILED".
+    """
