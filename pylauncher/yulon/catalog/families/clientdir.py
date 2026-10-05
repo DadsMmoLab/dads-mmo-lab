@@ -151,11 +151,12 @@ def _named_in_another_case(client_dir: Path, found: Path, required: str) -> Chec
     """The refusal for a required file only another case reaches, where that is fatal (T227).
 
     Only on a disk that tells cases apart (the exact spelling did not open) and
-    only for a game whose map tools read the player's own folder by exact name
-    (`ClientSpec.archives_any_case` false, every CMaNGOS game). Accepted, the
-    install would compile for half an hour or more and then fail extraction with a
-    sentence blaming the client's completeness. Until that extraction handles
-    another case (T260), the check says the true thing first.
+    only for a game whose map tools read the client by exact name with nothing in
+    between (`ClientSpec.archives_any_case` false). Accepted, the install would
+    compile for half an hour or more and then fail extraction with a sentence
+    blaming the client's completeness, so the check says the true thing first. No
+    shipped game is one since T260: TrinityCore extracts from a renamed copy and
+    CMaNGOS through links (`extract.lay_case_view()`).
     """
     named = found.relative_to(client_dir).as_posix()
     case = "lower case" if found.name == found.name.lower() else "another case"

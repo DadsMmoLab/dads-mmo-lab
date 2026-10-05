@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -39,6 +42,7 @@ from tests.support_trinitycore import (
 from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytest resolves them
     ENTRY,
     REV,
+    TC,
     Machine,
     context,
     engine,
@@ -72,6 +76,8 @@ WORLD_SQL = f"{SQL_DIR}/world"
 REPO_SQL = "centurion/sql"
 """The same folder as git names it: relative to the checkout."""
 MIN_FILES = 500
+TOOL_NAMES = [tool["name"] for tool in TRINITYCORE["extract"]["tools"]]
+"""The test entry's extraction tools, in plan order."""
 
 
 @dataclass
@@ -1002,6 +1008,426 @@ def test_reextract_uses_the_client_the_map_data_was_made_from(box: Box) -> None:
     assert needs_reextract(box.server_dir, ENTRY) is None
 
 
+def data_files(box: Box) -> dict[str, bytes]:
+    """Every file under the server's `data/`, by relative path: the map data and its record."""
+    data = box.server_dir / "data"
+    return {
+        path.relative_to(data).as_posix(): path.read_bytes()
+        for path in sorted(data.rglob("*"))
+        if path.is_file()
+    }
+
+
+def finished_with_pathfinding(box: Box) -> None:
+    """A finished Centurion install: map data extracted, movement maps made and switched on."""
+    box.m.mmaps.finish(0, tiles=MIN_FILES)
+    assert box.engine().mmaps_status(box.server_dir).state == "done"
+    assert "mmap.enablePathFinding = 1" in world_conf(box)
+    data = box.server_dir / "data"
+    assert (data / "Buildings" / extract.DIR_BIN).is_file(), "the marker vmap4extractor refuses"
+    # Old map data a new extraction does not write byte for byte, so a test comparing
+    # `data/` before and after can tell the old data put back from the new data left.
+    (data / "maps" / "0003232.map").write_bytes(b"OLD")
+    for folder in ("Buildings", "vmaps", "dbc"):
+        (data / folder / "from-the-old-run").write_bytes(b"OLD")
+
+
+def test_reextract_over_a_finished_extraction_replaces_buildings_and_vmaps(box: Box) -> None:
+    """T241: vmap4extractor refuses a `Buildings/` holding `dir_bin`, which every finished
+    extraction leaves; the press sets the old folders aside instead of dying at the tool."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    (data / "Buildings" / "left-by-the-old-run.bin").write_bytes(b"old")
+    (data / "vmaps" / "left-by-the-old-run.vmtile").write_bytes(b"old")
+    box.m.tools.seen.clear()
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert list(box.m.tools.seen) == ["mapextractor", "vmap4extractor", "vmap4assembler"]
+    assert not (data / "Buildings" / "left-by-the-old-run.bin").exists()
+    assert not (data / "vmaps" / "left-by-the-old-run.vmtile").exists()
+    evidence = extract.read_evidence(data)
+    assert evidence is not None
+    assert [record.name for record in evidence.tools] == TOOL_NAMES
+    assert [path.name for path in data.iterdir() if path.name.startswith(".yulon-")] == [
+        extract.EVIDENCE_FILE
+    ], "nothing set aside is left behind once the new map data is in"
+    assert needs_reextract(box.server_dir, ENTRY) is None
+    assert said[-1].endswith("Press Start on the Server tab to run the server on it.")
+
+
+@pytest.mark.parametrize("fails", ["a tool", "the start check"])
+def test_a_reextract_that_fails_leaves_the_old_map_data_its_record_and_pathfinding(
+    box: Box, fails: str
+) -> None:
+    """T241: nothing of the old map data goes before the new extraction has succeeded."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    assert "mmaps/0000000.mmtile" in before and extract.EVIDENCE_FILE in before
+    if fails == "a tool":
+        box.m.tools.fail_tool = "vmap4assembler"
+    else:
+        box.m.tools.missing = ("530",)
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "mapextractor" in box.m.tools.seen, "the new extraction ran and wrote over data/"
+    assert data_files(box) == before, "the old map data, its record and the movement maps"
+    assert "mmap.enablePathFinding = 1" in world_conf(box), "pathfinding stays on"
+    assert box.engine().mmaps_status(box.server_dir).state == "done"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+    assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
+    assert "record was cleared" not in str(failed.value), "the old record is back, not cleared"
+
+
+def test_a_folder_the_old_map_data_did_not_have_is_not_left_by_a_failed_reextract(
+    box: Box,
+) -> None:
+    """Codex review: nothing set aside for it, so the put-back must still clear the new one."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    shutil.rmtree(box.server_dir / "data" / "vmaps")
+    before = data_files(box)
+    box.m.tools.missing = ("530",)
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "vmap4assembler" in box.m.tools.seen, "the new extraction wrote vmaps/"
+    assert data_files(box) == before
+    assert not (box.server_dir / "data" / "vmaps").exists()
+
+
+def test_a_reextract_closed_part_way_puts_the_old_map_data_back(box: Box) -> None:
+    """A stream the app stops reading (GeneratorExit) is a way out too: nothing old is lost.
+
+    With the cancel event the Server tab always passes (`_run_upkeep_press`): it is
+    what stops the extraction's worker thread before the old data is put back, so
+    the two never write `data/` at once. With none, the worker is left running
+    (`native.stop_abandoned_worker`), and on Python 3.11 CI it wrote vmaps/ under
+    the put-back.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    box.world.running = False
+    press = box.engine().reextract(
+        InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+    )
+    for line in press:
+        if line.startswith("vmap assemble: running"):
+            break
+    assert data_files(box) != before, "the new extraction had written over data/"
+    press.close()
+    assert data_files(box) == before
+    assert box.engine().mmaps_status(box.server_dir).state == "done"
+
+
+def test_a_reextract_closed_at_the_line_saying_the_data_was_moved_aside_puts_it_back(
+    box: Box,
+) -> None:
+    """Codex review: the line after the move is inside the put-back's reach too."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    box.world.running = False
+    press = box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None)
+    for line in press:
+        if "was moved aside" in line:
+            break
+    assert not (box.server_dir / "data" / "maps").exists(), "the old map data was moved"
+    press.close()
+    assert data_files(box) == before
+
+
+def test_reextract_says_a_stop_brings_the_old_map_data_back(box: Box) -> None:
+    flagged(box)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert trinitycore.REEXTRACT_CANCEL_NOTE in said
+    assert trinitycore.CLIENT_DATA_CANCEL_NOTE not in said, "finished tools are not kept here"
+
+
+def interrupted(box: Box) -> dict[str, bytes]:
+    """The state a press that crashed in `vmap extract` leaves: old data aside, new data half in."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    plan = TC.extract
+    extract.set_aside(data, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
+    (data / "maps").mkdir()
+    (data / "maps" / "0003232.map").write_bytes(b"HALF")
+    evidence = extract.read_evidence(data / extract.PREVIOUS_DIR)
+    assert evidence is not None
+    extract.write_evidence(data, replace(evidence, tools=evidence.tools[:1]))
+    return old
+
+
+def test_a_reextract_after_one_that_crashed_falls_back_on_the_data_before_the_crash(
+    box: Box,
+) -> None:
+    """T241: what the crashed press set aside is the last whole map data, not the half it left."""
+    old = interrupted(box)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == old
+
+
+def test_a_reextract_after_one_that_crashed_finishes_and_leaves_nothing_aside(box: Box) -> None:
+    interrupted(box)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert any("did not finish; the map data from before it was put back" in s for s in said)
+    assert not (box.server_dir / "data" / extract.PREVIOUS_DIR).exists()
+    assert (box.server_dir / "data" / "maps" / "0003232.map").read_bytes() == b"MAPS"
+
+
+def visible(files: dict[str, bytes]) -> dict[str, bytes]:
+    """The map data the server reads: everything but what a re-extraction keeps aside."""
+    return {name: body for name, body in files.items() if not name.startswith(".yulon-previous")}
+
+
+def test_map_data_superseded_by_a_press_that_finished_is_dropped_not_put_back(box: Box) -> None:
+    """A press whose new map data was in, and that could not delete the old: never put back."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    (data / extract.PREVIOUS_DIR / "maps").mkdir(parents=True)
+    (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").write_bytes(b"STALE")
+    (data / extract.SUPERSEDED_MARK).mkdir()
+    current = data_files(box)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == visible(current)
+
+
+def test_old_map_data_deleted_part_way_after_the_new_is_in_is_never_put_back(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review: a deletion of the old data that stops half way (a locked
+    file, a crash) must leave nothing a later press would put back over the new map data."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    real = extract._remove_tree
+    cut: list[Path] = []
+
+    def stops_half_way(path: Path) -> bool:
+        if path == data / extract.PREVIOUS_DIR and not cut:
+            first = sorted(path.iterdir())[0]
+            real(first) if first.is_dir() else first.unlink()
+            cut.append(first)
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(extract, "_remove_tree", stops_half_way)
+    (data / "maps" / "0003232.map").write_bytes(b"OLD")  # so old and new data differ
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert cut and any(line.startswith("warning: the map data from before") for line in said)
+    new = visible(data_files(box))
+    assert new["maps/0003232.map"] == b"MAPS"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == new, "the press-one map data, with nothing of the half-deleted old"
+
+
+def test_old_map_data_that_cannot_be_marked_superseded_is_kept_and_named(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No mark, no deletion: deleting what may be the only copy is never the fallback."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    old_maps = (data / "maps" / "0003232.map").read_bytes()
+    real = Path.mkdir
+
+    def refuse_the_mark(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == extract.SUPERSEDED_MARK:
+            raise PermissionError(13, "Permission denied")
+        real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", refuse_the_mark)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").read_bytes() == old_maps
+    warning = next(line for line in said if line.startswith("warning: the map data from before"))
+    assert str(data / extract.PREVIOUS_DIR) in warning
+    assert "delete that folder" in warning and "never used again" not in warning
+    assert warning.endswith(
+        f"a later “{trinitycore.REEXTRACT_BUTTON}” may put it back if the map data in place no "
+        "longer matches the server's files by then."
+    ), "the press is no longer offered; the warning says only what is true (re-reviews)"
+    assert needs_reextract(box.server_dir, ENTRY) is None
+    monkeypatch.undo()
+
+    # The FOLLOWING press (cold review of 4d672a26): the unmarked old data must not come
+    # back over the new, whether that press finishes or fails.
+    new = visible(data_files(box))
+    assert new["maps/0003232.map"] == b"MAPS"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == new
+
+
+@pytest.mark.parametrize("unfinished", ["dbc overlay", "a tool's record", "start check"])
+def test_old_map_data_aside_beside_new_data_that_is_not_whole_is_put_back(
+    box: Box, unfinished: str
+) -> None:
+    """The other half of the rule above: new map data a server could not use -- one thing
+    the client-data stage does left undone, each fixture breaking exactly one -- means the
+    press died, and the old data comes back."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    # The state of a press that died in the DBC overlay: the old data aside, unmarked, with
+    # its own record; the new data in place, every tool recorded and counted and the start
+    # check met -- and the extractor's Spell.dbc still where the server's goes.
+    for name, body in old.items():
+        (data / extract.PREVIOUS_DIR / name).parent.mkdir(parents=True, exist_ok=True)
+        (data / extract.PREVIOUS_DIR / name).write_bytes(body)
+    if unfinished == "dbc overlay":
+        (data / "dbc" / "Spell.dbc").write_bytes(b"the client's Spell.dbc")
+    elif unfinished == "a tool's record":
+        record = extract.read_evidence(data)
+        assert record is not None
+        extract.write_evidence(data, replace(record, tools=record.tools[:-1]))
+    else:
+        (data / "vmaps" / "530.vmtree").unlink()
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert visible(data_files(box)) == old
+
+
+def test_a_put_back_cut_short_that_left_whole_looking_data_is_still_finished(box: Box) -> None:
+    """The record decides which half of the rule applies: a put-back restores it FIRST, so an
+    aside without its record is a put-back cut short, even when what is in place -- old record,
+    old maps, the new run's other folders -- would pass for whole map data."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    for name, body in old.items():
+        top = name.split("/", 1)[0]
+        if top in ("Buildings", "vmaps", "dbc"):
+            (data / extract.PREVIOUS_DIR / name).parent.mkdir(parents=True, exist_ok=True)
+            (data / extract.PREVIOUS_DIR / name).write_bytes(body)
+        elif top in ("maps", extract.EVIDENCE_FILE):
+            (data / name).write_bytes(body)
+    assert box.engine()._map_data_whole(box.server_dir, data), "it passes for whole"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    folders = ("Buildings/", "vmaps/", "dbc/", "maps/", extract.EVIDENCE_FILE)
+    assert {n: b for n, b in data_files(box).items() if n.startswith(folders)} == {
+        n: b for n, b in old.items() if n.startswith(folders)
+    }, "the old map data, whole: never the new run's folders under the old record"
+
+
+def test_the_real_put_back_restores_the_record_first_so_a_cut_short_one_is_finished(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review of e457b29e: `put_back()` itself, cut short at its SECOND name, after
+    a stage that had left whole map data. The record must already be back, so the next press
+    puts the rest back rather than taking the aside for a finished press's leftovers."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    press = box.engine().reextract(
+        InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+    )
+    for line in press:
+        if line.startswith("The map data the world server checks at start"):
+            break
+    assert box.engine()._map_data_whole(box.server_dir, data), "the new data in place is whole"
+    real = os.rename
+    calls: list[str] = []
+
+    def second_fails(src: object, dst: object) -> None:
+        calls.append(Path(str(src)).name)
+        if len(calls) == 2:
+            raise PermissionError(13, "Permission denied")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(extract.os, "rename", second_fails)
+    press.close()
+    monkeypatch.undo()
+    assert calls[0] == extract.EVIDENCE_FILE, "the record goes back first"
+    assert (data / extract.EVIDENCE_FILE).read_bytes() == old[extract.EVIDENCE_FILE]
+    assert not (data / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).exists()
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == visible(old), "the old map data, all of it, not the new"
+
+
+def test_a_put_back_that_fails_says_what_the_next_press_will_do(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review note 2: not "puts it back first" -- the next press keeps whichever map
+    data is whole, which may be the new."""
+
+    def fails(data_dir: Path) -> tuple[str, ...]:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(extract, "put_back", fails)
+    told = box.engine()._put_the_old_map_data_back(box.server_dir / "data")
+    assert "puts it back first" not in told
+    assert told.endswith(
+        f"pressing “{trinitycore.REEXTRACT_BUTTON}” again settles it first: it keeps the new map "
+        "data if that is whole, and puts this back otherwise."
+    )
+
+
+def test_pathfinding_data_that_cannot_be_removed_after_the_new_map_data_does_not_fail_the_press(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review note 3: the map data is in; the press says what to do and finishes."""
+    finished_with_pathfinding(box)
+    flagged(box)
+
+    def refuses(*args: object, **kwargs: object) -> None:
+        raise mmaps.MmapsError("data/mmaps could not be emptied (Permission denied)")
+
+    monkeypatch.setattr(mmaps, "discard", refuses)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    warning = next(line for line in said if line.startswith("warning: the pathfinding data"))
+    assert "could not be removed" in warning and "Make the pathfinding data" in warning
+    assert said[-1].endswith("Press Start on the Server tab to run the server on it.")
+    assert needs_reextract(box.server_dir, ENTRY) is None
+
+
+def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:
+    """Codex adversarial review: the old record back in place does not make the folders still
+    aside stale. Only a press whose new map data was in marks them so (`extract.supersede()`)."""
+    old = interrupted(box)
+    data = box.server_dir / "data"
+    os.replace(data / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE, data / extract.EVIDENCE_FILE)
+    assert extract.read_evidence(data) is not None, "a finished extraction's record, in place"
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == old
+
+
 @pytest.mark.parametrize("running", [True, None])
 def test_reextract_refuses_while_the_world_server_may_be_running(
     box: Box, running: bool | None
@@ -1095,8 +1521,11 @@ def test_a_named_file_must_be_one_the_plan_imports(
         centurion_like()
 
 
-def test_reextract_stops_a_running_job_and_says_its_tiles_were_removed(box: Box) -> None:
-    """T209: a stop for the extraction never keeps tiles, and never says it did."""
+def test_reextract_stops_a_running_job_and_keeps_its_tiles_only_until_the_new_data_is_in(
+    box: Box,
+) -> None:
+    """T209 with T241: the stop keeps the tiles (the old map data may come back), and a
+    finished extraction throws them away with the old data, so the new run starts empty."""
     fake: FakeMmapsDocker = box.m.mmaps
     flagged(box)
     assert not fake.jobs, "the update stopped it, and the flag holds the restart"
@@ -1109,12 +1538,46 @@ def test_reextract_stops_a_running_job_and_says_its_tiles_were_removed(box: Box)
         )
     )
     assert (
-        "Stopped making the pathfinding data before the extraction; what it had made so far "
-        "was removed and pathfinding stays off. It starts again from the beginning once the "
-        "server has been rebuilt, or from the Server tab."
+        "Stopped making the pathfinding data before the extraction; its 30 finished tiles are "
+        "kept and pathfinding stays off. If the extraction does not finish, the run continues "
+        "from them; once it has, they are removed with the old map data."
     ) in said
-    assert not [line for line in said if "tiles are kept" in line]
     assert len(fake.mmaps_at_run[-1]) == 0, "the new run starts from an empty folder"
+
+
+def _a_run_that_crashed(box: Box, tiles: int) -> list[str]:
+    """A pathfinding run that crashed part way and kept `tiles` whole tiles (T209)."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    box.engine().start_mmaps(box.server_dir)
+    fake.write_tiles(tiles)
+    fake.finish(139)
+    now = box.engine().mmaps_status(box.server_dir)
+    assert now.state == "failed" and now.kept == tiles
+    return sorted(path.name for path in (box.server_dir / "data" / "mmaps").iterdir())
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["crashed", "running"])
+def test_a_failed_reextract_leaves_a_pathfinding_run_that_continues_from_its_tiles(
+    box: Box, running: bool
+) -> None:
+    """The cold review of 4d672a26: the old map data comes back unchanged -- names, sizes and
+    dates, which `mmaps._evidence()` hashes -- so the run made from it continues."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    if running:
+        flagged(box)
+        box.engine().start_mmaps(box.server_dir)
+        fake.write_tiles(12)
+        tiles = sorted(path.name for path in (box.server_dir / "data" / "mmaps").iterdir())
+    else:
+        tiles = _a_run_that_crashed(box, 12)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    box.engine().start_mmaps(box.server_dir)
+    assert fake.mmaps_at_run[-1] == tiles, "continued from its tiles, not from 0 %"
 
 
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:
