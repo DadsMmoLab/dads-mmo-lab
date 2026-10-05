@@ -38,6 +38,7 @@ def test_the_exact_spelling_wins_over_a_case_variant(tmp_path: Path) -> None:
     (tmp_path / "Data" / "lichking.MPQ").write_bytes(b"canonical")
 
     assert client_names.find(tmp_path, "Data/lichking.MPQ") == tmp_path / "Data" / "lichking.MPQ"
+    assert client_names.find(tmp_path, "Data/lichking.mpq") == tmp_path / "Data" / "lichking.mpq"
 
 
 def test_what_is_not_there_keeps_the_spelling_it_was_asked_for(tmp_path: Path) -> None:

@@ -684,6 +684,23 @@ def test_a_lowercase_client_reaches_the_extractors_under_the_names_they_open(
     assert snapshot(machine.client) == before, "the player's client was changed"
 
 
+def test_an_archive_already_under_the_catalog_s_name_is_never_replaced_by_its_case_twin(
+    machine: Machine,
+) -> None:
+    """Two names that differ only in case are two files here; the catalog's one is read.
+
+    A rename onto an existing name replaces it on POSIX, so the copy's own
+    `lichking.MPQ` would silently become the bytes of the other file.
+    """
+    (machine.client / "Data" / "lichking.mpq").write_bytes(b"MPQ a case twin")
+    lay_for_client_data(machine)
+
+    run_stage(machine, "client-data")
+
+    for program, files in machine.tools.seen.items():
+        assert files["Data/lichking.MPQ"] == b"MPQ lichking", program
+
+
 def test_a_lowercase_client_s_extraction_is_vouched_for_on_the_next_press(
     machine: Machine,
 ) -> None:

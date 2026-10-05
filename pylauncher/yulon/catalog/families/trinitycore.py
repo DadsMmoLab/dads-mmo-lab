@@ -44,7 +44,6 @@ code, and "Update the server to latest…" is where a change to it is applied.
 
 from __future__ import annotations
 
-import contextlib
 import errno
 import fnmatch
 import hashlib
@@ -664,7 +663,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         A name the catalog's spelling already reaches is left alone: on a disk that
         does not tell cases apart that is the same file, and on one that does it is
         the catalog's own archive. A locale folder follows the retail `xxYY`
-        spelling (`enus` becomes `enUS`), and a folder the renames empty is removed.
+        spelling (`enus` becomes `enUS`).
 
         A rename and never a link: one name per archive, so the extractors see what
         they would see in a retail client. On a case-sensitive disk the player's
@@ -694,9 +693,6 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"client ({exc}), so the map data was not extracted: the extractors open it "
                     f"only by that name. Your own client was not changed.{remedy}"
                 ) from exc
-        for emptied in {path.parent for path, _ in moves} - {data}:
-            with contextlib.suppress(OSError):
-                emptied.rmdir()  # only an empty one goes
 
     def _refuse_missing_map_data(self, data_dir: Path, original: Path) -> None:
         """Refuse before `up` when the start check would fail, and make the next press extract.
