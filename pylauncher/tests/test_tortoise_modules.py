@@ -472,6 +472,11 @@ def test_a_manifest_that_defers_to_the_updater_is_refused_at_the_applier(tmp_pat
         applier.install(smuggled)
     assert "auto-update" in str(caught.value).lower()
     assert "smuggled" in str(caught.value)
+    # T248: the line is words; what was deferred and the rule it broke are Details.
+    assert isinstance(caught.value, autoupdate.AutoUpdateRefused)
+    assert "sql/*.sql" in caught.value.detail
+    assert '"applied_by": "direct"' in caught.value.detail
+    assert "`" not in str(caught.value) and "ProcessUpdates" not in str(caught.value)
 
 
 def test_an_install_is_refused_while_the_updater_is_armed_and_the_world_is_up(

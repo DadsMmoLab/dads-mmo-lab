@@ -982,8 +982,8 @@ def plan_restore(
 
     if backup_file.suffix == ".gz":
         refusals.append(
-            f"{backup_file.name} is compressed. Yu'lon restores plain .sql files; run "
-            f"`gunzip -k {backup_file.name}` and choose the .sql it writes."
+            f"{backup_file.name} is compressed. Yu'lon restores plain .sql files: run this in "
+            f"its folder and choose the .sql it writes.\ngunzip -k {backup_file.name}"
         )
     elif not backup_file.is_file():
         refusals.append(f"there is no file at {backup_file}")

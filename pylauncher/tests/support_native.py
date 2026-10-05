@@ -193,6 +193,10 @@ class Recorder:
 
     db_started: bool = False
     db_start_error: str = ""
+    verify_error: Exception | None = None
+    """What `verify_import()` raises instead of answering imported (T248)."""
+    start_error: Exception | None = None
+    """What `start` raises instead of starting (T248)."""
     db_healthy: bool = True
     load_lines: tuple[str, ...] = ()
     """What `recreate`'s wait for a loading world says (T158); nothing, as a loaded world does."""
@@ -595,7 +599,9 @@ class Recorder:
         self.relabelled.append(path)
         return True
 
-    def start_db(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
+    def start_db(
+        self, spec: docker.ContainerSpec, server_dir: Path, *, because: str = "nothing was run"
+    ) -> None:
         self.calls.append("start-db")
         if self.db_start_error:
             raise docker.DockerCommandError(self.db_start_error)
@@ -774,6 +780,8 @@ class Recorder:
             probe: object, service: str, server_dir: Path, run: object
         ) -> docker.ImportState:
             self.calls.append("verify")
+            if self.verify_error is not None:
+                raise self.verify_error
             return IMPORTED
 
         seams = native.Seams(
@@ -913,6 +921,8 @@ class Recorder:
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
+        if self.start_error is not None:
+            raise self.start_error
         return True
 
     def tag_image(self, src: str, dst: str) -> str:

@@ -89,6 +89,7 @@ from yulon.catalog.native import (
 )
 from yulon.log import get_logger
 from yulon.ownership import Ownership
+from yulon.said import SaidByYulon
 
 if TYPE_CHECKING:
     from yulon.catalog.catalog import CatalogEntry
@@ -97,7 +98,16 @@ logger = get_logger(__name__)
 
 
 class PurgeError(RuntimeError):
-    """An uninstall refused, or could not be finished. The message is user-readable."""
+    """An uninstall refused, or could not be finished.
+
+    A plain `PurgeError` carries another program's words (T248): the tab says
+    the uninstall did not finish and puts them under Details. Yu'lon's own
+    sentences are `PurgeRefusal`, shown on the line as written.
+    """
+
+
+class PurgeRefusal(PurgeError, SaidByYulon):
+    """A `PurgeError` whose message is Yu'lon's own sentence (T248)."""
 
 
 DB_VOLUME_SUFFIX = "_db-data"
@@ -445,7 +455,8 @@ class Uninstaller:
         try:
             return remove_for_uninstall(self.server_dir, self.game)
         except LeftoverNotNoted as exc:
-            raise PurgeError(str(exc)) from exc
+            # Its own words (T198), which never ask the person to delete the copy.
+            raise PurgeRefusal(str(exc)) from exc
 
     def _real_stop_background_jobs(self) -> None:
         """A TrinityCore server's movement-map job, removed before its containers (T179 Task 4).
@@ -604,9 +615,9 @@ class Uninstaller:
         """
         targets, refusal = self._resolve()
         if targets is None:
-            raise PurgeError(refusal)
+            raise PurgeRefusal(refusal)
         if keep_characters and targets.character_volume is None:
-            raise PurgeError(
+            raise PurgeRefusal(
                 f"Yu'lon cannot identify this install's database volume — nothing named "
                 f"{targets.project}{DB_VOLUME_SUFFIX} exists — so it will not promise to keep "
                 f"the characters. Nothing was removed."
@@ -701,7 +712,8 @@ class Uninstaller:
             self._remove_folder(self.server_dir)
         except PurgeError as exc:
             if leftover:  # its words still reach the person: a flag of theirs, say (T198)
-                raise PurgeError(f"{exc} {leftover}") from exc
+                kind = PurgeRefusal if isinstance(exc, SaidByYulon) else PurgeError
+                raise kind(f"{exc} {leftover}") from exc
             raise
 
         # LAST. A failure above leaves the record pointing at a server that is
@@ -753,7 +765,7 @@ class Uninstaller:
             return None
         at_risk = self._db_secret()
         if at_risk.problem:
-            raise PurgeError(
+            raise PurgeRefusal(
                 f'"Keep my characters" was ticked, but Yu\'lon cannot read the password this '
                 f"install's database was created with ({at_risk.problem}). Keeping "
                 f"{targets.character_volume} without it would keep characters that nothing can "
@@ -768,7 +780,7 @@ class Uninstaller:
         try:
             return self._keep_secret(at_risk.password, targets.character_volume)
         except OSError as exc:
-            raise PurgeError(
+            raise PurgeRefusal(
                 f'"Keep my characters" was ticked, but Yu\'lon could not keep a copy of the '
                 f"password that opens {targets.character_volume} ({exc}) — and this uninstall "
                 f"deletes the folder holding the only other copy. Nothing was removed."
@@ -848,7 +860,7 @@ def remove_tree(path: Path) -> None:
     try:
         rmtree.remove_tree(path)
     except rmtree.TreeRemovalError as exc:
-        raise PurgeError(_undeletable(path, _cause(exc))) from exc
+        raise PurgeRefusal(_undeletable(path, _cause(exc))) from exc
 
 
 def _cause(exc: rmtree.TreeRemovalError) -> object:

@@ -310,8 +310,8 @@ class TrinityCoreInstaller(CmangosInstaller):
         data = self._native().trinitycore
         if data is None:
             raise InstallerError(
-                f"{self.entry.name} says its family is trinitycore but carries no `trinitycore` "
-                f"block. {CATALOG_ERROR_TAIL}"
+                f"{self.entry.name} says its family is trinitycore but carries no trinitycore "
+                f"settings. {CATALOG_ERROR_TAIL}"
             )
         return data
 
@@ -1487,6 +1487,11 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"{rel} is no longer in {self.entry.name}'s sources; its table is left in "
                     "your world database as it is."
                 )
+        # T219: the start this ends in refuses on a map-data fingerprint that can be
+        # neither written nor removed; asked before the world is stopped for the tables.
+        warned = self._refresh_world_data(server_dir)
+        if warned is not None:
+            yield warned
         if runs:
             yield (
                 f"Importing {len(runs)} world tables again into {self.entry.databases.world}, "
@@ -1527,6 +1532,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         spec = self.entry.container_spec()

@@ -612,7 +612,7 @@ def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -
     with pytest.raises(InstallerError, match="install family this app does not have"):
         family_for(stranger)
     bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
-    with pytest.raises(InstallerError, match="install.native"):
+    with pytest.raises(InstallerError, match="native install section"):
         family_for(bare)
 
 
@@ -787,7 +787,7 @@ def test_a_folder_installed_as_another_family_is_refused_not_reinterpreted(
         ),
     )
     rec = Recorder()
-    with pytest.raises(InstallerError, match="installed as `cmangos`"):
+    with pytest.raises(InstallerError, match="installed as cmangos"):
         install(rec, server_dir)
     assert "clone" not in " ".join(rec.calls)
 
@@ -2452,6 +2452,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "recorded the user's own archives as this app's and removing the Season of Discovery "
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ),
+    ("catalog/world_data.py", "_folder_hash"): (
+        "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
+        "file's path, size and modification time into the fingerprint a Windows world "
+        "server's volume copy is compared by. It decides no write by itself: what it answers "
+        "is a line in `data/.yulon-world-data`, and the copy inside the container is what "
+        "acts on it. A folder that is not there answers `-` (the server sees it empty); one "
+        "that cannot be listed raises, and `refresh()` then writes nothing and says so, so "
+        "the copy keeps following the last fingerprint written"
     ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "

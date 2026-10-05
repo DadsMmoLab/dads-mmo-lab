@@ -551,3 +551,47 @@ def test_the_tile_header_refuses_nonsense_and_retry_threads_is_no_longer_a_field
     raw["trinitycore"]["mmaps"][field] = value
     with pytest.raises(ValidationError):
         NativeInstall.model_validate(raw)
+
+
+# -- T219: the folders a Windows world server reads from its volume ---------------------------
+
+
+def test_no_world_data_folders_is_the_default_and_keeps_the_bind() -> None:
+    assert NativeInstall.model_validate(_native()).trinitycore.world_data_dirs == ()  # type: ignore[union-attr]
+
+
+def test_centurion_copies_the_five_folders_its_world_server_opens() -> None:
+    """Read off the pin's source in T219 Task 0 (`GetDataPath()` + each name); never
+    `Buildings`, the extractor's own, and never `.yulon-previous` (T241)."""
+    block = load_catalog().get("wow-centurion").install.native.trinitycore  # type: ignore[union-attr]
+    assert block.world_data_dirs == ("dbc", "maps", "vmaps", "mmaps", "Cameras")
+
+
+def test_centurions_volume_asks_for_the_room_the_live_proof_measured() -> None:
+    """#309's live proof (yulon-win11, 2026-10-05): the folders are 1.12 GB; pathfinding was
+    644 tiles / 439 MB part-way, about 2.6-2.8 GB for the whole set; a folder copied again
+    sits beside its old copy (vmaps, 0.7 GB). About 3.9 GB in all, 5.4 at the outside."""
+    block = load_catalog().get("wow-centurion").install.native.trinitycore  # type: ignore[union-attr]
+    assert block.world_data_gb == 5
+
+
+def test_a_world_data_folder_named_twice_is_refused() -> None:
+    with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
+        NativeInstall.model_validate(
+            _native(world_data_dirs=["maps", "dbc", "maps"], world_data_gb=4)
+        )
+
+
+@pytest.mark.parametrize("name", ["../maps", "maps/x", ".yulon-previous", "a b", ""])
+def test_a_world_data_folder_must_be_a_plain_name(name: str) -> None:
+    """Spliced into the script's folder list and a `sed` pattern: letters, digits and `_`."""
+    with pytest.raises(ValidationError, match="world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_dirs=[name], world_data_gb=4))
+
+
+def test_folders_copied_into_a_volume_must_say_the_room_they_take() -> None:
+    """Preflight adds the number to Docker's disk on Windows; without it the floor is short."""
+    with pytest.raises(ValidationError, match="world_data_gb must say how much room"):
+        NativeInstall.model_validate(_native(world_data_dirs=["maps"]))
+    block = NativeInstall.model_validate(_native(world_data_dirs=["maps"], world_data_gb=4))
+    assert block.trinitycore.world_data_gb == 4  # type: ignore[union-attr]

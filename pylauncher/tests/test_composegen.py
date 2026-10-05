@@ -2514,3 +2514,133 @@ def test_the_trinitycore_build_overlay_builds_the_one_server_image(tmp_path: Pat
     assert composegen.built_image_refs(
         CENTURION, tmp_path / "wow", platform_id=lambda: "linux"
     ) == (tc_services(plan)["centurion-worldserver"]["image"],)
+
+
+# -- T219: Centurion's Linux and macOS files do not move ---------------------------------
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.CENTURION_LABELS))
+def test_the_centurion_linux_render_reproduces_its_committed_snapshot_byte_for_byte(
+    folder: str,
+) -> None:
+    """T219 gives a Windows Centurion a named volume for its map data; Linux keeps the bind.
+
+    The snapshots were written before that change (`support_rendered`), with no label and
+    with SELinux's `:z`. A WSL-distro install renders as `linux` and is covered here too.
+    """
+    texts = support_rendered.centurion_rendered(support_rendered.CENTURION_LABELS[folder])
+    root = support_rendered.CENTURION_SNAPSHOT_ROOT / folder
+    assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"{folder}: {name}"
+    assert "./data:/opt/trinitycore/data" in texts[composegen.BASE_FILE]
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.CENTURION_LABELS))
+def test_the_centurion_macos_render_is_the_linux_snapshot(folder: str) -> None:
+    """macOS keeps the bind until it is measured (T219 Decision 2): nothing in these files
+    differs from Linux on a Mac, so its render is the Linux snapshot byte for byte."""
+    label = support_rendered.CENTURION_LABELS[folder]
+    texts = support_rendered.centurion_rendered(label, platform_id="macos")
+    root = support_rendered.CENTURION_SNAPSHOT_ROOT / folder
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"macos {folder}: {name}"
+
+
+# -- T219: on Windows the world server reads its map data from a volume ---------------------
+
+
+def render_centurion_on(platform_id: str, bind_label: str = "") -> composegen.ComposePlan:
+    """The SHIPPED Centurion entry (its `world_data_dirs` are the catalog's) on `platform_id`."""
+    return composegen.render(
+        load_catalog().get("wow-centurion"),
+        support_rendered.linux_server_dir("wow-centurion"),
+        templates_root=TEMPLATES,
+        db_password=TC_PASSWORD,
+        bind_label=bind_label,
+        platform_id=lambda: platform_id,
+    )
+
+
+def test_the_windows_centurion_world_server_mounts_the_world_data_volume() -> None:
+    """The volume at DataDir, the server folder's `data` beside it read-only, `./etc` and the
+    conf's log folder as before; `world-data` declared next to `db-data`."""
+    base = yaml.safe_load(render_centurion_on("windows").base)
+    world = base["services"]["centurion-worldserver"]
+    assert world["volumes"] == [
+        f"./etc:{CORE_DIR}/etc",
+        f"world-data:{CORE_DIR}/data",
+        f"./data:{CORE_DIR}/data-src:ro",
+        f"./logs:{CORE_DIR}/logs",
+    ]
+    assert set(base["volumes"]) == {"db-data", "world-data"}
+
+
+def test_the_windows_world_server_starts_through_the_sync_and_then_the_server() -> None:
+    """The sync is the container's own entrypoint, because `start_staged()` runs `compose up
+    --no-deps` and a one-shot sync service would never be started; `command` is still the
+    server, which the script `exec`s."""
+    world = yaml.safe_load(render_centurion_on("windows").base)["services"]["centurion-worldserver"]
+    entrypoint = world["entrypoint"]
+    assert entrypoint[:2] == ["sh", "-c"]
+    assert len(entrypoint) == 4, "the script, then $0 for it"
+    assert 'exec "$$@"' in entrypoint[2]
+    assert world["command"] == ["./worldserver"]
+    assert world["working_dir"] == f"{CORE_DIR}/bin"
+
+
+def test_the_world_data_volume_never_takes_the_selinux_label() -> None:
+    """`:z` relabels a HOST folder; a named volume is Docker's own, so the label is only ever
+    on the binds -- the read-only source among them, as an option beside `ro`."""
+    base = yaml.safe_load(render_centurion_on("windows", bind_label=":z").base)
+    assert base["services"]["centurion-worldserver"]["volumes"] == [
+        f"./etc:{CORE_DIR}/etc:z",
+        f"world-data:{CORE_DIR}/data",
+        f"./data:{CORE_DIR}/data-src:ro,z",
+        f"./logs:{CORE_DIR}/logs:z",
+    ]
+
+
+def test_the_login_server_is_the_same_on_windows_and_linux() -> None:
+    windows = yaml.safe_load(render_centurion_on("windows").base)["services"]
+    linux = yaml.safe_load(render_centurion_on("linux").base)["services"]
+    assert windows["centurion-authserver"] == linux["centurion-authserver"]
+    assert windows["centurion-db"] == linux["centurion-db"]
+    assert "entrypoint" not in linux["centurion-worldserver"]
+
+
+def test_a_windows_trinitycore_entry_without_world_data_folders_keeps_the_bind() -> None:
+    """The volume is the catalog's to ask for (`world_data_dirs`): an entry that names no
+    folders renders on Windows exactly what it renders on Linux."""
+    assert CENTURION.install.native.trinitycore.world_data_dirs == ()  # type: ignore[union-attr]
+    server = Path("/home/user/wow-centurion-server")
+    texts = {
+        name: composegen.render(
+            CENTURION,
+            server,
+            templates_root=TEMPLATES,
+            db_password=TC_PASSWORD,
+            platform_id=lambda name=name: name,
+            install_id="0123456789ab",
+        ).base
+        for name in ("windows", "linux")
+    }
+    assert texts["windows"] == texts["linux"]
+    assert "world-data" not in texts["windows"]
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", *support_rendered.CMANGOS_GAMES])
+def test_no_other_game_gets_the_world_data_volume_on_windows(game: str) -> None:
+    """Decision 2: the TrinityCore family only. CMaNGOS binds `./data` the same way and keeps
+    it until measured; WotLK already keeps its client data in a volume of its own."""
+    entry = load_catalog().get(game)
+    plan = composegen.render(
+        entry,
+        Path(f"/home/user/{game}"),
+        templates_root=TEMPLATES,
+        db_password="pw-0123456789abcdef",
+        platform_id=lambda: "windows",
+        install_id="0123456789ab",
+    )
+    assert "world-data" not in plan.base
+    assert "data-src" not in plan.base
