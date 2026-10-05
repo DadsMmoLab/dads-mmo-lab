@@ -430,9 +430,10 @@ def check(key: ConfKey | None, value: str) -> None:
         return
     if key.type == "int":
         if WHOLE_NUMBER.fullmatch(value) is None:
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
             raise TuningError(
                 f"{key.key}: '{value}' is not a whole number; "
-                "type it with the digits 0 to 9 only, like 12 or -5"
+                f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
             )
         number = int(value)
         if not INT32_SMALLEST <= number <= INT32_LARGEST:

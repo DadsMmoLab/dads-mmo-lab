@@ -399,6 +399,7 @@ def test_an_int_key_refuses_any_spelling_but_plain_digits(tmp_path: Path, value:
     with pytest.raises(tuning.TuningError, match="^K: ") as refusal:
         tuning.write(path, {"BeastMaster.MinLevel": value}, spec=spec)
     assert "whole number" in str(refusal.value)
+    assert ("space" in str(refusal.value)) == (value != value.strip()), str(refusal.value)
     assert command_faults(str(refusal.value)) == [], str(refusal.value)
     assert text_faults(str(refusal.value)) == [], str(refusal.value)
     assert path.read_text(encoding="utf-8") == CLEAN

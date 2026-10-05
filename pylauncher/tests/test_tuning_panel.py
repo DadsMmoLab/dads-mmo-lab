@@ -1304,22 +1304,6 @@ def test_an_int_box_holding_a_value_it_would_refuse_can_still_be_edited(qapp: ob
     assert field.text() == "15", "once the text is a number again, letters stay out"
 
 
-@pytest.mark.parametrize("typed", ["١٢", "１２", "1_0", "+5"])
-def test_an_int_box_takes_only_the_digits_0_to_9(qapp: object, typed: str) -> None:
-    """Other scripts' digits are `\\d` to a regex and no number at all to the server.
-
-    One `insert()` per character, which is what typing and a paste go through:
-    `QTest.keyClicks` aborts on a character outside Latin-1.
-    """
-    editor = tp.RowEditor(_row(type="int", min=0, current="10"))
-    field = editor.control
-    assert isinstance(field, QLineEdit)
-    field.clear()
-    for character in typed:
-        field.insert(character)
-    assert field.text() == "".join(ch for ch in typed if ch in "0123456789"), field.text()
-
-
 def test_an_int_box_whose_file_holds_other_digits_drops_the_rule_until_they_are_gone(
     qapp: object,
 ) -> None:

@@ -2220,7 +2220,7 @@ def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Pa
         ("１２", "whole number"),
         ("١٢", "whole number"),
         ("1_000", "whole number"),
-        (" 5", "whole number"),
+        (" 5", "no spaces"),
         ("+5", "whole number"),
         ("0x10", "whole number"),
         ("2147483648", "2147483647"),
