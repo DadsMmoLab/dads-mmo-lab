@@ -9775,7 +9775,7 @@ class ControllerView(QWidget):
                 )
                 if not said_yes(answer):
                     return
-        elif not (chosen / clientdir.DATA_DIR).is_dir():
+        elif not play_client.data_folder(chosen).is_dir():  # `data/` too (T261)
             self._client_dir_refused(
                 f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
                 "Nothing was changed."

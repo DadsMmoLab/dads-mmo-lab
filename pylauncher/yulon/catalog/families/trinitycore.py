@@ -58,7 +58,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
-from yulon import client_packs, docker, platform, play_client, server_build_presses
+from yulon import client_names, client_packs, docker, platform, play_client, server_build_presses
 from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -602,6 +602,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         except play_client.PlayClientError as exc:
             raise InstallerError(_no_copy_beside(original, temp, exc)) from exc
+        self._spell_data_as_the_extractors_open_it(temp)
         left_out = self._drop_unlisted_archives(temp)
         self._spell_archives_as_the_extractors_open_them(temp)
         if left_out:
@@ -618,6 +619,36 @@ class TrinityCoreInstaller(CmangosInstaller):
                 )
             except client_packs.PackError as exc:
                 raise InstallerError(f"{exc} The map data was not extracted.") from exc
+
+    @staticmethod
+    def _spell_data_as_the_extractors_open_it(temp: Path) -> None:
+        """Rename the copy's `data/` folder to `Data/`, the one name the extractors read (T261).
+
+        `-i /client` and `-d /client/Data/` (map_extractor, vmap4extractor) open
+        `Data/` by exact name, and a client unpacked with `unzip -LL` has `data/`:
+        on a disk that tells cases apart the copy would give them nothing. The copy
+        is Yu'lon's, so the folder is renamed there; the player's client keeps its
+        name. A folder already named `Data` is left as it is, whatever else is
+        beside it, and so is a disk that ignores case, where `Data` reaches `data`.
+        A folder rename touches no file's flag, and `play_client.remove_folder()`
+        finds the player's file at its own case when the copy goes.
+        """
+        exact = temp / client_names.DATA_FOLDER
+        if os.path.lexists(exact):
+            return
+        found = client_names.find(temp, client_names.DATA_FOLDER)
+        if found is None or play_client._is_link(found) or not found.is_dir():
+            return
+        try:
+            os.rename(found, exact)
+        except OSError as exc:
+            remedy = _close_and_press(exc, "Install")
+            raise InstallerError(
+                f"{found} could not be renamed to {exact.name} in the temporary copy of your "
+                f"client ({exc}), so the map data was not extracted: the extractors read the "
+                f"client's {exact.name} folder only by that name. Your own client was not "
+                f"changed.{remedy}"
+            ) from exc
 
     def _drop_unlisted_archives(self, temp: Path) -> list[str]:
         """Move out of the copy's `Data/` every `.MPQ` that `client_archives` does not keep.

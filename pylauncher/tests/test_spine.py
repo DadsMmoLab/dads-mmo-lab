@@ -2615,11 +2615,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
     ("networking.py", "_realmlist_candidates"): (
-        "globs `Data/*/realmlist.wtf` in a client to find the file(s) to write: the first "
-        "for `write_client_realmlist()`, every one for T181's "
+        "lists a client's `Data/` (found whatever its case, T261) for its locale folders, "
+        "and finds `realmlist.wtf` in each the same way, to find the file(s) to write: the "
+        "first for `write_client_realmlist()`, every one for T181's "
         "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
-        "client. A glob matching nothing falls back to `Data/enUS/`, and each write is to a "
-        "named file"
+        "client. Finding none falls back to `Data/enUS/` under the names already on disk, "
+        "and each write is to a named file. A `Data/` that cannot be listed offers none"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "

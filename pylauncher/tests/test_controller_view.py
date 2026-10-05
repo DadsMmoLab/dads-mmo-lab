@@ -24,6 +24,7 @@ from PySide6.QtCore import QObject, Signal
 
 from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
+from tests.support_case import needs_case_sensitive_disk
 from yulon import apply as apply_module
 from yulon import (
     bot_population,
@@ -61,7 +62,7 @@ from yulon.apply import (
     DockerSql,
     required_prompts,
 )
-from yulon.catalog import composegen, native, upstream
+from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
@@ -9793,6 +9794,41 @@ def test_wotlk_requires_at_least_a_data_folder(qapp: object, tmp_path: Path) -> 
     # Mutation: drop the `elif not (chosen / clientdir.DATA_DIR).is_dir(): ...
     # return` branch in `change_client_dir()` -- `empty` above is written
     # instead of refused.
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize("game", ["wotlk", "tbc"])
+def test_a_client_whose_data_folder_is_lowercase_is_taken(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T261: refused as having no `Data/` folder while it held `data/`.
+
+    WotLK through the press's own minimal rule, TBC through `clientdir.validate()`;
+    the folder written is the one picked, and nothing in it is renamed.
+    """
+    entry = WOTLK if game == "wotlk" else TBC
+    real = tmp_path / "real-client"
+    data = real / "data"
+    (data / "enus").mkdir(parents=True)
+    for index in range(8):
+        (data / f"patch-{index}.mpq").write_bytes(b"MPQ")
+    (data / "expansion.mpq").write_bytes(b"MPQ")
+    (data / "enus" / "locale-enus.mpq").write_bytes(b"MPQ")
+    monkeypatch.setattr(preflight, "free_bytes", lambda _path: 100 * 2**30)
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: asked.append(a) or 0
+    )
+    view, fake = _client_dir_view(entry, tmp_path / "server", pick_client_dir=lambda *_: real)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert failures == []
+    assert fake.written == [real]
+    assert asked == [], "no warning to answer: the client is complete"
+    assert sorted(p.name for p in real.iterdir()) == ["data"]
 
 
 def test_the_row_says_the_folder_is_missing_rather_than_no_interface(

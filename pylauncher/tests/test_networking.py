@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
 from yulon.catalog import native
@@ -435,6 +436,86 @@ def test_a_realmlist_shared_through_a_hard_link_is_never_touched(tmp_path: Path)
 
     assert other.read_text(encoding="utf-8") == "set realmlist logon.example.com\n"
     assert other.stat().st_mode & 0o777 == 0o444
+
+
+# -- T261: a client whose Data folder is named in lower case ------------------
+
+
+def _lowercase_locale(folder: Path) -> Path:
+    """A realmlist where `unzip -LL` puts it: `data/enus/realmlist.wtf`."""
+    f = folder / "data" / "enus" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_text("set realmlist logon.example.com\nset patchlist x\n", encoding="utf-8")
+    return f
+
+
+def _tree(folder: Path) -> list[str]:
+    return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*"))
+
+
+@needs_case_sensitive_disk
+def test_the_players_realmlist_under_a_lowercase_data_folder_is_the_one_written(
+    tmp_path: Path,
+) -> None:
+    """T261: it wrote a second, fresh `Data/enUS/realmlist.wtf` beside `data/enus/`."""
+    f = _lowercase_locale(tmp_path / "client")
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5")
+
+    assert out == f
+    assert f.read_text(encoding="utf-8") == "set realmlist 10.0.0.5\nset patchlist x\n"
+    assert _tree(tmp_path / "client") == ["data", "data/enus", "data/enus/realmlist.wtf"]
+
+
+@needs_case_sensitive_disk
+def test_a_realmlist_named_in_another_case_is_written_where_it_is(tmp_path: Path) -> None:
+    f = tmp_path / "client" / "Data" / "enUS" / "Realmlist.WTF"
+    f.parent.mkdir(parents=True)
+    f.write_text("set realmlist logon.example.com\n", encoding="utf-8")
+
+    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5") == f
+    assert _tree(tmp_path / "client") == ["Data", "Data/enUS", "Data/enUS/Realmlist.WTF"]
+
+
+@needs_case_sensitive_disk
+def test_a_fresh_realmlist_goes_into_the_lowercase_data_folder_already_there(
+    tmp_path: Path,
+) -> None:
+    """None found: `Data/enUS/` is made only where no folder of that name is, in any case."""
+    for folder in (tmp_path / "client", tmp_path / "play"):
+        (folder / "data" / "enus").mkdir(parents=True)
+        (folder / "data" / "common.MPQ").write_bytes(b"MPQ")
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5")
+    (written,) = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert out == tmp_path / "client" / "data" / "enus" / "realmlist.wtf"
+    assert written == tmp_path / "play" / "data" / "enus" / "realmlist.wtf"
+    for folder in (tmp_path / "client", tmp_path / "play"):
+        assert _tree(folder) == [
+            "data",
+            "data/common.MPQ",
+            "data/enus",
+            "data/enus/realmlist.wtf",
+        ]
+
+
+@needs_case_sensitive_disk
+def test_every_realmlist_under_a_lowercase_data_folder_of_a_ready_to_play_client_is_written(
+    tmp_path: Path,
+) -> None:
+    us = _lowercase_locale(tmp_path / "play")
+    gb = tmp_path / "play" / "data" / "engb" / "realmlist.wtf"
+    gb.parent.mkdir()
+    gb.write_text("set realmlist logon.example.com\n", encoding="utf-8")
+    os.chmod(us, 0o444)
+
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert sorted(written) == sorted([us, gb])
+    for f in (us, gb):
+        assert f.read_text(encoding="utf-8").startswith("set realmlist 127.0.0.1\n")
+    assert not (tmp_path / "play" / "Data").exists()
 
 
 # --------------------------------------------------------- the macOS firewall

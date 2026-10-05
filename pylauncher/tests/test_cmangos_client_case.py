@@ -374,3 +374,36 @@ def test_an_extraction_closed_at_the_line_about_the_view_takes_the_view_with_it(
     assert (server_dir / extract.CASE_VIEW_DIR).is_dir()
     stage.close()
     assert not (server_dir / extract.CASE_VIEW_DIR).exists()
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize(("entry", "names"), GAMES)
+def test_a_client_whose_data_folder_is_lowercase_passes_the_check_and_extracts(
+    tmp_path: Path, entry: CatalogEntry, names: Mapping[str, str]
+) -> None:
+    """T261: the install check let such a client through only once `Data` was found by case.
+
+    The same real extraction as above, over a client whose `Data/` is `data/`: the
+    check the install runs first passes it, and every tool then opens every
+    archive under the name it asks for, while the client keeps its own names.
+    """
+    from yulon.catalog.families import clientdir
+
+    lower = {retail: "data/" + theirs.split("/", 1)[1] for retail, theirs in names.items()}
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = players_client(tmp_path, lower)
+    assert entry.install.native is not None and entry.install.native.cmangos is not None
+    checks = clientdir.validate(
+        client, entry.install.native.cmangos.client, free_bytes=lambda _p: 100 * 2**30
+    )
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    before = snapshot(client)
+    opens = Opens(Recorder(), lower)
+
+    list(engine(opens.rec, entry=entry, run_container=opens)._extract(context(server_dir, client)))
+
+    for (program, retail), body in opens.read.items():
+        assert body == (client / lower[retail]).read_bytes(), f"{program} opening {retail}"
+    assert len({program for program, _ in opens.read}) == 3
+    assert snapshot(client) == before, "the player's client: not a name, byte, date or mode"
