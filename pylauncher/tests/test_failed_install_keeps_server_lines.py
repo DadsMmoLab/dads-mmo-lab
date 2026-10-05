@@ -266,6 +266,18 @@ def test_a_log_that_cannot_be_read_is_said_and_the_other_is_still_shown(tmp_path
     assert "Save logs for support" in str(error), "the login server's lines were shown"
 
 
+def test_a_server_that_printed_nothing_is_said_so_and_promised_nothing(tmp_path: Path) -> None:
+    """An empty log is an answer, not a failed read: said as such, with no heading over nothing."""
+    tails = Tails({WORLD: "", AUTH: ""})
+    said, error = _fail(_engine(World("loop"), tails), tmp_path)
+    shown = _shown(said)
+
+    assert f"{WORLD} has printed nothing." in shown
+    assert f"The last lines {WORLD} printed:" not in shown
+    assert "could not be read" not in shown
+    assert "Save logs for support" not in str(error)
+
+
 def test_no_line_read_means_the_sentence_promises_none(tmp_path: Path) -> None:
     tails = Tails({WORLD: None, AUTH: None})
     _said, error = _fail(_engine(World("loop"), tails), tmp_path)
