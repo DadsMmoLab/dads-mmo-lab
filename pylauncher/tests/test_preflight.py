@@ -1798,10 +1798,10 @@ def test_a_wsl_distro_is_never_told_only_docker_desktop_can_be_its_docker() -> N
     # been booted with systemd as init system" and reads as a broken machine.
     assert "its own Docker Engine" in daemon
     assert "service docker start" in daemon
-    # It may NAME systemctl — it does, to steer away from it — but it must not
-    # be the command offered.
+    # It must not offer systemctl (T248: and no longer names it at all, since a
+    # command named inside a sentence is not one a player can copy).
     assert "sudo systemctl" not in daemon, "systemd is not what starts a daemon in a WSL distro"
-    assert "not `systemctl`" in daemon
+    assert "\nsudo service docker start\n" in daemon, "the command stands on its own line"
 
     compose = preflight._compose_remedy(_machine(WSL))
     assert "Docker Desktop" in compose
@@ -1871,3 +1871,58 @@ def test_facts_default_to_a_plain_linux_machine_rather_than_a_docker_desktop() -
     defect in a new coat — and every remedy in this module reads this field.
     """
     assert preflight.Facts(platform_id="linux", docker_ready=True).in_wsl is False
+
+
+# -- T219: a Windows Centurion keeps a second copy of its map data on Docker's disk ---------
+
+CENTURION = load_catalog().get("wow-centurion")
+
+
+def _centurion_extra() -> float:
+    block = CENTURION.install.native.trinitycore  # type: ignore[union-attr]
+    assert block is not None and block.world_data_gb is not None
+    return block.world_data_gb
+
+
+@pytest.mark.parametrize(
+    ("free_gb", "on_windows", "on_linux"), [(41, "refuse", "warn"), (61, "warn", "pass")]
+)
+def test_a_windows_centurion_needs_room_for_its_map_data_volume_on_dockers_disk(
+    free_gb: int, on_windows: str, on_linux: str
+) -> None:
+    """Free space just above the old floors (40 refuse, 60 warn) but under the floors plus the
+    volume is refused or warned on Windows; Linux, where the world reads `data/` itself, is
+    judged on the old floors."""
+    assert _centurion_extra() > 1
+    free = free_gb * GIB
+    windows = preflight.evaluate(
+        CENTURION, SERVER_DIR, facts(platform_id="windows", data_root_free=free)
+    )
+    assert verdict(windows, "Docker's disk") == on_windows
+    linux = preflight.evaluate(CENTURION, SERVER_DIR, facts(data_root_free=free))
+    assert verdict(linux, "Docker's disk") == on_linux
+
+
+def test_on_one_windows_drive_the_volume_adds_to_both_floors() -> None:
+    extra = _centurion_extra()
+    native = CENTURION.install.native
+    assert native is not None
+    refuse, _warn = native.floors_gb(same_volume=True)
+    free = int((refuse + extra / 2) * GIB)
+    one_drive = dict(data_root_free=free, server_dir_free=free, same_volume=True)
+    windows = preflight.evaluate(CENTURION, SERVER_DIR, facts(platform_id="windows", **one_drive))
+    assert verdict(windows, preflight.ONE_VOLUME_SPACE) == "refuse"
+    linux = preflight.evaluate(CENTURION, SERVER_DIR, facts(**one_drive))
+    assert verdict(linux, preflight.ONE_VOLUME_SPACE) != "refuse"
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc"])
+def test_no_other_game_on_windows_is_asked_for_the_volumes_room(game: str) -> None:
+    entry = load_catalog().get(game)
+    native = entry.install.native
+    assert native is not None
+    free = (native.min_data_root_gb + 1) * GIB
+    report = preflight.evaluate(
+        entry, SERVER_DIR, facts(platform_id="windows", data_root_free=int(free))
+    )
+    assert verdict(report, "Docker's disk") != "refuse"

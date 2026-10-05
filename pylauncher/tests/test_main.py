@@ -1928,7 +1928,7 @@ def test_a_failed_stop_asks_again_and_no_keeps_everything(
     view, _ = _removable_tab(window, monkeypatch, server_dir)
 
     def refuse() -> bool:
-        raise docker.DockerCommandError("Docker would not say which project owns tbc-mangosd")
+        raise docker.DockerRefusal("Docker would not say which project owns tbc-mangosd")
 
     view.services.controller.stop = refuse
 

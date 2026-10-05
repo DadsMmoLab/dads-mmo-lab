@@ -1052,6 +1052,8 @@ class PoolRebuild:
     monotonic: Callable[[], float] = time.monotonic
     timeout_s: float = WATCH_TIMEOUT_S
     poll_s: float = POLL_S
+    image_id: Callable[[str], str | None] = docker.image_id
+    """T225: the image a tag names, for the stopped-build check before anything is done."""
 
     def take_module_moved(self) -> botpool.Move | None:
         """Did the last update press move TortoiseBots, and is its restart owed? Answered once."""
@@ -1114,7 +1116,8 @@ class PoolRebuild:
         # key is written and armed for the first start after the repair. Asked first,
         # of the folder (`native.owed_start_refusal`, the one start guard a Tortoise
         # server has), so nothing is backed up, enrolled, written or stopped.
-        refused = native.owed_start_refusal(self.server_dir)
+        # T225: and a stopped rebuild's build that may have landed (`folder_start_refusal`).
+        refused = native.folder_start_refusal(self.server_dir, self.image_id)
         if refused is not None:
             raise PoolResetError(
                 f"{refused} The random bots were not rebuilt: nothing was written and the "
@@ -1502,6 +1505,7 @@ def for_entry(
     world_log: Callable[[], docker.RunLog],
     module_moved: botpool.ModuleMoved,
     world_started: Callable[[], str] = lambda: "",
+    image_id: Callable[[str], str | None] = docker.image_id,
 ) -> PoolRebuild | None:
     """The press for an install whose bots module is compiled in and whose bot conf is known.
 
@@ -1523,4 +1527,5 @@ def for_entry(
         world_log=world_log,
         module_moved=module_moved,
         world_started=world_started,
+        image_id=image_id,
     )

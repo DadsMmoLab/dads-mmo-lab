@@ -517,6 +517,12 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
                     labelled += 1
             elif _NAMED_VOLUME.match(line):
                 assert "{{BIND_LABEL}}" not in line, f"{entry.id} {name}: {item}"
+            elif _world_data_mounts(entry, item):
+                # T219: one `./data` bind on Linux (counted, like any bind line here), a
+                # named volume plus a read-only `./data` bind on Windows. Which carries
+                # the label is decided in composegen, so it is held to it by rendering.
+                if name != "build.yml.tmpl":
+                    labelled += 1
             else:
                 raise AssertionError(
                     f"{entry.id} {name}: {item} is neither a `./` host bind nor a named "
@@ -542,6 +548,44 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
     )
     assert len(rendered) == labelled + folders, (entry.id, len(rendered), labelled, folders)
     assert all(line.rstrip().endswith(":z") for line in rendered), (entry.id, rendered)
+
+
+def _world_data_mounts(entry: CatalogEntry, item: str) -> bool:
+    """Is this template item the TrinityCore `{{WORLD_DATA_MOUNTS}}` token (T219)?
+
+    When it is, every mount it renders -- on Linux and on Windows, with and without
+    `:z` -- is checked here: each `./` bind carries the label, a named volume never.
+    """
+    bare = item
+    for token in composegen.folder_confs(entry):
+        bare = bare.removesuffix("{{" + token + "}}")
+    if bare != "- {{WORLD_DATA_MOUNTS}}":
+        return False
+    password = None if entry.install.password.mode == "fixed" else TEST_PASSWORD
+    for platform_id in ("linux", "windows"):
+        for label in ("", ":z"):
+            base = composegen.render(
+                entry,
+                Path("/home/user/server"),
+                templates_root=TEMPLATES,
+                db_password=password,
+                bind_label=label,
+                platform_id=lambda platform_id=platform_id: platform_id,
+                install_id="0123456789ab",
+            ).base
+            mounts = [line.strip() for line in volume_entries(base)]
+            assert mounts, (entry.id, platform_id, label)
+            for mount in mounts:
+                if _HOST_BIND.match(mount):
+                    assert composegen.bind_label_of(f"      {mount}\n") == label, (
+                        entry.id,
+                        platform_id,
+                        mount,
+                    )
+                else:
+                    assert _NAMED_VOLUME.match(mount), (entry.id, platform_id, mount)
+                    assert not mount.endswith(("z", ",z")), (entry.id, platform_id, mount)
+    return True
 
 
 # -- the CMaNGOS family blocks ------------------------------------------------

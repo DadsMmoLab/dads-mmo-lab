@@ -40,7 +40,7 @@ def family_for(entry: CatalogEntry) -> type[StagedInstaller]:
     if native is None:
         raise InstallerError(
             f"{entry.name} is not set up for a native install — its catalog entry has no "
-            "`install.native` section. Nothing was started."
+            "native install section. Nothing was started."
         )
     try:
         return FAMILIES[native.family]
