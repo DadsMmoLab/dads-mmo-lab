@@ -1959,14 +1959,29 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield (
                 f"warning: the map data from before this press, in "
                 f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}). It takes "
-                "space and is never used again: delete that folder when the server is stopped."
+                "space; delete that folder when the server is stopped. Until it is gone, a "
+                f"later “{REEXTRACT_BUTTON}” may put it back if the map data in place no longer "
+                "matches the server's files by then."
             )
         if background:
-            mmaps.discard(server_dir, self.entry, install_id=ident)
-            yield (
-                "The pathfinding data made from the old map data was removed, and pathfinding "
-                "is off until it has been made again."
-            )
+            # After the new map data is in, so a failure here must not fail the press
+            # (scoped re-review of e457b29e): the map data is done; this is said.
+            try:
+                mmaps.discard(server_dir, self.entry, install_id=ident)
+            except mmaps.MmapsError as exc:
+                logger.warning(f"the old pathfinding data could not be removed: {exc}")
+                yield (
+                    "warning: the pathfinding data made from the old map data could not be "
+                    f"removed ({exc}), and the server may go on using it. Stop the server and "
+                    f"delete {data_dir / mmaps.MMAPS_DIR}; Yu'lon then switches pathfinding off, "
+                    "and “Make the pathfinding data” on the Server tab makes it again from the "
+                    "new map data."
+                )
+            else:
+                yield (
+                    "The pathfinding data made from the old map data was removed, and "
+                    "pathfinding is off until it has been made again."
+                )
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -2054,7 +2069,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             return (
                 f"The map data from before this press could not be put back ({exc}); it is kept "
                 f"in {data_dir / extract.PREVIOUS_DIR}, and pressing “{REEXTRACT_BUTTON}” again "
-                "puts it back first."
+                "settles it first: it keeps the new map data if that is whole, and puts this "
+                "back otherwise."
             )
         return REEXTRACT_PUT_BACK
 

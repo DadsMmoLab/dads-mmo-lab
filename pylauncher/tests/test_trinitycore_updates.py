@@ -1260,9 +1260,11 @@ def test_old_map_data_that_cannot_be_marked_superseded_is_kept_and_named(
     assert (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").read_bytes() == old_maps
     warning = next(line for line in said if line.startswith("warning: the map data from before"))
     assert str(data / extract.PREVIOUS_DIR) in warning
-    assert (
-        "delete that folder" in warning and trinitycore.REEXTRACT_BUTTON not in warning
-    ), "the press is no longer offered, so the warning cannot promise it (cold review)"
+    assert "delete that folder" in warning and "never used again" not in warning
+    assert warning.endswith(
+        f"a later “{trinitycore.REEXTRACT_BUTTON}” may put it back if the map data in place no "
+        "longer matches the server's files by then."
+    ), "the press is no longer offered; the warning says only what is true (re-reviews)"
     assert needs_reextract(box.server_dir, ENTRY) is None
     monkeypatch.undo()
 
@@ -1334,6 +1336,82 @@ def test_a_put_back_cut_short_that_left_whole_looking_data_is_still_finished(box
     assert {n: b for n, b in data_files(box).items() if n.startswith(folders)} == {
         n: b for n, b in old.items() if n.startswith(folders)
     }, "the old map data, whole: never the new run's folders under the old record"
+
+
+def test_the_real_put_back_restores_the_record_first_so_a_cut_short_one_is_finished(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review of e457b29e: `put_back()` itself, cut short at its SECOND name, after
+    a stage that had left whole map data. The record must already be back, so the next press
+    puts the rest back rather than taking the aside for a finished press's leftovers."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    press = box.engine().reextract(
+        InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+    )
+    for line in press:
+        if line.startswith("The map data the world server checks at start"):
+            break
+    assert box.engine()._map_data_whole(box.server_dir, data), "the new data in place is whole"
+    real = os.rename
+    calls: list[str] = []
+
+    def second_fails(src: object, dst: object) -> None:
+        calls.append(Path(str(src)).name)
+        if len(calls) == 2:
+            raise PermissionError(13, "Permission denied")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(extract.os, "rename", second_fails)
+    press.close()
+    monkeypatch.undo()
+    assert calls[0] == extract.EVIDENCE_FILE, "the record goes back first"
+    assert (data / extract.EVIDENCE_FILE).read_bytes() == old[extract.EVIDENCE_FILE]
+    assert not (data / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).exists()
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == visible(old), "the old map data, all of it, not the new"
+
+
+def test_a_put_back_that_fails_says_what_the_next_press_will_do(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review note 2: not "puts it back first" -- the next press keeps whichever map
+    data is whole, which may be the new."""
+
+    def fails(data_dir: Path) -> tuple[str, ...]:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(extract, "put_back", fails)
+    told = box.engine()._put_the_old_map_data_back(box.server_dir / "data")
+    assert "puts it back first" not in told
+    assert told.endswith(
+        f"pressing “{trinitycore.REEXTRACT_BUTTON}” again settles it first: it keeps the new map "
+        "data if that is whole, and puts this back otherwise."
+    )
+
+
+def test_pathfinding_data_that_cannot_be_removed_after_the_new_map_data_does_not_fail_the_press(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review note 3: the map data is in; the press says what to do and finishes."""
+    finished_with_pathfinding(box)
+    flagged(box)
+
+    def refuses(*args: object, **kwargs: object) -> None:
+        raise mmaps.MmapsError("data/mmaps could not be emptied (Permission denied)")
+
+    monkeypatch.setattr(mmaps, "discard", refuses)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    warning = next(line for line in said if line.startswith("warning: the pathfinding data"))
+    assert "could not be removed" in warning and "Make the pathfinding data" in warning
+    assert said[-1].endswith("Press Start on the Server tab to run the server on it.")
+    assert needs_reextract(box.server_dir, ENTRY) is None
 
 
 def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:
