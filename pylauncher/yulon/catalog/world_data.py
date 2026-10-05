@@ -41,7 +41,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, TrinityCoreData
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -131,7 +131,16 @@ def refresh(entry: CatalogEntry, server_dir: Path) -> str | None:
     """
     native = entry.install.native
     trinitycore = native.trinitycore if native is not None else None
-    if trinitycore is None or not trinitycore.world_data_dirs or not mirrored(server_dir):
+    if trinitycore is None:
+        return None
+    return refresh_for(trinitycore, server_dir)
+
+
+def refresh_for(trinitycore: TrinityCoreData, server_dir: Path) -> str | None:
+    """`refresh()` from the family block alone: the pathfinding job knows no entry, and it
+    writes the fingerprint again when a run turns `done` (Codex review), so a world that
+    Docker restarts before the next Start from Yu'lon copies the finished set."""
+    if not trinitycore.world_data_dirs or not mirrored(server_dir):
         return None
     path = server_dir / DATA_DIR / FINGERPRINT_FILE
     staged = path.with_name(path.name + ".yulon-new")

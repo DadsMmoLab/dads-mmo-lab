@@ -437,3 +437,26 @@ def test_a_repair_that_adds_nothing_about_the_volume_says_nothing_about_it(tc: M
     )
     linux = engine(tc, entry=MIRRORED).base_compose_check(InstallOptions(server_dir=tc.server_dir))
     assert linux.state == "stale" and linux.world_data_gb == 0
+
+
+def test_finished_pathfinding_writes_the_fingerprint_that_copies_it(tmp_path: Path) -> None:
+    """Codex review: the job's start wrote `mmaps -`, and the run then turned `done` with
+    pathfinding switched on -- so a world Docker restarted before the next Start from Yu'lon
+    would copy an empty `mmaps` under a conf that asks for it. The status that sees the run
+    finish writes the fingerprint again."""
+    from tests.test_mmaps_background import MIN_FILES
+
+    server_dir = tmp_path / "wow-centurion-server"
+    lay_server(server_dir)
+    lay_compose(server_dir, "windows")
+    fake = FakeMmapsDocker()
+    mmaps.start_mmaps(
+        server_dir, MIRRORED, runner=fake, platform_id=lambda: "windows", user_args=()
+    )
+    path = server_dir / "data" / FILE
+    assert "mmaps -" in path.read_text(encoding="utf-8").splitlines()
+    fake.finish(0, tiles=MIN_FILES)
+    assert mmaps.mmaps_status(server_dir, MIRRORED, runner=fake).state == "done"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert "mmaps -" not in lines
+    assert path.read_text(encoding="utf-8") == expected(server_dir, mmaps_done=True)

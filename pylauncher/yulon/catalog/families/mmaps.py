@@ -944,6 +944,9 @@ def _finished(
         resumable=False,
     )
     _write_record(job.server_dir, done)
+    # T219: the fingerprint said `-` for mmaps while the run made it; now the next start
+    # of a Windows world -- Yu'lon's or Docker's -- must copy the finished set.
+    world_data.refresh_for(job.block, job.server_dir)
     try:
         run.remove(job.container, timeout=CHANGE_TIMEOUT)
     except docker.DockerCommandError as exc:
@@ -971,6 +974,7 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
                 error=f"the finished pathfinding data is no longer all there, and {exc}",
                 pathfinding_on=_pathfinding_on(job),
             )
+        world_data.refresh_for(job.block, job.server_dir)  # T219: back to `-` with it
         logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:
