@@ -424,7 +424,7 @@ class AccountAdmin(Protocol):
 
     def delete_plan(self, account: str) -> object: ...
 
-    def delete_account(self, account: str, *, characters: tuple[str, ...]) -> object: ...
+    def delete_account(self, confirmed: useraccounts.DeletePlan) -> object: ...
 
 
 class BotDashboardSeam(Protocol):
@@ -12672,7 +12672,10 @@ class ControllerView(QWidget):
             self.account_report.setText(problem)
             self.action_failed.emit(problem)
             return
-        characters = tuple(getattr(plan, "characters", ()))
+        if not isinstance(plan, useraccounts.DeletePlan):
+            self._account_chosen(self.account_list.currentRow())
+            return
+        characters = plan.characters
         if not self._confirm(f"Delete {account}?", delete_account_question(account, characters)):
             self._account_chosen(self.account_list.currentRow())
             self.account_report.setText(f"{account} was not deleted.")
@@ -12680,7 +12683,7 @@ class ControllerView(QWidget):
         self.account_report.setText(f"Deleting {account}…")
         set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is deleting {account}.")
         self._run(
-            lambda: admin.delete_account(account, characters=characters),
+            lambda: admin.delete_account(plan),
             self._account_deleted,
             self._delete_failed,
         )
@@ -18356,6 +18359,10 @@ class ControllerView(QWidget):
         item = self.account_list.itemAt(pos)
         if item is None:
             return
+        # Every entry below acts on the chosen account, so the row clicked is
+        # made the chosen one: otherwise a right-click on CAROL could offer to
+        # delete whichever row was chosen before (Codex, T301).
+        self.account_list.setCurrentItem(item)
         username = str(item.data(Qt.ItemDataRole.UserRole) or "")
         menu = QMenu(self)
         copy_action = menu.addAction(f"Copy Username ({username})")

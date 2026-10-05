@@ -339,6 +339,11 @@ class DeletePlan:
     account: str
     characters: tuple[str, ...] = ()
     problem: str = ""
+    account_id: int = 0
+    """The row the person was asked about. The name and the characters are not
+    enough to know it is still that account: one deleted elsewhere and made
+    again under the same name can have the same characters, or none (Codex,
+    T301's two reviews)."""
 
 
 def deletion_plan(
@@ -396,12 +401,13 @@ def deletion_plan(
                 "so Yu'lon does not delete it."
             ),
         )
+    account_id = int(rows[0][0])
     table = ops.characters
     try:
         raw = sql.query(
             "characters",
             f"SELECT name, {table.online} FROM {schemas['characters']}.{table.table} "
-            f"WHERE {table.account} = {int(rows[0][0])} ORDER BY name;",
+            f"WHERE {table.account} = {account_id} ORDER BY name;",
         )
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         logger.warning(f"could not read {account}'s characters: {exc}")
@@ -432,12 +438,13 @@ def deletion_plan(
         return DeletePlan(
             account,
             characters=tuple(names),
+            account_id=account_id,
             problem=(
                 f"{who} {verb} in the game right now on {account}. Log {whom} out first, then "
                 "delete the account."
             ),
         )
-    return DeletePlan(account, characters=tuple(names))
+    return DeletePlan(account, characters=tuple(names), account_id=account_id)
 
 
 def delete_account(
@@ -644,21 +651,38 @@ class InstallAccounts:
             self._sql, self.entry, answer.marker, account=account, app_account=self.app_account
         )
 
-    def delete_account(self, account: str, *, characters: tuple[str, ...]) -> Outcome:
-        """Delete `account`, if it is still what the person was asked about.
+    def delete_account(self, confirmed: DeletePlan) -> Outcome:
+        """Delete the account the person confirmed, if it is still that account.
 
         Every rule is asked again here, right before the line is sent: the
         question may have been open for a minute, and somebody can log in, or
-        make a character, in that minute. `characters` is what they were told
-        would go; if the account has others now, nothing is deleted.
+        make a character, in that minute. `confirmed` is the plan they were
+        shown; if the row is another one now, or has other characters, nothing
+        is deleted.
+
+        What is left is the moment between this read and the server running
+        the command, and nothing on any of the five trees closes it: `account
+        delete` takes a name, checks nothing of ours, and kicks whoever is on
+        the account (`AccountMgr::DeleteAccount`). So a login inside that
+        moment is kicked and its characters -- the ones the person was asked
+        about -- are deleted with the account.
         """
+        account = confirmed.account
         plan = self.delete_plan(account)
         if plan.problem:
             return Outcome(False, problem=plan.problem)
         channel = self._channel()
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
-        if plan.characters != tuple(characters):
+        if plan.account_id != confirmed.account_id:
+            return Outcome(
+                False,
+                problem=(
+                    f"{account} is not the account you were asked about: it was deleted and made "
+                    "again while you were being asked. Nothing was deleted."
+                ),
+            )
+        if plan.characters != tuple(confirmed.characters):
             now = _names(plan.characters) if plan.characters else "none"
             return Outcome(
                 False,

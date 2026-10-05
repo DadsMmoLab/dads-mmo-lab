@@ -480,13 +480,18 @@ def test_an_account_with_somebody_in_the_game_is_refused_before_asking(
 # -- the rules, where the command is sent ------------------------------------
 
 
+def _confirmed(account: str, *characters: str, account_id: int = 0) -> useraccounts.DeletePlan:
+    """A plan as the person was shown it, for a call that skips the question."""
+    return useraccounts.DeletePlan(account, characters=characters, account_id=account_id)
+
+
 def _characters_read(sql: _Sql) -> list[str]:
     return [s for db, s in sql.asked if f"{sql.chars}.{sql.table}" in s]
 
 
 def test_the_apps_own_account_is_refused_before_anything_is_read(wotlk: _Server) -> None:
     plan = wotlk.admin.delete_plan(APP_ACCOUNT)
-    outcome = wotlk.admin.delete_account(APP_ACCOUNT, characters=())
+    outcome = wotlk.admin.delete_account(_confirmed(APP_ACCOUNT))
 
     assert "reserves for its own command channel" in plan.problem
     assert outcome.done is False
@@ -498,7 +503,7 @@ def test_the_apps_own_account_is_refused_before_anything_is_read(wotlk: _Server)
 def test_another_installs_channel_account_is_refused_too(wotlk: _Server) -> None:
     wotlk.sql.account(41, "YULON_FFFFFFFF")
 
-    outcome = wotlk.admin.delete_account("YULON_FFFFFFFF", characters=())
+    outcome = wotlk.admin.delete_account(_confirmed("YULON_FFFFFFFF", account_id=41))
 
     assert "another install's command channel" in outcome.problem
     assert wotlk.wire.commands == []
@@ -510,7 +515,7 @@ def test_a_bot_account_by_this_games_prefix_is_refused(server: _Server) -> None:
     bot = f"{ops.bots.account_prefix.upper()}1"
 
     plan = server.admin.delete_plan(bot)
-    outcome = server.admin.delete_account(bot, characters=("Botty",))
+    outcome = server.admin.delete_account(_confirmed(bot, "Botty", account_id=20))
 
     assert plan.problem.startswith(f"{bot} belongs to this server's bots"), plan.problem
     assert outcome.problem == plan.problem
@@ -526,14 +531,14 @@ def test_a_bot_account_the_module_registered_is_refused_whatever_its_name(
     wotlk.sql.account(21, "ZED")
     wotlk.sql.register_bot(21)
 
-    outcome = wotlk.admin.delete_account("ZED", characters=())
+    outcome = wotlk.admin.delete_account(_confirmed("ZED", account_id=21))
 
     assert outcome.problem.startswith("ZED belongs to this server's bots"), outcome.problem
     assert wotlk.wire.commands == []
 
 
 def test_the_auction_house_account_is_refused(wotlk: _Server) -> None:
-    outcome = wotlk.admin.delete_account("AHBOT", characters=("Auctioneer",))
+    outcome = wotlk.admin.delete_account(_confirmed("AHBOT", "Auctioneer", account_id=30))
 
     assert "the auction house runs as" in outcome.problem
     assert wotlk.wire.commands == []
@@ -542,7 +547,7 @@ def test_the_auction_house_account_is_refused(wotlk: _Server) -> None:
 
 def test_somebody_online_is_refused_where_the_command_is_sent(wotlk: _Server) -> None:
     """Not only before the question: they may have logged in while it was open."""
-    outcome = wotlk.admin.delete_account("BOB", characters=("Borin", "Bramble"))
+    outcome = wotlk.admin.delete_account(_confirmed("BOB", "Borin", "Bramble", account_id=9))
 
     assert outcome.done is False
     assert "Borin is in the game right now" in outcome.problem
@@ -562,7 +567,7 @@ def test_a_character_made_while_the_question_was_open_stops_the_delete(wotlk: _S
     assert plan.characters == ("Ganaar", "Guglu")
     wotlk.sql.conn.execute(f"INSERT INTO {wotlk.sql.chars}.characters VALUES (1, 7, 'Newbie', 0)")
 
-    outcome = wotlk.admin.delete_account("ALICE", characters=plan.characters)
+    outcome = wotlk.admin.delete_account(plan)
 
     assert outcome.done is False
     assert "Newbie" in outcome.problem
@@ -570,7 +575,7 @@ def test_a_character_made_while_the_question_was_open_stops_the_delete(wotlk: _S
 
 
 def test_an_account_that_is_not_there_is_said_so(wotlk: _Server) -> None:
-    outcome = wotlk.admin.delete_account("NOBODY", characters=())
+    outcome = wotlk.admin.delete_account(_confirmed("NOBODY", account_id=1))
 
     assert outcome.problem == (
         "There is no account named NOBODY on this server now. Press Refresh the list."
@@ -579,7 +584,7 @@ def test_an_account_that_is_not_there_is_said_so(wotlk: _Server) -> None:
 
 
 def test_a_name_the_server_would_refuse_is_refused_before_any_read(wotlk: _Server) -> None:
-    outcome = wotlk.admin.delete_account("AL ICE", characters=())
+    outcome = wotlk.admin.delete_account(_confirmed("AL ICE", account_id=7))
 
     assert outcome.done is False
     assert wotlk.sql.asked == []
@@ -598,7 +603,7 @@ def test_no_channel_says_where_to_turn_it_on(wotlk: _Server, tmp_path: Path) -> 
     plan = admin.delete_plan("ALICE")
 
     assert "Server tab" in plan.problem
-    assert "Server tab" in admin.delete_account("ALICE", characters=plan.characters).problem
+    assert "Server tab" in admin.delete_account(_confirmed("ALICE", account_id=7)).problem
 
 
 def test_a_characters_read_that_fails_refuses_rather_than_asking_about_nobody(
@@ -615,3 +620,49 @@ def test_a_characters_read_that_fails_refuses_rather_than_asking_about_nobody(
 
     assert plan.problem.startswith("Could not read ALICE's characters"), plan.problem
     assert "did not answer" in plan.problem
+
+
+def test_an_account_made_again_under_the_same_name_is_not_the_one_confirmed(
+    wotlk: _Server,
+) -> None:
+    """Codex, both reviews: the name and the characters are not the account.
+
+    CAROL (no characters) is confirmed, then deleted elsewhere and made again
+    under the same name, still with no characters. Only the id tells them apart.
+    """
+    plan = wotlk.admin.delete_plan("CAROL")
+    assert plan.problem == "" and plan.account_id == 11
+    wotlk.sql.remove("CAROL")
+    wotlk.sql.account(71, "CAROL")
+
+    outcome = wotlk.admin.delete_account(plan)
+
+    assert outcome.done is False
+    assert outcome.problem.startswith("CAROL is not the account you were asked about"), outcome
+    assert wotlk.wire.commands == []
+
+
+def test_the_right_click_delete_acts_on_the_row_clicked_not_the_one_chosen_before(
+    wotlk: _Server, tmp_path: Path, asked: _Asked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex: the menu entry read `currentItem()`, which need not be the clicked row."""
+    view, _ = _tab(wotlk, tmp_path)
+    _choose(view, "ALICE")
+    carol = view.account_list.item(_listed(view).index("CAROL"))
+    offered: list[str] = []
+
+    class _Menu(controller_view_module.QMenu):
+        """`QMenu.exec` is a Shiboken slot nothing can patch; a subclass's is Python."""
+
+        def exec(self, *_args: object) -> None:  # type: ignore[override]
+            for action in self.actions():
+                offered.append(action.text())
+                if action.text() == controller_view_module.DELETE_ACCOUNT_LABEL:
+                    action.trigger()
+
+    monkeypatch.setattr(controller_view_module, "QMenu", _Menu)
+    view._show_account_context_menu(view.account_list.visualItemRect(carol).center())
+
+    assert controller_view_module.DELETE_ACCOUNT_LABEL in offered
+    assert len(asked.questions) == 1 and "CAROL" in asked.questions[0][0]
+    assert wotlk.wire.commands == ["account delete CAROL"]
