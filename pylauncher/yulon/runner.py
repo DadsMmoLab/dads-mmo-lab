@@ -26,8 +26,9 @@ import threading
 import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
+from typing import TypeVar
 
-from yulon import ansi
+from yulon import ansi, winjob
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -63,10 +64,12 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on", "ended")
+    __slots__ = ("proc", "started_on", "ended", "job")
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
+        self.job: winjob.Job | None = None
+        """The Windows Job object `proc` was started in, if it joined one (T299)."""
         self.started_on: int | None = None
         self.ended = False
         """Set by `end_streams_started_on()` BEFORE it ends `proc` (T240): the exit is a Stop's."""
@@ -110,8 +113,14 @@ def _register(generator: Generator[str, None, None], child: _Child) -> None:
         _LIVE_STREAMS[generator] = child
 
 
-def _end_child(proc: _AnyPopen) -> None:
+def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
     """End `proc` if it is still running: on Windows its tree first, then terminate, then kill.
+
+    **The tree is ended by `proc`'s Job object when it has one (T299)**, and by
+    taskkill only when it has none or the job could not be ended. The job holds
+    every process the child started, however late and whatever became of its
+    parent; taskkill reaches what is still linked by parent pid at that moment.
+    See `yulon.winjob` and `_end_tree`.
 
     **On Windows `terminate()` ends one process, and a Stop has to end a tree
     (T246).** Measured on yulon-win11 2026-10-05: a rebuild's child was
@@ -130,7 +139,7 @@ def _end_child(proc: _AnyPopen) -> None:
     macOS need a process group.
     """
     if proc.poll() is None:
-        if sys.platform == "win32":
+        if sys.platform == "win32" and (job is None or not job.end()):
             _end_tree(proc)
         proc.terminate()
         try:
@@ -148,21 +157,15 @@ def _taskkill() -> str:
 def _end_tree(proc: _AnyPopen) -> None:
     """`taskkill /T /F` the tree under `proc`, bounded, never raising (T246; see `_end_child`).
 
-    **Why taskkill and not a Job object**, which is the sturdier tool in
-    principle (every descendant is in the job however late it was started, and
-    the job still holds orphans whose parent has died):
-
-    * taskkill is what the live probe PROVED ends the build. A job object would
-      be new ctypes structure layouts that no test on the Linux CI can run.
-    * a job has to be assigned after `Popen` returns, so docker.exe could have
-      started its plugin before it joined: the race just moves to the start.
-    * a job holds a descendant for good, whatever it is. Anything a streamed
-      command starts to outlive it (a helper, or Docker Desktop itself) would
-      be ended by the next Stop or by closing the job; taskkill only reaches
-      what is still a descendant of a live docker.exe at the moment of Stop.
+    **Since T299 this is the fallback**: a child started in a Job object is
+    ended by `TerminateJobObject` instead, and this runs only for a child that
+    has no job (none could be made, or it could not join) or whose job could
+    not be ended. `yulon.winjob` says how the job closes the gaps below: the
+    child is created suspended and joins before it runs, so the race moves
+    nowhere.
 
     What taskkill cannot reach, and why each is narrow (challenged by Codex's
-    adversarial review, 2026-10-05; the Job object is T299):
+    adversarial review, 2026-10-05):
 
     * a descendant whose parent had already exited. docker.exe does not exit
       before its plugin does: docker/cli's `tryPluginRun` blocks in
@@ -269,7 +272,7 @@ def _close_abandoned_streams() -> None:
             # `next()`; one whose child is still running does not.
             logger.debug(f"an abandoned stream() is being run by another thread at exit: {exc}")
             if child.proc is not None:
-                _end_child(child.proc)
+                _end_child(child.proc, child.job)
         except BaseException as exc:  # noqa: BLE001 - exiting; nothing may escape
             # The generator's own `finally` failed. Logged rather than swallowed
             # silently, but never re-raised: an exception here would be reported
@@ -370,7 +373,10 @@ def end_streams_started_on(ident: int) -> int:
         # never see this child's exit before it can see why (T240).
         child.ended = True
         threading.Thread(
-            target=_end_child, args=(proc,), daemon=True, name=f"yulon-end-stream-{proc.pid}"
+            target=_end_child,
+            args=(proc, child.job),
+            daemon=True,
+            name=f"yulon-end-stream-{proc.pid}",
         ).start()
     if children:
         logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
@@ -478,6 +484,45 @@ def child_env(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
     return base
 
 
+_Popen = TypeVar("_Popen", subprocess.Popen[str], subprocess.Popen[bytes])
+
+
+def _spawn(start: Callable[[int], _Popen]) -> tuple[_Popen, winjob.Job | None]:
+    """Start a child through `start(creationflags)`; on Windows, inside a Job object (T299).
+
+    The child is created suspended, joins the job, and only then runs, so
+    nothing it starts can be outside the job (see `yulon.winjob`). No job — none
+    could be made, or the child could not join — leaves it as before, ended by
+    taskkill. A child the job cannot resume would never run: it is killed, and
+    the `OSError` goes to the caller as a command that could not start. Off
+    Windows this is `start(creationflags())`.
+    """
+    job = winjob.create() if sys.platform == "win32" else None
+    flags = creationflags() | (winjob.CREATE_SUSPENDED if job is not None else 0)
+    try:
+        proc = start(flags)
+    except BaseException:
+        if job is not None:
+            job.close()
+        raise
+    if job is None:
+        return proc, None
+    try:
+        joined = job.start(proc.pid)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        job.close()
+        raise
+    if not joined:
+        job.close()
+        return proc, None
+    return proc, job
+
+
 def stream(
     command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
 ) -> Generator[str, None, None]:
@@ -549,17 +594,20 @@ def _stream_lines(
 ) -> Generator[str, None, None]:
     """`stream()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream() called: command={command} cwd={cwd} merge_stderr={merge_stderr}")
-    proc = subprocess.Popen(
-        command,
-        cwd=_cwd_arg(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=child_env(),
-        creationflags=creationflags(),
+    proc, job = _spawn(
+        lambda flags: subprocess.Popen(
+            command,
+            cwd=_cwd_arg(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env(),
+            creationflags=flags,
+        )
     )
+    child.job = job
     child.proc = proc
     child.started_on = threading.get_ident()
     stderr_lines: list[str] = []
@@ -593,7 +641,11 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _end_child(proc)
+        # The job is closed only after it has been asked to end the tree: a
+        # closed job's handle can no longer end anything (T299).
+        _end_child(proc, job)
+        if job is not None:
+            job.close()
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -700,14 +752,17 @@ def _progress_lines(
     # translation, which rewrites every `\r` as `\n` before this function can
     # see it — and then the carriage returns this exists for are gone, silently,
     # with the split still looking right.
-    proc = subprocess.Popen(
-        command,
-        cwd=_cwd_arg(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=child_env(env),
-        creationflags=creationflags(),
+    proc, job = _spawn(
+        lambda flags: subprocess.Popen(
+            command,
+            cwd=_cwd_arg(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_env(env),
+            creationflags=flags,
+        )
     )
+    child.job = job
     child.proc = proc
     child.started_on = threading.get_ident()
     fragments: queue.Queue[str | None] = queue.Queue()
@@ -757,7 +812,9 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _end_child(proc)
+        _end_child(proc, job)
+        if job is not None:
+            job.close()
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):
@@ -1039,6 +1096,7 @@ def interact(
     logger.debug(f"interact() called: command={command} cwd={cwd} terminal={terminal}")
     on_pty = terminal and pty_supported()
     master = slave = -1
+    job: winjob.Job | None = None
     if on_pty:
         master, slave = open_pty()
     try:
@@ -1055,15 +1113,17 @@ def interact(
                 start_new_session=True,  # see _CLAIM_THE_TERMINAL
             )
         else:
-            proc = subprocess.Popen(
-                command,
-                cwd=_cwd_arg(cwd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=child_env(env),
-                bufsize=0,
-                creationflags=creationflags(),
+            proc, job = _spawn(
+                lambda flags: subprocess.Popen(
+                    command,
+                    cwd=_cwd_arg(cwd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=child_env(env),
+                    bufsize=0,
+                    creationflags=flags,
+                )
             )
     except BaseException:
         for fd in (master, slave):
@@ -1295,7 +1355,9 @@ def interact(
     finally:
         # `stream()`'s ending, so a cancelled child's whole tree ends on Windows
         # too (T246); until then this was a copy of it that ended the root alone.
-        _end_child(proc)
+        _end_child(proc, job)
+        if job is not None:
+            job.close()
         reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for handle in (proc.stdin, proc.stdout):
             if handle is not None:
