@@ -226,26 +226,29 @@ def test_a_stop_before_the_first_tool_runs_no_tool(tmp_path: Path) -> None:
     assert extract.EXTRACT_CANCEL_NOTE in str(stopped.value)
 
 
+class LeftRunning(test_extract.Runner):
+    """A tool Stop ended whose container Docker would not remove."""
+
+    def __call__(
+        self,
+        spec: docker.ContainerRun,
+        *,
+        sink: docker.OutputSink,
+        cancel: threading.Event | None,
+    ) -> docker.AttachedRun:
+        self.specs.append(spec)
+        if cancel is not None:
+            cancel.set()
+        return docker.AttachedRun(
+            docker.CANCELLED_RETURNCODE, (), container_left="yulon-extract-0123456789ab"
+        )
+
+
 def test_a_stopped_tool_whose_container_was_not_removed_is_a_refusal_true_after_stop(
     tmp_path: Path,
 ) -> None:
     """Codex adversarial review: the caller must not treat it as a clean Stop -- a stopped
     Re-extract would put the old map data back under a tool still writing into `data/`."""
-
-    class LeftRunning(test_extract.Runner):
-        def __call__(
-            self,
-            spec: docker.ContainerRun,
-            *,
-            sink: docker.OutputSink,
-            cancel: threading.Event | None,
-        ) -> docker.AttachedRun:
-            self.specs.append(spec)
-            if cancel is not None:
-                cancel.set()
-            return docker.AttachedRun(
-                docker.CANCELLED_RETURNCODE, (), container_left="yulon-extract-0123456789ab"
-            )
 
     runner = LeftRunning(test_extract.FULL)
 
@@ -257,3 +260,16 @@ def test_a_stopped_tool_whose_container_was_not_removed_is_a_refusal_true_after_
     assert "yulon-extract-0123456789ab" in said and str(tmp_path / "server" / "data") in said
     assert "docker rm -f yulon-extract-0123456789ab" in said
     assert runner.names() == ["ad"], "nothing after it"
+
+
+def test_a_stopped_map_generation_whose_container_was_not_removed_says_so_too(
+    tmp_path: Path,
+) -> None:
+    test_extract.run(test_extract.PLAN, test_extract.Runner(test_extract.FULL), tmp_path)
+
+    with pytest.raises(extract.ContainerLeftRunning) as left:
+        test_extract.mmaps(
+            test_extract.MMAPS, LeftRunning(test_extract.MMAPS_WRITES), tmp_path, cancel=None
+        )
+
+    assert str(left.value).startswith("map generation was stopped, but its container")
