@@ -8,6 +8,8 @@ is a file under `containers/`, the CLI only watches it, and killing the CLI
 leaves the file exactly where the daemon would leave the container. `rm -f
 <name>` removes it, and the CLI watching it then exits 137; with a file named
 `refuse-rm` in the state folder, `rm -f` is refused as a daemon would refuse it.
+With `late-create`, `run` makes no container at all until the test calls
+`finish_late_create()`: the daemon that finishes a create after the Stop.
 
 Its argv0 is `fake-docker`, so `conftest`'s real-daemon guard lets it run: it
 is a script in the test's own folder and talks to nothing.
@@ -19,7 +21,7 @@ import sys
 from pathlib import Path
 
 FAKE_DOCKER = """#!{python}
-import os, pathlib, subprocess, sys, time
+import os, pathlib, sys, time
 
 state = pathlib.Path({state!r})
 args = sys.argv[1:]
@@ -29,36 +31,9 @@ if args[:1] == ["run"]:
     name = args[args.index("--name") + 1] if "--name" in args else "unnamed"
     box = state / "containers" / name
     if (state / "late-create").exists():
-        # The daemon has the create request but not the name yet. It finishes
-        # the create only after the CLI is gone AND the first `rm -f` has asked
-        # for the name, which is the exact window a single `rm -f` misses.
-        daemon = (
-            "import os, pathlib, time\\n"
-            f"state = pathlib.Path({{str(state)!r}}); cli = {{os.getpid()}}\\n"
-            "deadline = time.monotonic() + 120\\n"
-            "def alive():\\n"
-            "    try:\\n"
-            "        os.kill(cli, 0)\\n"
-            "    except OSError:\\n"
-            "        return False\\n"
-            "    return True\\n"
-            f"wanted = 'rm -f {{name}}'\\n"
-            "while time.monotonic() < deadline:\\n"
-            "    log = (state / 'calls.log').read_text(encoding='utf-8')\\n"
-            "    asked = wanted in log.splitlines()\\n"
-            "    if not alive() and asked:\\n"
-            f"        made = state / 'containers' / {{name!r}}\\n"
-            "        made.write_text('created', encoding='utf-8')\\n"
-            "        break\\n"
-            "    time.sleep(0.01)\\n"
-        )
-        subprocess.Popen(
-            [sys.executable, "-c", daemon],
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # The daemon has the create request but not the name yet, so there is
+        # no container for a Stop to find. The TEST finishes the create, with
+        # `finish_late_create()`, at the moment it chooses (T305).
         sys.stderr.write("Unable to find image locally; pulling\\n")
         sys.stderr.flush()
         time.sleep({lasts})
@@ -129,3 +104,16 @@ def end_fake_containers(state: Path) -> None:
     """Remove every container left, which ends its CLI: an orphan must not outlive the test."""
     for box in (state / "containers").iterdir():
         box.unlink(missing_ok=True)
+
+
+def finish_late_create(state: Path) -> str:
+    """With `late-create`: the daemon finishes the create now. Returns the container's name.
+
+    Called by the test, not by a process of its own: the daemon this stands in
+    for used to be a second process polling `calls.log`, and it raced the very
+    `rm -f` it waited for (T305).
+    """
+    (run,) = [call.split() for call in calls(state) if call.startswith("run ")]
+    name = run[run.index("--name") + 1]
+    (state / "containers" / name).write_text("created", encoding="utf-8")
+    return name

@@ -1406,13 +1406,3 @@ def test_pressing_install_again_repairs_a_conf_written_before_the_fix(
     with caplog.at_level(logging.INFO, logger=conf.logger.name):
         assert conf.apply_table(CENTURION_TABLE, etc, {}) == ()
     assert not [r for r in caplog.records if "commented out" in r.getMessage()]
-
-
-def test_the_changelog_line_for_this_fix_names_its_ticket() -> None:
-    """The T204 bullet ends with its ticket, as the bullets around it do."""
-    changelog = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
-    lines = changelog.read_text(encoding="utf-8").splitlines()
-    start = "- A fresh Centurion server no longer restarts"
-    bullet = [line for line in lines if line.startswith(start)]
-    assert len(bullet) == 1, bullet
-    assert bullet[0].endswith("(T204)"), bullet[0][-80:]

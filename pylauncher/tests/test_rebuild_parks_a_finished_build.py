@@ -26,12 +26,13 @@ and therefore their "removed" path.
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tests.support_native import ENTRY, Recorder, engine
+from tests.support_native import ENTRY, FakeSnapshot, Recorder, engine
 from tests.test_rebuild import (  # noqa: F401 - `cmangos_gate` is a fixture
     CM_ENTRY,
     _answers,
@@ -48,7 +49,7 @@ from tests.test_rebuild import (  # noqa: F401 - `cmangos_gate` is a fixture
 from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
 from tests.test_stop_as_the_build_finishes import _StopAfterTagging
 from yulon import docker, server_build_presses
-from yulon.catalog import build_context, composegen, native
+from yulon.catalog import build_context, composegen, native, snapshot
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller_wow_wotlk import maintenance
 
@@ -741,46 +742,129 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
     assert native.read_parked_build(server_dir) is not None
 
 
-# -- WotLK in normal use: the upstream .dockerignore admits backups and .git ---
+# -- WotLK in normal use: only what its Dockerfile reads counts (T230) --------
 
-UPSTREAM_DOCKERIGNORE = (
-    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e" / "dockerignore"
-)
-"""The root `.dockerignore` of mod-playerbots/azerothcore-wotlk, byte for byte, at commit
-7f12e89ee5f467a50e62eba1d525eac7dc953d03 (the catalog's pin for wow-wotlk, read 2026-10-05).
-WotLK renders none of its own, so this is what Docker filters the server folder with."""
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e"
+"""mod-playerbots/azerothcore-wotlk at commit 7f12e89ee5f467a50e62eba1d525eac7dc953d03 (the
+catalog's pin for wow-wotlk, read 2026-10-05), byte for byte: the root `.dockerignore`,
+`apps/docker/Dockerfile` and `src/cmake/genrev.cmake`. WotLK renders none of its own, so these
+are what Docker builds the server folder with."""
+UPSTREAM_DOCKERIGNORE = WOTLK_DATA / "dockerignore"
+HEAD_COMMIT = "c" * 40
 
 
-def test_on_wotlk_a_new_backup_in_the_server_folder_changes_the_fingerprint(
-    tmp_path: Path,
-) -> None:
-    """Cold review, lead's v1 decision: fail-safe, and pinned so the behaviour is visible.
+def a_wotlk_install(rec: Recorder, tmp_path: Path) -> Path:
+    """`a_finished_install()` with upstream's recipe files, a source file and a detached HEAD."""
+    server_dir = a_finished_install(rec, tmp_path)
+    for name, data in (
+        (RECIPE, "Dockerfile"),
+        (".dockerignore", "dockerignore"),
+        ("src/cmake/genrev.cmake", "genrev.cmake"),
+    ):
+        target = server_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((WOTLK_DATA / data).read_bytes())
+    source = server_dir / SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("void World::Update() {}\n", encoding="utf-8")
+    (server_dir / ".git").mkdir(exist_ok=True)
+    (server_dir / ".git" / "HEAD").write_text(f"{HEAD_COMMIT}\n", encoding="utf-8")
+    assert build_context.fingerprint(server_dir, refs=_refs(server_dir)) is not None
+    return server_dir
 
-    Upstream's `.dockerignore` does not leave out `.git`, a module's own `.git`
-    or the Maintenance backups (`maintenance.backups_dir()`, which T217's update
-    copy shares), so each changes the fingerprint and a kept build is not used
-    after it -- though the Dockerfile copies none of them. A follow-up decides
-    what WotLK may leave out; this records what v1 does.
-    """
-    rec = Recorder(images=True)
-    server_dir = a_parkable_install(rec, tmp_path)
-    (server_dir / ".dockerignore").write_bytes(UPSTREAM_DOCKERIGNORE.read_bytes())
-    assert build_context.parse_dockerignore(UPSTREAM_DOCKERIGNORE.read_text("utf-8")) is not None
-    refs = _refs(server_dir)
-    before = build_context.fingerprint(server_dir, refs=refs)
-    assert before is not None, "upstream's .dockerignore must parse, or nothing is ever kept"
+
+def _a_backup_a_fetch_and_a_settings_save(server_dir: Path) -> None:
+    """What a player does between a kept build and the next press, none of which is compiled."""
     backups = maintenance.backups_dir(server_dir)
     backups.mkdir(parents=True, exist_ok=True)
     (backups / "20261005_010000_acore_characters.sql").write_text("-- dump\n", encoding="utf-8")
-    after_backup = build_context.fingerprint(server_dir, refs=refs)
-    assert after_backup is not None and after_backup != before
-    (server_dir / ".git" / "FETCH_HEAD").write_text("c1a9220 branch\n", encoding="utf-8")
-    assert build_context.fingerprint(server_dir, refs=refs) not in (before, after_backup)
-    # And the excluded tree really is left out: a build folder changes nothing.
-    again = build_context.fingerprint(server_dir, refs=refs)
-    (server_dir / "build").mkdir()
-    (server_dir / "build" / "CMakeCache.txt").write_text("x\n", encoding="utf-8")
-    assert build_context.fingerprint(server_dir, refs=refs) == again
+    copy = f"20261005_020000_{snapshot.SNAPSHOT_LABEL}_acore_world.sql"
+    (backups / copy).write_text("-- the update's copy\n", encoding="utf-8")
+    (server_dir / ".git" / "FETCH_HEAD").write_text(
+        f"{'d' * 40}\t\tbranch 'Playerbot'\n", encoding="utf-8"
+    )
+    override = server_dir / composegen.OVERRIDE_FILE
+    override.write_text(
+        override.read_text(encoding="utf-8") + "# saved from the Settings tab\n", encoding="utf-8"
+    )
+
+
+def test_on_wotlk_a_backup_a_fetch_and_a_settings_save_keep_the_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """T230: the Dockerfile copies none of them, so none of them removes a kept build."""
+    rec = Recorder(images=True)
+    server_dir = a_wotlk_install(rec, tmp_path)
+    assert build_context.parse_dockerignore(UPSTREAM_DOCKERIGNORE.read_text("utf-8")) is not None
+    refs = _refs(server_dir)
+    before = build_context.fingerprint(server_dir, refs=refs)
+    _a_backup_a_fetch_and_a_settings_save(server_dir)
+    assert build_context.fingerprint(server_dir, refs=refs) == before
+    (server_dir / SOURCE).write_text("void World::Update() { tick(); }\n", encoding="utf-8")
+    assert build_context.fingerprint(server_dir, refs=refs) != before
+
+
+def _parked_once_on_wotlk(tmp_path: Path) -> tuple[Recorder, _Daemon, Path]:
+    rec = Recorder(images=True)
+    server_dir = a_wotlk_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    _refused(rec, server_dir, _silent_recreate(rec, daemon))
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert native.read_parked_build(server_dir) is not None
+    rec.calls.clear()
+    rec.ready_specs.clear()
+    return rec, daemon, server_dir
+
+
+def test_on_wotlk_a_rebuild_after_a_backup_and_a_fetch_uses_the_kept_build(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once_on_wotlk(tmp_path)
+    _a_backup_a_fetch_and_a_settings_save(server_dir)
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert daemon.builds == 1, "one compile across both presses"
+    assert [line for line in said if REUSED in line], said
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert native.read_parked_build(server_dir) is None
+
+
+class _CopyOnDisk(FakeSnapshot):
+    """`FakeSnapshot` whose copy is real files in the backups folder, as the real one writes."""
+
+    def take(self, server_dir: Path, databases: Sequence[str]) -> snapshot.Snapshot:
+        made = super().take(server_dir, databases)
+        made.directory.mkdir(parents=True, exist_ok=True)
+        for path in made.files:
+            path.write_text("-- copy\n", encoding="utf-8")
+        return made
+
+
+def test_on_wotlk_update_to_latest_after_its_database_copy_reuses_the_kept_build(
+    tmp_path: Path,
+) -> None:
+    """D2 on WotLK, which until T230 never fired: an earlier update's copy sits in the folder.
+
+    The copy is written into `sql_scripts/backups`, inside the build context,
+    so before T230 it changed the fingerprint and the kept build was removed.
+    """
+    rec, daemon, server_dir = _parked_once_on_wotlk(tmp_path)
+    made = engine(rec, **_seams_of(rec, daemon))
+    databases = made.snapshot_databases()
+    assert databases, "WotLK copies its databases before a new build starts"
+    earlier = _CopyOnDisk(rec).take(server_dir, databases)
+    assert all(path.is_file() for path in earlier.files)
+    _on_old_with_somewhere_to_go(rec, server_dir)
+    made._snapshot = _CopyOnDisk(rec)
+    said = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert rec.clones, "the update moved its sources"
+    assert "build" not in rec.calls, rec.calls
+    assert [line for line in said if REUSED in line], said
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), daemon.names
+    assert native.read_parked_build(server_dir) is None
 
 
 def test_a_kept_build_refused_part_way_with_docker_silent_about_the_tags_still_puts_them_back(
