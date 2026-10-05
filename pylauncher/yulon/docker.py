@@ -1615,6 +1615,39 @@ def log_tail(
     return proc.stdout
 
 
+def last_lines(
+    container: str,
+    lines: int,
+    *,
+    wsl_distro: str | None = None,
+    timeout: float = 20.0,
+) -> str | None:
+    """`log_tail()`, keeping what the container wrote to stderr as well (T249).
+
+    `docker logs` hands a container's stderr back on its OWN stderr, and
+    `log_tail()` keeps stdout alone. A world server runs with a tty, so all it
+    prints is on stdout; a container without one -- Tortoise's realmd, every
+    database -- writes its errors to stderr, which is where a failure's reason
+    is. The two come back as two pipes, so their interleaving is lost: the
+    stderr lines follow stdout's, `lines` of each at most.
+
+    `None` when docker would not read it (no such container, a timeout, no
+    CLI), never the daemon's refusal passed off as the container's own words.
+    """
+    proc = _docker(
+        ["logs", "--tail", str(lines), container],
+        wsl_distro=wsl_distro,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
+        return None
+    if not proc.stderr:
+        return proc.stdout
+    stdout = proc.stdout if not proc.stdout or proc.stdout.endswith("\n") else proc.stdout + "\n"
+    return stdout + proc.stderr
+
+
 def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> str | None:
     """The Docker daemon's version, or `None` when it does not answer (T93's system-info.txt).
 

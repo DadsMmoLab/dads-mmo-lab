@@ -127,6 +127,7 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
 from yulon.said import SaidByYulon, carry_detail
+from yulon.support.redact import Redactor
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -5092,6 +5093,39 @@ def wait_ready_quietly(
         before = now
 
 
+FAILURE_TAIL_LINES = 500
+"""How many of a container's last lines a failed `ready` shows (T249), per stream.
+
+Shown on the install's log, where the panel keeps 5000 lines, so the world and
+login servers together take a fifth of it; written in full to the run log the
+support file zips. A crash-looping world server's last start is a few hundred
+lines, and its reason is at the end.
+"""
+
+FAILURE_TAIL_BYTES = 256 * 1024
+"""A cap on those lines, END kept, for a server that prints very long lines."""
+
+FAILURE_TAIL_TIMEOUT_S = 20.0
+"""Per read: a failure is being reported, and a slow daemon must not hold it up long."""
+
+
+def _container_tail(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """`docker.last_lines()` of one container, for a failed `ready` (T249). `None`: unread."""
+    return docker.last_lines(
+        container, FAILURE_TAIL_LINES, wsl_distro=wsl_distro, timeout=FAILURE_TAIL_TIMEOUT_S
+    )
+
+
+def _kept_end(text: str, limit: int) -> str:
+    """`text`'s last `limit` bytes, starting on a whole line."""
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    tail = data[len(data) - limit :].decode("utf-8", errors="ignore")
+    _, newline, whole = tail.partition("\n")
+    return whole if newline else tail
+
+
 @dataclass
 class Seams:
     """Everything the engine reaches outside itself through. Real by default.
@@ -5244,6 +5278,12 @@ class Seams:
     """
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
+    container_tail: Callable[[str], str | None] = _container_tail
+    """A container's last lines, read when `ready` fails (T249). `None`: docker would not say.
+
+    A failed install is never remembered, so the support file has no install to
+    read a container for; the lines it needs travel in the run's own log instead.
+    """
     world_output: Callable[[docker.ContainerSpec], WorldOutput] = _world_output
     """What the world server has printed, asked BETWEEN waits rather than during one.
 
@@ -5540,6 +5580,7 @@ class Seams:
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
+            container_tail=on(_container_tail, wsl_distro=distro),
             selinux_enforcing=lambda: False,
             # Asked beside `selinux_enforcing` by the compose render whatever the
             # answer; left to default it ran `stat -f` on the HOST (found by the
@@ -11997,11 +12038,53 @@ class StagedInstaller:
         spec = self.entry.container_spec()
         yield "Waiting for the database."
         if not self._seams.wait_db_healthy(spec):
+            kept = yield from self._last_lines(ctx, (spec.db,))
             raise InstallerError(
-                "The database never reported healthy. Its own log says why.",
+                f"The database never reported healthy. Its own log says why.{kept}",
                 detail=docker.logs_command(spec.service_for(spec.db), ctx.server_dir),
             )
         yield from self.wait_for_ready(ctx, self._native().ready)
+
+    def _last_lines(
+        self, ctx: StageContext, containers: Sequence[str]
+    ) -> Generator[str, None, str]:
+        """Show each container's last lines before a failure is raised (T249).
+
+        A failed install is never remembered, so **Save logs for support…** has
+        no install to read a container for, and the world server's own log was
+        the one thing the reported crash loop needed. What the job yields is on
+        the screen, in the CLI's transcript and in the run log the support file
+        zips, so the lines go there, each as a program's output under its
+        container's name (`lines.TOOL`): a server line spelled like `Step 3 of
+        9` or `--- ` is never read as the engine's own.
+
+        The install's database password is masked here, where the lines are
+        made: the screen and the transcript are not redacted on the way out.
+
+        Returns the sentence the failure appends, naming where the lines are, or
+        `""` when none could be read and so none were shown.
+        """
+        redact = Redactor.build([ctx.secrets.db_password]).redact
+        shown = False
+        for container in dict.fromkeys(containers):
+            text = self._seams.container_tail(container)
+            if text is None:
+                yield f"{container}'s log could not be read."
+                continue
+            said = _kept_end(text, FAILURE_TAIL_BYTES).splitlines()
+            if not said:
+                yield f"{container} has printed nothing."
+                continue
+            yield f"The last lines {container} printed:"
+            for line in said:
+                yield lines.TOOL + f"{container} | {redact(line)}"
+            shown = True
+        if not shown:
+            return ""
+        return (
+            " Its last lines are in the log above, and Logs → Save logs for support… puts "
+            "them in a file you can send to whoever is helping you."
+        )
 
     def wait_for_ready(self, ctx: StageContext, markers: ReadyMarkers) -> Iterator[str]:
         """Wait for the world server, giving a server that is still TALKING more time.
@@ -12079,6 +12162,7 @@ class StagedInstaller:
         service, container = spec.service_for(spec.world), spec.world
         # T248: the line says whose log in words; the command is under Details.
         logs = f"{container}'s own log"
+        servers = (spec.world, spec.auth)
         read_it = docker.logs_command(service, ctx.server_dir)
         quiet = markers.timeout_s
         never_ready = "The server started but never reported ready"
@@ -12130,11 +12214,12 @@ class StagedInstaller:
                     # every run the container has had.
                     else " What it said as it went is in the log of the run before this one."
                 )
+                kept = yield from self._last_lines(ctx, servers)
                 raise WorldStoppedAfterReadyError(
                     f"The world server came up and then stopped. {container} printed its "
                     f"ready marker and was gone again inside "
                     f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
-                    f"even though it started. {logs} has the rest."
+                    f"even though it started. {logs} has the rest.{kept}"
                     f"{_missing_table_hint(after.words, self.entry)}{said}",
                     detail=read_it,
                 )
@@ -12144,24 +12229,30 @@ class StagedInstaller:
                 before, now, first_restarts, markers.restart_loop, ready.fatal
             )
             spent = self._seams.monotonic() - started
+            # Not for "unreadable": docker is not answering, and each ask would
+            # cost its whole bound to get nothing. Nor for "alive": nothing ended.
+            kept = ""
+            if verdict in ("loop", "gone", "fatal", "quiet"):
+                kept = yield from self._last_lines(ctx, servers)
             if verdict == "loop":
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
                     f"which is a crash loop and not a slow start. {logs} has what it printed "
-                    f"before each one.{_corrections_hint(self.entry, now.text)}",
+                    f"before each one.{kept}{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )
             if verdict == "gone":
                 raise InstallerError(
                     f"{never_ready}: {container} is not running any more (docker says "
                     f"{detail!r}), so nothing is going to print it. {logs} has its "
-                    f"last words.",
+                    f"last words.{kept}",
                     detail=read_it,
                 )
             if verdict == "fatal":
                 raise InstallerError(
                     f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest.{_corrections_hint(self.entry, now.text)}",
+                    f"{detail!r}. {logs} has the rest.{kept}"
+                    f"{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )
             if verdict == "quiet":
@@ -12169,7 +12260,8 @@ class StagedInstaller:
                 raise InstallerError(
                     f"{never_ready}, and it stopped printing anything at all for the last "
                     f"{_spell_seconds(silent_for)} — a server that is still loading says so as "
-                    f"it goes, so this one is stuck rather than slow. {logs} has its last words.",
+                    f"it goes, so this one is stuck rather than slow. {logs} has its last words."
+                    f"{kept}",
                     detail=read_it,
                 )
             if verdict == "unreadable":
@@ -12184,13 +12276,15 @@ class StagedInstaller:
                 )
             before = now
             yield (f"Still loading after {_spell_seconds(spent)}, and still printing — waiting on.")
+        lasted = self._seams.monotonic() - started
+        kept = yield from self._last_lines(ctx, servers)
         raise InstallerError(
             f"{never_ready}. It was still printing after "
-            f"{_spell_seconds(self._seams.monotonic() - started)}, so it is doing something "
+            f"{_spell_seconds(lasted)}, so it is doing something "
             f"without finishing it. This wait gives a server that keeps talking another "
             f"{_spell_seconds(quiet)} every time it prints, up to a ceiling of "
             f"{_spell_seconds(READY_CEILING_SECONDS)}, which is many times the slowest first "
-            f"boot this has been measured against. {logs} has what it is doing.",
+            f"boot this has been measured against. {logs} has what it is doing.{kept}",
             detail=read_it,
         )
 
