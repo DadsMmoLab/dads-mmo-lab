@@ -8458,6 +8458,10 @@ class ControllerView(QWidget):
         # not a fact an action of ours can make wrong the way "world down" is.
         if status.distro is not None:
             self._distro_answered(status.distro)
+        if status.world:
+            # T377: a world that runs has a database; however it was started
+            # (Restart, "Start and play", by hand), the offer to repair it goes.
+            self._withdraw_the_database_offer()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)

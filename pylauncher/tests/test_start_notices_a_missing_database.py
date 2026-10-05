@@ -378,3 +378,15 @@ def test_a_rebuild_refused_for_the_database_puts_the_same_offer_on_the_server_ta
     view._rebuild_finished(False, f"{database_presence.MISSING} Nothing was changed.")
     assert view.problem_label.text() == database_presence.MISSING
     assert view.repair_database_button.isVisibleTo(view)
+
+
+def test_a_world_seen_running_takes_the_offer_down_however_it_was_started(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    assert view.repair_database_button.isVisibleTo(view)
+    db.names = "".join(f"{name}\n" for name in (SPEC.db, SPEC.auth, SPEC.world))
+    view.refresh_status()
+    assert not view.repair_database_button.isVisibleTo(view)
