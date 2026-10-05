@@ -161,9 +161,18 @@ def _end_tree(proc: _AnyPopen) -> None:
       be ended by the next Stop or by closing the job; taskkill only reaches
       what is still a descendant of a live docker.exe at the moment of Stop.
 
-    What taskkill cannot do, and is accepted: a process started between its
-    snapshot and its kill (compose starts `buildx bake` once, right at the
-    start of a build) survives, and so does one whose parent had already exited.
+    What taskkill cannot reach, and why each is narrow (challenged by Codex's
+    adversarial review, 2026-10-05; the Job object is T299):
+
+    * a descendant whose parent had already exited. docker.exe does not exit
+      before its plugin does: docker/cli's `tryPluginRun` blocks in
+      `plugincmd.Run()` until compose returns. So a live compose under a dead
+      docker.exe needs something else to have killed docker.exe, and this
+      function only runs while `proc.poll()` says docker.exe is alive.
+    * a process started between taskkill's snapshot and its kill. compose
+      starts `buildx bake` once, at the start of a build, so the window is a
+      Stop landing in the first moments of that one command.
+
     Popen holds docker.exe's handle until it is reaped, so `proc.pid` cannot be
     another process's pid while this runs.
     """
