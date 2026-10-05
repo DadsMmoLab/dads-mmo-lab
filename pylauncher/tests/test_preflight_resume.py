@@ -22,13 +22,15 @@ engine is what decides what has been spent):
 
 from __future__ import annotations
 
+import stat
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from tests.support_native import ENTRY, TBC, Recorder
-from yulon import platform, resources
+from tests.support_native import ENTRY, TBC, Recorder, engine, install
+from yulon import docker, platform, resources
 from yulon.catalog import native, preflight
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -294,3 +296,585 @@ def test_an_unmeasured_drive_stays_unchecked_whatever_was_spent() -> None:
     spent = preflight.Spent(build=True)
     report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
     assert _row(report, "free space on Docker's disk").verdict == "unchecked"
+
+
+# -- T203: a resumed build is not asked for the space its own cache already takes --
+#
+# Found by the T179 live check on a Windows test VM (2026-10-03, phase A7): a
+# Centurion install whose compile had finished failed after it, and pressing
+# Install again was refused, "free space on Docker's disk: 30 GB free, and the
+# install needs 40 GB" -- with 12.91 GB of build cache from that compile on the
+# same disk, which the resumed build reuses instead of writing again. The way
+# through was pruning the cache and compiling again (~35 minutes).
+#
+# The rule: when the press will run the build again (every stage before it is
+# recorded, and the build is not spent), the build cache Docker GAINED since this
+# install's build last started -- `stage_build` records the figure it starts on
+# -- counts toward the build's share of the floor, and the floor never drops
+# below what a FINISHED build is asked for. Only the growth, because Yu'lon never
+# prunes and the whole machine's cache may be other servers' (review, 2026-10-04).
+
+A7_CACHE = 12_910_000_000
+"""`docker system df` on the VM after the failed press: Build Cache 8 / 12.91GB (decimal)."""
+
+
+def test_the_a7_refusal_passes_once_the_reused_cache_is_counted() -> None:
+    """WotLK's Docker-disk pair is Centurion's (40/60): 30 GB free, 12.91 GB of it cache."""
+    spent = preflight.Spent(build_cache_bytes=A7_CACHE)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "warn", row
+    # In this module's GB (GiB, as every free-space figure here): 12.91e9 bytes is 12.0.
+    assert "build cache" in row.detail and f"{A7_CACHE / GIB:.1f} GB" in row.detail, row.detail
+    assert "Docker counts it as 12.91 GB" in row.detail, "Docker's own figure, to compare"
+
+
+def test_without_a_cache_the_a7_numbers_are_still_refused() -> None:
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), preflight.Spent())
+    assert _row(report, "free space on Docker's disk").verdict == "refuse"
+
+
+def test_a_huge_cache_never_lowers_the_floor_below_a_finished_build_s() -> None:
+    spent = preflight.Spent(build_cache_bytes=500 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(3, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "refuse", row
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in row.detail, row.detail
+
+
+def test_the_cache_leaves_the_server_folder_s_own_row_alone_on_two_drives() -> None:
+    spent = preflight.Spent(build_cache_bytes=A7_CACHE)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(200, 5), spent)
+    row = _row(report, "free space on the server folder")
+    assert row.verdict == "refuse", row
+    assert "build cache" not in row.detail
+
+
+def test_the_cache_counts_against_the_added_floor_on_one_drive() -> None:
+    """TBC on one drive asks 40 (20 + 20); 16 GB of cache brings that to 24, never below 20."""
+    facts = replace(_one_drive(0), data_root_free=int(25 * GIB), server_dir_free=int(25 * GIB))
+    fresh = preflight.evaluate(TBC, Path("/srv/tbc"), facts)
+    cached = preflight.evaluate(
+        TBC, Path("/srv/tbc"), facts, preflight.Spent(build_cache_bytes=16 * GIB)
+    )
+    assert not fresh.ok()
+    assert cached.ok(), cached.message()
+    floor = preflight.evaluate(
+        TBC,
+        Path("/srv/tbc"),
+        replace(facts, data_root_free=int(19 * GIB), server_dir_free=int(19 * GIB)),
+        preflight.Spent(build_cache_bytes=500 * GIB),
+    )
+    assert f"needs {NATIVE.min_server_dir_gb:.0f} GB" in floor.message(), floor.message()
+
+
+def test_a_spent_build_ignores_the_cache() -> None:
+    """Already judged against the server-folder pair; the cache cannot lower it further."""
+    spent = preflight.Spent(build=True, build_cache_bytes=500 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(3, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in row.detail, row.detail
+    assert "build cache" not in row.detail
+
+
+def _lay_baseline(server_dir: Path, cache: int) -> None:
+    """What `stage_build` records as it starts: Docker's build cache before this build ran."""
+    native.write_build_cache_baseline(server_dir, cache)
+
+
+def test_growth_since_this_install_s_build_started_lowers_the_floor(tmp_path: Path) -> None:
+    """The engine: every stage before `build` recorded, 16 GB of cache grown since it started."""
+    rec = Recorder(images=False, build_cache=17 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 1 * GIB)
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "16.0 GB of build cache" in rows[0], rows[0]
+    assert rec.build_cache_asked == 1
+
+
+def test_a_big_cache_that_was_there_before_this_build_does_not_lower_the_floor(
+    tmp_path: Path,
+) -> None:
+    """Another server's cache is not this build's: 400 GB before, 400 GB now, nothing credited."""
+    rec = Recorder(images=False, build_cache=400 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 400 * GIB)
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_a_cache_pruned_below_the_baseline_credits_nothing(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=2 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 10 * GIB)
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [None, "", "not json", '{"baseline_bytes": "lots"}', '{"baseline_bytes": -5}', "[]", "null"],
+    ids=["missing", "empty", "garbled", "string", "negative", "list", "null"],
+)
+def test_a_missing_or_garbled_baseline_credits_nothing(sidecar: str | None, tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=400 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    if sidecar is not None:
+        (server_dir / native.BUILD_CACHE_FILE).write_text(sidecar, encoding="utf-8")
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_the_build_stage_records_the_baseline_as_it_starts(tmp_path: Path) -> None:
+    """A7 end to end: the build starts on 1.75 GB of cache and fails at 12.91; the next passes."""
+    rec = Recorder(images=False, build_cache=1_754_000_000)
+    rec.build_result = docker.AttachedRun(
+        1,
+        (
+            "failed to receive status: rpc error: code = "
+            "Unavailable desc = error reading from server: EOF",
+        ),
+    )
+    installer = _engine(rec, 30)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(TBC.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(ctx))
+    assert native.read_build_cache_baseline(server_dir) == 1_754_000_000
+
+    rec.build_cache = A7_CACHE
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "Docker counts it as 11.16 GB" in rows[0], rows[0]
+
+
+def _build_ctx(installer: native.StagedInstaller, server_dir: Path) -> native.StageContext:
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(TBC.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+
+
+EOF_RUN = docker.AttachedRun(
+    1,
+    (
+        "failed to receive status: rpc error: code = "
+        "Unavailable desc = error reading from server: EOF",
+    ),
+)
+"""How A7's and A10's builds ended."""
+
+
+def test_the_build_says_it_is_asking_docker_about_its_cache_before_it_asks(
+    tmp_path: Path,
+) -> None:
+    """Asking can take two minutes (`buildx du`, then `system df`): it is said first."""
+    said: list[str] = []
+    seen_when_asked: list[str] = []
+
+    def ask() -> int | None:
+        seen_when_asked.extend(said)
+        return 0
+
+    rec = Recorder(images=False)
+    installer = CmangosInstaller(
+        TBC,
+        installers_root=resources.installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(build_cache_bytes=ask),
+    )
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    for line in installer.stage_build(_build_ctx(installer, server_dir)):
+        said.append(line)
+    assert seen_when_asked, said
+    assert seen_when_asked[-1] == native.BUILD_CACHE_ASKING, seen_when_asked
+    assert said.count(native.BUILD_CACHE_ASKING) == 1
+
+
+def test_a_second_failed_build_keeps_the_credit_for_the_cache_the_first_one_added(
+    tmp_path: Path,
+) -> None:
+    """Two failed builds in a row, then a press: the first build's 11.16 GB is still credited.
+
+    Review of PR 294 (2026-10-04): the second build used to record ITS starting
+    cache -- the first build's 12.91 GB included -- as the baseline, so after it
+    failed too the third press credited 12.91 - 12.91 = 0 and was refused "30 GB
+    free, and the install needs 40 GB", with this install's cache still on disk.
+    """
+    rec = Recorder(images=False, build_cache=1_754_000_000, build_result=EOF_RUN)
+    installer = _engine(rec, 30)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = A7_CACHE  # what the first build compiled is in the cache now
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "Docker counts it as 11.16 GB" in rows[0], rows[0]
+
+
+def test_a_cache_pruned_between_two_failed_builds_lowers_the_kept_baseline(
+    tmp_path: Path,
+) -> None:
+    """The lower figure wins: after a prune, only what is there now can be this build's to reuse."""
+    rec = Recorder(images=False, build_cache=10 * GIB, build_result=EOF_RUN)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = 2 * GIB
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 2 * GIB
+
+
+def test_an_unmeasurable_second_start_keeps_the_first_build_s_baseline(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=3 * GIB, build_result=EOF_RUN)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = None
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 3 * GIB
+
+
+def test_a_finished_build_lets_the_next_build_start_from_the_cache_it_finds(
+    tmp_path: Path,
+) -> None:
+    """A finished build's cache is not the NEXT build's growth: that one starts a baseline anew."""
+    rec = Recorder(images=False, build_cache=1 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    assert "The build finished." in list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = 13 * GIB
+    rec.build_result = EOF_RUN
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 13 * GIB
+
+
+def test_a_build_that_could_not_measure_the_cache_leaves_a_baseline_that_credits_nothing(
+    tmp_path: Path,
+) -> None:
+    """A finished build's baseline must not survive a build that started on an unknown cache."""
+    rec = Recorder(images=False, build_cache=0)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = None
+    list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) is None
+
+
+@pytest.mark.parametrize("checkout", [False, True], ids=["plain-folder", "git-checkout"])
+def test_a_baseline_left_in_a_folder_with_no_install_record_never_reaches_a_build(
+    checkout: bool, tmp_path: Path
+) -> None:
+    """Why a fresh install needs no reset of its own: it cannot inherit an earlier figure.
+
+    A run with no install record is a fresh install, and the only folders that
+    lets through are empty ones (a leftover `BUILD_CACHE_FILE` is not one of
+    `OUR_OWN_FILES`, so the guard refuses it) and git checkouts (the clone stage
+    refuses one with no record). Either way the build never starts on it.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    if checkout:
+        (server_dir / ".git").mkdir()
+    _lay_baseline(server_dir, 0)  # an unfinished build of an install whose record is gone
+    rec = Recorder(images=False, build_cache=5 * GIB)
+    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    with pytest.raises(InstallerError):
+        install(rec, server_dir)
+    assert "build" not in rec.calls, rec.calls
+
+
+@pytest.mark.parametrize("cache", [None, 0], ids=["could-not-ask", "no-cache"])
+def test_a_resume_at_the_build_with_no_cache_to_count_is_asked_for_the_whole_floor(
+    cache: int | None, tmp_path: Path
+) -> None:
+    rec = Recorder(images=False, build_cache=cache)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 0)
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_an_earlier_resume_and_a_fresh_install_do_not_ask_about_the_cache(tmp_path: Path) -> None:
+    """Another install's cache must not lower the floor of a build this folder never reached."""
+    rec = Recorder(images=False, build_cache=500 * GIB)
+    installer = _engine(rec, 25)
+    early = tmp_path / "early"
+    recorded = _recorded(installer)
+    _lay_record(installer, early, recorded[: recorded.index("build") - 1])
+    _lay_baseline(early, 0)
+
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, early)
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, tmp_path / "fresh")
+    assert rec.build_cache_asked == 0
+
+
+# -- T203 fix round 3: what the finished stages already put in the server folder --
+#
+# Found by the m910q live test of PR 294 (2026-10-04, P7): a WotLK install on
+# ONE drive lost its builder mid-compile, and the next press was refused, "46 GB
+# free, and the install needs 46 GB" -- 45.58 GiB free against a floor of 48
+# (40 + 8) less 2.27 of build cache. The 8 GB server-folder share was asked for
+# in full although the 2.20 GiB checkout it sizes was already in the folder, and
+# both figures rounded to 46, so the refusal stated two equal numbers.
+
+P7_FREE = 48_939_778_048
+"""`df` on m910q's one drive just before the refused press (p7-before-resume-facts.txt)."""
+P7_CACHE = 2_434_000_000
+"""`docker buildx du` then: `Total: 2.434GB`, with the build's starting figure 0."""
+P7_CHECKOUT = int(2.20 * GIB)
+"""The `~/yulon-wotlk` checkout then: 2.20 GiB (clone-core, clone-modules, generate-compose)."""
+P7_EOF_RUN = docker.AttachedRun(
+    1,
+    (
+        "#25 1598.8 [1346/1848] Building CXX object modules/CMakeFiles/modules.dir/"
+        "mod-playerbots/src/Ai/Base/Strategy/LfgStrategy.cpp.o",
+        "target ac-worldserver: failed to receive status: rpc error: code = Unavailable "
+        "desc = error reading from server: EOF",
+        "",
+    ),
+)
+"""How P7's build ended, verbatim from its install record's `last_error`."""
+
+
+def _wotlk_on_one_drive(rec: Recorder, free_bytes: int) -> native.StagedInstaller:
+    facts = replace(_one_drive(0), data_root_free=free_bytes, server_dir_free=free_bytes)
+    return engine(
+        rec, platform_id=lambda: "linux", gather=lambda entry, server_dir, **_kwargs: facts
+    )
+
+
+def _wotlk_ctx(installer: native.StagedInstaller, server_dir: Path) -> native.StageContext:
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(ENTRY.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+
+
+def _p7_after_the_lost_builder(
+    rec: Recorder, tmp_path: Path
+) -> tuple[native.StagedInstaller, Path]:
+    """P7 up to the refused press: the stages before `build` recorded, the build lost at 1346."""
+    installer = _wotlk_on_one_drive(rec, P7_FREE)
+    server_dir = tmp_path / "yulon-wotlk"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_wotlk_ctx(installer, server_dir)))
+    rec.build_cache = P7_CACHE
+    return installer, server_dir
+
+
+def test_the_p7_resume_passes_once_the_checkout_already_in_the_folder_is_counted(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder(images=False, build_cache=0, build_result=P7_EOF_RUN)
+    installer, server_dir = _p7_after_the_lost_builder(rec, tmp_path)
+    rec.folder_size = P7_CHECKOUT
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "2.2 GB of the server folder's share is already in the folder" in rows[0], rows[0]
+    assert rec.folder_asked == [server_dir]
+
+
+def test_an_unmeasurable_folder_leaves_the_p7_press_refused(tmp_path: Path) -> None:
+    """`None` is not 0 and not a size: nothing is credited, so the press is still refused."""
+    rec = Recorder(images=False, build_cache=0, build_result=P7_EOF_RUN)
+    installer, server_dir = _p7_after_the_lost_builder(rec, tmp_path)
+    rec.folder_size = None
+
+    with pytest.raises(InstallerError, match="free, and the install needs"):
+        _preflight(installer, server_dir)
+
+
+def test_a_resume_before_the_build_does_not_measure_the_folder(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=0, folder_size=8 * GIB)
+    installer = _engine(rec, 25)
+    early = tmp_path / "early"
+    recorded = _recorded(installer)
+    _lay_record(installer, early, recorded[: recorded.index("build") - 1])
+
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, early)
+    assert rec.folder_asked == []
+
+
+def test_the_folder_credit_never_exceeds_the_server_folder_share() -> None:
+    """A 50 GiB folder on WotLK's one-drive floor of 48 takes off 8, the folder's share, no more."""
+    facts = replace(_one_drive(0), data_root_free=int(30 * GIB), server_dir_free=int(30 * GIB))
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(server_dir_bytes=50 * GIB)
+    )
+    assert not report.ok()
+    floor = WOTLK.min_data_root_gb
+    assert f"needs {floor:.0f} GB" in report.message(), report.message()
+
+
+def test_the_folder_credit_and_the_cache_never_go_below_a_finished_build_s_floor() -> None:
+    facts = replace(_one_drive(0), data_root_free=int(5 * GIB), server_dir_free=int(5 * GIB))
+    spent = preflight.Spent(build_cache_bytes=500 * GIB, server_dir_bytes=50 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in report.message(), report.message()
+
+
+def test_the_folder_credit_leaves_two_drives_alone() -> None:
+    """On two drives a finished build is asked the folder's own pair too; a resume no less."""
+    spent = preflight.Spent(server_dir_bytes=6 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(200, 5), spent)
+    row = _row(report, "free space on the server folder")
+    assert row.verdict == "refuse" and "already in the folder" not in row.detail, row
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(35, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "refuse" and "already in the folder" not in row.detail, row
+    assert f"needs {WOTLK.min_data_root_gb:.0f} GB" in row.detail, row.detail
+
+
+def test_a_spent_build_ignores_the_folder_credit() -> None:
+    spent = preflight.Spent(build=True, server_dir_bytes=6 * GIB)
+    facts = replace(_one_drive(0), data_root_free=int(5 * GIB), server_dir_free=int(5 * GIB))
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in report.message(), report.message()
+    assert "already in the folder" not in report.message(), report.message()
+
+
+def test_a_refusal_never_states_two_equal_numbers() -> None:
+    """P7's numbers without the folder credit: 45.58 free against 45.73 -- not "46 and 46"."""
+    facts = replace(_one_drive(0), data_root_free=P7_FREE, server_dir_free=P7_FREE)
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(build_cache_bytes=P7_CACHE)
+    )
+    assert not report.ok()
+    said = report.message()
+    assert "46 GB free, and the install needs 46 GB" not in said, said
+    assert "45.6 GB free, and the install needs 45.7 GB" in said, said
+
+
+def test_a_warning_never_states_two_equal_numbers() -> None:
+    """72.6 free against a comfortable 72.73 (75 less 2.27 of cache) is not "73 and 73"."""
+    free = int(72.6 * GIB)
+    facts = replace(_one_drive(0), data_root_free=free, server_dir_free=free)
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(build_cache_bytes=P7_CACHE)
+    )
+    row = _row(report, f"free space on {preflight.ONE_VOLUME_SPACE}")
+    assert row.verdict == "warn", row
+    assert "72.6 GB free; 72.7 GB is the comfortable figure" in row.detail, row.detail
+
+
+def test_whole_numbers_stay_whole_when_they_differ() -> None:
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), preflight.Spent())
+    assert "30 GB free, and the install needs 40 GB" in report.message(), report.message()
+
+
+def test_folder_bytes_adds_up_every_file_under_the_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "server"
+    (folder / "src" / "deep").mkdir(parents=True)
+    (folder / "a.txt").write_bytes(b"x" * 1000)
+    (folder / "src" / "b.bin").write_bytes(b"y" * 2500)
+    (folder / "src" / "deep" / "c").write_bytes(b"z" * 7)
+    assert native.folder_bytes(folder) == 3507
+
+
+def test_folder_bytes_never_follows_a_link_out_of_the_folder(tmp_path: Path) -> None:
+    """A linked folder elsewhere is not this install's: only the link itself is there."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    folder = tmp_path / "server"
+    folder.mkdir()
+    (folder / "a").write_bytes(b"x" * 10)
+    try:
+        (folder / "linked").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        pytest.skip("this machine cannot make a symlink")
+    size = native.folder_bytes(folder)
+    assert size is not None and size < 100_000, size
+
+
+def test_folder_bytes_says_unknown_for_a_folder_it_cannot_list(tmp_path: Path) -> None:
+    assert native.folder_bytes(tmp_path / "missing") is None
+
+
+def test_folder_bytes_never_enters_a_windows_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A junction lstats as a folder; only its reparse-point attribute gives it away."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    folder = tmp_path / "server"
+    folder.mkdir()
+
+    class Junction:
+        path = str(elsewhere)
+
+        def stat(self, *, follow_symlinks: bool = True) -> object:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_size=0,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+
+    real = native.os.scandir
+
+    def scandir(path: Path) -> object:
+        return iter([Junction()]) if Path(path) == folder else real(path)
+
+    monkeypatch.setattr(native.os, "scandir", scandir)
+    assert native.folder_bytes(folder) == 0

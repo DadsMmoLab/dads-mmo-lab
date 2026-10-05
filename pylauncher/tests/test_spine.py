@@ -2410,6 +2410,16 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("ui/folder_picker.py", "removable_volumes"): (
+        "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
+        "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
+        "becomes a SIDEBAR ENTRY in the folder and save pickers and nothing else. It decides "
+        "no write and no refusal: the user still chooses the folder, and whatever they choose "
+        "goes through the same checks as a folder typed by hand. A root that is missing or "
+        "unreadable adds no entries (OSError is caught per root), which leaves the sidebar as "
+        "Qt's own Computer and Home. It reads only the parent's directory entries and never "
+        "stats, opens or follows a mount, so a hung network mount cannot freeze the GUI thread"
+    ),
     ("apply.py", "copy_dbc_dir"): (
         "T62. Lists a folder INSIDE the clone this app just made, to find the `*.dbc` files "
         "a manifest's `server_dbc` step names. It decides nothing about writing to that "
@@ -2426,6 +2436,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "recorded the user's own archives as this app's and removing the Season of Discovery "
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ),
+    ("catalog/native.py", "folder_bytes"): (
+        "T203 fix round 3. Adds up the sizes of the files under a server folder for "
+        "preflight's credit to a resumed install; it never writes, never enters a link or a "
+        "Windows reparse point, and an entry it cannot look at counts short (less credit, a "
+        "higher floor). A top folder it cannot list answers None, which credits nothing"
     ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
@@ -2482,12 +2498,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("platform.py", "_desktop_wsl_vhdx"): (
         "T39. Lists `<drive>/Users` to find the profile holding Docker Desktop's "
-        "`docker_data.vhdx`, so preflight measures the drive the images actually land on "
+        "`docker_data.vhdx` - since T199 the location that profile's Docker Desktop settings "
+        "name (`CustomWslDistroDir`, then the legacy keys, reached as `/mnt/<letter>/...`), "
+        "else the default one - so preflight measures the drive the images actually land on "
         "rather than a `/var/lib/docker` that does not exist in the distro. Nothing is "
         "written anywhere near it - the path is handed to `shutil.disk_usage` and no further "
         "- and the OSError per drive is skipped because a drive with no `Users` is the "
-        "ordinary case. Anything other than exactly one hit answers None, which the caller "
-        "renders *unchecked*"
+        "ordinary case. Anything other than exactly one hit, or any profile whose settings "
+        "name a location that cannot be found or cannot be read, answers None, which the "
+        "caller renders *unchecked*"
+    ),
+    ("platform.py", "_legacy_disk_folder"): (
+        "T199. Lists the folder a legacy Docker Desktop settings key (`dataFolder`/`diskPath`) "
+        "names, looking for a `.vhdx`/`.raw` disk image directly inside it, as proof that "
+        "Docker's disk lives there before preflight measures that drive. It decides no write: "
+        "the folder is handed to `shutil.disk_usage` and no further, and a folder that cannot "
+        "be listed answers None - 'could not be established' - which the caller renders "
+        "*unchecked*, never a guessed drive"
     ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "

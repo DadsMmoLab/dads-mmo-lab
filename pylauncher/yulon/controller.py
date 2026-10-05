@@ -410,15 +410,17 @@ class Controller:
         return to_stop
 
     def refuse_start(self) -> None:
-        """Raise `StartRefused` when `start_guard` gives a reason; ask before stopping anything.
+        """Raise `StartRefused` when the folder or `start_guard` gives a reason; before any stop.
 
         Called by `start()` itself, and first by every press that would stop
         something on the way to a start (Restart, recreate, "stop the other
         server"), so a refused start leaves everything as it was.
         """
-        if self.start_guard is None:
-            return
-        reason = self.start_guard()
+        # T197 fix round 2: a press left this folder in a state no start may run on
+        # (`native.START_REFUSED_FILE`), on every family, before the family's own guard.
+        reason = native.owed_start_refusal(self.server_dir)
+        if not reason and self.start_guard is not None:
+            reason = self.start_guard()
         if reason:
             logger.warning(f"start() refused: {reason}")
             raise StartRefused(reason)

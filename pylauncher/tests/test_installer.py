@@ -189,6 +189,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     # second server beside. A rule and its table, not machinery.
     "FORMER_DEFAULT_DIRS",
     "default_server_dir",
+    # Added deliberately with T197: a rollback that stopped before the old build
+    # was back, so the update route leaves its sources with the new one. An
+    # exception type, not machinery.
+    "RollbackNotDone",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

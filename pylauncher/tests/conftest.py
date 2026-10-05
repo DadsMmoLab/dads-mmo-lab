@@ -35,6 +35,38 @@ from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+
+def _redirect_qt_settings() -> Path:
+    """Point Qt's own settings files at a scratch directory, for the whole process.
+
+    A widget `QFileDialog` writes its sidebar, history and last folder to
+    `QtProject.conf` when it is DESTROYED, shown or not, and that file is
+    shared by every Qt app the user runs (`~/.config/QtProject.conf` on Linux).
+    The guards below cover Yu'lon's own data directory and the environment of
+    child processes; neither reaches Qt's settings in THIS process, and until
+    T215 no test destroyed a file dialog, so nothing showed it. T215's first
+    test run replaced a developer's file with 19 pytest folders and dropped
+    Computer and Home from it (review, 2026-10-04).
+
+    `setPath` rather than a scratch `XDG_CONFIG_HOME`: the variable would also
+    reach every child the suite starts, and `git` reads its own config from
+    there. Done here, at import, before any `QSettings` exists. On Windows and
+    macOS Qt's native store is the registry or a plist, which `setPath` does
+    not move, so the tests that build a dialog instance are Linux-only.
+    """
+    from PySide6.QtCore import QSettings
+
+    scratch = Path(tempfile.mkdtemp(prefix="yulon-test-qt-settings-"))
+    atexit.register(lambda: shutil.rmtree(scratch, ignore_errors=True))
+    for fmt in (QSettings.Format.NativeFormat, QSettings.Format.IniFormat):
+        for scope in (QSettings.Scope.UserScope, QSettings.Scope.SystemScope):
+            QSettings.setPath(fmt, scope, str(scratch))
+    return scratch
+
+
+QT_SETTINGS_SCRATCH = _redirect_qt_settings()
+"""Where Qt's `QtProject.conf` and every other `QSettings` file goes during the suite."""
+
 THE_ANSWER_HANDED_TO_CHILDREN = "YULON_TEST_THE_USERS_OWN_CONFIG_DIR"
 """Env var carrying the REAL `config_dir()` down to every child this suite starts.
 
@@ -496,6 +528,18 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "_resolved_docker_cli", "docker")
 
 
+@pytest.fixture(autouse=True)
+def _each_test_starts_with_no_unread_container_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docker` logs a failed state read once per change, and remembers it to know (PR 291).
+
+    A fresh memory per test, so one test's failed read cannot hide the next
+    test's first line, whatever order the suite runs in.
+    """
+    from yulon import docker
+
+    monkeypatch.setattr(docker, "_UNREAD_SAID", {})
+
+
 @pytest.fixture(scope="session")
 def qapp() -> Iterator[object]:
     """One offscreen `QApplication` for the whole session (Qt allows exactly one)."""
@@ -951,6 +995,48 @@ def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
     deletes the window.
     """
     yield from destroying_what_is_left_behind()
+
+
+@pytest.fixture(autouse=True)
+def _no_test_leaves_the_application_restyled() -> Iterator[None]:
+    """Fail the test that leaves the `QApplication`'s style sheet or palette changed (T212).
+
+    There is one `QApplication` for the whole session, so an app-wide restyle a
+    test does not undo is felt by every later test, in whichever file happens to
+    run next. `test_theme.py` themed the app and left it themed, and the theme's
+    touch-target floor grew `test_gamepad_keyboard.py`'s fixed-size buttons from
+    60x20 to 98x50: four navigation tests failed, but only in that order.
+
+    Put back and failed, rather than only put back, so the leak is named at the
+    test that made it and not found later as a mystery in somebody else's file.
+    Read only when a `QApplication` exists: a test that never imported Qt cannot
+    have restyled one, and importing it here would load Qt for every test.
+    """
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    app = widgets.QApplication.instance() if widgets is not None else None
+    if app is None:
+        yield
+        return
+    from PySide6.QtGui import QPalette
+
+    sheet, palette = app.styleSheet(), QPalette(app.palette())
+    yield
+    changed = [
+        what
+        for what, same in (
+            ("style sheet", app.styleSheet() == sheet),
+            ("palette", app.palette() == palette),
+        )
+        if not same
+    ]
+    if not changed:
+        return
+    app.setStyleSheet(sheet)
+    app.setPalette(palette)
+    pytest.fail(
+        f"this test left the application's {' and '.join(changed)} changed. Every later test "
+        "in the session inherits it (T212); put it back in the test's own teardown."
+    )
 
 
 UNGUARDED_HTTPS_GET = upstream.https_get

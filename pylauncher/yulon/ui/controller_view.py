@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -117,6 +116,7 @@ from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, tri
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
@@ -158,6 +158,7 @@ from yulon.said import SaidByYulon
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
+from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
@@ -806,13 +807,11 @@ def ask_module_link(parent: QWidget, title: str) -> str | None:
 def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     """The real `FolderAsker`: a directory, or `None` if the user cancelled.
 
-    `getExistingDirectory` answers `""` for cancel, which as a `Path` would be
-    `Path(".")` — the process's working directory, which on a packaged build is
-    wherever the user launched it from. So the empty string is turned back into
-    a cancel here rather than handed on as a folder nobody chose.
+    `pick_folder` (T215) turns Qt's `""` for cancel back into `None`: as a
+    `Path` it would be `Path(".")`, the process's working directory, which on a
+    packaged build is wherever the user launched it from.
     """
-    chosen = QFileDialog.getExistingDirectory(parent, title)
-    return Path(chosen) if chosen else None
+    return pick_folder(parent, title)
 
 
 SET_CLIENT_DIR_LABEL = "Set client folder…"
@@ -1628,6 +1627,7 @@ class _Compared:
 
     stale: tuple[Path, ...]
     left_out: tuple[Path, ...]
+    flags_lost: str = ""  # T198: `play_client.flags_lost_warning()` of the Refresh
 
 
 @dataclass(frozen=True)
@@ -1641,10 +1641,11 @@ class _UninstallOutcome:
 def _delete_with_the_server(play: Path, *, game: str, server_dir: Path) -> str:
     """Delete a removed server's ready-to-play client; the sentence that says how it went."""
     try:
-        play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
+        lost = play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
     except play_client.PlayClientError as exc:
         return str(exc)
-    return f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    done = f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    return f"{done} {lost}" if lost else done  # T198: a read-only flag it could not put back
 
 
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
@@ -2178,7 +2179,7 @@ class ControllerServices:
 
     The tab draws none of them and says the reasons instead; `play.InstallPlay`
     refuses a press of one as well. Empty everywhere but a tree whose verbs have
-    not all been watched to work (Centurion, until T179 Task 9).
+    not all been watched to work (Centurion: Revive, held back after T208's live check).
     """
 
     no_modules_note: str = ""
@@ -3532,8 +3533,7 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb not yet watched to work on a live Centurion server
-    (`centurion_characters.withheld`).
+    verb Centurion withholds (`centurion_characters.withheld`).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an
@@ -4361,6 +4361,14 @@ DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
 START_FAILED_NO_DOCKER = "The server could not start because Docker isn't answering."
 """A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
 
+STOP_FAILED_NO_DOCKER = (
+    "Yu'lon couldn't ask Docker what is running, so it can't tell whether the server stopped."
+)
+"""A Stop's own line when Docker did not answer its census (PR 291 Linux live test).
+
+Docker's words go to the log; this goes when Docker answers again, as the
+status line then says what runs."""
+
 START_FAILED_DOCKER_GONE = (
     "The server could not start: a SteamOS update removed Docker from this Steam Deck. Press "
     f'"{platform.STEAMOS_DOCKER_REPAIR_LABEL}" in the box above.'
@@ -4461,9 +4469,14 @@ def wait_for(job: str) -> str:
 
 
 _POINTERS_AT_THE_BANNER = frozenset(
-    {START_FAILED_NO_DOCKER, START_FAILED_DOCKER_GONE, START_FAILED_DOCKER_MISSING}
+    {
+        START_FAILED_NO_DOCKER,
+        START_FAILED_DOCKER_GONE,
+        START_FAILED_DOCKER_MISSING,
+        STOP_FAILED_NO_DOCKER,
+    }
 )
-"""A failed Start's lines that send the player to the Docker banner (T194).
+"""A failed Start's or Stop's lines that are about Docker not answering (T194).
 
 When the banner goes, a problem line holding one of these points at nothing,
 so it goes too; any other problem line is a refusal of its own and stays.
@@ -6061,6 +6074,10 @@ TUNING_NO_FILE_BACKUP = (
     "first save on this tab is what creates it."
 )
 
+TUNING_NAMED_BACKUP_GONE = (
+    "The backup Revert file names, {backup}, is no longer beside {file}, so nothing was written."
+)
+
 TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
@@ -6982,7 +6999,7 @@ class ControllerView(QWidget):
             )
             self._check_the_channel()
             if found_pending:
-                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     # ------------------------------------------------------------- sub-tabs
 
@@ -7265,6 +7282,10 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
         self.uninstall_confirm_button.setProperty("danger", True)
         self.uninstall_confirm_button.setVisible(False)
+        # Beside the red press, with the plan (PR 291's Windows live test: the
+        # plan could not be put away once shown).
+        self.uninstall_cancel_button = QPushButton(ARM_CANCEL, tab)
+        self.uninstall_cancel_button.setVisible(False)
         self.uninstall_label = QLabel("", tab)
         self.uninstall_label.setWordWrap(True)
         self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -7289,6 +7310,7 @@ class ControllerView(QWidget):
             self.uninstall_button = QPushButton("Uninstall\u2026", tab)
             self.uninstall_button.clicked.connect(self.show_uninstall_plan)
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
+            self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
             self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
             self.uninstall_label.setVisible(True)
@@ -7427,7 +7449,9 @@ class ControllerView(QWidget):
             danger_column.addWidget(self.uninstall_label)
             danger_column.addWidget(self.keep_characters_check)
             danger_column.addWidget(self.delete_play_client_check)
-            danger_column.addWidget(self.uninstall_confirm_button)
+            danger_column.addWidget(
+                _bar(danger, self.uninstall_confirm_button, self.uninstall_cancel_button)
+            )
         box.addWidget(danger)
         box.addStretch(1)
         for press in self._server_presses():
@@ -7454,6 +7478,7 @@ class ControllerView(QWidget):
                 self.keep_characters_check,
                 self.delete_play_client_check,
                 self.uninstall_confirm_button,
+                self.uninstall_cancel_button,
             )
             if press is not None
         )
@@ -8578,11 +8603,12 @@ class ControllerView(QWidget):
         self._clear_the_verdict()
         # F1 (T195): a greyed Start or Stop says what it waits for, in the
         # banner's case's own words (T214). A reading that answers replaces it
-        # (`_status_ready`); a job of ours keeps its "Wait:".
+        # (`_status_ready`); a job of ours keeps its "Wait:". Both, not only the
+        # greyed one: a running server's Stop stayed live under that sentence,
+        # and pressing it ran a stop that could only fail (PR 291 Linux live test).
         if not self._busy:
             for press in (self.start_button, self.stop_button):
-                if not press.isEnabled():
-                    set_enabled_why(press, advice.greyed)
+                set_enabled_why(press, advice.greyed)
         # The reinstall lives in the banner, so it is offered with it and
         # never switched on inside a banner the hold keeps down.
         self._offer_docker_repair()
@@ -8771,6 +8797,7 @@ class ControllerView(QWidget):
             if self.forget_install_button is not None:
                 self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
+            self.uninstall_cancel_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
             if self.set_client_dir_button is not None:
                 self.set_client_dir_button.setEnabled(True)
@@ -8923,12 +8950,14 @@ class ControllerView(QWidget):
         on it re-verifies rather than re-creates.
         """
         self._settle_the_channel()
-        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     def _resettle_if_pending(self) -> None:
         # A minute is long enough for the tab to have been torn down (install,
         # then uninstall): `shutdown()` sets `_closed`, and a job started after
-        # it would connect its `done` to a slot of a deleted widget. `settle()`
+        # it would connect its `done` to a slot of a deleted widget. Both arms
+        # name `self` as the timer's context object (T213), so a tab deleted
+        # without `shutdown()` never gets here at all. `settle()`
         # on `Pending` re-verifies and never creates, which is why the tab-open
         # path may schedule this too (T138).
         if getattr(self, "_closed", False):
@@ -9325,10 +9354,21 @@ class ControllerView(QWidget):
         the silent bug it replaced looked like (review, 2026-08-22).
         """
         self._set_busy(False)
-        msg = str(exc)
+        msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    def _stop_failure_words(self, exc: object) -> str:
+        """What a failed stop says: its own refusal, or one plain line when Docker did not answer.
+
+        Docker's words go to the log, as a failed Start's do (T194 C7); the
+        follow-up read puts the box up with what to do.
+        """
+        if isinstance(exc, docker.DockerUnansweredError) or docker_advice.unreachable(exc):
+            logger.warning(f"{self.entry.name}: Stop could not reach Docker: {exc}")
+            return STOP_FAILED_NO_DOCKER
+        return str(exc)
 
     def stop_for_removal(self) -> None:
         """Stop this server on the job runner because it is about to leave Yu'lon's list (T95).
@@ -9365,7 +9405,7 @@ class ControllerView(QWidget):
     def _stop_for_removal_failed(self, exc: object) -> None:
         """Say why here, as `_stop_failed()` does; the window asks whether to go on anyway."""
         self._set_busy(False)
-        message = str(exc)
+        message = self._stop_failure_words(exc)
         self.problem_label.setText(message)
         self.action_failed.emit(message)
         # As `_stop_failed()` does: the status line said "stopping…", and the
@@ -9390,11 +9430,28 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         self._play_delete_offered = False
         self.delete_play_client_check.setVisible(False)
         self.uninstall_label.setText("Working out what would be removed\u2026")
         self._run(self.services.uninstall.plan, self._uninstall_plan_ready, self._uninstall_failed)
+
+    @Slot()
+    def put_away_uninstall_plan(self) -> None:
+        """Cancel beside the plan: take the plan, its two boxes and its press off the tab.
+
+        Removes nothing, and the next Uninstall… asks for a fresh plan.
+        """
+        if self._uninstall_running:
+            return
+        self._uninstall_plan = None
+        self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
+        self._play_delete_offered = False
+        self.delete_play_client_check.setVisible(False)
+        self.uninstall_label.setText("")
 
     @Slot(object)
     def _uninstall_plan_ready(self, result: object) -> None:
@@ -9406,11 +9463,13 @@ class ControllerView(QWidget):
             # visible Uninstall button would be an offer the app cannot keep.
             self._uninstall_plan = None
             self.uninstall_confirm_button.setVisible(False)
+            self.uninstall_cancel_button.setVisible(False)
             self.keep_characters_check.setVisible(False)
             self.uninstall_label.setText(result.refusal)
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
+        self.uninstall_cancel_button.setVisible(True)
         # T188 fix round 1: a plan that found no database volume has nothing to
         # keep, so a tick left from an earlier plan must not promise it.
         if not result.character_volume:
@@ -9541,6 +9600,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         play_said: str | None = None
         if isinstance(result, _UninstallOutcome):
@@ -9592,6 +9652,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
         message = str(exc)
         self.uninstall_label.setText(message)
@@ -11114,6 +11175,7 @@ class ControllerView(QWidget):
         source = marker.source_client_dir
 
         def work() -> _Compared:
+            lost: list[play_client.LostFlag] = []
             done = play_client.refresh(
                 play,
                 source,
@@ -11122,8 +11184,10 @@ class ControllerView(QWidget):
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
                 catalog_always=_catalog_always(self.entry.client.config_wtf),
+                flags_lost=lost,
             )
-            return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
+            left_out = archives_left_out(server_dir, play, source, client_dir)
+            return _Compared(done, left_out, play_client.flags_lost_warning(lost))
 
         self._run(work, self._play_client_refreshed, self._play_client_job_failed)
         return True
@@ -11139,6 +11203,9 @@ class ControllerView(QWidget):
             said = "Nothing needed refreshing: it matches your own client."
         if compared.left_out:
             said += " " + left_out_sentence(compared.left_out)
+        if compared.flags_lost:  # T198: on the label and in front of the player
+            said += " " + compared.flags_lost
+            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -11181,8 +11248,10 @@ class ControllerView(QWidget):
         )
 
     @Slot(object)
-    def _play_client_deleted(self, _result: object) -> None:
+    def _play_client_deleted(self, result: object) -> None:
         self._release_play_client()
+        if isinstance(result, str) and result:  # T198: a read-only flag it could not put back
+            self._play_refused(result)
         setter = self.services.set_play_client_dir
         if setter is None:  # pragma: no cover - the menu is not built without it
             return
@@ -12203,12 +12272,20 @@ class ControllerView(QWidget):
         first read after an action can legitimately show the old state; a
         second and a third cost nothing and cover a machine slower than the one
         this was measured on.
+
+        T213: a self-re-arming timer like the Modules version walk, with the
+        same two guards. A tab removed between two reads (`shutdown()`, then
+        `deleteLater()`) ends the sequence here, and the timer names `self` as
+        its context object so a read queued before the delete is dropped by
+        Qt instead of clearing a deleted list.
         """
+        if getattr(self, "_closed", False):
+            return
         self.refresh_characters()
         if self._character_rows() != before or attempt >= _ROW_SETTLE_TRIES:
             return
         QTimer.singleShot(
-            _ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(before, attempt + 1)
+            _ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(before, attempt + 1)
         )
 
     def _character_rows(self) -> tuple[str, ...]:
@@ -12284,7 +12361,7 @@ class ControllerView(QWidget):
             # done -- "You change the level of Aevret to 60" above a row still
             # reading 55, which reads as the action having failed.
             rows = self._character_rows()
-            QTimer.singleShot(_ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(rows))
+            QTimer.singleShot(_ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(rows))
 
     @Slot()
     def teleport_character(self) -> None:
@@ -13031,7 +13108,10 @@ class ControllerView(QWidget):
         grid = QGridLayout(self.time_zone_group)
         self.time_zone_where = QComboBox(self.time_zone_group)
         self.time_zone_place = QComboBox(self.time_zone_group)
-        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+        for box, chars in (
+            (self.time_zone_where, len(TIME_ZONE_HOST.format(zone=time_zone.host_zone()))),
+            (self.time_zone_place, 16),
+        ):
             box.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
@@ -14954,7 +15034,7 @@ class ControllerView(QWidget):
         if self._filling_versions or self.services.module_version is None:
             return
         self._filling_versions = True
-        QTimer.singleShot(0, self._fill_next_version)
+        QTimer.singleShot(0, self, self._fill_next_version)
 
     @Slot()
     def _fill_next_version(self) -> None:
@@ -14965,7 +15045,17 @@ class ControllerView(QWidget):
         `.git`, a git that refused and a git that is not there), so there is
         nothing to catch here and nothing that can turn a reload into a
         failure.
+
+        T213: a closed tab ends the walk here. `drop_controller()` in main.py
+        runs `shutdown()` and then `deleteLater()`, and a tick already queued
+        used to come back after both and call `set_version` on a deleted
+        label -- a `RuntimeError` traceback inside a Qt slot. The re-arm
+        names `self` as the timer's context object as well, so a tick queued
+        before the delete is dropped by Qt rather than delivered.
         """
+        if getattr(self, "_closed", False):
+            self._filling_versions = False
+            return
         if self._waits_for_the_distro("modules", self.reload_modules):
             # Stopped mid-walk: the reload that runs once it is up walks again.
             self._filling_versions = False
@@ -14978,7 +15068,7 @@ class ControllerView(QWidget):
             self.modules_panel.set_version(
                 row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
             )
-            QTimer.singleShot(0, self._fill_next_version)
+            QTimer.singleShot(0, self, self._fill_next_version)
             return
         self._filling_versions = False
 
@@ -16526,12 +16616,13 @@ class ControllerView(QWidget):
         T179 Task 6 fix round 3: a failure that KEPT the new build
         (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
         commits, so `_rebuild_finished()` drops the counts the move made stale, as
-        after a finished press. Runs on the panel's worker; the flag is read on the
-        GUI thread once the job has ended.
+        after a finished press. So did a rollback that stopped before the old build
+        was back (`RollbackNotDone.sources_kept`, T197). Runs on the panel's worker;
+        the flag is read on the GUI thread once the job has ended.
         """
         try:
             yield from lines
-        except WorldStoppedAfterReadyError as exc:
+        except (WorldStoppedAfterReadyError, RollbackNotDone) as exc:
             self._update_sources_kept = exc.sources_kept
             raise
 
@@ -16702,7 +16793,7 @@ class ControllerView(QWidget):
         self.tuning_reload_button.clicked.connect(self.reload_tuning)
         self.tuning_reload_button.setToolTip(
             "Read this install's conf files again. Cheap: the files themselves, no network. "
-            "Anything you have typed here and not saved is dropped."
+            "Anything you have typed here and not saved is kept."
         )
         # The undo for the FORM, and the one control on this bar that cannot
         # destroy anything: the cards are rebuilt from the rows already read,
@@ -16798,10 +16889,12 @@ class ControllerView(QWidget):
         self.tuning_details = Details(tab)
         self.tuning_report.textChanged.connect(lambda: self.tuning_details.set_text(""))
         box.addWidget(self.tuning_details)
-        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
-        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
-        # floor of 100 under it could never be the number that applied. A guard
-        # that cannot fire is a guard nobody can test (measured 2026-09-16).
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately. Measured 2026-09-16 the
+        # panel asked for 288px of its own, so a floor of 100 could never apply.
+        # Measured again at T190's fix round, when the file side got its scroll
+        # area: 70 side by side and 125 narrow, and side by side it was given
+        # 523 at 1280x800 -- a floor still never the number that applied, and a
+        # guard that cannot fire is a guard nobody can test.
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller
@@ -16837,6 +16930,8 @@ class ControllerView(QWidget):
         is cheap enough to run after every install and every save.
         """
         if self._waits_for_the_distro("tuning", self.reload_tuning):
+            # A card's Save or Revert that led here still redraws as that card's (T190).
+            self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
         rows = tuning.rows_for(
@@ -16889,7 +16984,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()), keep_edits=False)
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -17897,9 +17992,13 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
-        backups = tuning.backups_of(path)
+        # The backup the tab names, not merely the newest (T190): a card's Save
+        # may have taken a newer one since, and the label still names this one.
+        named = self.tuning_panel.backup_name()
+        backups = tuple(b for b in tuning.backups_of(path) if named is None or b.name == named)
         if not backups:
-            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
+            self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
             note = self._put_back(backups[-1], path)

@@ -150,6 +150,9 @@ class _Lifecycle:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
+    def refuse_start(self) -> None:
+        return None
+
     def stop(self) -> bool:
         self.calls.append("stop")
         return True

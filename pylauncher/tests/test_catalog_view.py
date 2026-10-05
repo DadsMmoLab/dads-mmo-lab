@@ -2341,6 +2341,55 @@ def test_a_real_no_on_the_suggestion_dialog_reads_as_no(
     assert _ask_with_real_dialog(monkeypatch, tmp_path, QMessageBox.StandardButton.No) is False
 
 
+def _escape_active_message_box(seen: list[list[str]], deadline: object) -> None:
+    """Press Escape on the active modal `QMessageBox`, noting its buttons, once it appears."""
+    from PySide6.QtCore import QDeadlineTimer, Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    assert isinstance(deadline, QDeadlineTimer)
+    app = QApplication.instance()
+    widget = app.activeModalWidget() if app is not None else None
+    if isinstance(widget, QMessageBox):
+        seen.append([button.text() for button in widget.buttons()])
+        QTest.keyClick(widget, Qt.Key.Key_Escape)
+        return
+    if deadline.hasExpired():
+        return
+    QTimer.singleShot(_DIALOG_POLL_MS, lambda: _escape_active_message_box(seen, deadline))
+
+
+def test_escape_on_the_install_folder_question_closes_it_and_opens_no_picker(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR 291's Windows live test: Escape opened "Where should WoW WotLK be installed?"."""
+    from PySide6.QtCore import QDeadlineTimer
+
+    monkeypatch.setattr(QMessageBox, "exec", _REAL_QMESSAGEBOX_EXEC)
+    seen: list[list[str]] = []
+    _escape_active_message_box(seen, QDeadlineTimer(_REAL_DIALOG_BOUND_MS))
+
+    answer = catalog_view._qt_suggestion_asker(None, "WoW WotLK", tmp_path / "suggested")
+
+    assert seen, "the question never opened"
+    assert catalog_view.CANCEL_LABEL in seen[0], seen
+    assert answer is None, f"Escape read as {answer!r}"
+
+    picked: list[str] = []
+    started: list[str] = []
+    view = CatalogView(
+        CATALOG,
+        lambda e: started.append(e.id) or _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda _parent, title, _start: picked.append(title),
+        ask_suggestion=lambda *_: None,
+        platform_id=lambda: "linux",
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert picked == [] and started == [], (picked, started)
+
+
 # -- "Installed" on a tile whose server the app already knows (owner, 2026-09-04)
 
 
@@ -2798,3 +2847,59 @@ def test_install_keeps_the_former_folder_when_the_new_one_is_empty(
     _with_install(tmp_path / "wow-server-playerbots")
     (tmp_path / "yulon-wotlk").mkdir()
     assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def _install_question(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The Install dialog's words, from the REAL asker: only its `exec()` is stood in for."""
+    said: list[str] = []
+
+    def answer_no(box: QMessageBox) -> object:
+        said.append(box.text())
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "exec", answer_no)
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, [], installs=False),
+        LogPanel(),
+        pick_dir=lambda *_: None,
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    (text,) = said
+    return text
+
+
+def test_the_install_question_says_a_new_folder_only_when_it_is_new(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this new folder?" in text and str(tmp_path / "yulon-wotlk") in text
+    assert "Yu'lon makes the folder when the install starts." in text
+
+
+def test_the_install_question_for_an_old_server_folder_says_it_uses_that_server(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux live test of PR 291, item 3: ~/wow-server-playerbots found and offered.
+
+    The dialog said "into this new folder" and "Yu'lon makes the folder when
+    the install starts" about a folder that held a server already.
+
+    Mutation: drop the existing-folder wording, and "new folder" is back.
+    """
+    _with_install(tmp_path / "wow-server-playerbots")
+    text = _install_question(tmp_path, monkeypatch)
+    assert str(tmp_path / "wow-server-playerbots") in text
+    assert "into this existing server folder?" in text
+    assert "already in this folder, and Yu'lon uses it" in text
+    assert "new folder" not in text and "makes the folder" not in text
+
+
+def test_the_install_question_for_an_empty_folder_says_it_is_already_there(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "yulon-wotlk").mkdir()
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this folder?" in text and "The folder is already there." in text
+    assert "new folder" not in text and "makes the folder" not in text

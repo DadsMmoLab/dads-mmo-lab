@@ -208,6 +208,14 @@ def _touch(base: int, scale: float) -> str:
     return f"{max(TOUCH_TARGET_PX, round(base * eased))}px"
 
 
+def _scroller_width(base: int, scale: float) -> str:
+    """A tab bar's two scroll arrows side by side: each `_touch()` plus a 1 px border either side.
+
+    Qt's style sheet gives each arrow half of `QTabBar::scroller`'s width.
+    """
+    return f"{2 * (int(_touch(base, scale).removesuffix('px')) + 2)}px"
+
+
 def _px(base: int, scale: float) -> str:
     """A font size at `scale`, floored so text never becomes unreadable."""
     return f"{max(MIN_FONT_PX, round(base * scale))}px"
@@ -409,6 +417,15 @@ QTabBar QToolButton {{
     min-height: {_touch(30, scale)};
 }}
 
+/* Where QTabBar PUTS its two arrows: it places them by this width, halved for
+   each (PM_TabBarScrollButtonWidth, 16 px each unset), not by their min-width
+   above, so at 960x640 each arrow was drawn 34 px wide in a 16 px slot and the
+   right one ran off the bar's end (PR 291 Windows live test). Two arrows, each
+   the floor plus its 1 px border either side. */
+QTabBar::scroller {{
+    width: {_scroller_width(30, scale)};
+}}
+
 QTabBar QToolButton:hover {{
     border-color: {COLOR_GOLD_BRIGHT};
     background-color: #242424;
@@ -421,6 +438,29 @@ QTabBar QToolButton:focus {{
 QTabBar QToolButton:disabled {{
     border-color: {COLOR_BRASS_DEEP};
     color: #5A5A5A;
+}}
+
+/* Their glyphs. Styling the button replaces the base style's arrow, and a sheet
+   draws only what it names: at 960x640 the two were dark boxes with nothing in
+   them (PR 291 Linux live test). */
+QTabBar QToolButton::left-arrow {{
+    image: {_image("arrow-left.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::left-arrow:disabled {{
+    image: {_image("arrow-left-disabled.svg")};
+}}
+
+QTabBar QToolButton::right-arrow {{
+    image: {_image("arrow-right.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::right-arrow:disabled {{
+    image: {_image("arrow-right-disabled.svg")};
 }}
 
 /* T95: the × on a server's sidebar tab. Exempt, by objectName, from the scroll

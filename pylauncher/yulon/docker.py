@@ -83,6 +83,36 @@ class DockerCliMissingError(DockerCommandError, SaidByYulon):
     """
 
 
+class DockerUnansweredError(DockerRefusal):
+    """Raised when Docker did not answer the `docker ps` that says what is running.
+
+    A subclass, so every `except DockerCommandError` keeps catching it. What it
+    buys is the Server tab telling this apart from Docker refusing the stop
+    itself: its words were shown raw under the presses ("could not ask Docker
+    what is running, so the stop cannot be confirmed") on the Linux live test of
+    PR 291, and stayed there after Docker came back.
+
+    A `DockerRefusal`: every message it is raised with is Yu'lon's own sentence,
+    not Docker's output (T214).
+    """
+
+
+class DockerTimedOutError(DockerCommandError):
+    """Raised when a `docker` command was given up on at its deadline: Docker did not answer.
+
+    A subclass, so every `except DockerCommandError` keeps catching it, and its
+    words are the generic failure's ("... exited 124: timed out after 30.0s").
+    What the type buys is the Server tab's banner telling it apart from an exit
+    status 124 a container gave: with Docker Desktop's engine VM killed, the CLI
+    hung past the realm poll's 30 s and the banner called that "an error Yu'lon
+    doesn't recognise" (PR 291's Windows live test, 2026-10-04).
+
+    Not `SaidByYulon` (T214): the message is the docker command line and its
+    exit status, not a sentence Yu'lon wrote, so a press it ends says in words
+    that it broke and puts these words under Details.
+    """
+
+
 class SourceUnreadableError(RuntimeError):
     """Raised when the stream `exec_stdin()` was pumping stopped being readable.
 
@@ -351,9 +381,10 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerRefusal(problem)
-        raise DockerCommandError(
-            f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
-        )
+        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        if timeout is not None and runner.timed_out(proc):
+            raise DockerTimedOutError(said)
+        raise DockerCommandError(said)
     return proc
 
 
@@ -945,7 +976,9 @@ def _running(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None
     """
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
-        raise DockerRefusal("could not ask Docker what is running, so the stop cannot be confirmed")
+        raise DockerUnansweredError(
+            "could not ask Docker what is running, so the stop cannot be confirmed"
+        )
     running = {line.strip() for line in listed}
     ours: list[str] = []
     strangers: list[tuple[str, str | None]] = []
@@ -2656,6 +2689,37 @@ _NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECA
 No unreachable-daemon wording contains either; "no such file or directory" is not one.
 `container_state()` reads it as `missing`."""
 
+_UNREAD_SAID: dict[tuple[str, str | None], str] = {}
+"""What Docker last said when a container's state could not be read, by (name, distro).
+
+`_note_unread()` / `_note_read()` keep it, under `_UNREAD_LOCK`: the realm poll
+and a stop's waits read from worker threads.
+"""
+_UNREAD_LOCK = threading.Lock()
+
+
+def _note_unread(container: str, wsl_distro: str | None, said: str) -> None:
+    """Log a failed state read once per change of what Docker said.
+
+    The Server tab reads the world's state every five seconds. With the daemon
+    stopped, each read logged Docker's words again: 39 identical lines in three
+    minutes on the Linux live test of PR 291 (2026-10-04).
+    """
+    with _UNREAD_LOCK:
+        if _UNREAD_SAID.get((container, wsl_distro)) == said:
+            return
+        _UNREAD_SAID[(container, wsl_distro)] = said
+    logger.warning(f"could not read the state of {container}: {said}")
+
+
+def _note_read(container: str, wsl_distro: str | None) -> None:
+    """A read that answered after one that did not: say so once, and forget the failure."""
+    with _UNREAD_LOCK:
+        if _UNREAD_SAID.pop((container, wsl_distro), None) is None:
+            return
+    logger.info(f"Docker answers about {container} again")
+
+
 _STOP_SAYS_GONE = "No such container"
 """What `docker stop` says for a container that is already gone; `_run_docker_stop()`
 takes it as done. The stricter, older reading of `_NO_SUCH_CONTAINER`'s answer, kept
@@ -2735,7 +2799,7 @@ def _refuse_without_an_identity(
             have nothing to say it to — and naming it sends the user to edit
             their install's `.env` over a machine that has no Docker on it
             (review, 2026-08-23).
-        DockerCommandError: Docker was asked and would not answer.
+        DockerUnansweredError: Docker was asked and would not answer.
     """
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
@@ -2744,7 +2808,7 @@ def _refuse_without_an_identity(
         # the server had stopped while it was still serving. Socket permissions,
         # a wrong DOCKER_HOST and an API timeout under load all land here
         # (review, 2026-08-22).
-        raise DockerRefusal(
+        raise DockerUnansweredError(
             f"could not ask Docker what is running, and the install in {server_dir} has no "
             f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
             f"{nothing_was}"
@@ -3471,9 +3535,10 @@ def container_state(
     fmt = "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}"
     proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
-        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
         return ContainerState(missing=missing)
+    _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
@@ -4409,6 +4474,46 @@ CE on Linux and stated as a guarantee.
 
 _EXIT_CODE = re.compile(r"exit(?:ed with)? code:? (\d+)")
 
+_BUILDER_GONE = re.compile(
+    r"rpc error: code = Unavailable\b"
+    r"|failed to solve: Unavailable:"
+    r"|failed to (?:solve|receive status): error reading from server: EOF\b"
+)
+"""The build's client losing BuildKit: gRPC's `Unavailable`, the transport gone (T202).
+
+Measured twice on one Windows test VM (Docker Desktop 29.7.2, 2026-10-03, the
+T179 live check): `failed to receive status: rpc error: code = Unavailable
+desc = error reading from server: EOF`, once after 53 silent minutes that
+followed a finished compile, once mid-compile at 99% on a VM whose memory was
+then raised and whose next build passed. The `desc` after the code is the
+transport's to word (`error reading from server: EOF`, `closing transport due
+to: ...`), so the code is what is matched. No build step prints this, so a
+compiler's line cannot be read as it.
+
+BuildKit words the same event a second way. The m910q live test of PR 294
+(Docker 29.7.2, 2026-10-04) restarted Docker under a build at [459/1848], and
+the build ended on `target ac-db-import: failed to solve: Unavailable: error
+reading from server: EOF` -- the code spelled as `Unavailable:` after `failed
+to solve:`, with no `rpc error`. The third form is the transport's own EOF with
+no code in front of it. All three are Docker's own lines, never a step's: a
+step's output arrives as `#<n> <seconds> ...` and is not read at all
+(`builder_connection_lost()`), and a registry's `503 Service Unavailable`,
+`429 Too Many Requests`, `not found` or a pull's `unexpected EOF` matches none.
+"""
+
+_STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
+"""A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
+
+
+def builder_connection_lost(tail: Sequence[str]) -> bool:
+    """Did this build end because its client lost Docker's builder? (T202)
+
+    The whole tail is read: the line is the last one Docker prints, but blank
+    lines may follow it. A step's own output lines are skipped: what a RUN step
+    prints is that program's, not Docker's word on its builder.
+    """
+    return any(_BUILDER_GONE.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
+
 
 def _build_log_elsewhere(said: list[str]) -> str:
     """The URL Docker Desktop printed instead of the build's output, or `""`.
@@ -4827,6 +4932,71 @@ def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool 
     # compare against `len(refs)` could only ever equal it here, which read as
     # if a partial count could reach this line (review, 2026-08-24).
     return True
+
+
+BUILD_CACHE_TIMEOUT_SECONDS = 60.0
+"""How long each build-cache question gets. `system df` sizes every image and volume."""
+
+_DECIMAL_SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kMGTP]?)B$")
+_DECIMAL_UNITS = {"": 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
+_BUILDX_TOTAL = re.compile(r"^Total:\s+(\S+)\s*$")
+
+
+def _decimal_bytes(size: str) -> int | None:
+    """Docker's own size spelling (`12.91GB`, `441.6kB`, `0B`, decimal units) as bytes."""
+    found = _DECIMAL_SIZE.match(size.strip())
+    if found is None:
+        return None
+    return round(float(found.group(1)) * _DECIMAL_UNITS[found.group(2)])
+
+
+def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
+    """How much build cache Docker holds, in bytes; `None` when it would not say (T203).
+
+    `docker buildx du` first: it sizes the cache and nothing else, and it asks
+    the builder a build would use. Its summary ends `Total:\t\t4.79GB`, which on
+    a Linux test box (Docker 29.7.2, buildx v0.36.1, 2026-10-04) was the same
+    figure `docker system df` gave for `Build Cache` that minute, in 0.1 s
+    against 0.34 s. A Docker without the buildx plugin answers `'buildx' is not
+    a docker command` and a non-zero exit; that, or a summary with no readable
+    `Total:`, falls back to the `Build Cache` row's `Size` in `docker system df
+    --format '{{json .}}'`, which every Docker since 1.13 has.
+
+    `None` is not 0, in either direction: a daemon that would not answer, a
+    missing row or a size this cannot read credits nothing, and a real 0 is the
+    answer "nothing to reuse".
+    """
+    proc = _docker(["buildx", "du"], timeout=BUILD_CACHE_TIMEOUT_SECONDS, wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        for line in reversed(proc.stdout.splitlines()):
+            found = _BUILDX_TOTAL.match(line.strip())
+            if found is not None:
+                total = _decimal_bytes(found.group(1))
+                if total is not None:
+                    return total
+                break
+    logger.info("`docker buildx du` gave no total; asking `docker system df`")
+    proc = _docker(
+        ["system", "df", "--format", "{{json .}}"],
+        timeout=BUILD_CACHE_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not ask Docker how much build cache it holds: {proc.stderr.strip()}")
+        return None
+    for line in proc.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("Type") != "Build Cache":
+            continue
+        size = _decimal_bytes(str(row.get("Size", "")))
+        if size is None:
+            logger.info(f"could not read Docker's build cache size: {row.get('Size')!r}")
+        return size
+    logger.info("`docker system df` printed no Build Cache row")
+    return None
 
 
 def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:
@@ -5334,9 +5504,10 @@ def container_exit(
     fmt = "{{.Id}}\t{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.FinishedAt}}"
     proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
-        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
         return ContainerExit(missing=missing)
+    _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     cid, status, code, finished = (fields + ["", "", "", ""])[:4]
     exit_code = int(code) if code.lstrip("-").isdigit() else None

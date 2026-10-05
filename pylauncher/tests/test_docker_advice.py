@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -12,29 +13,41 @@ from yulon import docker, docker_advice, wsl
 from yulon import platform as yulon_platform
 
 HOSTS = ("windows", "macos", "linux", "deck")
-PROBLEMS = ("missing", "not-running", "permission", "removed", "wsl", "unknown")
+PROBLEMS = (
+    "missing",
+    "not-running",
+    "not-answering",
+    "permission",
+    "removed",
+    "wsl",
+    "unknown",
+)
 
 ACTIONS = {
     ("windows", "missing"): "open-desktop",
     ("windows", "not-running"): "open-desktop",
+    ("windows", "not-answering"): "open-desktop",
     ("windows", "permission"): None,
     ("windows", "removed"): "open-desktop",
     ("windows", "wsl"): None,
     ("windows", "unknown"): None,
     ("macos", "missing"): "open-desktop",
     ("macos", "not-running"): "open-desktop",
+    ("macos", "not-answering"): "open-desktop",
     ("macos", "permission"): None,
     ("macos", "removed"): "open-desktop",
     ("macos", "wsl"): None,
     ("macos", "unknown"): None,
     ("linux", "missing"): None,
     ("linux", "not-running"): None,
+    ("linux", "not-answering"): None,
     ("linux", "permission"): None,
     ("linux", "removed"): None,
     ("linux", "wsl"): None,
     ("linux", "unknown"): None,
     ("deck", "missing"): "reinstall-deck",
     ("deck", "not-running"): None,
+    ("deck", "not-answering"): None,
     ("deck", "permission"): None,
     ("deck", "removed"): "reinstall-deck",
     ("deck", "wsl"): None,
@@ -70,6 +83,7 @@ GREYED = {
     "missing": "Start and Stop come back once Docker is installed.",
     "removed": "Start and Stop come back once Docker is installed again.",
     "not-running": "Start and Stop come back when Docker answers.",
+    "not-answering": "Start and Stop come back when Docker answers.",
     "wsl": "Start and Stop come back when the Docker in that distro answers.",
     "permission": "Start and Stop come back once Docker lets Yu'lon in.",
     "unknown": "Start and Stop come back once Docker stops answering with that error.",
@@ -91,6 +105,32 @@ def test_each_failure_says_what_start_and_stop_wait_for(
 
     assert advice.greyed == GREYED[problem]
     assert text_faults(advice.greyed) == [], advice.greyed
+
+
+def test_every_problem_the_banner_knows_says_what_start_and_stop_wait_for() -> None:
+    """A `Problem` added without a greyed sentence raised KeyError from `advise()` (T214).
+
+    PR 291 added `not-answering` after T214 wrote the table. Read from the
+    type itself, so a value added later fails here rather than at the first
+    banner a player sees; and the parametrised tests above cover every value.
+
+    Mutation: drop `not-answering` from `_GREYED`, and `advise()` raises here.
+    """
+    every = set(get_args(docker_advice.Problem))
+
+    assert set(PROBLEMS) == every
+    assert set(GREYED) == every
+    for problem in sorted(every):
+        assert docker_advice.advise(problem, "linux").greyed == GREYED[problem]
+
+
+def test_a_docker_given_up_on_at_its_deadline_waits_for_docker_to_answer() -> None:
+    """A timeout is `not-answering`, and a greyed Start or Stop under it says so (T214)."""
+    hung = docker.DockerTimedOutError("docker ps exited 124: timed out after 30.0s")
+
+    advice = docker_advice.advice_for(hung, distro=None, host="linux", deck_docker_removed=False)
+
+    assert advice.greyed == "Start and Stop come back when Docker answers."
 
 
 def test_a_deleted_distro_says_start_and_stop_wait_for_it() -> None:
@@ -511,3 +551,143 @@ def test_a_500_from_a_linux_daemons_own_socket_is_not_docker_desktop_down() -> N
         "supports the requested API version"
     )
     assert not docker_advice.unreachable(exc)
+
+
+# ------------------------------------------------- Windows live test, fix round 2
+
+POLL_TIMEOUT = "docker ps --format {{.Names}} exited 124: timed out after 30.0s"
+"""The status poll's error when Docker Desktop's engine VM was killed (yulon.log, PR 291's
+Windows 11 live test, 2026-10-04): the CLI hung past the poll's 30 s and the runner gave up."""
+
+DESKTOP_ENGINE_502 = (
+    "docker version exited 1: request returned 502 Bad Gateway for API route and version "
+    "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.55/version, check if the server "
+    "supports the requested API version"
+)
+"""Docker 29.7.2's first answer after the same kill, captured on that test (CLI words verbatim)."""
+
+DESKTOP_STOPPED_29 = (
+    "docker ps --format {{.Names}} exited 1: failed to connect to the docker API at "
+    "npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon "
+    "is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file "
+    "specified."
+)
+"""Docker 29's words with Docker Desktop quit, captured on that test (already recognised)."""
+
+
+def _hung_poll(monkeypatch: pytest.MonkeyPatch, seconds: float) -> Exception:
+    """The real status poll against a CLI that never answers, given up on by the real runner."""
+    import sys
+
+    hang = [sys.executable, "-c", "import time; time.sleep(60)", "--"]
+    monkeypatch.setattr(yulon_platform, "docker_prefix", lambda distro, inside=None: hang)
+    monkeypatch.setattr(docker, "STATUS_TIMEOUT_SECONDS", seconds)
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.status()
+    return raised.value
+
+
+def test_the_status_poll_given_up_on_is_docker_desktop_not_running_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """8b: killing the engine VM showed "an error Yu'lon doesn't recognise" and no Open press."""
+    exc = _hung_poll(monkeypatch, 0.3)
+
+    assert str(exc) == POLL_TIMEOUT.replace("30.0s", "0.3s"), "not the words the live test saw"
+    assert docker_advice.unreachable(exc)
+    for host in ("windows", "macos"):
+        advice = docker_advice.advice_for(exc, distro=None, host=host, deck_docker_removed=False)
+        assert advice.action == "open-desktop", host
+        assert advice.body.startswith("Docker Desktop isn't running."), advice.body
+
+
+def test_a_command_given_up_on_is_something_that_broke_not_yulons_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T214: a timeout's words are the command line and exit status, not Yu'lon's sentence.
+
+    So a press a timeout ends says in words that it broke and puts them under
+    Details, rather than showing "docker ps exited 124: ..." on the line.
+
+    Mutation: mark `DockerTimedOutError` `SaidByYulon`, and this fails.
+    """
+    from yulon.said import SaidByYulon
+
+    exc = _hung_poll(monkeypatch, 0.3)
+
+    assert isinstance(exc, docker.DockerTimedOutError)
+    assert not isinstance(exc, SaidByYulon)
+
+
+def test_on_linux_a_poll_given_up_on_says_docker_is_not_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = _hung_poll(monkeypatch, 0.3)
+
+    linux = docker_advice.advice_for(exc, distro=None, host="linux", deck_docker_removed=False)
+    deck = docker_advice.advice_for(exc, distro=None, host="deck", deck_docker_removed=False)
+
+    assert linux.body.startswith("Docker isn't answering."), linux.body
+    assert deck.body.startswith("Docker isn't answering."), deck.body
+    assert "installed but not running" not in linux.body + deck.body
+    for advice in (linux, deck):
+        assert advice.action is None
+        assert "sudo systemctl restart docker" in advice.body
+        assert "Docker Desktop" not in advice.body
+    assert "Restart the Deck" in deck.body and "computer" not in deck.body
+    wsl_server = docker_advice.advice_for(exc, distro="Ubuntu", host="windows")
+    assert wsl_server.body.startswith("This server runs inside the WSL distro Ubuntu")
+
+
+def test_a_command_of_our_own_that_exits_124_is_not_docker_not_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 124 alone is a command's own status (`timeout` inside a `docker exec`), even under
+    a deadline of ours: only the runner's own "timed out after" is Docker not answering."""
+    from yulon import runner
+
+    monkeypatch.setattr(yulon_platform, "_resolved_docker_cli", "docker")
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda argv, **_kw: subprocess.CompletedProcess(argv, 124, "", "mysql: timed out"),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.status()
+
+    assert not isinstance(raised.value, docker.DockerTimedOutError)
+    assert not docker_advice.unreachable(raised.value)
+    problem = docker_advice.problem_of(raised.value, distro=None, deck_docker_removed=False)
+    assert problem == "unknown"
+    plain = docker.DockerCommandError(POLL_TIMEOUT)
+    assert docker_advice.problem_of(plain, distro=None, deck_docker_removed=False) == "unknown"
+
+
+@pytest.mark.parametrize("said", [DESKTOP_ENGINE_502, DESKTOP_STOPPED_29])
+def test_docker_29s_answers_with_desktops_engine_away_are_docker_desktop_not_running(
+    said: str,
+) -> None:
+    exc = docker.DockerCommandError(said)
+    assert docker_advice.unreachable(exc)
+    advice = docker_advice.advice_for(exc, distro=None, host="windows", deck_docker_removed=False)
+    assert advice.action == "open-desktop"
+    assert advice.body.startswith("Docker Desktop isn't running.")
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "docker ps exited 1: request returned 502 Bad Gateway for API route and version "
+        "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/json, check if the server supports "
+        "the requested API version",
+        "docker pull exited 1: Error response from daemon: Get https://registry-1.docker.io/v2/:"
+        " 502 Bad Gateway",
+    ],
+)
+def test_a_502_that_is_not_desktops_engine_stays_unknown(said: str) -> None:
+    """A registry or a Linux daemon answering 502 is an answer, and the banner says unknown."""
+    exc = docker.DockerCommandError(said)
+    assert not docker_advice.unreachable(exc)
+    advice = docker_advice.advice_for(exc, distro=None, host="windows", deck_docker_removed=False)
+    assert advice.body.startswith("Docker answered with an error Yu'lon doesn't recognise")
+    assert advice.action is None

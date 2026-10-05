@@ -19,7 +19,9 @@ from typing import Literal
 from yulon import docker, platform
 
 Host = Literal["windows", "macos", "linux", "deck"]
-Problem = Literal["missing", "not-running", "permission", "removed", "wsl", "unknown"]
+Problem = Literal[
+    "missing", "not-running", "not-answering", "permission", "removed", "wsl", "unknown"
+]
 Action = Literal["open-desktop", "reinstall-deck"]
 
 UNKNOWN_TITLE = "Yu'lon can't ask Docker about this server right now"
@@ -36,6 +38,15 @@ _ENGINE_NOT_RUNNING = (
 _DECK_NOT_RUNNING = (
     "Docker is installed but not running. Restart the Deck, or run "
     '"sudo systemctl start docker" in a terminal in Desktop Mode.'
+)
+_ENGINE_NOT_ANSWERING = (
+    "Docker isn't answering. Restart it with "
+    '"sudo systemctl restart docker" in a terminal (or restart the computer); '
+    "Yu'lon checks again every few seconds."
+)
+_DECK_NOT_ANSWERING = (
+    "Docker isn't answering. Restart the Deck, or run "
+    '"sudo systemctl restart docker" in a terminal in Desktop Mode.'
 )
 _ENGINE_PERMISSION = (
     "Docker is running, but your account isn't allowed to use it yet. Log out and back in "
@@ -73,6 +84,7 @@ _GREYED: dict[Problem, str] = {
     "missing": "Start and Stop come back once Docker is installed.",
     "removed": "Start and Stop come back once Docker is installed again.",
     "not-running": "Start and Stop come back when Docker answers.",
+    "not-answering": "Start and Stop come back when Docker answers.",
     "wsl": "Start and Stop come back when the Docker in that distro answers.",
     "permission": "Start and Stop come back once Docker lets Yu'lon in.",
     "unknown": "Start and Stop come back once Docker stops answering with that error.",
@@ -80,7 +92,9 @@ _GREYED: dict[Problem, str] = {
 """Why a greyed Start or Stop waits while the banner is up, per failure (T214).
 
 One sentence used to stand for all of them, "…when Docker answers": untrue for
-a Docker that is not installed, and for one that answered with an error.
+a Docker that is not installed, and for one that answered with an error. It is
+still the sentence for a Docker given up on at its deadline (`not-answering`),
+which is not running for the player's purposes and has not answered.
 """
 _GREYED_DISTRO_GONE = "Start and Stop come back once that WSL distro is there again."
 
@@ -128,24 +142,36 @@ _DESKTOP_ENGINE_PIPES = (
 route, lower-cased. A Linux daemon's `/var/run/docker.sock` is none of them."""
 
 
+_DESKTOP_PROXY_ANSWERS = ("internal server error", "502 bad gateway")
+"""What Docker Desktop's proxy answers on its engine pipe with no engine behind it, lower-cased:
+500 while the engine starts or after it stopped, and (Docker 29) 502 the moment its VM is killed."""
+
+
 def unreachable(exc: object) -> bool:
     """Whether `exc` is Docker not answering at all, rather than Docker refusing something.
 
     A missing CLI is not: it has its own sentence, which names the install.
+    A command given up on at its deadline is (`docker.DockerTimedOutError`).
     Docker Desktop's engine while it starts or after it stopped is: the CLI
     reaches the pipe and is answered "request returned 500 Internal Server
     Error for API route and version http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/…"
-    (older CLIs: no number, `docker_engine`). That is Desktop's proxy with no
-    engine behind it, not the engine refusing, so it is told as not running
-    and keeps the Open Docker Desktop press (T194 R3). On macOS the same answer
-    names Desktop's socket under `~/.docker/run` (or `docker.raw.sock`).
+    (older CLIs: no number, `docker_engine`), or by Docker 29 just after its
+    engine VM died, "request returned 502 Bad Gateway for …" on the same route
+    (PR 291's Windows live test). That is Desktop's proxy with no engine behind
+    it, not the engine refusing, so it is told as not running and keeps the
+    Open Docker Desktop press (T194 R3). On macOS the same answer names
+    Desktop's socket under `~/.docker/run` (or `docker.raw.sock`).
     """
     if isinstance(exc, docker.DockerCliMissingError):
         return False
+    if isinstance(exc, docker.DockerTimedOutError):
+        return True
     said = str(exc).lower()
     if any(wording in said for wording in _UNREACHABLE_WORDINGS):
         return True
-    return "internal server error" in said and any(pipe in said for pipe in _DESKTOP_ENGINE_PIPES)
+    return any(answer in said for answer in _DESKTOP_PROXY_ANSWERS) and any(
+        pipe in said for pipe in _DESKTOP_ENGINE_PIPES
+    )
 
 
 def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) -> Problem:
@@ -153,7 +179,8 @@ def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) ->
 
     A server in a WSL distro is that distro's Docker whatever it said; no CLI at
     all is `missing` (`removed` on a Deck an update took it from); a socket or
-    pipe that refused us is `permission`; Docker not answering in a wording
+    pipe that refused us is `permission`; a command given up on at its
+    deadline is `not-answering`; Docker not answering in a wording
     `unreachable()` knows is `not-running`; anything else is `unknown`, which
     never says Docker is down (T194 F2).
     """
@@ -161,6 +188,8 @@ def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) ->
         return "wsl"
     if isinstance(exc, docker.DockerCliMissingError):
         return "removed" if deck_docker_removed else "missing"
+    if isinstance(exc, docker.DockerTimedOutError):
+        return "not-answering"
     said = str(exc).lower()
     if "permission denied" in said or "access is denied" in said:
         return "permission"
@@ -197,7 +226,13 @@ def _banner(problem: Problem, host: Host, *, distro: str | None = None) -> Advic
             return Advice(UNKNOWN_TITLE, _DECK_PERMISSION, None)
         return Advice(UNKNOWN_TITLE, _ENGINE_PERMISSION, None)
     if desktop:
+        # Not answering is told as not running: Docker Desktop's proxy hangs
+        # with its engine VM gone, and opening Desktop is what brings it back
+        # (PR 291's Windows live test).
         return Advice(UNKNOWN_TITLE, _DESKTOP_NOT_RUNNING, "open-desktop")
+    if problem == "not-answering":
+        body = _DECK_NOT_ANSWERING if host == "deck" else _ENGINE_NOT_ANSWERING
+        return Advice(UNKNOWN_TITLE, body, None)
     if host == "deck":
         return Advice(UNKNOWN_TITLE, _DECK_NOT_RUNNING, None)
     return Advice(UNKNOWN_TITLE, _ENGINE_NOT_RUNNING, None)

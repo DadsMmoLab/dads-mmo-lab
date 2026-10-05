@@ -165,6 +165,38 @@ class WorldStoppedAfterReadyError(InstallerError):
         self.sources_kept = sources_kept
 
 
+class RollbackNotDone(InstallerError):
+    """A rebuild's rollback stopped before the old build was back on its tags (T197).
+
+    `StagedInstaller._restore_rollback()` has four ways to stop early: the new
+    build's servers would not stop, the new build could not be given a name to
+    undo onto, a tag would not move back (and the ones moved were moved back),
+    or that undo failed too and the tags are mixed. In every one the old build
+    is NOT what the tags name, so a start (`compose up -d`) runs the new one.
+    Its own type because one caller acts on it: "Update the server to latest…"
+    then leaves the moved sources with the new build instead of putting the old
+    commits back under it, and `sources_kept` says so, as on
+    `WorldStoppedAfterReadyError`.
+
+    `touched` False: no container was replaced, so the server still runs the old
+    build until its next start. `mixed` True: the tags name neither build, so there
+    is no new build for the sources to stay with, and the route puts them back
+    (fix round 1).
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        touched: bool = True,
+        mixed: bool = False,
+        sources_kept: bool = False,
+    ) -> None:
+        super().__init__(*args)
+        self.touched = touched
+        self.mixed = mixed
+        self.sources_kept = sources_kept
+
+
 class UpdateRefused(InstallerError):
     """An update refused for what one upstream commit brings, which a second press cannot change.
 

@@ -90,10 +90,12 @@ from pathlib import Path
 from typing import Literal, TypeVar
 
 from yulon import bot_population, docker, tuning
+from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.catalog.installer import InstallerError
 from yulon.channel import Channel
+from yulon.controller import StartRefused
 from yulon.controller_wow_tortoise import botpool
 from yulon.log import get_logger
 
@@ -1078,6 +1080,11 @@ class PoolRebuild:
         yield "Restarting the server so the bots enrolled during the update log in…"
         try:
             self.restart()
+        except StartRefused as exc:
+            # T197: Restart is refused too; the refusal names its own repair.
+            raise PoolResetError(
+                f"{botpool.RESTART_REFUSED} {exc} The enrolled bots log in at any later start."
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - one press left, said in one sentence
             raise PoolResetError(
                 f"The restart failed ({exc}). Restart the server from the Server tab; the "
@@ -1099,10 +1106,20 @@ class PoolRebuild:
         runs it anyway (a Stop does not, like T123's own cancel).
 
         Raises:
-            PoolResetError: a backup that failed (nothing else was done), a key
-                that could not be written, a failed restart, or a refusal the
-                module logged.
+            PoolResetError: a server no start may run on (T197: nothing was done), a
+                backup that failed (nothing else was done), a key that could not be
+                written, a failed restart, or a refusal the module logged.
         """
+        # T197 fix round 4: the restart this ends in would be refused, and by then the
+        # key is written and armed for the first start after the repair. Asked first,
+        # of the folder (`native.owed_start_refusal`, the one start guard a Tortoise
+        # server has), so nothing is backed up, enrolled, written or stopped.
+        refused = native.owed_start_refusal(self.server_dir)
+        if refused is not None:
+            raise PoolResetError(
+                f"{refused} The random bots were not rebuilt: nothing was written and the "
+                "server was not stopped."
+            )
         try:
             if backup is not None:
                 yield "Backing up the databases first… this can take minutes on a full world."
@@ -1180,6 +1197,9 @@ class PoolRebuild:
         """
         if isinstance(exc, botpool.StopFailed):
             return (yield from self._after_a_failed_stop(exc, token, started_before, restart_owed))
+        if isinstance(exc, StartRefused):
+            # T197: refused before the stop, so the running world never reads the key.
+            raise PoolResetError(f"{botpool.RESTART_REFUSED} {exc} {self._take_back()}") from exc
         try:
             up = self.world_running()
         except Exception as check:  # noqa: BLE001 - an unknown answer is its own branch

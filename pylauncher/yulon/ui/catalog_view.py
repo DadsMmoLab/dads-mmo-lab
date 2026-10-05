@@ -19,7 +19,6 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -48,6 +47,7 @@ from yulon.catalog.installer import (
 from yulon.log import get_logger
 from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
+from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import COLOR_TEXT_GOLD
@@ -105,17 +105,46 @@ def _existing_ancestor(start: Path | None) -> Path | None:
 
 
 def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
-    opens_at = _existing_ancestor(start)
-    chosen = QFileDialog.getExistingDirectory(parent, title, str(opens_at) if opens_at else "")
-    return Path(chosen) if chosen else None
+    return pick_folder(parent, title, _existing_ancestor(start))
 
 
-SuggestionAsker = Callable[[QWidget, str, Path], bool]
-"""Offer a folder that does not exist yet: True to take it, False to open the picker."""
+SuggestionAsker = Callable[[QWidget, str, Path], "bool | None"]
+"""Offer the default folder, new or already there: True to take it, False to open the picker,
+None when the question was closed (Cancel, Escape, the window's X) and nothing is to start."""
+
+USE_THIS_FOLDER_LABEL = "Use this folder"
+CHOOSE_ANOTHER_FOLDER_LABEL = "Choose another folder\u2026"
+CANCEL_LABEL = "Cancel"
+"""The Install question's three presses, named once for the dialog and its tests."""
 
 
-def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
-    """ "Install into this folder?" - Yes takes it, No opens the picker.
+def _suggestion_question(game: str, suggested: Path) -> str:
+    """The Install dialog's words for `suggested`: a new folder, an empty one, or a server's.
+
+    `default_server_dir()` offers a former default folder only when it holds a
+    server, and the dialog said "into this new folder" and "Yu'lon makes the
+    folder" about it all the same (PR 291 Linux live test).
+    """
+    elsewhere = "Choose another folder if you would rather put it somewhere else."
+    if compose_file(suggested) is not None:
+        return (
+            f"Install {game} into this existing server folder?\n\n{suggested}\n\n"
+            f"A server from an earlier install is already in this folder, and Yu'lon uses it. "
+            f"{elsewhere}"
+        )
+    if suggested.is_dir():
+        return (
+            f"Install {game} into this folder?\n\n{suggested}\n\n"
+            f"The folder is already there. {elsewhere}"
+        )
+    return (
+        f"Install {game} into this new folder?\n\n{suggested}\n\n"
+        f"Yu'lon makes the folder when the install starts. {elsewhere}"
+    )
+
+
+def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool | None:
+    """ "Install into this folder?" - Yes takes it, No opens the picker, Cancel closes it.
 
     **This exists because a file picker cannot say "make this one".** The
     suggestion is a folder that by definition does not exist on a first install,
@@ -138,25 +167,36 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     Default is Yes. The suggestion is right for nearly every install, and the
     one it is wrong for - a second install of the same game - is a folder the
     user is already thinking about.
+
+    Cancel is the Escape button, named. With only Yes and No, Qt made No the
+    escape button, so Escape opened the folder picker instead of closing the
+    question (PR 291's Windows live test, 2026-10-04).
     """
     box = FittedMessageBox(
         QMessageBox.Icon.Question,
         f"Install {game}",
-        f"Install {game} into this new folder?\n\n{suggested}\n\n"
-        "Yu'lon makes the folder when the install starts. Choose another folder "
-        "if you would rather put it somewhere else.",
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        _suggestion_question(game, suggested),
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.No
+        | QMessageBox.StandardButton.Cancel,
         parent,
     )
     box.setDefaultButton(QMessageBox.StandardButton.Yes)
-    yes_btn = box.button(QMessageBox.StandardButton.Yes)
-    if yes_btn is not None:
-        yes_btn.setText("Use this folder")
-    no_btn = box.button(QMessageBox.StandardButton.No)
-    if no_btn is not None:
-        no_btn.setText("Choose another folder…")
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    for which, label in (
+        (QMessageBox.StandardButton.Yes, USE_THIS_FOLDER_LABEL),
+        (QMessageBox.StandardButton.No, CHOOSE_ANOTHER_FOLDER_LABEL),
+        (QMessageBox.StandardButton.Cancel, CANCEL_LABEL),
+    ):
+        button = box.button(which)
+        if button is not None:
+            button.setText(label)
     answer = box.exec()
-    return said_yes(answer)
+    if said_yes(answer):
+        return True
+    if answer == QMessageBox.StandardButton.No:
+        return False
+    return None
 
 
 def _pin_compose_project(server_dir: Path) -> None:
@@ -941,7 +981,10 @@ class CatalogView(QWidget):
         # window manager at 91 characters before it reached the name itself
         # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
         suggested = default_server_dir(entry, self._home)
-        if self._ask_suggestion(self, entry.name, suggested):
+        taken = self._ask_suggestion(self, entry.name, suggested)
+        if taken is None:
+            return False
+        if taken:
             server_dir: Path | None = suggested
         else:
             server_dir = self._pick_dir(
