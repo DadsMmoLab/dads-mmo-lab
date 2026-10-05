@@ -622,8 +622,9 @@ class CmangosInstaller(StagedInstaller):
             "runs from the image and the maps it already wrote would not be rebuilt either. "
             "Nothing was changed, and the server you have goes on working exactly as it did. "
             f"To get the fix, keep this folder and take away what this press would skip: "
-            f"use “{REBUILD_ACTION}” on the Server tab, then `docker image rm {images}` "
-            f"and delete {doomed}, then install again into the same folder with the same "
+            f"use “{REBUILD_ACTION}” on the Server tab, then run this in a terminal:\n"
+            f"docker image rm {images}\n"
+            f"Then delete {doomed}, and install again into the same folder with the same "
             "client. That recompiles the server and extracts the maps a second time, which "
             "takes hours, and it leaves the install folder, its database and the characters in "
             f"it alone.{why} {self._why_not_to_delete_the_folder(ctx)}"
@@ -739,9 +740,10 @@ class CmangosInstaller(StagedInstaller):
                 f"{path} is gone, but this install's database volume {volume} still exists and "
                 "was created with the password that file held. A new password would lock this "
                 f"install out of its own database, so nothing was written. Put {plan.file} back "
-                "if you have a copy of it. If it is lost, that database cannot be opened again: "
-                f"`docker volume rm {volume}` deletes it, and every character in it, so this "
-                "install can start over. Removing the containers does not delete it."
+                "if you have a copy of it. If it is lost, that database cannot be opened again. "
+                "This deletes it, and every character in it, so this install can start over "
+                "(removing the containers does not):\n"
+                f"docker volume rm {volume}"
             )
         try:
             _write_secret(path, ctx.secrets.db_password)
@@ -900,7 +902,7 @@ class CmangosInstaller(StagedInstaller):
         native_block = self._native()
         if native_block.dockerfile_dir is None:
             raise InstallerError(
-                f"{self.entry.name} names no `dockerfile_dir`, so there is nothing to build "
+                f"{self.entry.name} names no Dockerfile folder, so there is nothing to build "
                 "from. That is a catalog error in the app, not something to fix on this machine."
             )
         template_dir = self.installers_root / native_block.dockerfile_dir
@@ -1403,13 +1405,14 @@ class CmangosInstaller(StagedInstaller):
                 "install press checks again."
             ) from exc
         if failing:
-            rules = "; ".join(
-                f"{rule.db}: `{rule.query}` must answer at least {rule.min}" for rule in plan.verify
+            rules = "\n".join(
+                f"{rule.db}: {rule.query} must answer at least {rule.min}" for rule in plan.verify
             )
             raise InstallerError(
-                f"The import finished but these checks failed: {', '.join(failing)}. The rules "
-                f"are {rules}. No completion marker was written, so the next install press "
-                "imports again rather than starting a server with an empty world."
+                f"The import finished but these checks failed: {', '.join(failing)}. No "
+                "completion marker was written, so the next install press imports again "
+                "rather than starting a server with an empty world.",
+                detail=f"The rules:\n{rules}",
             )
         levels = sqlplan.update_levels(runs)
         yield f"Checked {len(plan.verify)} database rule(s); every one holds."
@@ -2230,7 +2233,7 @@ class CmangosInstaller(StagedInstaller):
     def _native(self) -> NativeInstall:
         native_block = self.entry.install.native
         if native_block is None:  # preflight refuses first; this keeps the type honest
-            raise InstallerError(f"{self.entry.name} has no `install.native` section.")
+            raise InstallerError(f"{self.entry.name} has no native install section.")
         return native_block
 
     def _data(self) -> CmangosData:
@@ -2242,7 +2245,7 @@ class CmangosInstaller(StagedInstaller):
         data = self._native().cmangos
         if data is None:
             raise InstallerError(
-                f"{self.entry.name} says its family is cmangos but carries no `cmangos` block. "
+                f"{self.entry.name} says its family is cmangos but carries no cmangos settings. "
                 f"{CATALOG_ERROR_TAIL}"
             )
         return data
@@ -2477,9 +2480,9 @@ class CmangosInstaller(StagedInstaller):
         shadowed = sorted(set(public) & set(secret))
         if shadowed:
             raise InstallerError(
-                f"{', '.join(shadowed)} is both a public install token and a field of "
-                "`native.Secrets`, so building the conf mapping would put the password where "
-                "the public value belongs. Rename the `native.Secrets` field. "
+                f"{', '.join(shadowed)} is both a public install token and the name of a stored "
+                "secret, so building the conf mapping would put the password where the public "
+                "value belongs. Rename the secret. "
                 f"{DECLARATION_ERROR_TAIL}"
             )
         return {**public, **secret}

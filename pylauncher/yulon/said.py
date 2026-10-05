@@ -15,6 +15,8 @@ the line. Here nothing is Yu'lon's unless the code that raised it says so.
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 
 class SaidByYulon(Exception):
     """Mixed into an exception type whose message is a sentence Yu'lon wrote for the player.
@@ -33,13 +35,45 @@ class SaidByYulon(Exception):
     detail: str = ""
 
 
+DETAILS_HEADING = "\n\nDetails:\n"
+"""Where `with_details()` puts a text's Details, and where `split_details()` cuts it."""
+
+
 def with_details(exc: BaseException, sentence: str | None = None) -> str:
     """`sentence` (else `exc`'s own) with its Details under it, for a place with no pane (T248).
 
-    The install's failure dialog has no Details to fold away, so what a
-    program printed -- and a command, when one helps -- goes under a "Details:"
-    heading in the text itself, below the sentence and never in it.
+    Any exception's `detail` counts: `SaidByYulon`'s and `InstallerError`'s. The
+    install's failure dialog has no Details to fold away, so what a program
+    printed -- and a command, when one helps -- goes under a "Details:" heading
+    in the text itself, below the sentence and never in it.
     """
     said = str(exc) if sentence is None else sentence
-    detail = exc.detail if isinstance(exc, SaidByYulon) else ""
-    return f"{said}\n\nDetails:\n{detail}" if detail else said
+    detail = getattr(exc, "detail", "")
+    return details_below(said, detail if isinstance(detail, str) else "")
+
+
+def details_below(sentence: str, detail: str) -> str:
+    """`sentence`, and `detail` under a "Details:" heading when there is any (T248).
+
+    For a failure whose text is all a place gets (`InstallerError`): the line
+    shows the sentence (`split_details()`), the dialog shows both.
+    """
+    return f"{sentence}{DETAILS_HEADING}{detail}" if detail else sentence
+
+
+def split_details(text: str) -> tuple[str, str]:
+    """`with_details()` undone: the sentence for a line, and the Details for a fold (T248)."""
+    line, _, details = text.partition(DETAILS_HEADING)
+    return line, details
+
+
+_E = TypeVar("_E", bound=BaseException)
+
+
+def carry_detail(cause: BaseException, error: _E) -> _E:
+    """`error`, holding `cause`'s Details unless it has its own (T248)."""
+    if not getattr(error, "detail", ""):
+        detail = getattr(cause, "detail", "")
+        if detail:
+            error.detail = detail  # type: ignore[attr-defined]
+    return error

@@ -1789,7 +1789,7 @@ def test_a_rebuild_tuple_missing_the_stage_the_rollback_watches_refuses_before_t
     with pytest.raises(InstallerError) as raised:
         list(installer.rebuild(InstallOptions(server_dir=server_dir)))
     said = str(raised.value)
-    assert "`recreate` stage to watch" in said, said
+    assert "recreate stage to watch" in said, said
     assert "could not be rolled back" in said and "Nothing was started" in said, said
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
     assert "build" not in rec.calls, rec.calls

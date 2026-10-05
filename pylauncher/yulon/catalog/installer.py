@@ -136,7 +136,19 @@ SUDO_PROMPT_PREFIX = "[sudo via Yu'lon "
 
 
 class InstallerError(RuntimeError):
-    """The install could not start or did not finish (message is user-readable)."""
+    """The install could not start or did not finish (message is user-readable).
+
+    `detail` is what goes under Details (T248): a program's own words, or a
+    command that shows them. Never part of the message, so a wrap that quotes
+    the message (`f"{exc} …"`) keeps the line words; `said.carry_detail()` hands it on.
+    """
+
+    detail: str = ""
+
+    def __init__(self, *args: object, detail: str = "") -> None:
+        super().__init__(*args)
+        if detail:
+            self.detail = detail
 
 
 class WorldStoppedAfterReadyError(InstallerError, TrueAfterStop):
@@ -164,8 +176,8 @@ class WorldStoppedAfterReadyError(InstallerError, TrueAfterStop):
     pressed, so the log panel shows this sentence after a Stop too.
     """
 
-    def __init__(self, *args: object, sources_kept: bool = False) -> None:
-        super().__init__(*args)
+    def __init__(self, *args: object, sources_kept: bool = False, detail: str = "") -> None:
+        super().__init__(*args, detail=detail)
         self.sources_kept = sources_kept
 
 
@@ -866,7 +878,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
         why = (
             "it holds a git checkout: with no record here of an install this app made, the app "
             "cannot tell its own half-finished download from a checkout you made yourself, so "
-            "it stops rather than run `git fetch` and `git reset --hard` over your work"
+            "it stops rather than reset your work to a fresh copy of the repository"
             if has_checkout
             else "it has files in it: the app will not write into a folder that is not empty "
             "and was not created by this app"
@@ -1113,7 +1125,7 @@ def installer_for(
 
     if entry.install.native is None:
         raise InstallerError(
-            f"{entry.name} cannot be installed yet: its catalog entry has no `install.native` "
+            f"{entry.name} cannot be installed yet: its catalog entry has no native install "
             "section. Nothing was started."
         )
     engine = family_for(entry)

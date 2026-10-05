@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 from yulon import runner
 from yulon.after_stop import TrueAfterStop
 from yulon.log import get_logger
+from yulon.said import split_details, with_details
 from yulon.support import runlog
 from yulon.ui import lines
 from yulon.ui.widgets.job import in_flight
@@ -408,7 +409,8 @@ class _StreamWorker(QObject):
             ok = False
             # The reason alone (T194 C8): the class name is for the log line
             # below, not for the screen and not for `run_finished`'s readers.
-            message = str(exc) or UNDESCRIBED_FAILURE
+            # T248: and its Details below it, for `_on_finished` to fold away.
+            message = with_details(exc) or UNDESCRIBED_FAILURE
             raised = f"{type(exc).__name__}: {exc}"
             if self._stop and isinstance(exc, TrueAfterStop):
                 # T228: NOT the Stop taking effect. What the route did after the
@@ -714,9 +716,16 @@ class LogPanel(QWidget):
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         self.failure_label.setVisible(False)
+        # T248: a failure's Details (`said.with_details`) under its sentence,
+        # folded, never on the line. Imported here: `details` builds on this
+        # module's `CollapseHandle`.
+        from yulon.ui.widgets.details import Details
+
+        self.failure_details = Details(self)
         layout = QVBoxLayout(self)
         layout.addLayout(header)
         layout.addWidget(self.failure_label)
+        layout.addWidget(self.failure_details)
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
@@ -966,6 +975,7 @@ class LogPanel(QWidget):
         self._step_label.say("")
         self.failure_label.setText("")
         self.failure_label.setVisible(False)
+        self.failure_details.set_text("")
         self._progress_label.say("")
         self._bar.setStyleSheet("")
         self._bar.setRange(0, 100)
@@ -1142,17 +1152,20 @@ class LogPanel(QWidget):
         # finish it. What was left behind is the caller's story to tell — the
         # panel does not know whether it was following a log or building a
         # server.
+        # T248: the header and the line get the sentence; its Details go in
+        # the fold under the line and, whole, into the run's record.
+        said, details = split_details(message)
         if self._stop_requested:
             # T228: a stopped job that still FAILED carries a sentence about what
             # it left (`TrueAfterStop`; the worker decides by type), shown under
             # "Stopped". Every other stopped job is a clean cancel.
-            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
+            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + said
         elif ok and self._ended is not None:
             verdict = self._ended
         else:
-            verdict = ("finished: " if ok else "FAILED: ") + message
+            verdict = ("finished: " if ok else "FAILED: ") + said
         self._status.say(verdict)
-        self._close_record(f"--- {verdict}")
+        self._close_record(f"--- {verdict}" + (f"\nDetails:\n{details}" if details else ""))
         # Stopped, then shown ONE more time. The ticker is what makes the field
         # live, and a job that has ended must not go on counting; but the last
         # value is the run's total, which is the number somebody wants after a
@@ -1186,8 +1199,9 @@ class LogPanel(QWidget):
                 self._step_label.say(f"Stopped at step {step.number} of {step.total} · {step.name}")
             self._progress_label.say("")
             if self._shows_failure:
-                self.failure_label.setText(message)
+                self.failure_label.setText(said)
                 self.failure_label.setVisible(True)
+                self.failure_details.set_text(details)
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
 

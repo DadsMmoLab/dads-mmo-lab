@@ -118,15 +118,15 @@ _open_pty = runner.open_pty
 NO_TTY_HELP = (
     "The worldserver console needs a terminal, and Yu'lon cannot open one on this "
     "computer, so it cannot send console commands here yet. Following the worldserver "
-    "log still works. To type at the console, open a terminal and run "
-    '"docker attach --sig-proxy=false {container}"; press Ctrl+P then Ctrl+Q to leave '
-    "it without stopping the server."
+    "log still works. To type at the console, open a terminal and run this; press Ctrl+P "
+    "then Ctrl+Q to leave it without stopping the server:\n"
+    "docker attach --sig-proxy=false {container}"
 )
 """The Console tab's note where this computer cannot type at the console.
 
 It names a command on purpose (T248, beside the Linux banner's systemctl line):
 a terminal is the only way to the console here, the player has to type it, and
-no press can do it for them. Quoted, never in backticks.
+no press can do it for them. On a line of its own, never in backticks.
 """
 
 
@@ -151,12 +151,16 @@ client that is going to ignore them.
 """
 
 NO_SCRIPT_HELP = (
-    "The worldserver console needs `script` inside {distro}, and there is none. "
-    "It comes with util-linux (`sudo apt install bsdutils` on Debian/Ubuntu, "
-    "`sudo pacman -S util-linux` on Arch). Until then use the console in a "
-    "terminal: `wsl -d {distro} -- docker attach --sig-proxy=false {container}` "
-    "(Ctrl+P then Ctrl+Q to leave it running)."
+    "The worldserver console needs the script program inside {distro}, and there is none. "
+    "It comes with util-linux. On Debian or Ubuntu, run this inside {distro}:\n"
+    "sudo apt install bsdutils\n"
+    "On Arch:\n"
+    "sudo pacman -S util-linux\n"
+    "Until then, use the console from a terminal with this; press Ctrl+P then Ctrl+Q to leave "
+    "it without stopping the server:\n"
+    "wsl -d {distro} -- docker attach --sig-proxy=false {container}"
 )
+"""Where the in-distro console has no `script`: commands the player has to type (T248, T296)."""
 
 
 def can_send(wsl_distro: str | None = None) -> bool:

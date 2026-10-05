@@ -1401,7 +1401,7 @@ def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(
         installers_root=resources.installers_dir(),
         seams=Recorder().seams(platform_id=lambda: "linux"),
     )
-    with pytest.raises(InstallerError, match="install.native"):
+    with pytest.raises(InstallerError, match="native install section"):
         bare._native()
 
 
@@ -2264,8 +2264,8 @@ def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], tuple
     below delete and nothing else, so a sentence that goes back to naming one
     path still has to leave a press that finishes.
     """
-    images = re.search(r"`docker image rm ([^`]+)`", message)
-    delete = re.search(r"and delete (\S+(?: and \S+)*), then install", message)
+    images = re.search(r"^docker image rm (.+)$", message, re.MULTILINE)
+    delete = re.search(r"Then delete (\S+(?: and \S+)*), and install", message)
     assert images is not None and delete is not None, message
     # The FOLDER, not a path inside it -- the remedy names paths under it, and
     # `delete <server_dir>/data/...` is the sentence working as intended.
@@ -3417,7 +3417,7 @@ def test_write_dockerfile_calls_an_entry_with_no_dockerfile_dir_a_catalog_error(
     )
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
-    with pytest.raises(InstallerError, match="dockerfile_dir") as refusal:
+    with pytest.raises(InstallerError, match="Dockerfile folder") as refusal:
         list(rooted(tmp_path, Recorder(), blank)._write_dockerfile(context(server_dir)))
     assert "catalog error in the app" in str(refusal.value)
     assert list(server_dir.iterdir()) == []

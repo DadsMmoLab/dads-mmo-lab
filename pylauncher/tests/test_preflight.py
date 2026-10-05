@@ -1798,10 +1798,10 @@ def test_a_wsl_distro_is_never_told_only_docker_desktop_can_be_its_docker() -> N
     # been booted with systemd as init system" and reads as a broken machine.
     assert "its own Docker Engine" in daemon
     assert "service docker start" in daemon
-    # It may NAME systemctl — it does, to steer away from it — but it must not
-    # be the command offered.
+    # It must not offer systemctl (T248: and no longer names it at all, since a
+    # command named inside a sentence is not one a player can copy).
     assert "sudo systemctl" not in daemon, "systemd is not what starts a daemon in a WSL distro"
-    assert "not `systemctl`" in daemon
+    assert "\nsudo service docker start\n" in daemon, "the command stands on its own line"
 
     compose = preflight._compose_remedy(_machine(WSL))
     assert "Docker Desktop" in compose

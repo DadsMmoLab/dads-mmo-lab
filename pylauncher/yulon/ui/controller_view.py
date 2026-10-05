@@ -4381,6 +4381,8 @@ START_FAILED_DOCKER_MISSING = (
 """A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
 START_FAILED_BROKE = "The server did not start. Details below says why."
+STOP_FAILED_BROKE = "The server did not stop. Details below says why."
+"""A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
 """A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
 
 STOP_LOG_NOT_SAVED = (
@@ -6562,6 +6564,21 @@ class _SaidLine(QLabel):
         self.said.emit()
 
 
+class _ToldLine(QLabel):
+    """A label that says when its text changes, and leaves its visibility to its owner (T248).
+
+    The Uninstall line is shown and hidden with the plan, so it cannot be a
+    `_SaidLine`; what it shares is that a new line takes the last Details down.
+    """
+
+    said = Signal()
+    """Every `setText`, as `_SaidLine.said`."""
+
+    def setText(self, text: str) -> None:  # noqa: N802  (Qt's own name)
+        super().setText(text)
+        self.said.emit()
+
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
@@ -7286,10 +7303,14 @@ class ControllerView(QWidget):
         # plan could not be put away once shown).
         self.uninstall_cancel_button = QPushButton(ARM_CANCEL, tab)
         self.uninstall_cancel_button.setVisible(False)
-        self.uninstall_label = QLabel("", tab)
+        self.uninstall_label = _ToldLine("", tab)
         self.uninstall_label.setWordWrap(True)
         self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.uninstall_label.setVisible(False)
+        # T248: what explains a failed uninstall (a command to list what is
+        # left) goes here, under the line; any new line takes it down.
+        self.uninstall_details = Details(tab)
+        self.uninstall_label.said.connect(lambda: self.uninstall_details.set_text(""))
         # 8.8. Beside Start, because it is the same errand seen from the other
         # side: Start plays this server from here, and this puts it and its
         # client in the Steam library so a Deck in Gaming Mode can. Built only
@@ -7447,6 +7468,7 @@ class ControllerView(QWidget):
         danger_column.addWidget(self.uninstall_absent_label)
         if self.uninstall_button is not None:
             danger_column.addWidget(self.uninstall_label)
+            danger_column.addWidget(self.uninstall_details)
             danger_column.addWidget(self.keep_characters_check)
             danger_column.addWidget(self.delete_play_client_check)
             danger_column.addWidget(
@@ -9361,10 +9383,21 @@ class ControllerView(QWidget):
         msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
         # T248: a refusal's command (`docker compose ls`) is under Details, not on the line.
-        detail = "" if msg == STOP_FAILED_NO_DOCKER else _detail_of(exc)
+        detail = self._stop_failure_detail(exc, msg)
         self.problem_details.set_text(detail)
         self.action_failed.emit(f"{msg}\n{detail}" if detail else msg)
         self.refresh_status()
+
+    def _stop_failure_detail(self, exc: object, said: str) -> str:
+        """What goes under a failed stop's line (T248).
+
+        A refusal's own Details; for a stop that broke, Docker's own words,
+        which used to be the line itself (`docker stop X failed: …`); none
+        when Docker did not answer, whose words went to the log.
+        """
+        if said == STOP_FAILED_NO_DOCKER:
+            return ""
+        return _detail_of(exc) if _said_by_yulon(exc) else str(exc)
 
     def _stop_failure_words(self, exc: object) -> str:
         """What a failed stop says: its own refusal, or one plain line when Docker did not answer.
@@ -9375,7 +9408,8 @@ class ControllerView(QWidget):
         if isinstance(exc, docker.DockerUnansweredError) or docker_advice.unreachable(exc):
             logger.warning(f"{self.entry.name}: Stop could not reach Docker: {exc}")
             return STOP_FAILED_NO_DOCKER
-        return str(exc)
+        # T248: as a Start's (T214), only Yu'lon's own sentence goes on the line.
+        return str(exc) if _said_by_yulon(exc) else STOP_FAILED_BROKE
 
     def stop_for_removal(self) -> None:
         """Stop this server on the job runner because it is about to leave Yu'lon's list (T95).
@@ -9414,7 +9448,10 @@ class ControllerView(QWidget):
         self._set_busy(False)
         message = self._stop_failure_words(exc)
         self.problem_label.setText(message)
-        self.action_failed.emit(message)
+        # T248: as `_stop_failed()` does, the refusal's command goes under Details.
+        detail = self._stop_failure_detail(exc, message)
+        self.problem_details.set_text(detail)
+        self.action_failed.emit(f"{message}\n{detail}" if detail else message)
         # As `_stop_failed()` does: the status line said "stopping…", and the
         # tab may be kept (the second question can be answered No).
         self.refresh_status()
@@ -9661,9 +9698,9 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button.setVisible(False)
         self.uninstall_cancel_button.setVisible(False)
         self.keep_characters_check.setVisible(False)
-        message = str(exc)
-        self.uninstall_label.setText(message)
-        self.action_failed.emit(message)
+        self.uninstall_label.setText(str(exc))
+        self.uninstall_details.set_text(_detail_of(exc))
+        self.action_failed.emit(_for_the_log(exc))
 
     @Slot()
     def forget_install(self) -> None:
@@ -11365,7 +11402,7 @@ class ControllerView(QWidget):
         self.danger_label.setText(text)
         self.danger_label.setVisible(True)
         self.danger_details.set_text(details)
-        QTimer.singleShot(0, self._bring_the_danger_label_on_screen)
+        QTimer.singleShot(0, self, self._bring_the_danger_label_on_screen)
 
     @Slot()
     def _bring_the_danger_label_on_screen(self) -> None:

@@ -778,7 +778,7 @@ def test_a_tuple_with_no_import_stage_to_guard_refuses_before_anything_runs(
     monkeypatch.setattr(type(engine), "update_stages", lambda self: (self.stage_named("start-db"),))
     with pytest.raises(InstallerError) as raised:
         list(engine.update_databases(InstallOptions(server_dir=server_dir)))
-    assert "no `import` stage to guard" in str(raised.value)
+    assert "no import stage to guard" in str(raised.value)
     assert "Nothing was started." in str(raised.value)
     assert rec.calls == [], rec.calls
 

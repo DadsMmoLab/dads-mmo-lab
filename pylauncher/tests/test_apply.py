@@ -4624,6 +4624,31 @@ def test_a_database_that_will_not_start_refuses_with_the_daemons_own_sentence(
     assert sql.statements == [] and sql.files == []
 
 
+def test_a_database_refusal_keeps_its_details_through_the_applier(tmp_path: Path) -> None:
+    """T248: `docker.start_database()`'s log command is Details; the wrap must not drop it."""
+    from yulon import docker
+    from yulon.said import SaidByYulon
+
+    refusal = docker.DockerRefusal(
+        "ac-database did not report healthy within 120s, so no SQL was run.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs ac-database",
+    )
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql(),
+        world_running=lambda: False,
+        start_database=_StartDb(boom=refusal),
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert isinstance(raised.value, SaidByYulon)
+    assert raised.value.detail == refusal.detail
+    assert "docker compose logs" not in str(raised.value)
+
+
 def test_the_database_is_not_started_for_an_action_with_no_direct_sql(tmp_path: Path) -> None:
     """Starting a container costs a Docker call and a running database.
 

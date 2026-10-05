@@ -783,13 +783,17 @@ def _daemon_remedy(facts: Facts) -> str:
             "which, because the daemon did not answer. If Docker Desktop provides it: start "
             "Docker Desktop on Windows, wait for the whale icon to stop animating, and check "
             "that this distro is ticked under Settings → Resources → WSL integration. Or, if "
-            "this distro runs its own Docker Engine, start it with `sudo service docker start` "
-            "— WSL usually has no systemd, so `service` and not `systemctl`. Then try again."
+            "this distro runs its own Docker Engine, start it with this (most WSL distros run "
+            "no service manager of the usual kind):\n"
+            "sudo service docker start\n"
+            "Then try again."
         )
     engine = (
-        "Start the Docker service, if Docker runs as a service here — `sudo systemctl start "
-        "docker` — and try again. If it is already running, your user may not be allowed to "
-        "talk to it: `sudo usermod -aG docker $USER`, then log out and back in."
+        "Start the Docker service, if Docker runs as a service here, and try again:\n"
+        "sudo systemctl start docker\n"
+        "If it is already running, your user may not be allowed to talk to it. Run this, then "
+        "log out and back in:\n"
+        "sudo usermod -aG docker $USER"
     )
     if facts.steamos_docker_gone:
         # T160. After a SteamOS update there is no service to start: the update
@@ -824,7 +828,7 @@ def _compose_check(facts: Facts) -> Check:
             "not asked, because no Docker daemon answered",
         )
     if facts.compose_ready:
-        return Check(COMPOSE_CHECK, "pass", "`docker compose` answered")
+        return Check(COMPOSE_CHECK, "pass", "Docker Compose answered")
     return Check(
         COMPOSE_CHECK,
         "refuse",
@@ -857,20 +861,25 @@ def _compose_remedy(facts: Facts) -> str:
     if flavour == "wsl":
         return (
             f"{_COMPOSE_FROM_DESKTOP} If instead this distro runs its own Docker Engine "
-            f"(`docker.io` installed inside it, no WSL integration), install the plugin in the "
+            f"(the docker.io package installed inside it, no WSL integration), install the "
+            f"plugin in the "
             f"distro. {_COMPOSE_IN_THE_DISTRO} {_COMPOSE_SPACE}"
         )
-    return f"{_COMPOSE_FROM_DESKTOP} Then check with `docker compose version` and try again."
+    return (
+        f"{_COMPOSE_FROM_DESKTOP} Then check it with this, and try again:\ndocker compose version"
+    )
 
 
 _COMPOSE_FROM_DESKTOP = "Docker Desktop ships Compose, so update it to a current version."
 """The Desktop half of the Compose remedy, spelled once for its two callers."""
 
 _COMPOSE_IN_THE_DISTRO = (
-    "On Arch or SteamOS: `sudo pacman -S docker-compose`. On Debian or Ubuntu: "
-    "`sudo apt install docker-compose-v2` -- which is the package Yu'lon's own "
-    "installer uses there; if your Docker came from Docker's own apt repository "
-    "instead, that package is called `docker-compose-plugin`."
+    "On Arch or SteamOS:\n"
+    "sudo pacman -S docker-compose\n"
+    "On Debian or Ubuntu, the package Yu'lon's own installer uses there:\n"
+    "sudo apt install docker-compose-v2\n"
+    "If your Docker came from Docker's own apt repository instead, that package is called "
+    "docker-compose-plugin."
 )
 """The package half, which is right on a Linux machine AND inside a WSL distro
 whose Docker is its own. Its Debian package must stay the one
@@ -878,8 +887,9 @@ whose Docker is its own. Its Debian package must stay the one
 name different packages -- see the test that reads it out of `platform.py`."""
 
 _COMPOSE_SPACE = (
-    "Check it with `docker compose version` -- note the SPACE: `docker-compose` with a hyphen "
-    "is the old v1 and is not what Yu'lon runs."
+    "Check it with this, and note the space: docker-compose with a hyphen is the old v1, which "
+    "Yu'lon does not run.\n"
+    "docker compose version"
 )
 """The v1/v2 warning, which belongs to every route that ends in a check."""
 
@@ -949,8 +959,8 @@ def _memory_floor_remedy(facts: Facts) -> str:
     if flavour == "wsl":
         return (
             "Docker Desktop's WSL2 backend takes its memory from Windows, not from its own "
-            f"Resources pane: set `memory=` in {WSLCONFIG}, run `wsl --shutdown`, start Docker "
-            f"Desktop again, then try again. {killed}"
+            f"Resources pane. Set the memory= line in {WSLCONFIG}, run this, start Docker "
+            f"Desktop again, then try again:\nwsl --shutdown\n{killed}"
         )
     return (
         "Docker Engine has no memory limit to raise — a container gets this machine's own "
@@ -972,8 +982,8 @@ def _memory_headroom_remedy(facts: Facts, warn_gb: float) -> str:
         return f"Give Docker at least {warn_gb:.0f} GB in its settings before a long build."
     if flavour == "wsl":
         return (
-            f"Give the distro at least {warn_gb:.0f} GB with `memory=` in {WSLCONFIG} before a "
-            "long build."
+            f"Give the distro at least {warn_gb:.0f} GB with the memory= line in {WSLCONFIG} "
+            "before a long build."
         )
     return (
         f"Make sure this machine has at least {warn_gb:.0f} GB of memory, or swap to fall back "
@@ -1089,7 +1099,7 @@ def _jobs_remedy(facts: Facts, affordable: int, *, from_cpus: bool) -> str:
         # give. Only the lever changes; the diagnosis above it is the same.
         lever = {
             "desktop": "give Docker more memory in its Resources settings",
-            "wsl": f"give the distro more memory with `memory=` in {WSLCONFIG}",
+            "wsl": f"give the distro more memory with the memory= line in {WSLCONFIG}",
             "engine": "free memory on this machine, or give it swap to fall back on",
         }[flavour]
         return (
@@ -1107,8 +1117,9 @@ def _jobs_remedy(facts: Facts, affordable: int, *, from_cpus: bool) -> str:
         # the same reason its memory slider is: Windows sizes the distro.
         return (
             f"Either raise the memory, or give the distro {max(affordable - 1, 1)} CPUs with "
-            f"`processors=` in {WSLCONFIG} and run `wsl --shutdown` — this build takes its job "
-            f"count from the CPU count and it cannot be set any other way. {outran}"
+            f"the processors= line in {WSLCONFIG} and run this (this build takes its job "
+            f"count from the CPU count and it cannot be set any other way):\n"
+            f"wsl --shutdown\n{outran}"
         )
     return (
         f"Either raise the memory, or set Docker Desktop to {max(affordable - 1, 1)} CPUs — this "
@@ -1571,8 +1582,8 @@ def _selinux_check(facts: Facts) -> Check:
             "SELinux",
             "unchecked",
             "whether SELinux is enforcing could not be read — that is not a pass",
-            "If the containers cannot read the server folder, run "
-            "`chcon -Rt container_file_t <server folder>` and try again.",
+            "If the containers cannot read the server folder, run this on it and try again:\n"
+            "chcon -Rt container_file_t <server folder>",
         )
     if not facts.selinux_enforcing:
         return Check("SELinux", "pass", "not enforcing")
@@ -1582,7 +1593,7 @@ def _selinux_check(facts: Facts) -> Check:
         "SELinux",
         "warn",
         f"enforcing, and the server folder is on {facts.server_fs_type}, which cannot hold "
-        "SELinux labels, so the `:z` bind option is omitted; the daemon may refuse to create "
+        "SELinux labels, so the :z bind option is omitted; the daemon may refuse to create "
         "containers on this drive",
         "If the server fails to start, pick a folder on the system drive (ext4, xfs or btrfs).",
     )

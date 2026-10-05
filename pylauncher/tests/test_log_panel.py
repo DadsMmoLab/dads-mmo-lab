@@ -1697,6 +1697,45 @@ def test_a_failure_says_its_reason_in_full_without_the_class_name(
     ), "the class name was dropped from the log as well as the screen"
 
 
+def test_the_failure_line_shows_the_sentence_and_details_holds_the_rest(qapp: object) -> None:
+    """T248 review: a failure that carries a Details part shows only its sentence on the line.
+
+    An install failure carries a Details part (`InstallerError.detail`): the
+    line and the header are words, the fold under the line holds the rest, the
+    message handed on (the Install failed dialog's) keeps both, and a new run
+    takes them down.
+    """
+    from tests.support_player_text import command_faults
+    from yulon.catalog.installer import InstallerError
+
+    refusal = InstallerError(
+        "The database import ran, but the databases still read as absent.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs ac-db-import",
+    )
+    finished: list[str] = []
+
+    def refused() -> Iterator[str]:
+        yield "Step 7 of 9 (77%): import"
+        raise refusal
+
+    panel = LogPanel()
+    panel.resize(400, 300)
+    panel.run_finished.connect(lambda _ok, message: finished.append(message))
+    panel.run(refused)
+    wait_for_panel(panel)
+
+    assert panel.failure_label.text() == refusal.args[0]
+    assert "docker compose logs" not in panel.status_text()
+    assert finished and refusal.detail in finished[0], "the dialog's text lost the Details"
+    assert command_faults(panel.failure_label.text()) == []
+    assert panel.failure_details.text_box.toPlainText() == refusal.detail
+    assert panel.failure_details.isVisibleTo(panel)
+
+    panel.run(lambda: iter(["fine"]))
+    wait_for_panel(panel)
+    assert panel.failure_details.isHidden(), "the last run's Details stayed up over this one"
+
+
 def test_the_failure_line_carries_a_long_reason_whole_and_a_new_run_takes_it_down(
     qapp: object,
 ) -> None:

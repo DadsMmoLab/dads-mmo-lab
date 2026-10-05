@@ -709,7 +709,8 @@ CERT_VERIFY_FIX = (
 )
 _MANUAL_ROOT_CERTS = f"{CERT_VERIFY_FIX} Yu'lon will not install software it could not verify."
 _MANUAL_WSL = (
-    "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
+    "Open an Administrator PowerShell, run this, then restart Windows:\n"
+    "wsl --install --no-distribution"
 )
 _MANUAL_START_DOCKER_DESKTOP = (
     "Yu'lon could not find Docker Desktop on this PC. Open the Start menu, type "
@@ -3383,9 +3384,10 @@ _NEW_PASSWORD_ATTEMPTS = 3
 
 STEAMOS_SET_PASSWORD_BY_HAND_STEP = (
     "Nothing was changed: reinstalling Docker needs a sudo password, and {user} has none yet. "
-    "To set one yourself: switch to Desktop Mode, open Konsole, type passwd and press Enter, "
-    f'and choose a password. Then press "{STEAMOS_DOCKER_REPAIR_LABEL}" again and give it '
-    "that password."
+    "To set one yourself: switch to Desktop Mode, open Konsole, type this, press Enter and "
+    "choose a password:\n"
+    "passwd\n"
+    f'Then press "{STEAMOS_DOCKER_REPAIR_LABEL}" again and give it that password.'
 )
 
 STEAMOS_DOCKER_BACK_STEP = "Docker is back and running. Press Start to bring the server up again."

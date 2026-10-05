@@ -2895,8 +2895,8 @@ class Applier:
         rel = _rel(self.server_dir, clone)
         return (
             f"{rel} is a checkout of {found.remote}, not of {manifest.source.url}.\n\n"
-            f"Installing {manifest.id} here runs `git fetch` and `git reset --hard` over that "
-            f"folder to make it a checkout of {manifest.source.url}. Anything in it that "
+            f"Installing {manifest.id} here resets that folder to a fresh copy of "
+            f"{manifest.source.url}. Anything in it that "
             f"{found.remote} does not have is lost.\n\nReplace it?"
         )
 
@@ -4841,13 +4841,13 @@ def transaction_refusal(name: str, text: str) -> str:
         word = statement.split(None, 1)[0].upper() if statement.split() else ""
         shown = " ".join(statement.split())[:60]
         if word not in _TRANSACTION_SAFE:
-            return f"{name}: `{shown}` is not a row change or a read, {tail}"
+            return f"{name}: “{shown}” is not a row change or a read, {tail}"
         if word == "SET" and not all(
             _USER_VARIABLE_SET.match("SET " + part.strip())
             for part in statement[3:].split(",")
             if part.strip()
         ):
-            return f"{name}: `{shown}` sets more than a user variable, {tail}"
+            return f"{name}: “{shown}” sets more than a user variable, {tail}"
     return ""
 
 

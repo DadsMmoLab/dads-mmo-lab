@@ -58,13 +58,30 @@ COMMAND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("--rm", re.compile(r"--rm\b")),
     ("systemctl", re.compile(r"\bsystemctl\b")),
     ("journalctl", re.compile(r"\bjournalctl\b")),
+    ("wsl command", re.compile(r"\bwsl(?:\.exe)?\s+-{1,2}[a-z]")),
+    (
+        "sudo",
+        re.compile(
+            r"\bsudo\s+(?:apt|apt-get|pacman|dnf|zypper|systemctl|service|usermod|chcon|passwd)\b"
+        ),
+    ),
+    (
+        "package manager",
+        re.compile(r"\b(?:apt|apt-get|pacman|dnf|zypper|brew)\s+(?:-S\b|install\b|update\b)"),
+    ),
+    (
+        "git command",
+        re.compile(r"\bgit\s+(?:fetch|reset|clone|log|status|stash|pull|-C)\b|\bgit checkout -"),
+    ),
+    ("shell command", re.compile(r"\b(?:gunzip|chcon|xcode-select|usermod|passwd)\b")),
 )
 """A command on a player's line (T248): the line says in words what failed and
 where to look, and a command worth running goes under Details (T194, T214).
 
-Kept apart from `RULES` because the Linux "start the engine" banner names its
-`systemctl` line on purpose: `RULES` holds for every screen, these for every
-player line but the exceptions `test_player_lines_name_no_commands` names.
+Kept apart from `RULES` because a command the player has to type stays on the
+line on purpose (T194's systemctl banner; the owner's rule for T296): `RULES`
+holds for every screen, these for every player line but the exceptions
+`test_player_lines_name_no_commands` names.
 """
 
 
