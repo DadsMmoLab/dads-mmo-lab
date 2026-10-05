@@ -307,6 +307,8 @@ def test_a_start_whose_fingerprint_cannot_be_written_still_starts(
     monkeypatch.setattr(controller, "port_conflicts", lambda: [])
     controller.start()
     assert started == [server_dir]
+    said = controller.world_data_problem
+    assert said is not None and "may not be brought up to date" in said, said
 
 
 @pytest.mark.parametrize("platform_id", ["windows", "linux"])
@@ -479,3 +481,17 @@ def test_a_fingerprint_that_cannot_be_worked_out_removes_the_old_one(
     said = world_data.refresh(MIRRORED, windows_install)
     assert not path.exists()
     assert said is not None and "copies all of the map data again" in said
+
+
+def test_a_start_with_a_current_fingerprint_has_nothing_to_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = tmp_path / "wow-centurion-server"
+    lay_compose(server_dir, "windows")
+    lay_data(server_dir)
+    monkeypatch.setattr(docker, "start_staged", lambda spec, where, **_kw: True)
+    controller = CenturionController(MIRRORED, server_dir)
+    monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    controller.world_data_problem = "left from an earlier start"
+    controller.start()
+    assert controller.world_data_problem is None

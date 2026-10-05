@@ -185,6 +185,10 @@ class Controller:
         # starts, since `start()` is the one door every Start, Restart and
         # recreate goes through.
         self.zone_problem: str | None = None
+        # What the last `start()` could not do about a Windows Centurion world's copy of
+        # the map data (T219, `world_data.refresh()`): `None` when nothing. Read by the
+        # tab beside `zone_problem`.
+        self.world_data_problem: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -310,7 +314,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.zone_problem = self._put_back_the_zone_file()
-        self._refresh_world_data()
+        self.world_data_problem = self._refresh_world_data()
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
@@ -345,16 +349,15 @@ class Controller:
             return None  # no override to name a zone; compose says what is wrong with it
         return time_zone.refresh(entry, self.server_dir, override)
 
-    def _refresh_world_data(self) -> None:
+    def _refresh_world_data(self) -> str | None:
         """T219: the map-data fingerprint a Windows Centurion world copies by, before every start.
 
         `world_data.refresh()` writes it only on an install whose compose file declares
-        the `world-data` volume, and only when it changed. A failure is logged there and
-        never stops the Start: the copy then follows the last fingerprint written.
+        the `world-data` volume, and only when it changed. A failure never stops the
+        Start; its sentence is returned for the tab to show.
         """
         entry = self.entry or _entry_for(self.spec)
-        if entry is not None:
-            world_data.refresh(entry, self.server_dir)
+        return world_data.refresh(entry, self.server_dir) if entry is not None else None
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""

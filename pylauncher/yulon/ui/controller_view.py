@@ -8898,9 +8898,17 @@ class ControllerView(QWidget):
         goes through, and it never refuses over the zone file: the server runs
         on UTC, and this line says so and names the presses that fix it.
         """
-        said = getattr(self.services.controller, "zone_problem", None)
-        if isinstance(said, str) and said:
-            text = f"The server started, but {said}"
+        said = [
+            problem
+            for problem in (
+                getattr(self.services.controller, "zone_problem", None),
+                # T219: a Windows Centurion world's map-data copy, said the same way.
+                getattr(self.services.controller, "world_data_problem", None),
+            )
+            if isinstance(problem, str) and problem
+        ]
+        if said:
+            text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None

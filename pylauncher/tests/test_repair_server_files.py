@@ -663,3 +663,15 @@ def test_every_other_repair_question_is_word_for_word_as_before(
         "running containers keep the old file until they are recreated, which Yu'lon offers "
         "next."
     ]
+
+
+def test_the_server_tab_says_when_a_start_could_not_bring_the_map_data_copy_up_to_date(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex review: an interactive Start's fingerprint failure was only logged. The tab says
+    it where it says the zone file's, after the Start's job is done."""
+    view = _view(ps, tmp_path, None)
+    said = "Yu'lon could not write data/.yulon-world-data (denied), so the copy may be stale."
+    view.services.controller.world_data_problem = said  # type: ignore[attr-defined]
+    view._server_action_done(None)
+    assert view.problem_label.text() == f"The server started, but {said}"
