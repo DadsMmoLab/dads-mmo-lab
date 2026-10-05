@@ -38,6 +38,7 @@ from yulon.catalog.installer import (
     FORMER_DEFAULT_DIRS,
     InstallEngine,
     InstallOptions,
+    ReadyWaitStopped,
     cancelled_install_message,
     compose_file,
     default_server_dir,
@@ -242,6 +243,16 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
 
 INSTALL_STOPPED_TITLE = "Install stopped"
 """The popup's title when a stopped install ended on a failure that says what it left (T228)."""
+
+
+def ready_wait_stopped_message(entry: CatalogEntry) -> str:
+    """The popup for an install stopped in its ready wait (T247 review): the log's own sentence."""
+    from yulon.catalog import native  # the engine's module; imported where it is used
+
+    return (
+        f"Stop was pressed while {entry.name}'s world server was starting, so it has not been "
+        f"remembered as an install yet. {native.INSTALL_LEFT_LOADING}"
+    )
 
 
 class Identification(Enum):
@@ -1055,6 +1066,21 @@ class CatalogView(QWidget):
             logger.info(f"install of {game_id} was stopped and left something: {message}")
             QMessageBox.warning(self, INSTALL_STOPPED_TITLE, said)
             self.install_finished.emit(game_id, False, said)
+            return
+        stopped_by = self._log.stopped_by
+        if (
+            self._log.cancelled
+            and stopped_by is not None
+            and issubclass(stopped_by, ReadyWaitStopped)
+        ):
+            # T247 review: stopped in its ready wait, the install has left a server
+            # running and starting, with no tab yet. The popup says what the log
+            # says -- press Install again on the same folder, which resumes at the
+            # wait and then remembers it -- not the generic cancel copy.
+            note = ready_wait_stopped_message(self._catalog.get(game_id))
+            logger.info(f"install of {game_id} was stopped in its ready wait; not remembered yet")
+            QMessageBox.information(self, INSTALL_STOPPED_TITLE, note)
+            self.install_finished.emit(game_id, False, note)
             return
         if self._log.cancelled:
             # A cancelled install reaches here as a SUCCESS: `runner.interact()`

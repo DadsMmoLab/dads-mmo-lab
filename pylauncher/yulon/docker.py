@@ -2910,7 +2910,19 @@ WORLD_RESTARTED_STOPPING = (
 )
 """Said when `StopControl.restart_ends_the_wait` ends a wait on a new run (T159)."""
 
-LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED})
+STOP_WAITS_FOR_THE_LOAD = (
+    "Stop was pressed: Yu'lon lets the world server finish loading (stopping it mid-load can "
+    "damage the database), then puts the build from before back."
+)
+"""Said once when Stop lands in a rebuild's ready wait (T247, the lead's words, 2026-10-05).
+
+T158's rule reaches the ready wait: a new world still loading may be in the
+middle of its database update, so the Stop is heard at once and acted on once
+the load has ended -- ready, crashed or out of time. A member of
+`LOAD_WAIT_LINES`, so the panel offers "Stop now anyway" beside it.
+"""
+
+LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED, STOP_WAITS_FOR_THE_LOAD})
 """The sentences said while a stop is WAITING: the ones "Stop now anyway" is offered beside."""
 
 FORCE_STOP_WARNINGS = frozenset({WORLD_STOPPED_ANYWAY})

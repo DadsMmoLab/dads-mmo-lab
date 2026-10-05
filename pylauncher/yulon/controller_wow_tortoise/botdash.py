@@ -52,7 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from yulon import docker
-from yulon.after_stop import StopTookEffect
+from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.catalog import bot_dashboard as files
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
@@ -85,6 +85,15 @@ class SwitchError(RuntimeError):
 
 class SwitchStopped(SwitchError, StopTookEffect):
     """The player's Stop ended a switch before it changed anything (T250): "cancelled"."""
+
+
+class RebuildLeftOwed(SwitchError, TrueAfterStop):
+    """A dashboard rebuild that did not finish: the old dashboard stopped, and a rebuild owed.
+
+    `TrueAfterStop` (T250 review): a Stop that ended the build ("the build was
+    stopped") is not a clean cancel here -- the old dashboard was stopped on
+    the way out, and the debt recorded -- so the sentence is shown after it.
+    """
 
 
 @dataclass
@@ -313,7 +322,7 @@ class Dashboard:
         failed = yield from self._rebuild(cancel)
         if failed is not None:
             yield from self._stop_until_rebuilt(failed.why)
-            raise SwitchError(
+            raise RebuildLeftOwed(
                 f"The dashboard could not be rebuilt ({failed.why}). Press {REBUILD_PRESS} "
                 "to try again."
             )

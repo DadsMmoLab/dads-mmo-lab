@@ -1485,22 +1485,24 @@ REBUILD_WAIT_HINT = (
 controls does at this point. Stop is the panel's Cancel."""
 
 ROLLBACK_STOPPING = (
-    "The new build did not come up; stopping it (it may be force-stopped) and putting the "
-    "previous build back\u2026"
+    "Stopping the new build (it may be force-stopped) and putting the previous build " "back\u2026"
 )
 """The rollback's first line once the containers were replaced (T158, round 3, the lead's words).
 
 The failed build is stopped before any tag moves back, and it may be force-stopped: if its world
-is still loading, the rollback waits and a press stops it regardless.
+is still loading, the rollback waits and "Stop now anyway" stops it regardless. It began "The
+new build did not come up;" until T247's review: a build stopped by the player after its world
+DID come up is put back too (`READY_STOPPED_AFTER_LOADING`), and the line was false there.
 """
 
 ROLLBACK_WAIT_HINT = (
     "The new build's world is still loading and cannot be stopped cleanly yet. Yu'lon waits "
-    'for it; "Stop now anyway" or Stop stops it regardless -- it may then be force-stopped '
-    "-- and the previous build is put back once it is down."
+    'for it; "Stop now anyway" stops it regardless -- it may then be force-stopped -- and the '
+    "previous build is put back once it is down."
 )
-"""Said once under a load wait in the rollback (T158): there, Stop does not give up the stop --
-the rollback's job is to replace a build that already failed -- it forces it."""
+"""Said once under a load wait in the rollback (T158): there, Stop neither gives up the stop --
+the rollback's job is to replace a build that already failed -- nor forces it (T247 review:
+never kill a loading world on a plain Stop); "Stop now anyway" does."""
 
 
 def _stop_control(ctx: StageContext, *, rollback: bool) -> docker.StopControl:
@@ -1511,14 +1513,19 @@ def _stop_control(ctx: StageContext, *, rollback: bool) -> docker.StopControl:
 
     * before the replace, it GIVES UP the stop (`abandon`): nothing has been
       touched yet, and the server keeps the build it had;
-    * in a rollback, it FORCES the stop (`also_anyway`): the build being
-      stopped has already failed, and giving up would leave it running with
-      the tags half-way.
+    * in a rollback, it does nothing to the stop: the stop is not given up --
+      the build being stopped has already failed, and giving up would leave
+      it running with the tags half-way -- and it is not forced either. It
+      FORCED it until the lead's ruling of 2026-10-05 (T247 review): a Stop
+      that lands in a rebuild's ready wait is already set when the rollback
+      stops the new world, and forcing on it killed that world in the middle
+      of its load, which is when it updates its database (T158). Only "Stop
+      now anyway" forces a rollback's stop now.
     """
     cancel = ctx.cancel
     force = cancel.anyway if isinstance(cancel, docker.CancelWithForce) else threading.Event()
     if rollback:
-        return docker.StopControl(anyway=force, also_anyway=() if cancel is None else (cancel,))
+        return docker.StopControl(anyway=force)
     return docker.StopControl(anyway=force, abandon=cancel or threading.Event())
 
 
@@ -3201,10 +3208,10 @@ the rollback did; an install adds `INSTALL_LEFT_LOADING`.
 """
 
 INSTALL_LEFT_LOADING = (
-    "The server's containers were started and are left running, so the world server goes on "
-    "loading. Nothing was stopped: a world is never stopped in the middle of its load, which "
-    "is when it updates its database. Press Install again on the same folder to wait for it "
-    "and finish the install; the steps already done are not done again."
+    "The server's containers were started and are left running, and its world server is left "
+    "to finish starting. Nothing was stopped: a world is never stopped in the middle of its "
+    "load, which is when it updates its database. Press Install again on the same folder to "
+    "wait for it and finish the install; the steps already done are not done again."
 )
 """What an install stopped in its ready wait has left (T247), said before the Stop ends it.
 
@@ -3215,6 +3222,53 @@ already up, and then waits again. Not stopping is T158's rule, the owner's:
 never kill a world mid-load (`docker.wait_for_the_world_to_load()`). Driven in
 `test_an_install_stopped_in_its_ready_wait_resumes_at_the_wait`.
 """
+
+READY_WAIT_STOP_HINT = (
+    '"Stop now anyway" ends this wait now and puts the build from before back at once: the new '
+    "world may then be force-stopped in the middle of its load, and its database left "
+    "half-updated."
+)
+"""Said under `docker.STOP_WAITS_FOR_THE_LOAD` when the panel has the escape (T247 review)."""
+
+READY_WAIT_STOPPED_ANYWAY = (
+    '"Stop now anyway" was pressed while the world server was still loading, so the wait for it '
+    "ended before it reported ready: this build was never seen to come up."
+)
+"""A rebuild's ready wait ended by the escape, not by the load (T247 review)."""
+
+READY_STOPPED_AFTER_LOADING = (
+    "Stop was pressed while the world server was loading, and it was let finish: it reported "
+    "ready and stayed up for the minute it is watched, so this build did come up. The press "
+    "asked for it to be stopped, so it is put back."
+)
+"""A rebuild whose Stop waited out the load, which then succeeded (T247 review, the lead's ruling:
+the player asked to stop, so it rolls back)."""
+
+READY_STOPPED_IN_THE_WATCH = (
+    "The world server reported ready, and Stop was pressed during the minute it is watched "
+    "afterwards, before that minute was over, so this build was not proved to stay up."
+)
+"""Stop inside T71's watch: true about the banner, and about the proof that was not finished."""
+
+READY_STOP_TOO_LATE = (
+    "Stop was pressed after the new build had already been watched for the whole minute, so it "
+    "came too late to matter: the build is kept."
+)
+"""Stop in the watch's last pause: the build met T71's proof first, so it is a Stop after
+success (T247 review). Said before "The server is up."."""
+
+ROLLBACK_WAIT_UNSTOPPABLE = (
+    "Putting the build from before back, and waiting for it to come up. Stop cannot end this "
+    "wait: the rollback has already replaced the new build, and only this wait can say whether "
+    "the build it put back is up."
+)
+"""Said once, before the rollback's own ready wait, which is handed no cancel (T247 review)."""
+
+MANAGEMENT_WAIT_STOPPED = (
+    "Stop was pressed, so Yu'lon stopped waiting for the world server. The server was not "
+    "stopped: it is still loading, and the Server tab shows when it is up."
+)
+"""What `wait_ready_quietly()` logs when its cancel ends the wait (T247 review, T158)."""
 
 READY_GRACE_SECONDS = 60.0
 """How long the world server is WATCHED after it prints its ready banner (T71).
@@ -3713,6 +3767,8 @@ class AfterReady:
 
     stopped: bool
     words: str
+    cut_short: bool = False
+    """The watch was ended by its cancel before its minute was over (T247): nothing proved."""
 
 
 _DYING_WORDS_LINES = 5
@@ -3921,9 +3977,10 @@ def watch_after_ready(
     `grace`; one that dies costs one poll after it died.
 
     `cancel` set (the job's Stop, T247) ends the watch after the look it lands
-    in, answering "still up" -- which the caller must not believe: it asks the
-    event before it says anything. After the look, not before it, so a world
-    seen to have stopped is reported as that, Stop or no Stop. A Stop that
+    in, answering `cut_short` -- nothing proved. After the look, not before it,
+    so a world seen to have stopped is reported as that, Stop or no Stop; and a
+    Stop that lands in the last pause, after which the minute is over, does not
+    cut anything short: the build met its proof first. A Stop that
     lands in the pause is heard when the pause ends: at most `interval`, two
     seconds as shipped. Left so rather than waiting on the event, because
     `sleep` is the seam every test hands a clock-advancing fake, and a pause
@@ -3940,15 +3997,20 @@ def watch_after_ready(
     # over a fake one) would otherwise never leave. That is not a hypothetical:
     # it hung two of this file's own management tests before the count was added.
     # `+ 1` because the first look happens before any sleep.
-    for _ in range(max(1, int(grace / interval)) + 1):
+    looks = max(1, int(grace / interval)) + 1
+    for number in range(looks):
         now = look()
         stopped = _still_the_run_that_said_ready(before, now, baseline, banner, fatal)
         if stopped is not None:
             return stopped
         baseline = _restart_baseline(baseline, now)
         before = now
-        if monotonic() >= deadline or (cancel is not None and cancel.is_set()):
+        if monotonic() >= deadline or number == looks - 1:
+            # The whole minute was watched: proved, even if a Stop came in the
+            # last pause (T247 review). No pause after the last look.
             break
+        if cancel is not None and cancel.is_set():
+            return AfterReady(False, "", cut_short=True)
         sleep(interval)
     return AfterReady(False, "")
 
@@ -3962,6 +4024,7 @@ def wait_ready_quietly(
     monotonic: Callable[[], float] | None = None,
     sleep: Callable[[float], None] | None = None,
     wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> bool:
     """`docker.wait_ready_for()` with `ready.timeout` spent as a QUIET budget, not a total.
 
@@ -4016,12 +4079,26 @@ def wait_ready_quietly(
     only one case: a daemon that was unreachable for the first look and
     answered for the second, where it gave up on a container it could by then
     see. A branch whose only distinct behaviour is the wrong one.
+
+    `cancel` (T247 review) ends the WAIT and nothing else: False, with
+    `MANAGEMENT_WAIT_STOPPED` logged. The world is left loading -- T158, never
+    stopped mid-load -- because a Start or Restart that waits has nothing to put
+    back. No press of the app's reaches this with a Stop today: Start and
+    Restart on the Server tab return once the containers are started and wait
+    for nothing (`controller_view.start_server()`, `_do_restart()`).
     """
     wait = wait or docker.wait_ready_for
     look = output or _world_output
     clock = monotonic or time.monotonic
     pause = sleep or time.sleep
     ceiling = management_ceiling(ready.timeout)
+    ready = replace(ready, cancel=cancel)
+
+    def heard() -> bool:
+        if cancel is not None and cancel.is_set():
+            logger.info(MANAGEMENT_WAIT_STOPPED)
+            return True
+        return False
 
     started = clock()
     before = look(spec, wsl_distro=wsl_distro)
@@ -4043,13 +4120,18 @@ def wait_ready_quietly(
                 interval=ready.interval,
                 banner=ready.world,
                 fatal=ready.fatal,
+                cancel=cancel,
             )
+            if after.cut_short:
+                return not heard()
             if not after.stopped:
                 return True
             logger.warning(
                 f"{spec.world} reported ready and then stopped within "
                 f"{_spell_seconds(READY_GRACE_SECONDS)}: {after.words!r}"
             )
+            return False
+        if heard():
             return False
         now = look(spec, wsl_distro=wsl_distro)
         first_restarts = _restart_baseline(first_restarts, now)
@@ -6117,9 +6199,15 @@ class StagedInstaller:
         #
         # BEFORE the rollback is kept, so the refusal below can say nothing was
         # started and mean it: `_keep_rollback()` tags four images.
+        def ready(stage_ctx: StageContext) -> Iterator[str]:
+            # T247 review: a Stop here lets the new world finish loading before
+            # the rollback stops it (T158), instead of ending the wait at once.
+            yield from self.stage_ready(stage_ctx, stop_lets_it_load=True)
+
         wrappers: dict[str, Callable[[StageContext], Iterator[str]]] = {
             "build": build,
             "recreate": recreate,
+            "ready": ready,
         }
         stages = tuple(
             replace(stage, run=wrappers.pop(stage.name)) if stage.name in wrappers else stage
@@ -7390,9 +7478,9 @@ class StagedInstaller:
             # T158, round 3: the failed build's servers go down BEFORE a single tag
             # moves back -- a tag moved under a running container names a binary
             # it is not running. Its world may still be loading and deaf; then
-            # this waits, says so, and the Cancel that brought us here (or "Stop
-            # now anyway") means "stop it regardless": rollback's job is to
-            # replace a build that has already failed.
+            # this waits, says so, and "Stop now anyway" means "stop it
+            # regardless". The Cancel that brought us here no longer does (T247
+            # review): a plain Stop never kills a loading world (T158).
             yield ROLLBACK_STOPPING
             control = _stop_control(ctx, rollback=True)
 
@@ -7512,6 +7600,7 @@ class StagedInstaller:
             # one never reach a recreate, and a name docker already let go is a
             # no-op here (`remove_image` treats "no such image" as done).
             yield from self._release(named)
+            yield ROLLBACK_WAIT_UNSTOPPABLE
             # With no cancel (T247): the Stop that brought a rollback here is
             # already set, and handed on it would end this wait before it began.
             # A rollback is finished, not given up -- `servers_down.back()` above
@@ -9790,7 +9879,7 @@ class StagedInstaller:
         except docker.DockerCommandError as exc:
             raise InstallerError(f"The server would not start: {exc}") from exc
 
-    def stage_ready(self, ctx: StageContext) -> Iterator[str]:
+    def stage_ready(self, ctx: StageContext, *, stop_lets_it_load: bool = False) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
 
         `wait_db_healthy_for()` polls the container's health status and reads no
@@ -9807,9 +9896,13 @@ class StagedInstaller:
                 f"The database never reported healthy. `docker compose logs "
                 f"{spec.service_for(spec.db)}` in {ctx.server_dir} will say why."
             )
-        yield from self.wait_for_ready(ctx, self._native().ready)
+        yield from self.wait_for_ready(
+            ctx, self._native().ready, stop_lets_it_load=stop_lets_it_load
+        )
 
-    def wait_for_ready(self, ctx: StageContext, markers: ReadyMarkers) -> Iterator[str]:
+    def wait_for_ready(
+        self, ctx: StageContext, markers: ReadyMarkers, *, stop_lets_it_load: bool = False
+    ) -> Iterator[str]:
         """Wait for the world server, giving a server that is still TALKING more time.
 
         **`ready.timeout_s` is a quiet budget, not a total one.** It is how long
@@ -9880,23 +9973,37 @@ class StagedInstaller:
         is not seen. Both are conservative — slower to give up, never quicker to
         call a dead server ready.
 
-        **Stop ends it (T247)**, within one poll: `ctx.cancel` rides to the
+        **Stop is heard within one poll (T247)**: `ctx.cancel` rides to the
         real wait on `docker.ReadySpec.cancel` and to the watch after the
-        banner, and this raises `ReadyWaitStopped` once either comes back on
-        it. A window the Stop cut short is never read as silence, but a verdict
-        that is a failure in its own right -- a crash loop, a container gone, a
-        fatal line, a world that stopped after its banner -- is still that
-        failure: the Stop did not cause it. A caller that must not be stopped
-        (the rollback's wait for the build it put back) passes a context with
-        no cancel.
+        banner. A window the Stop cut short is never read as silence, but a
+        verdict that is a failure in its own right -- a crash loop, a container
+        gone, a fatal line, a world that stopped after its banner -- is still
+        that failure: the Stop did not cause it. What the Stop then does:
+
+        * plain (an install, the finish of a world update): `ReadyWaitStopped`
+          at once, and the world is left loading;
+        * `stop_lets_it_load` (a rebuild, which Update and Return run through;
+          the lead's ruling of 2026-10-05): T158's rule, never kill a loading
+          world. The Stop is said (`docker.STOP_WAITS_FOR_THE_LOAD`) and the
+          wait goes on until the world is ready, crashes or runs out; ready and
+          watched, it still raises (`READY_STOPPED_AFTER_LOADING`), because the
+          player asked to stop. "Stop now anyway" ends it early
+          (`READY_WAIT_STOPPED_ANYWAY`);
+        * inside the watch after the banner, before its minute is over:
+          `READY_STOPPED_IN_THE_WATCH`. In its last pause: the build met its
+          proof first, so it is kept (`READY_STOP_TOO_LATE`).
+
+        A caller that must not be stopped (the rollback's wait for the build it
+        put back) passes a context with no cancel.
         """
         spec = self.entry.container_spec()
-        ready = replace(self._ready_spec(markers), cancel=ctx.cancel)
-
-        def stopped() -> None:
-            if ctx.cancel is not None and ctx.cancel.is_set():
-                raise ReadyWaitStopped(READY_WAIT_STOPPED)
-
+        # What ends a window now: the job's Stop -- or, once a Stop has been heard
+        # and the load is being let finish (`stop_lets_it_load`), the panel's
+        # "Stop now anyway", which rides on the Cancel (`docker.CancelWithForce`).
+        force = ctx.cancel.anyway if isinstance(ctx.cancel, docker.CancelWithForce) else None
+        ends: threading.Event | None = ctx.cancel
+        pending = False
+        ready = replace(self._ready_spec(markers), cancel=ends)
         service, container = spec.service_for(spec.world), spec.world
         logs = f"`docker compose logs {service}` in {ctx.server_dir}"
         quiet = markers.timeout_s
@@ -9935,10 +10042,19 @@ class StagedInstaller:
                     interval=ready.interval,
                     banner=ready.world,
                     fatal=ready.fatal,
-                    cancel=ctx.cancel,
+                    cancel=ends,
                 )
+                if after.cut_short:
+                    raise ReadyWaitStopped(READY_STOPPED_IN_THE_WATCH)
+                if not after.stopped and pending:
+                    # The lead's ruling: the load was let finish, and it succeeded,
+                    # but the player asked to stop -- so the build from before goes
+                    # back. The world has loaded, so its stop is a clean one.
+                    yield docker.WORLD_FINISHED_LOADING
+                    raise ReadyWaitStopped(READY_STOPPED_AFTER_LOADING)
                 if not after.stopped:
-                    stopped()
+                    if ctx.cancel is not None and ctx.cancel.is_set():
+                        yield READY_STOP_TOO_LATE
                     yield "The server is up."
                     return
                 said = (
@@ -9964,11 +10080,27 @@ class StagedInstaller:
                 before, now, first_restarts, markers.restart_loop, ready.fatal
             )
             spent = self._seams.monotonic() - started
-            if verdict in ("alive", "quiet", "unreadable"):
-                # Asked here and not before the verdict: the three above are about
-                # the window, which the Stop cut short, and the three below are
-                # about the server, which it did not touch.
-                stopped()
+            if verdict in ("alive", "quiet", "unreadable") and ends is not None and ends.is_set():
+                # Asked here and not before the verdict: these three are about the
+                # window, which the Stop cut short; a loop, a container gone or a
+                # fatal line are about the server, which it did not touch.
+                if pending:
+                    raise ReadyWaitStopped(READY_WAIT_STOPPED_ANYWAY)
+                if not stop_lets_it_load:
+                    raise ReadyWaitStopped(READY_WAIT_STOPPED)
+                # T158 reaches the ready wait (the lead's ruling, 2026-10-05): a new
+                # world still loading may be in the middle of its database update,
+                # so the Stop is heard and said now, and acted on once the load has
+                # ended -- ready, crashed or out of time. Only "Stop now anyway"
+                # ends this wait early.
+                pending = True
+                ends = force
+                ready = replace(ready, cancel=ends)
+                yield docker.STOP_WAITS_FOR_THE_LOAD
+                if force is not None:
+                    yield READY_WAIT_STOP_HINT
+                before = now
+                continue
             if verdict == "loop":
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
@@ -10390,7 +10522,13 @@ class StagedInstaller:
         alike — and the copy that was true of one was being said for all three.
         A default here is the shape that mistake had.
         """
-        if run.returncode == docker.CANCELLED_RETURNCODE:
+        if run.returncode == docker.CANCELLED_RETURNCODE or (
+            run.returncode != 0 and cancel is not None and cancel.is_set()
+        ):
+            # Asked before the exit status, as `extract._conclude()` does (T250
+            # review): a child another route killed under a Stop exits with a
+            # code of its own, and "failed (exit 143)" would be a refusal for a
+            # button the player pressed.
             raise InstallStopped(_cancelled_message(what, note))
         if run.returncode != 0 and from_build and docker.builder_connection_lost(run.tail):
             # T202: said in words before the quote, which alone told the

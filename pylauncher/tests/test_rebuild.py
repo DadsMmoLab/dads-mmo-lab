@@ -1433,11 +1433,13 @@ def _old_build_back(rec: Recorder, server_dir: Path) -> None:
     assert len(recreates) == 2 and rec.calls.index(restores[-1]) < recreates[1], rec.calls
 
 
-def test_a_cancel_that_lands_after_the_replace_rolls_back_stopping_the_failed_build_regardless(
+def test_a_cancel_that_lands_after_the_replace_rolls_back_without_forcing_the_new_world(
     cmangos_gate: None, tmp_path: Path
 ) -> None:
-    """Cancel then rollback: in the rollback the Cancel FORCES the failed build's stop (the lead's
-    decision), which comes before any tag moves back, and the old build is running again."""
+    """Cancel then rollback: the Cancel no longer FORCES the failed build's stop (the lead's
+    ruling of 2026-10-05, T158's rule: never kill a loading world -- until then it did); only
+    "Stop now anyway" does. The stop still comes before any tag moves back, and the old build
+    is running again."""
     rec = Recorder(images=True)
     server_dir = _replaced_then_failed(rec, tmp_path)
     cancel = docker.CancelWithForce()
@@ -1456,7 +1458,7 @@ def test_a_cancel_that_lands_after_the_replace_rolls_back_stopping_the_failed_bu
                 InstallOptions(server_dir=server_dir), cancel=cancel
             )
         )
-    assert "stop_servers:forced" in rec.calls, rec.calls
+    assert "stop_servers" in rec.calls and "stop_servers:forced" not in rec.calls, rec.calls
     _old_build_back(rec, server_dir)
     said = str(raised.value)
     assert "put back and is running again" in said, said

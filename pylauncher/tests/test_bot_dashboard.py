@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QMessageBox
 from tests.conftest import pump_until
 from tests.support_native import Recorder
 from yulon import docker, resources, useraccounts
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import bot_dashboard as files
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
@@ -1318,6 +1319,25 @@ def test_a_rebuild_press_that_fails_again_stays_owed_and_says_so(
     assert "up tortoise-observability --force-recreate" not in fake.calls
     state = files.state(server_dir)
     assert state.rebuild_owed and "exit 2" in state.rebuild_why
+
+
+def test_a_stopped_rebuild_says_what_it_left_after_the_stop_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T250 review: a Stop that ended the rebuild's build left the dashboard stopped and a rebuild
+    owed. That sentence is true after the Stop, so it is typed to be shown after one."""
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = docker.CANCELLED_RETURNCODE
+
+    with pytest.raises(botdash.SwitchError) as raised:
+        list(switch.rebuild(None))
+
+    assert isinstance(raised.value, TrueAfterStop), type(raised.value)
+    assert "the build was stopped" in str(raised.value)
+    assert files.state(server_dir).rebuild_owed
 
 
 def test_switching_off_a_dashboard_that_owes_a_rebuild_forgets_the_debt(

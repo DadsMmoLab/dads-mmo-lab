@@ -23,9 +23,15 @@ def stop_when(
     source: Callable[[threading.Event], Iterator[str]],
     reached: threading.Event,
     what: str,
+    *,
+    cancel: threading.Event | None = None,
 ) -> tuple[LogPanel, list[tuple[bool, str]]]:
-    """Run `source(cancel)` in a panel, press Stop once `reached` is set, wait for the end."""
-    cancel = threading.Event()
+    """Run `source(cancel)` in a panel, press Stop once `reached` is set, wait for the end.
+
+    `cancel` is the job's Cancel; a rebuild-panel job's is a
+    `docker.CancelWithForce`, carrying "Stop now anyway".
+    """
+    cancel = cancel if cancel is not None else threading.Event()
     panel = LogPanel()
     finished: list[tuple[bool, str]] = []
     panel.run_finished.connect(lambda ok, message: finished.append((ok, message)))
@@ -59,3 +65,21 @@ def compile_until_stopped(reached: threading.Event) -> Callable[..., AttachedRun
         return AttachedRun(docker.CANCELLED_RETURNCODE, ("compiling",))
 
     return build
+
+
+def ready_wait_until_stop(reached: threading.Event) -> Callable[..., bool]:
+    """A ready-wait seam that holds until the cancel IT IS HANDED is set, then says "not yet".
+
+    `reached` is set once it is waiting. The cancel is `ReadySpec.cancel` (T247),
+    so a press that does not hand the job's Stop to the wait fails at the
+    `assert` here rather than hanging.
+    """
+
+    def wait(spec: object, ready: object) -> bool:
+        cancel = getattr(ready, "cancel", None)
+        assert cancel is not None, "the ready wait was handed no cancel, so Stop cannot end it"
+        reached.set()
+        assert cancel.wait(HANG_BOUND), "Stop never reached the ready wait"
+        return False
+
+    return wait

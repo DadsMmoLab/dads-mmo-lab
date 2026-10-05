@@ -339,6 +339,7 @@ class _StreamWorker(QObject):
     """Runs a `LineSource` to exhaustion on its thread, emitting each line."""
 
     line = Signal(str)
+    stopped_by = Signal(object)  # the type of what a clean stop ended on, just before `finished`
     finished = Signal(bool, str)  # ok, message
 
     def __init__(self, source: LineSource, *, drains: bool = False) -> None:
@@ -432,6 +433,7 @@ class _StreamWorker(QObject):
                 # stopped" bug `_on_finished` exists to fix.
                 logger.debug(f"log panel job ended after a stop was asked for: {raised}")
                 ok, message = True, "stopped"
+                self.stopped_by.emit(type(exc))
             elif self._stop:
                 # T250: NOT the Stop. Until T250 everything raised after a Stop
                 # was read as it, by timing alone, so a real failure that landed
@@ -742,6 +744,7 @@ class LogPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
         self._stop_requested = False
+        self._stopped_by: type | None = None
         # T93. The run being kept on disk, if its owner asked for one. Opened by
         # `run()` after the busy check, closed by `_on_finished()`; flushed per
         # line, so the two ways out that never deliver `_on_finished` (app exit;
@@ -1029,6 +1032,7 @@ class LogPanel(QWidget):
         self._cancel = cancel
         self._ended = ended
         self._stop_requested = False
+        self._stopped_by = None
         self._job_label = f'log panel "{title}"'
         # The zero the elapsed clock counts from. Set on the RUN, not on the
         # panel or the first line: the same panel is reused for the next
@@ -1053,6 +1057,7 @@ class LogPanel(QWidget):
         in_flight().hold(thread, worker, label=self._job_label)
         thread.started.connect(worker.run)
         worker.line.connect(self.append)
+        worker.stopped_by.connect(self._on_stopped_by)
         worker.finished.connect(self._on_finished)
         worker.finished.connect(thread.quit)
         # Deliberately NOT `thread.finished.connect(worker.deleteLater)`, the
@@ -1139,6 +1144,22 @@ class LogPanel(QWidget):
         return bool(self._thread.wait(timeout_ms))
 
     # -- slots ----------------------------------------------------------
+
+    @property
+    def stopped_by(self) -> type | None:
+        """The type of the Stop a cancelled job ended on, when it ended by raising one (T247).
+
+        `cancelled` says Stop was pressed; this says WHERE it took effect, by
+        type, for the one owner that words its popup by it: an install stopped in
+        its ready wait (`ReadyWaitStopped`) has left a server running, and its
+        popup says so. None for a job that ended without raising, or that was
+        not stopped.
+        """
+        return self._stopped_by
+
+    @Slot(object)
+    def _on_stopped_by(self, kind: object) -> None:
+        self._stopped_by = kind if isinstance(kind, type) else None
 
     @Slot(bool, str)
     def _on_finished(self, ok: bool, message: str) -> None:
