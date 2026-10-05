@@ -297,6 +297,28 @@ def settings_only(manifest: Manifest) -> bool:
     )
 
 
+def database_receipt(manifest: Manifest) -> bool:
+    """Whether `manifest`'s install writes the `applied` record, nothing else saying it ran (T385).
+
+    No source and no folder of its own, install-time SQL sent straight to the
+    database (`direct`; a `db-import` file is only staged, so the database does
+    not hold it yet), and not relative: a relative one (`reapplies_on_top()`)
+    keeps that record through `_run_relative()` already. Its install leaves no
+    folder under `sql_scripts/clones/`, so the record is the one thing that says
+    it is installed, and being in `applied` it is dropped with the database's
+    other records when a database is imported fresh
+    (`module_answers.forget_database_records()`). The shipped ones are Bigger
+    Stacks on TBC, Vanilla and Tortoise.
+    """
+    return (
+        manifest.source is None
+        and manifest.origin is None
+        and any(step.when == "install" for step in manifest.sql)
+        and all(step.applied_by == "direct" for step in manifest.sql)
+        and not reapplies_on_top(manifest)
+    )
+
+
 def _key_written_confs(manifest: Manifest) -> tuple[ConfFile, ...]:
     """The conf files whose keys `Applier._conf()` writes, in the manifest's order."""
     return tuple(
@@ -1821,6 +1843,10 @@ class _Log:
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
+    # T385. The SQL steps `_sql()` has sent, of any action: whether the database
+    # was reached at all, which `_record_database()` needs and the `done` lines
+    # cannot be counted for (a skipped step is not a line there either).
+    sql_sent: int = 0
 
 
 def take_back_file(path: Path, sha256: str, log: _Log) -> None:
@@ -2672,7 +2698,10 @@ class Applier:
         # pass that would be false of the configure-time one.
         if first_configure_sql:
             self._refuse_direct_sql_into_a_running_world(manifest, "configure")
+        sent = log.sql_sent
         self._sql(manifest, clone, vals, "install", log, undo=undo)
+        if log.sql_sent > sent:
+            self._record_database(manifest, vals, "install", log)
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -2721,6 +2750,35 @@ class Applier:
                 f"{module_answers.ANSWERS_FILE}: the settings were written, but the note that "
                 f"{manifest.name} is installed could not be saved ({problem}), so its row will "
                 "keep reading Not installed"
+            )
+
+    def _record_database(
+        self, manifest: Manifest, vals: Mapping[str, str], when: When, log: _Log
+    ) -> None:
+        """Record a `database_receipt()` mod as in the database after an install, or not after
+        a remove, once its SQL was sent and returned (T385).
+
+        Right after the SQL, as `_run_relative()` records, and only when `_sql()`
+        returned: a statement that raised leaves the record as it was. After a
+        failed install that means none, and Install again is safe over whatever
+        it left (the statements are re-runnable; the backup keeps the original
+        values). After a failed restore the record stays, so Remove stays on
+        offer. Never fatal: the SQL ran and the player is owed the report of it.
+        """
+        if not database_receipt(manifest):
+            return
+        values = (
+            {prompt.key: vals[prompt.key] for prompt in manifest.prompts if prompt.key in vals}
+            if when == "install"
+            else None
+        )
+        problem = module_answers.record_applied(self.server_dir, manifest, values)
+        if problem:
+            state = "Not installed" if when == "install" else "Installed"
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the SQL ran, but Yu'lon's note that "
+                f"{manifest.name} is {'in' if when == 'install' else 'out of'} the database "
+                f"could not be saved ({problem}), so its row will keep reading {state}"
             )
 
     def _finish_claim(
@@ -3197,7 +3255,10 @@ class Applier:
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
         self._patches(manifest, clone, vals, "remove", log)
+        sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
+        if log.sql_sent > sent:
+            self._record_database(manifest, vals, "remove", log)
         if settings_only(manifest):
             # T380: the settings are back, so the receipt that said they were
             # changed goes. A legacy install has none, and its conf no longer
@@ -4006,6 +4067,7 @@ class Applier:
             if not self._precondition_met(step, log):
                 continue
             self._run_sql(step, clone, vals, log, plan.get(index))
+            log.sql_sent += 1
             self._verify_sql(manifest, step, log)
 
     def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> bool:

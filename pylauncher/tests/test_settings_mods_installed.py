@@ -38,6 +38,7 @@ from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView, remove_question
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.widgets.job import run_inline
 
 CATALOG = load_catalog()
@@ -102,15 +103,26 @@ def _row(view: ControllerView, item_id: str) -> object:
 def _answer_questions(
     monkeypatch: pytest.MonkeyPatch, answer: QMessageBox.StandardButton
 ) -> list[tuple[str, str]]:
-    """`QMessageBox.question`, answering `answer` as the int PySide6 really returns, and
-    keeping each (title, text) it was asked."""
+    """Answer each Yes/No box `answer`, as the int PySide6 really returns, keeping each
+    (title, text) it was asked.
+
+    The recorder sits on `QMessageBox.exec`, the only way `ask_yes_no()`'s fitted box is
+    answered (T243). Only a fitted box with No as its default is kept and answered: a
+    press that went back to the static `QMessageBox.question()` would build Qt's own box,
+    which grows with its text and can put Yes and No below the screen. That static call is
+    the conftest's, which answers No and never reaches this recorder, so the question
+    count is 0 and a Yes test fails too.
+    """
     asked: list[tuple[str, str]] = []
 
-    def question(parent: object, title: str, text: str, *_: object, **__: object) -> int:
-        asked.append((title, text))
-        return int(answer)
+    def record(box: QMessageBox) -> int:
+        no = QMessageBox.StandardButton.No
+        if not isinstance(box, FittedMessageBox) or box.standardButton(box.defaultButton()) != no:
+            return int(no.value)
+        asked.append((box.windowTitle(), box.text()))
+        return int(answer.value)
 
-    monkeypatch.setattr(QMessageBox, "question", question)
+    monkeypatch.setattr(QMessageBox, "exec", record)
     return asked
 
 

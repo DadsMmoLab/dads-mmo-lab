@@ -4773,6 +4773,13 @@ FORGET_RECORD_QUESTION = (
 )
 """What the Forget question says, word for word (T121 fix wave)."""
 
+FORGET_INSTALL_QUESTION = (
+    "Yu'lon forgets that {name} is installed. The database is not changed. Use this only if the "
+    "stack sizes are already back to normal, for example after restoring a backup."
+)
+"""The Forget question for Bigger Stacks, whose record says it is installed (T385): its
+Remove restores from a backup table, which a restored database does not have."""
+
 SETTINGS_REMOVE_TAIL = (
     ", including any value you set since {name} was installed.\n\n"
     "Restart the server for this to take effect."
@@ -15519,19 +15526,13 @@ class ControllerView(QWidget):
         if action == "remove" and apply_module.settings_only(manifest):
             # T380 cold review: one press of Remove put every rate this mod
             # touched back to stock, a rate set since included. Asked first, No
-            # by default, naming each setting and the value it goes back to.
+            # by default, naming each setting and the value it goes back to, in
+            # the box that fits the screen (T243).
             title, text = remove_question(
                 manifest,
                 apply_module.settings_removal(self.services.controller.server_dir, manifest),
             )
-            answer = QMessageBox.question(
-                self,
-                title,
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if not said_yes(answer):
+            if not self._confirm(title, text):
                 self._module_pending = None
                 self.module_report.setPlainText(
                     f"remove {manifest.id}: cancelled — nothing on this machine was changed."
@@ -18616,7 +18617,8 @@ class ControllerView(QWidget):
 
         A relative manifest (the four mob multipliers) leaves no folder, so its
         row can only read installed from the record (T121). That is the row a
-        stale record can lie on, and the one Forget is for.
+        stale record can lie on, and the one Forget is for. So is Bigger Stacks
+        with no repository (`database_receipt()`, T385).
         """
         manifest = self.selected_manifest()
         row = self.modules_panel.selected_row()
@@ -18624,7 +18626,7 @@ class ControllerView(QWidget):
             manifest is not None
             and row is not None
             and row.data.installed
-            and reapplies_on_top(manifest)
+            and (reapplies_on_top(manifest) or apply_module.database_receipt(manifest))
         )
 
     @Slot()
@@ -18643,7 +18645,9 @@ class ControllerView(QWidget):
         answer = QMessageBox.question(
             self,
             "Forget Yu'lon's record?",
-            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            (
+                FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
+            ).format(name=manifest.name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
