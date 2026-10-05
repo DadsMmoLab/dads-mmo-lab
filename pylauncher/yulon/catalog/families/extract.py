@@ -53,7 +53,7 @@ from typing import Any, Protocol
 
 from yulon import client_names, docker, platform
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -1359,7 +1359,7 @@ def _conclude(
     caller's "done" line.
     """
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
-        raise InstallerError(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
+        raise InstallStopped(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
             f"{tool.name} could not be started, so the client was never read. "
@@ -1904,7 +1904,7 @@ def run_mmaps(
         yield f"mmaps: already generated ({_counts_text(counts(produces, data_dir))})"
         return
     if cancel is not None and cancel.is_set():
-        raise InstallerError(
+        raise InstallStopped(
             f"map generation was stopped before it started, so nothing was removed. "
             f"{MMAPS_CANCEL_NOTE}"
         )
@@ -1952,7 +1952,7 @@ def run_mmaps(
         cancel=cancel,
     )
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
-        raise InstallerError(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
+        raise InstallStopped(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
             f"map generation could not be started, so no movement data was written."
