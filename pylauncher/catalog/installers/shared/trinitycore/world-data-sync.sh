@@ -16,7 +16,10 @@
 # The copy is parallel (8 cp at a time) over a folder tree made first: measured
 # on yulon-win11 at about 134 s for 20,643 files and 1.12 GB, three times tar's
 # speed. Making the folders inside the parallel cp raced, and a losing cp dropped
-# its file without an error (2026-10-04).
+# its file without an error (2026-10-04). Each listing is written to a file and
+# checked before anything is copied from it: in a pipe only the last command's
+# status counts, so a listing that failed part-way over the file share would
+# otherwise be copied as if whole, and its line written.
 #
 # A shell as PID 1 ignores SIGTERM unless it traps it, so without the trap a Stop
 # during a copy would wait out the whole stop grace. exec makes the server PID 1.
@@ -47,7 +50,9 @@ for d in $dirs; do
   want=$(line "$d" "$src/$fp")
   have=$(line "$d" "$vol/$fp")
   new="$vol/$d.yulon-new"
-  rm -rf "$new" || failed "$d" "the copy a stop left behind could not be removed"
+  list="$vol/$d.yulon-list"
+  rm -rf "$new" "$list.dirs" "$list.files" ||
+    failed "$d" "the copy a stop left behind could not be removed"
   [ -n "$want" ] && [ "$want" = "$have" ] && continue
   if [ -f "$vol/$fp" ]; then
     grep -v "^$d " "$vol/$fp" > "$vol/$fp.yulon-new"
@@ -58,14 +63,17 @@ for d in $dirs; do
     echo "yulon: copying $d into the world-data volume"
     (
       cd "$src/$d" &&
-        find . -type d -print0 | (cd "$new" && xargs -0 -r mkdir -p) &&
-        find . ! -type d -print0 | xargs -0 -r -P8 -n200 cp --parents -t "$new"
+        find . -type d -print0 > "$list.dirs" &&
+        find . ! -type d -print0 > "$list.files" &&
+        (cd "$new" && xargs -0 -r mkdir -p < "$list.dirs") &&
+        xargs -0 -r -P8 -n200 cp --parents -t "$new" < "$list.files"
     ) &
     job=$!
     wait "$job"
     rc=$?
     job=
     [ "$rc" = 0 ] || failed "$d" "the copy ended with exit code $rc"
+    rm -f "$list.dirs" "$list.files"
   fi
   rm -rf "$vol/$d" || failed "$d" "the old copy could not be removed"
   mv "$new" "$vol/$d" || failed "$d" "the new copy could not be moved into place"

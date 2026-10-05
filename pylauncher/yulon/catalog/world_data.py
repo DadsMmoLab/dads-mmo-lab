@@ -161,11 +161,23 @@ def refresh_for(trinitycore: TrinityCoreData, server_dir: Path) -> str | None:
             staged.unlink(missing_ok=True)
         except OSError:
             pass
-        said = (
-            f"Yu'lon could not write {path} ({exc}), so the world server's copy of the map "
-            "data may not be brought up to date at this start. Check that the server folder "
-            "can be written, then start the server again."
-        )
+        # The last fingerprint may no longer match the folder, and the copy would trust
+        # it (Codex adversarial review). Without one, the copy takes all of the map data
+        # again: slower, never stale. The start itself still goes on (the plan's rule).
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            said = (
+                f"Yu'lon could not write {path} ({exc}), so the world server's copy of the map "
+                "data may not be brought up to date at this start. Check that the server "
+                "folder can be written, then start the server again."
+            )
+        else:
+            said = (
+                f"Yu'lon could not work out what is in {path.parent} ({exc}), so this start "
+                "copies all of the map data again into the world server's own copy, which "
+                "takes a few minutes. Check that the server folder can be read and written."
+            )
         logger.warning(said)
         return said
     logger.info(f"wrote {path} for the world server's map-data copy")

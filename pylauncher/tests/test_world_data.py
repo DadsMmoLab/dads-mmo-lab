@@ -460,3 +460,22 @@ def test_finished_pathfinding_writes_the_fingerprint_that_copies_it(tmp_path: Pa
     lines = path.read_text(encoding="utf-8").splitlines()
     assert "mmaps -" not in lines
     assert path.read_text(encoding="utf-8") == expected(server_dir, mmaps_done=True)
+
+
+def test_a_fingerprint_that_cannot_be_worked_out_removes_the_old_one(
+    windows_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review: keeping the last fingerprint after a failure lets the copy
+    trust a volume the server folder no longer matches. Without one the copy takes all of
+    the map data again (`test_world_data_sync`), which is slow but never stale."""
+    world_data.refresh(MIRRORED, windows_install)
+    path = windows_install / "data" / FILE
+    assert path.exists()
+
+    def unreadable(*_args: object) -> str:
+        raise PermissionError(13, "Permission denied", str(windows_install / "data" / "maps"))
+
+    monkeypatch.setattr(world_data, "fingerprint", unreadable)
+    said = world_data.refresh(MIRRORED, windows_install)
+    assert not path.exists()
+    assert said is not None and "copies all of the map data again" in said

@@ -363,3 +363,35 @@ def test_the_fingerprint_yulon_writes_is_the_one_the_copy_reads(tmp_path: Path) 
     assert box.run().returncode == 0
     assert box.copied_from() == {"maps"}
     assert (box.vol / "maps" / "0013238.map").read_bytes() == b"map one, extracted again"
+
+
+def test_a_folder_listing_that_fails_part_way_is_never_taken_for_a_copy(box: Box) -> None:
+    """Codex adversarial review: only the last command of a pipe sets its status, so a `find`
+    that listed half a folder over the file share and then failed was copied as if whole --
+    and its fingerprint line written, so no later start would ever copy it again. The old
+    copy and its line stay, and the start stops with a reason."""
+    box.fingerprint()
+    assert box.run().returncode == 0
+    box.fingerprint(maps="maps-v2")
+    real = shutil.which("find")
+    shim = box.bin / "find"
+    shim.write_text(
+        # Only the listing of FILES in maps fails, after naming one: the folder listing and
+        # every other folder are the real `find`, so nothing else can be what refuses.
+        '#!/bin/sh\ncase "$PWD $*" in */maps*!*)\n'
+        "  printf './0000000.map\\0'\n  echo 'find: ./0013238.map: Input/output error' >&2\n"
+        f'  exit 1;;\nesac\nexec {real} "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    done = box.run("echo", "the server started")
+    assert done.returncode != 0
+    assert "yulon: could not copy maps" in done.stderr
+    assert "the server started" not in done.stdout
+    assert not any(
+        line.startswith("maps ") for line in box.volume_lines()
+    ), "its line went before the copy began, and no line came back"
+    assert sorted(path.name for path in (box.vol / "maps").iterdir()) == [
+        "0000000.map",
+        "0013238.map",
+    ], "the old copy is still the one in place"
