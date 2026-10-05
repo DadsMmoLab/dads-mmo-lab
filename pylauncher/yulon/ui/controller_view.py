@@ -4275,15 +4275,24 @@ def _start_said_holds(status: mmaps.MmapsStatus) -> bool:
     return status.state in ("queued", "running")
 
 
-def _stop_said_holds(status: mmaps.MmapsStatus) -> bool:
-    """Stop's sentence is true until a run starts again, or the tiles it said the next run
-    continues from would be thrown away (T245; Codex adversarial review, round 3).
+def _stop_said_holds(stopped: mmaps.MmapsStatus) -> Callable[[mmaps.MmapsStatus], bool]:
+    """Stop's sentence is true while the job reads as the first reading after the Stop did.
 
-    A reading where a press's sentence no longer holds removes it from the problem
+    Its sentence says what that Stop left -- N tiles kept and continued from, or
+    nothing -- so it holds while the state, the kept count and whether the next run
+    begins again are still those (T245). A run started again, map data changed since
+    (Codex adversarial review, round 3), or tiles thrown away by Re-extract, Update or
+    Return, which forget the record and read as not started (cold review), each end
+    it. A reading where a press's sentence no longer holds removes it from the problem
     line, and the pathfinding line (`MmapsStatus.line()`) says what happened and what
     the press beside it does next.
     """
-    return status.state in ("failed", "not-started") and not status.begins_again_because
+
+    def facts(status: mmaps.MmapsStatus) -> tuple[str, int, bool]:
+        return status.state, status.kept, bool(status.begins_again_because)
+
+    left = facts(stopped)
+    return lambda status: facts(status) == left
 
 
 WORLD_UPKEEP_UNREAD = "Could not read whether the last update left anything to finish: {exc}"
@@ -7064,8 +7073,9 @@ class ControllerView(QWidget):
         self._pathfinding_pressing = False
         # T245: the sentence the last press put in `problem_label`, and the job's
         # states it stays true in; None before the first press.
-        self._pathfinding_said: tuple[str, Callable[[mmaps.MmapsStatus], bool]] | None = None
-        self._pathfinding_holds: Callable[[mmaps.MmapsStatus], bool] = _start_said_holds
+        # A Stop's rule is made from the first reading after it (`_stop_said_holds`).
+        self._pathfinding_said: tuple[str, Callable[[mmaps.MmapsStatus], bool] | None] | None = None
+        self._pathfinding_holds: Callable[[mmaps.MmapsStatus], bool] | None = None
         # Bumped by every read and every press: a read whose generation is not
         # the newest lands after the state it describes has changed, and is dropped.
         self._pathfinding_generation = 0
@@ -7813,7 +7823,11 @@ class ControllerView(QWidget):
         another press's, and stays.
         """
         said = self._pathfinding_said
-        if said is not None and self.problem_label.text() == said[0] and not said[1](status):
+        if said is None or self.problem_label.text() != said[0]:
+            return
+        if said[1] is None:
+            self._pathfinding_said = (said[0], _stop_said_holds(status))
+        elif not said[1](status):
             self.problem_label.setText("")
 
     @Slot(object)
@@ -7879,10 +7893,10 @@ class ControllerView(QWidget):
         seam = self.services.pathfinding
         if seam is None or self._pathfinding_pressing:
             return
-        self._press_pathfinding(seam.stop, _stop_said_holds)
+        self._press_pathfinding(seam.stop, None)
 
     def _press_pathfinding(
-        self, press: Callable[[], str], holds: Callable[[mmaps.MmapsStatus], bool]
+        self, press: Callable[[], str], holds: Callable[[mmaps.MmapsStatus], bool] | None
     ) -> None:
         self._pathfinding_pressing = True
         self._pathfinding_holds = holds

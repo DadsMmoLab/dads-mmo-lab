@@ -377,11 +377,10 @@ class MmapsStatus:
             return f"Pathfinding data: {done}{unasked} — {RUNS_WITHOUT_IT}."
         # T245: an ended run says how far it got and what the press offered beside it
         # does next, so the press's own sentence ("Making…") is never the last word.
-        reached = (
-            f" (it was at {self.percent} % when Yu'lon last checked)"
-            if self.percent is not None
-            else ""
-        )
+        # "had reached", never "stopped at": the percentage is the generator's last
+        # progress line when its log could be read at the end, and otherwise the last
+        # one a poll saw (a container Docker lost, a Stop) -- reached either way.
+        reached = f" (it had reached {self.percent} %)" if self.percent is not None else ""
         if self.state == "failed" and self.kept and self.begins_again_because:
             return (
                 f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "

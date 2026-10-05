@@ -755,7 +755,7 @@ def test_a_crash_replaces_the_making_sentence_with_where_it_stopped_and_what_sta
 
     assert view.problem_label.text() == "" and view.problem_label.isHidden()
     assert view.pathfinding_label.text() == (
-        "Pathfinding data stopped part-way (it was at 17 % when Yu'lon last checked): the "
+        "Pathfinding data stopped part-way (it had reached 17 %): the "
         "generator stopped with exit 139. 16% [Map 001] Building tile [32,48] / 17% [Map 001] "
         "Building tile [33,48] / Segfault Its 644 finished tiles are kept, and “Make the "
         "pathfinding data” continues from there."
@@ -792,9 +792,7 @@ def test_docker_losing_the_job_replaces_the_making_sentence(
 
     assert view.problem_label.text() == "" and view.problem_label.isHidden()
     line = view.pathfinding_label.text()
-    assert line.startswith(
-        f"Pathfinding data stopped part-way (it was at 16 % when Yu'lon last checked): {why}"
-    )
+    assert line.startswith(f"Pathfinding data stopped part-way (it had reached 16 %): {why}")
     assert line.endswith(
         "Its 40 finished tiles are kept, and “Make the pathfinding data” continues from there."
     )
@@ -814,7 +812,7 @@ def test_a_stop_says_where_it_stopped_and_its_own_sentence_stays_true(
         "continues from there. Pathfinding stays off until a run finishes."
     )
     assert view.pathfinding_label.text() == (
-        "Pathfinding data stopped part-way (it was at 16 % when Yu'lon last checked): you "
+        "Pathfinding data stopped part-way (it had reached 16 %): you "
         "stopped it. Its 12 finished tiles are kept, and “Make the pathfinding data” continues "
         "from there."
     )
@@ -864,7 +862,7 @@ def test_a_crash_with_no_tile_kept_says_start_begins_again(qapp: object, tmp_pat
     assert view.problem_label.text() == ""
     line = view.pathfinding_label.text()
     assert line.startswith(
-        "Pathfinding data could not be made (it was at 16 % when Yu'lon last checked): the "
+        "Pathfinding data could not be made (it had reached 16 %): the "
         "generator stopped with exit 139."
     )
     assert line.endswith("“Make the pathfinding data” starts it again from the beginning.")
@@ -965,3 +963,93 @@ def test_a_stop_sentence_that_promised_to_continue_goes_once_the_map_data_change
     )
     view.start_pathfinding()
     assert job.docker.mmaps_at_run[-1] == []
+
+
+@pytest.mark.parametrize(
+    "drop",
+    [
+        lambda job: mmaps.discard(job.server, MM_ENTRY, install_id=mm.INSTALL_ID),
+        lambda job: mmaps.stop_for_route(
+            job.server,
+            MM_ENTRY,
+            "the update",
+            clear=True,
+            runner=job.docker,
+            install_id=mm.INSTALL_ID,
+        ),
+    ],
+    ids=("re-extract", "update-to-latest"),
+)
+def test_a_stop_sentence_that_promised_to_continue_goes_once_the_tiles_are_thrown_away(
+    qapp: object, tmp_path: Path, drop: Callable[[_RealJob], object]
+) -> None:
+    """Cold review of T245: Re-extract (`discard()`) and Update or Return (`stop_for_route`
+    with `clear`) remove the kept tiles and forget the record, so the job reads as not
+    started -- a state Stop's sentence holds in only when that Stop kept nothing."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    assert "continues from there" in view.problem_label.text()
+    drop(job)
+
+    view.refresh_pathfinding()
+
+    assert view.problem_label.text() == "" and view.problem_label.isHidden()
+    assert view.pathfinding_label.text().startswith("Pathfinding data has not been made yet")
+    view.start_pathfinding()
+    assert job.docker.mmaps_at_run[-1] == []
+
+
+def test_a_stop_that_kept_nothing_keeps_saying_so_while_nothing_runs(
+    qapp: object, tmp_path: Path
+) -> None:
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 0)
+
+    view.stop_pathfinding()
+    view.refresh_pathfinding()
+
+    assert view.problem_label.text() == (
+        "Stopped making the pathfinding data and removed what it had made so far. Pathfinding "
+        "stays off until a run finishes."
+    )
+    assert view.pathfinding_label.text().startswith("Pathfinding data has not been made yet")
+
+
+def test_a_stop_sentence_goes_when_a_later_run_fails_with_other_tiles_kept(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Only the kept count changes (failed both times): "Its 12 finished tiles are kept" is
+    no longer what is on disk once a run a rebuild started has failed with 30."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    view.refresh_pathfinding()
+    assert view.problem_label.text().startswith("Stopped making the pathfinding data. Its 12")
+    job.start()  # a Rebuild's `after_ready`, with no reading of this tab in between
+    job.docker.write_tiles(30)
+    job.docker.finish(139)
+
+    view.refresh_pathfinding()
+
+    assert view.problem_label.text() == ""
+    assert "Its 30 finished tiles are kept" in view.pathfinding_label.text()
+
+
+def test_a_stop_that_kept_nothing_goes_when_a_later_run_fails_with_nothing_kept(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Only the state changes (0 kept both times): the Stop is no longer the last word once
+    a run a rebuild started has crashed."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 0)
+    view.stop_pathfinding()
+    view.refresh_pathfinding()
+    assert view.problem_label.text().startswith("Stopped making the pathfinding data and removed")
+    job.start()
+    job.docker.finish(139)
+
+    view.refresh_pathfinding()
+
+    assert view.problem_label.text() == ""
+    assert view.pathfinding_label.text().startswith("Pathfinding data could not be made")
