@@ -4787,7 +4787,12 @@ def _after_a_failed_run(server_dir: Path) -> native.StageContext:
     """A stage context for a press whose previous run of this install failed."""
     ctx = context(server_dir)
     return replace(
-        ctx, state=replace(ctx.state, last_error="centurion-worldserver restarted 7 times")
+        ctx,
+        state=replace(
+            ctx.state,
+            last_error="centurion-worldserver restarted 7 times",
+            error_run=native.ERROR_RUN_INSTALL,
+        ),
     )
 
 
@@ -4874,6 +4879,70 @@ def test_pressing_install_again_after_a_crash_looping_install_finishes_it(
     )
     assert world.stopped == [[ENTRY.container_spec().world]]
     assert said[-1].endswith(f"is installed and running in {server_dir}"), said[-1]
+
+
+def test_a_failed_rebuild_then_install_refuses_the_running_world_instead_of_stopping_it(
+    tmp_path: Path,
+) -> None:
+    """T207: a remembered server whose Rebuild failed is not an unfinished install.
+
+    T206's stop reads the engine's own `last_error`, and a failed Rebuild records
+    one too. Until T207 nothing told the two apart, so an `engine.run()` reaching
+    that folder later (the CLI, or Install after the tab was removed) stopped a
+    live world without asking. The record now says which kind of run failed, and
+    only a failed INSTALL's world is stopped.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN, IMPORTED_OLDER_PLAN, IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    client = client_folder(tmp_path)
+    install(rec, server_dir, client, world_running=world.world_running, stop_world=world.stop_world)
+    rec.build_result = docker.AttachedRun(2, ("error: no",))
+    with pytest.raises(InstallerError):
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and state.last_error, "the ground: the Rebuild's failure is recorded"
+    assert state.error_run == native.ERROR_RUN_REBUILD
+    world.running = True
+    rec.containers[ENTRY.container_spec().world] = _our_project(server_dir)
+    with pytest.raises(InstallerError) as raised:
+        install(
+            rec, server_dir, client, world_running=world.world_running, stop_world=world.stop_world
+        )
+    assert "world server is running" in str(raised.value)
+    assert world.stopped == [], "a remembered server's world was stopped without asking"
+
+
+def test_the_kind_of_run_that_failed_is_recorded_beside_its_sentence_and_read_back(
+    tmp_path: Path,
+) -> None:
+    """T207: written next to `last_error`, and cleared with it."""
+    state = native.InstallState(game_id=ENTRY.id, install_id="0" * 8)
+    native.write_state(tmp_path, replace(state, last_error="x", error_run=native.ERROR_RUN_REBUILD))
+    back = native.read_state(tmp_path, valid=())
+    assert back is not None and back.error_run == native.ERROR_RUN_REBUILD
+    assert back.with_stage("build", ("build",)).error_run == ""
+    native.write_state(tmp_path, replace(back, last_error="", error_run=""))
+    raw = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert "error_run" not in raw, "an install with no failure writes the file it always did"
+
+
+def test_a_record_from_before_t207_with_an_error_and_no_kind_is_not_stopped_for(
+    tmp_path: Path,
+) -> None:
+    """No kind recorded: not provably a failed install, so the world is refused, not stopped."""
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    ctx = _after_a_failed_run(server_with_sql(tmp_path))
+    ctx = replace(ctx, state=replace(ctx.state, error_run=""))
+    rec.containers[ENTRY.container_spec().world] = _our_project(ctx.server_dir)
+    with pytest.raises(InstallerError, match="world server is running"):
+        list(
+            engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(ctx)
+        )
+    assert world.stopped == []
 
 
 def test_a_finished_installs_rerun_names_docker_when_the_world_cannot_be_read(

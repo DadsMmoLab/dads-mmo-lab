@@ -528,6 +528,17 @@ def lay_for_client_data(m: Machine) -> None:
     lay_checkout(m.server_dir / CHECKOUT)
 
 
+def clear_buildings_as_the_refusal_asks(m: Machine) -> None:
+    """Delete `data/Buildings`, as the refusal of a second extraction over it tells the player.
+
+    `vmap4extractor` will not start over the `dir_bin` a finished extraction
+    leaves (T241, `extract.DIRTY_OUTPUT_TOOLS`), so an Install press whose
+    evidence names another client or pack set stops before any container and
+    names that folder. `reextract()` sets it aside instead.
+    """
+    shutil.rmtree(m.server_dir / "data" / extract.BUILDINGS_DIR)
+
+
 # -- identity -----------------------------------------------------------------------------
 
 
@@ -860,6 +871,7 @@ def test_the_evidence_names_the_players_client_and_a_changed_pack_extracts_again
     changed[1]["md5"] = hashlib.md5(newer, usedforsecurity=False).hexdigest()
     other = centurion_like(packs=[*changed, *OPTIONAL_PACKS], rev=REV)
     machine.tools.seen.clear()
+    clear_buildings_as_the_refusal_asks(machine)
     said = run_stage(machine, "client-data", entry=other)
     assert "the extracted data is for another client or plan; extracting everything again" in said
     seen = machine.tools.seen["mapextractor"]
@@ -895,15 +907,18 @@ def _update_locale_pack(m: Machine) -> None:
 def test_a_pack_updated_with_its_md5_line_is_extracted_by_the_re_extraction(
     machine: Machine,
 ) -> None:
-    """Update to latest flags the map data; the re-extraction removes the evidence and runs
-    `client-data` again (`TrinityCoreInstaller.reextract`), which takes the new zip on the
-    checkout's word -- with a pinned md5 it would be refused as a changed file."""
+    """Update to latest flags the map data; the re-extraction sets the old map data and its
+    evidence aside and runs `client-data` again (`TrinityCoreInstaller.reextract`), which takes
+    the new zip on the checkout's word -- with a pinned md5 it would be refused as a changed
+    file."""
     entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
     lay_for_client_data(machine)
     _lay_md5_file(machine)
     run_stage(machine, "client-data", entry=entry)
     _update_locale_pack(machine)
-    (machine.server_dir / "data" / extract.EVIDENCE_FILE).unlink()  # as reextract() does
+    data = machine.server_dir / "data"
+    plan = entry.install.native.trinitycore.extract  # type: ignore[union-attr]
+    extract.set_aside(data, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))  # T241
     machine.tools.seen.clear()
 
     run_stage(machine, "client-data", entry=entry)
@@ -938,6 +953,7 @@ def test_a_pack_updated_with_its_md5_line_is_noticed_by_the_evidence_without_a_p
     run_stage(machine, "client-data", entry=entry)
     _update_locale_pack(machine)
     machine.tools.seen.clear()
+    clear_buildings_as_the_refusal_asks(machine)
 
     said = run_stage(machine, "client-data", entry=entry)
 
