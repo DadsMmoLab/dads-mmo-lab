@@ -89,12 +89,15 @@ starting docker.service:
 
 Those deaths are real exits, so neither the count, the exit code (0 again once
 it runs) nor `OOMKilled` tells them from a crash. What says Docker restarted is
-the daemon itself: `docker.daemon_identity()`, read when the dashboard first
-looks, when Docker answers after a read that failed and whenever the count
-moved, changes only when the daemon started again. A crash-looping world can start a new run while
-the CLI cannot reach the daemon for a moment, so a new `StartedAt` after a
-silence proves nothing (Codex adversarial review, round 6). No identity seen
-before, or none readable now, opens no window: the restarts count as before.
+the daemon itself: `docker.daemon_identity()` changes only when the daemon
+started again. A new `StartedAt` alone proves nothing, as a crash-looping world
+starts a new run too, even while the CLI cannot reach the daemon for a moment
+(Codex adversarial review, round 6). But Docker's restore always starts a new
+run, so the identity is read when the dashboard first looks and whenever the
+world is on a new run: a restart between two ticks, or with the count reading
+higher, lower or the same afterwards, is still told apart before its restarts
+are counted (Codex reviews, rounds 7 to 9). No identity seen before, or none
+readable now, opens no window: the restarts count as before.
 
 The window closes early, at the first tick whose population read reached the
 world's database: the dependency the race is about is up, and every death from
@@ -291,10 +294,10 @@ class Dashboard:
         self._strikes = 0
         self._looping = False
         self._loop_is_current = False
-        self._docker_away = False
         self._restoring_until: datetime | None = None
         self._daemon: str | None = None
         self._daemon_asked = False
+        self._last_started: str | None = None
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -314,11 +317,10 @@ class Dashboard:
                 self._restoring_until = None
                 self._daemon = None
                 self._daemon_asked = False
-            else:
-                self._docker_away = True
             return Verdict(kind, state.restart_count, state.started_at, uptime)
-        moved = self._last_restarts is not None and state.restart_count != self._last_restarts
-        restoring = self._docker_is_restoring(moved)
+        new_run = self._last_started is not None and state.started_at != self._last_started
+        self._last_started = state.started_at
+        restoring = self._docker_is_restoring(new_run)
         if self._restarted(state) or restoring:
             self._loop_is_current = False
             self._strikes = 0
@@ -350,24 +352,19 @@ class Dashboard:
             self._restoring_until = None  # its database answered: the race is over
         return verdict
 
-    def _docker_is_restoring(self, moved: bool) -> bool:
+    def _docker_is_restoring(self, new_run: bool) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker restarted (T306).
 
-        The daemon's identity is read on the first answer, on the first answer
-        after a read that failed, and whenever the restart count moved, so a
-        Docker that stopped and started between two ticks is still told apart
-        before its restarts are counted (Codex review, rounds 7 and 8: its
-        restore resets the count, which can then read higher or lower). A different one
-        opens the window; one that could not be read changes nothing, and the
-        last one read stays what Docker was. Docker restarting itself starts
-        every container again, which ends the run the loop evidence was about,
-        so the caller clears it the way `_restarted()` does, and only that:
-        `_looping` stays, so a server that was looping before is still not
-        called steady.
+        The daemon's identity is read on the first answer and whenever the world
+        is on a new run (`DOCKER_RESTORE_GRACE` says why). A different one opens
+        the window; one that could not be read changes nothing, and the last one
+        read stays what Docker was. Docker restarting itself starts every
+        container again, which ends the run the loop evidence was about, so the
+        caller clears it the way `_restarted()` does, and only that: `_looping`
+        stays, so a server that was looping before is still not called steady.
         """
         now = self._now()
-        if self._docker_away or moved or not self._daemon_asked:
-            self._docker_away = False
+        if new_run or not self._daemon_asked:
             self._daemon_asked = True
             seen = self._daemon_of()
             if seen:

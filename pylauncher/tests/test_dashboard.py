@@ -957,7 +957,7 @@ def test_a_docker_restart_between_two_ticks_is_still_told_by_the_daemon(tmp_path
     five-second ticks leaves no failed read, and its restore race was counted as
     crashes again.
 
-    Mutation: ask the daemon only after a silence, and the last tick reads `restart_loop`.
+    Mutation: ask the daemon only on the first look, and the last tick reads `restart_loop`.
     """
     back = _stamp(NOW + timedelta(seconds=8))
     watch, handed = _clocked(
@@ -1018,7 +1018,7 @@ def test_the_first_answer_after_a_silence_asks_the_daemon_even_with_no_new_resta
     it, the silence itself must, or that first tick says "restart loop" about
     Docker's own restart.
 
-    Mutation: never note the silence, and this reads `restart_loop`.
+    Mutation: ask the daemon only on the first look, and this reads `restart_loop`.
     """
     up = _stamp(NOW - timedelta(hours=2))
     watch, _handed = _clocked(
@@ -1044,7 +1044,7 @@ def test_a_docker_restart_between_two_ticks_that_lowered_the_count_is_told_too(
     Codex review, 2026-10-05, round 8: only a growing count asked the daemon, and
     the tick that found the world `restarting` at a lower count called it a loop.
 
-    Mutation: ask the daemon only when the count grew, and this reads `restart_loop`.
+    Mutation: ask the daemon only on the first look, and this reads `restart_loop`.
     """
     up = _stamp(NOW - timedelta(hours=2))
     watch, _handed = _clocked(
@@ -1059,3 +1059,35 @@ def test_a_docker_restart_between_two_ticks_that_lowered_the_count_is_told_too(
     verdicts = [watch.tick() for _ in range(2)]
 
     assert verdicts[-1].state == "starting"
+
+
+def test_a_clean_docker_restart_is_noticed_by_the_new_run_not_by_a_later_crash(
+    tmp_path: Path,
+) -> None:
+    """Docker restarted between ticks and the world came back at once, count 0 as before.
+
+    Codex adversarial review, 2026-10-05, round 9: with nothing failed and no count
+    moved, the new daemon went unasked until the world's first real crash, which
+    then opened a window and was forgiven. Docker's restore starts every container
+    again, so the new run is when to ask.
+
+    Mutation: ask the daemon only on the first look, and the last tick reads `up`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    back = _stamp(NOW + timedelta(seconds=4))
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), _running(back, 0)),  # Docker restarted at 3 s
+            (timedelta(seconds=10), _running(back, 0)),
+            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 1)),
+            (timedelta(seconds=20), _running(_stamp(NOW + timedelta(seconds=19)), 2)),
+            (timedelta(seconds=25), _running(_stamp(NOW + timedelta(seconds=24)), 3)),
+        ],
+        daemons=_restart_at(3),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[-1].state == "restart_loop"
