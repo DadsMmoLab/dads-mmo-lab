@@ -418,7 +418,7 @@ def check(key: ConfKey | None, value: str) -> None:
         raise TuningError(f"{key.key}: `{value}` is not an on/off value (use one of: {allowed})")
 
 
-DECIMAL = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)")
+DECIMAL = re.compile(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)")
 """How a `float` key's value may be spelled: digits, at most one point, an optional minus.
 
 Narrower than Python's `float()` on purpose (T302). The cores parse a rate in C:
@@ -427,8 +427,10 @@ at their pins), which throws -- at world start -- on a value that does not begin
 with a number, and Tortoise with `atof` (`src/shared/Config/Config.cpp:261-265`).
 Both stop at the first character they do not expect, so `float("1_0")` is 10 to
 this app and 1 to the server, and `1,5` is 1. `inf` and `nan` are numbers to
-Python and not rates. A value the two sides would read differently is refused
-rather than written.
+Python and not rates. `[0-9]` and not `\\d`, which in a Python pattern also
+matches other scripts' digits: `float("١.٥")` is 1.5, and the server reads no
+number at all (Codex review, 2026-10-05). A value the two sides would read
+differently is refused rather than written.
 """
 
 

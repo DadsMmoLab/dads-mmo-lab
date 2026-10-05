@@ -57,10 +57,15 @@ reaching a live realm, and leaves the file's own editor for anybody who means it
 **The XP Rate Customization mod (owner choice recorded in T302).** The card owns
 these keys. When the mod is installed its three XP rows stay on its own card,
 read-only, saying the Server rates card sets them (`yield_to_card`), so the tab
-has one writer per key. The mod itself keeps working: installing it still writes
+has one control per key. The mod itself keeps working: installing it still writes
 the XP multiplier it asks for, removing it still puts the three keys back to 1,
 and Reset to default still keeps a key an installed module declares (owner
-decision 5, `reset_defaults.carry_module_keys`).
+decision 5, `reset_defaults.carry_module_keys`). Those two are a person's own
+presses, not a second control, and while the mod is installed the card's XP rows
+SAY both (`shared_with`), where the value is changed (Codex adversarial review,
+2026-10-05, asked for the mod's removal to stop writing or for reset to drop the
+carry; both would overrule what the mod and owner decision 5 promise, so this
+says it instead).
 
 Nothing here imports Qt. The rows are `tuning.TuningRow`s, drawn by the same
 `TuningPanel` card every module gets, and saved by the same `save_tuning`.
@@ -96,6 +101,18 @@ ON_THE_RATES_CARD = (
     "was installed and puts it back to 1 when it is removed."
 )
 """What a module's row says when this card owns its key (`yield_to_card`)."""
+
+SHARED_WITH = (
+    "{module} is installed and also sets this. While it is installed, Reset to default "
+    "keeps this value, and removing {module} sets it back to 1."
+)
+"""What the card's own row adds while an installed module names the same key (`shared_with`).
+
+True of the one module that does, XP Rate Customization: its remove patches write 1
+and owner decision 5 carries its keys through a reset. `test_server_rates` fails if
+another manifest comes to name a rate this card writes, or that mod's removal stops
+writing 1.
+"""
 
 _HOW_MUCH = "1 is the normal amount, 2 is double, 0.5 is half."
 
@@ -309,3 +326,27 @@ def yield_to_card(
         (replace(row, read_only_reason=ON_THE_RATES_CARD) if (row.file, row.key) in owned else row)
         for row in module_rows
     )
+
+
+def shared_with(
+    card_rows: Iterable[tuning.TuningRow], module_rows: Iterable[tuning.TuningRow]
+) -> tuple[tuning.TuningRow, ...]:
+    """The card's rows, each one an installed module also names saying so (`SHARED_WITH`).
+
+    The other half of `yield_to_card` (Codex adversarial review, 2026-10-05): the
+    card is the one CONTROL for the key, but the module's removal and Reset to
+    default still act on it, and the row a person changes it on is where that is said.
+    """
+    names: dict[tuple[str, str], str] = {}
+    for row in module_rows:
+        if row.installed and row.backend == "conf":
+            names.setdefault((row.file, row.key), row.module_name)
+    shared: list[tuning.TuningRow] = []
+    for row in card_rows:
+        name = names.get((row.file, row.key))
+        if name is None:
+            shared.append(row)
+            continue
+        said = SHARED_WITH.format(module=name)
+        shared.append(replace(row, explain=f"{row.explain} {said}" if row.explain else said))
+    return tuple(shared)

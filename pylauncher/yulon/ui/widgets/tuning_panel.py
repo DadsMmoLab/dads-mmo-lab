@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import tuning
+from yulon import server_rates, tuning
 from yulon.manifest_store import FAMILY_FILES
 from yulon.tuning import ApplyRule, TuningRow
 from yulon.ui.message_box import FittedMessageBox
@@ -70,6 +70,13 @@ CHIP_READ_ONLY = "read-only in this version"
 The same fact `read_only_reason` already spells out in a sentence under the
 row, at a glance: a person scanning a card of twelve settings needs to see
 which of them are not theirs to change without reading twelve paragraphs.
+"""
+
+CHIP_ON_THE_RATES_CARD = "set on the Server rates card"
+"""The chip on a module's row whose key the Server rates card writes (T302).
+
+Not `CHIP_READ_ONLY`: that one promises a later version that writes the row, and
+this row will never be written here -- the card above it is where it is changed.
 """
 
 CHIP_FREE_TEXT = "free text"
@@ -455,6 +462,8 @@ def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
     this function is on the pure side of the module.
     """
     if not row.editable:
+        if row.read_only_reason == server_rates.ON_THE_RATES_CARD:
+            return (CHIP_ON_THE_RATES_CARD,)
         return (CHIP_READ_ONLY,)
     chips: list[str] = []
     if changed:
@@ -552,7 +561,7 @@ the box can be emptied on the way to a new number.
 """
 
 
-DECIMAL_TEXT = r"-?\d*\.?\d*"
+DECIMAL_TEXT = r"-?[0-9]*\.?[0-9]*"
 """What a box for a `float` key lets a player type (T302): digits and one point.
 
 The partial spellings on the way to a number (`-`, `2.`, `.`) are let through,

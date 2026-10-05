@@ -17040,7 +17040,8 @@ class ControllerView(QWidget):
         and `_tuning_rows` keeps it as the module declared it.
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
-        return self._rate_rows + modules + self._bot_rows
+        rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
+        return rates + modules + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:

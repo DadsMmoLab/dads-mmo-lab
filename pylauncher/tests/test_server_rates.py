@@ -40,6 +40,16 @@ def test_a_rate_spelled_with_an_underscore_is_refused_by_the_spelling_rule() -> 
         tuning.check(RATE, "1_0")
 
 
+def test_a_rate_in_another_scripts_digits_is_refused_although_python_reads_it() -> None:
+    """`float("١.٥")` is 1.5; the server's `std::stof` or `atof` reads no number at all.
+
+    Codex review 2026-10-05. In bounds as 1.5, so only the spelling rule can refuse it.
+    """
+    assert float("١.٥") == 1.5
+    with pytest.raises(tuning.TuningError, match="is not a number"):
+        tuning.check(RATE, "١.٥")
+
+
 @pytest.mark.parametrize("value", ["1,5", "nan", "inf", "2x", "", " "])
 def test_a_rate_that_is_not_a_decimal_number_is_refused(value: str) -> None:
     with pytest.raises(tuning.TuningError, match="is not a number"):
@@ -116,6 +126,7 @@ def test_a_rate_box_takes_a_decimal_and_refuses_a_letter(qapp: object) -> None:
     assert rule.validate("2.5", 3)[0] == QValidator.State.Acceptable
     assert rule.validate("2.5x", 4)[0] == QValidator.State.Invalid
     assert rule.validate("2,5", 3)[0] == QValidator.State.Invalid
+    assert rule.validate("١.٥", 3)[0] == QValidator.State.Invalid
     field.setText("2.5")
     assert editor.changed and editor.value() == "2.5"
 
@@ -555,6 +566,8 @@ def test_with_the_xp_mod_installed_the_card_is_the_one_writer_of_its_keys(
 ) -> None:
     path = _lay(tmp_path, game)
     view = _view(ps, tmp_path, game, mods=frozenset({"xp-rates"}))
+    order = [(c.card.family, c.card.module_id) for c in view.tuning_panel.cards()]
+    assert order == [("core", "server-rates"), ("mod", "xp-rates")], "the built-in card first"
     mod = view.tuning_panel.card(("mod", "xp-rates"))
     assert sorted(mod.editors) == ["Rate.XP.Explore", "Rate.XP.Kill", "Rate.XP.Quest"]
     for editor in mod.editors.values():
@@ -638,3 +651,75 @@ def test_the_raw_editor_still_lists_the_world_conf_the_xp_mod_named(
     _lay(tmp_path, "wow-tbc")
     view = _view(ps, tmp_path, "wow-tbc", mods=frozenset({"xp-rates"}))
     assert "etc/mangosd.conf" in view._tuning_files()
+
+
+def test_with_the_xp_mod_installed_the_cards_xp_rows_say_what_the_mod_still_does(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    """Codex adversarial review 2026-10-05: the mod's removal and Reset to default still act.
+
+    Said on the card where the value is changed, and only on the rows the mod names.
+    """
+    _lay(tmp_path, "wow-tbc")
+    view = _view(ps, tmp_path, "wow-tbc", mods=frozenset({"xp-rates"}))
+    editors = _rates_card(view).editors
+    for key in ("Rate.XP.Kill", "Rate.XP.Quest", "Rate.XP.Explore"):
+        said = editors[key].explain_label.text()
+        assert "XP Rate Customization is installed" in said, key
+        assert "Reset to default keeps this value" in said and "back to 1" in said
+    assert "XP Rate Customization" not in editors["Rate.Drop.Money"].explain_label.text()
+
+    bare = _view(ps, tmp_path, "wow-tbc")
+    assert (
+        "XP Rate Customization"
+        not in _rates_card(bare).editors["Rate.XP.Kill"].explain_label.text()
+    )
+
+
+def test_only_the_xp_mod_names_a_rate_the_card_writes_and_its_removal_writes_1() -> None:
+    """What the card's sentence about the mod says, held against every shipped manifest.
+
+    A second module naming one of these keys (in its conf rows or a patch) would be
+    a writer the card's sentences do not describe; the xp mod's remove patches are
+    what "back to 1" claims.
+    """
+    import json
+    import re
+
+    keys = [key for key, _label, _value in SHOWN]
+    root = Path(__file__).resolve().parents[1] / "manifests"
+    naming: list[str] = []
+    for path in sorted(root.glob("wow-*/**/*.json")):
+        text = path.read_text(encoding="utf-8")
+        if any(key in text or re.escape(key).replace("\\", "\\\\") in text for key in keys):
+            naming.append(path.relative_to(root).as_posix())
+    assert naming == [
+        f"wow-{game}/mods/xp-rates.json" for game in ("tbc", "tortoise", "vanilla", "wotlk")
+    ]
+    for name in naming:
+        data = json.loads((root / name).read_text(encoding="utf-8"))
+        removes = [p["replace"] for p in data["patches"] if p["when"] == "remove"]
+        assert removes and all(re.search(r"=\s*1$", r) for r in removes), name
+
+
+def test_a_mod_row_the_card_owns_is_chipped_as_set_there_not_as_a_later_version() -> None:
+    """`read-only in this version` would promise a version that writes it; none will."""
+    from yulon.ui.widgets import tuning_panel as tp
+
+    card = (_rate_row(file="etc/mangosd.conf", key="Rate.XP.Kill"),)
+    (row,) = server_rates.yield_to_card([_module_row("etc/mangosd.conf", "Rate.XP.Kill")], card)
+    assert tp.row_chips(row) == ("set on the Server rates card",)
+    lua = _module_row("x.lua", "K")
+    lua = tuning.TuningRow(**{**lua.__dict__, "read_only_reason": tuning.LUA_IS_NOT_IN_V1})
+    assert tp.row_chips(lua) == (tp.CHIP_READ_ONLY,)
+
+
+def test_the_card_names_only_a_module_that_writes_the_same_key_in_the_same_file() -> None:
+    """A module naming `Rate.XP.Kill` in a conf of its own sets a different value."""
+    card = (_rate_row(file="etc/mangosd.conf", key="Rate.XP.Kill", explain="Kills."),)
+    elsewhere = _module_row("etc/modules/mine.conf", "Rate.XP.Kill")
+    assert server_rates.shared_with(card, [elsewhere]) == card
+    (said,) = server_rates.shared_with(card, [_module_row("etc/mangosd.conf", "Rate.XP.Kill")])
+    assert said.explain == "Kills. " + server_rates.SHARED_WITH.format(
+        module="XP Rate Customization"
+    )
