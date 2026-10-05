@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from tests.support_native import Recorder, engine
-from tests.test_rebuild import _Daemon, _daemon_for, _refs, _seams_of, a_finished_install
+from tests.test_rebuild import _Daemon, _daemon_for, _refs, a_finished_install
+from tests.test_rebuild import _seams_of as _rebuild_seams_of
 from tests.test_rebuild_parks_a_finished_build import a_parkable_install
 from yulon import docker, server_build_presses
 from yulon.catalog import native
@@ -36,6 +38,14 @@ from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.controller import Controller, StartRefused
 
 LANDED = native.STOPPED_BUILD_LANDED_REFUSAL
+
+
+def _seams_of(rec: Recorder, daemon: _Daemon, **overrides: object) -> dict[str, object]:
+    """`test_rebuild._seams_of`, with the server's world down unless a test says otherwise:
+    a stopped build is settled only while it is (the lead's belt, scoped re-review)."""
+    return _rebuild_seams_of(rec, daemon, **{"world_running": lambda _c: False, **overrides})
+
+
 UNCHECKED = native.STOPPED_BUILD_UNCHECKED_REFUSAL
 
 
@@ -302,30 +312,218 @@ def test_a_failed_compile_after_a_stop_keeps_the_record_and_the_names(tmp_path: 
     assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
 
 
-def test_a_restore_after_a_stop_keeps_the_names_it_put_back_from(tmp_path: Path) -> None:
-    """The new build does not come up; the old one is put back -- and a stopped solve may
-    still land, so the `-rollback` names and the record stay for the Start check."""
+# -- scoped re-review 2: a TOUCHED exit settles the record -------------------
+
+
+def _touched_exit(tmp_path: Path, how: str) -> tuple[Recorder, _Daemon, Path, InstallerError]:
+    """A stop's record, then a press whose new build started and was rolled back, `how`."""
     from tests.test_rebuild import _answers
 
-    rec = Recorder(images=True)
-    server_dir = a_finished_install(rec, tmp_path)
-    daemon = _daemon_for(server_dir)
-    _stopped_mid_compile(rec, daemon, server_dir)
+    rec, daemon, server_dir = _recorded(tmp_path)
+    overrides: dict[str, object] = {"wait_ready": _answers(False, True)}
+    servers_down: native.ServersDownWork | None = None
+    if how == "second-failure":
+        overrides["wait_ready"] = _answers(False, False)
+    elif how == "refused":
+        assert native.owe_start(server_dir) == ""
+    elif how == "servers-would-not-stop":
+
+        def stop_servers(*_a: object, **_kw: object) -> None:
+            raise docker.DockerCommandError(["compose", "stop"], 1, "daemon said no")
+
+        overrides["stop_servers"] = stop_servers
+    elif how == "retag-failed-undone":
+        moved: list[str] = []
+
+        def tag_image(src: str, dst: str) -> str:
+            if src.endswith(native.ROLLBACK_TAG_SUFFIX) and dst in _refs(server_dir):
+                moved.append(dst)
+                if len(moved) == 2:
+                    return "Error response from daemon: read-only file system"
+            return daemon.tag_image(src, dst)
+
+        overrides["tag_image"] = tag_image
+    elif how == "stay":
+
+        def back(_ctx: object) -> Iterator[str]:
+            raise native.LeaveStopped("a source folder would not go back")
+            yield ""
+
+        servers_down = native.ServersDownWork(
+            prepare=lambda: iter(()), forward=lambda _ctx: iter(()), back=back
+        )
     with pytest.raises(InstallerError) as raised:
         list(
-            engine(rec, **_seams_of(rec, daemon, wait_ready=_answers(False, True))).rebuild(
+            engine(rec, **_seams_of(rec, daemon, **overrides)).rebuild(
+                InstallOptions(server_dir=server_dir), servers_down=servers_down
+            )
+        )
+    exit_words = {
+        "put-back-and-running": "put back and is running again",
+        "second-failure": "did not report ready either",
+        "refused": "were left STOPPED",
+        "stay": "a source folder would not go back",
+        "servers-would-not-stop": "could not be stopped",
+        "retag-failed-undone": "were moved back",
+    }[how]
+    assert exit_words in str(raised.value), (how, str(raised.value))
+    return rec, daemon, server_dir, raised.value
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        "put-back-and-running",
+        "second-failure",
+        "refused",
+        "stay",
+        "servers-would-not-stop",
+        "retag-failed-undone",
+    ],
+)
+def test_a_touched_exit_forgets_the_stopped_build(tmp_path: Path, how: str) -> None:
+    """Lead decision (a): this press's build started, so the record no longer describes
+    the server; kept, it made the next Start say a stopped build landed, falsely."""
+    rec, daemon, server_dir, failed = _touched_exit(tmp_path, how)
+    assert native.read_stopped_build(server_dir) is None, (how, str(failed))
+    assert engine(rec, **_seams_of(rec, daemon)).start_refusal(server_dir) != LANDED
+
+
+@pytest.mark.parametrize("how", ["put-back-and-running", "second-failure", "refused", "stay"])
+def test_a_touched_restore_lets_its_rollback_names_go(tmp_path: Path, how: str) -> None:
+    """Scoped re-review 4: these exits put every tag back, so the names are duplicates."""
+    rec, daemon, server_dir, failed = _touched_exit(tmp_path, how)
+    rollback = [n for n in daemon.transient() if n.endswith(native.ROLLBACK_TAG_SUFFIX)]
+    assert rollback == [], (how, str(failed), daemon.transient())
+
+
+def test_an_untouched_restore_after_a_stop_keeps_the_names_and_the_record(
+    tmp_path: Path,
+) -> None:
+    """Docker silent through the recreate: this press's build never started, so an earlier
+    stop's solve may still land, and its record and the names stay."""
+    from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
+
+    rec, daemon, server_dir = _recorded(tmp_path)
+    clock = _Clock()
+    seams = _seams_of(
+        rec,
+        daemon,
+        docker_ready=_Probe(clock, *SILENT_FOR_THE_WAIT, then=True),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    with pytest.raises(InstallerError):
+        list(engine(rec, **seams).rebuild(InstallOptions(server_dir=server_dir)))
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert native.read_stopped_build(server_dir) is not None
+    rollback = sorted(n for n in daemon.transient() if n.endswith(native.ROLLBACK_TAG_SUFFIX))
+    assert rollback == _rollback_names(server_dir), daemon.transient()
+
+
+def test_a_landed_build_is_not_settled_under_a_running_server(tmp_path: Path) -> None:
+    """Lead decision (b), the belt: no tag moves while the server's containers are up."""
+    rec, daemon, server_dir = _recorded(tmp_path)
+    daemon.compiled()
+    asked: list[str] = []
+
+    def world_running(container: str) -> bool | None:
+        asked.append(container)
+        return True
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, **_seams_of(rec, daemon, world_running=world_running)).rebuild(
                 InstallOptions(server_dir=server_dir)
             )
         )
-    assert "put back and is running again" in str(raised.value), raised.value
-    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert asked, "the settle never asked whether the server runs"
+    message = str(raised.value)
+    assert "is running" in message and "Stop the server" in message, message
+    assert "Nothing was changed" in message, message
+    assert "build" not in rec.calls, rec.calls
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), "a tag moved"
     assert native.read_stopped_build(server_dir) is not None
-    assert sorted(
-        name for name in daemon.transient() if name.endswith(native.ROLLBACK_TAG_SUFFIX)
-    ) == _rollback_names(server_dir), daemon.transient()
-    assert engine(rec, **_seams_of(rec, daemon)).start_refusal(server_dir) is None
+
+
+def test_a_server_docker_cannot_say_is_down_is_not_settled_either(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
     daemon.compiled()
-    assert engine(rec, **_seams_of(rec, daemon)).start_refusal(server_dir) == LANDED
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, **_seams_of(rec, daemon, world_running=lambda c: None)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert "could not tell whether" in str(raised.value), raised.value
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), "a tag moved"
+
+
+# -- scoped re-review 3: a record that will not go is said, and goes later -----
+
+
+def test_a_record_that_cannot_be_removed_is_said_and_the_next_rebuild_removes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == native.STOPPED_BUILD_FILE:
+            raise PermissionError(13, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    told = [line for line in said if native.STOPPED_BUILD_FILE in line]
+    assert len(told) == 1 and "could not be removed" in told[0], said
+    assert "the next rebuild removes it" in told[0], told
+    assert native.read_stopped_build(server_dir) is not None
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert native.read_stopped_build(server_dir) is None
+
+
+# -- scoped re-review 5: each refusal through the call site --------------------
+
+
+def _controller_with(
+    monkeypatch: pytest.MonkeyPatch, server_dir: Path, image_id: object
+) -> Controller:
+    from yulon.catalog.catalog import load_catalog
+
+    monkeypatch.setattr(docker, "image_id", lambda ref, *, wsl_distro=None: image_id(ref))  # type: ignore[operator]
+    return Controller(load_catalog().get("wow-wotlk").container_spec(), server_dir)
+
+
+def test_a_half_answered_check_refuses_the_controllers_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
+    del daemon.names[_refs(server_dir)[0] + native.ROLLBACK_TAG_SUFFIX]
+    with pytest.raises(StartRefused) as refused:
+        _controller_with(monkeypatch, server_dir, daemon.image_id).refuse_start()
+    assert str(refused.value) == UNCHECKED
+
+
+def test_a_silent_docker_does_not_refuse_the_controllers_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
+    _controller_with(monkeypatch, server_dir, lambda ref: None).refuse_start()
+
+
+def test_a_landed_tag_refuses_the_controllers_start_over_an_unanswered_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
+    daemon.compiled(_refs(server_dir)[:1])
+    del daemon.names[_refs(server_dir)[1] + native.ROLLBACK_TAG_SUFFIX]
+    with pytest.raises(StartRefused) as refused:
+        _controller_with(monkeypatch, server_dir, daemon.image_id).refuse_start()
+    assert str(refused.value) == LANDED
 
 
 def test_a_rebuild_that_succeeds_forgets_the_record_and_the_names(tmp_path: Path) -> None:

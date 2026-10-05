@@ -6926,12 +6926,12 @@ class StagedInstaller:
                 # that is the whole of what this subclass separates.
                 yield from self._release(kept)
                 # The new build started: as a success, the stopped build's record goes.
-                forget_stopped_build(server_dir)
+                also = self._forget_the_stopped_build(server_dir)
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
                     f"there is nothing wrong with the build to undo. Fix what stopped it and "
-                    f"press Start."
+                    f"press Start.{also}"
                 )
                 self._record_error(server_dir, ctx.state, kept_build)
                 raise WorldStoppedAfterReadyError(kept_build) from exc
@@ -6952,11 +6952,16 @@ class StagedInstaller:
                 servers_down=servers_down,
                 press=press,
                 parking=parking,
-                hold_rollback=hold,
+                # A touched press's build started, so an earlier stop's record no longer
+                # describes the server (scoped re-review, the lead's (a)): it goes below,
+                # and the restore treats the names as it always did.
+                hold_rollback=hold and not touched,
             )
-            self._record_error(server_dir, ctx.state, message)
+            also = self._forget_the_stopped_build(server_dir) if touched and hold else ""
+            message_said = f"{message}{also}"
+            self._record_error(server_dir, ctx.state, message_said)
             if isinstance(message, _LeftStopped):
-                raise ServersLeftStopped(str(message)) from exc
+                raise ServersLeftStopped(message_said) from exc
             if isinstance(message, _NotPutBack):
                 # T197: the tags still name the new build (or are mixed), so the
                 # update route must not put the old sources back under it.
@@ -6979,11 +6984,11 @@ class StagedInstaller:
                             f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
                         )
                 raise RollbackNotDone(
-                    f"{message} {warned}" if warned else str(message),
+                    f"{message_said} {warned}" if warned else message_said,
                     touched=message.touched,
                     mixed=message.mixed,
                 ) from exc
-            raise InstallerError(message) from exc
+            raise InstallerError(message_said) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
             # `KeyboardInterrupt`, or a consumer that stopped reading (which
@@ -7020,6 +7025,9 @@ class StagedInstaller:
                 else:
                     self._let_go(kept)
             elif kept:
+                if touched and hold:
+                    # The lead's (a): this press's build started; logged, never yielded.
+                    self._forget_the_stopped_build(server_dir)
                 # T225: also when compose had moved the tags before `built` was set
                 # (a consumer that stopped reading at "The build finished.").
                 logger.error(
@@ -7040,7 +7048,9 @@ class StagedInstaller:
             raise
         yield from self._release(kept)
         # T225: only a press that succeeded settles a stopped build's record.
-        forget_stopped_build(server_dir)
+        stuck = self._forget_the_stopped_build(server_dir)
+        if stuck:
+            yield stuck.strip()
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         left = forget_owed_start(server_dir)
@@ -8694,6 +8704,22 @@ class StagedInstaller:
         )
         return False
 
+    def _forget_the_stopped_build(self, server_dir: Path) -> str:
+        """Remove `STOPPED_BUILD_FILE`; "" once gone, else a sentence (logged) saying so.
+
+        A record that outlives its `-rollback` names makes every Start check
+        half-answered, so it refuses (`STOPPED_BUILD_UNCHECKED_REFUSAL`) until the
+        next rebuild that succeeds removes it -- said, not hidden (scoped re-review).
+        """
+        forgot = forget_stopped_build(server_dir)
+        if not forgot:
+            return ""
+        logger.warning(f"rebuild of {self.entry.id}: {forgot}")
+        return (
+            f" A stopped rebuild's record is out of date, but {forgot}; until it is removed "
+            f"every Start is refused, and the next rebuild removes it."
+        )
+
     def _remember_the_stopped_build(
         self, server_dir: Path, refs: Sequence[str], parking: _Parking
     ) -> str:
@@ -8739,6 +8765,25 @@ class StagedInstaller:
             # be running, and a press that fails must leave the Start check armed.
             logger.info(f"rebuild of {self.entry.id}: the stopped build has not landed")
             return
+        # The lead's belt (scoped re-review): no tag moves under a running server
+        # (T158's order), and "could not say" is not "down".
+        spec = self.entry.container_spec()
+        running = [self._seams.ask_world_running(name) for name in (spec.world, spec.auth)]
+        again = server_build_presses.under_server_build(server_build_presses.REBUILD)
+        if any(answer is True for answer in running):
+            raise InstallerError(
+                "A rebuild stopped earlier finished in Docker's background and moved this "
+                "server's image tags, and this server is running. Yu'lon does not move image "
+                f"tags under a running server: Stop the server, then press {again} again. "
+                "Nothing was changed."
+            )
+        if any(answer is None for answer in running):
+            raise InstallerError(
+                "A rebuild stopped earlier finished in Docker's background and moved this "
+                "server's image tags, and Yu'lon could not tell whether this server is running, "
+                f"so it moved nothing. Once Docker answers, press {again} again. Nothing was "
+                "changed."
+            )
         kept = len(moved) == len(refs) and self._park_landed(server_dir, refs, moved, record)
         for ref in moved:
             problem = self._seams.tag_image(ref + ROLLBACK_TAG_SUFFIX, ref)
