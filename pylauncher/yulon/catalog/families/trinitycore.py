@@ -1943,8 +1943,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield (
                 f"warning: the map data from before this press, in "
                 f"{data_dir / extract.SUPERSEDED_DIR} or {data_dir / extract.PREVIOUS_DIR}, "
-                f"could not be deleted ({exc}); it takes space but is not used. Delete that "
-                "folder when the server is stopped."
+                f"could not be deleted ({exc}). Delete that folder before the next "
+                f"“{REEXTRACT_BUTTON}”: a {extract.PREVIOUS_DIR} folder left there would be put "
+                "back over this map data."
             )
         if background:
             mmaps.discard(server_dir, self.entry, install_id=ident)

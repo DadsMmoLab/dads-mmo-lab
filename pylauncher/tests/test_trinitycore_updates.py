@@ -1174,6 +1174,28 @@ def test_map_data_superseded_by_a_press_that_finished_is_dropped_not_put_back(bo
     }
 
 
+def test_old_map_data_that_cannot_be_marked_superseded_is_deleted_outright(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: left under its kept-aside name, the next press would put it back over the
+    new map data. So a rename that fails is followed by deleting it where it is."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    real = os.rename
+
+    def refuse_the_mark(src: object, dst: object) -> None:
+        if Path(str(dst)).name == extract.SUPERSEDED_DIR:
+            raise PermissionError(13, "Permission denied")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(extract.os, "rename", refuse_the_mark)
+    box.world.running = False
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert not (data / extract.PREVIOUS_DIR).exists()
+    assert not (data / extract.SUPERSEDED_DIR).exists()
+
+
 def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:
     """Codex adversarial review: the old record back in place does not make the folders still
     aside stale. Only a press whose new map data was in marks them so (`extract.supersede()`)."""

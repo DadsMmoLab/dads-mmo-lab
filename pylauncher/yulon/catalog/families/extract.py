@@ -2142,9 +2142,14 @@ still in `PREVIOUS_DIR` is put back; only this name is ever deleted.
 def supersede(data_dir: Path) -> None:
     """The new map data is in: rename `PREVIOUS_DIR` to `SUPERSEDED_DIR`, then delete it.
 
+    A rename that fails is followed by deleting `PREVIOUS_DIR` where it is (Codex
+    review): left under that name, the next re-extraction would put it back over
+    the new map data.
+
     Raises:
-        OSError: it could not be renamed or deleted. Renamed, the next
-            re-extraction deletes it; not renamed, the caller deletes it outright.
+        OSError: it could not be deleted. Renamed, the next re-extraction
+            deletes it; not renamed, it is still `PREVIOUS_DIR`, and the caller
+            has to say so.
     """
     aside = data_dir / PREVIOUS_DIR
     gone = data_dir / SUPERSEDED_DIR
@@ -2152,6 +2157,10 @@ def supersede(data_dir: Path) -> None:
     try:
         os.rename(aside, gone)
     except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(f"{aside} could not be renamed to {gone} ({exc}); deleting it where it is")
+        _remove_tree(aside)
         return
     _remove_tree(gone)
 
