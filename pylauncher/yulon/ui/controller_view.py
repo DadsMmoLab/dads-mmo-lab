@@ -74,6 +74,7 @@ from yulon import (
     channel_setup,
     client_config,
     client_exe,
+    client_names,
     client_packs,
     commands,
     dbreads,
@@ -3693,6 +3694,12 @@ WoW client does not refuse a `client` step: it GAINS an
 """
 
 
+def _has_interface(client_dir: Path) -> bool:
+    """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
+    found = client_names.find(client_dir, ADDONS_PARENT)
+    return found is not None and found.is_dir()
+
+
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """This install's client folder if a manifest may write an addon into it, else None.
 
@@ -3718,7 +3725,7 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """
     if client_dir is None:
         return None
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         logger.info(
             f"{client_dir} has no {ADDONS_PARENT}/ folder, so no client addon is written "
             "into it; start the game once, or point this install at the client you play"
@@ -3741,7 +3748,7 @@ def _client_dir_row_text(client_dir: Path | None) -> str:
         return "Client folder: none — addons and Play need one"
     if not client_dir.is_dir():
         return f"Client folder: {client_dir} — the folder is missing"
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         return (
             f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
             "once before installing addons"

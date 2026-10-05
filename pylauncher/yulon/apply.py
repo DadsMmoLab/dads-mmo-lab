@@ -1856,6 +1856,14 @@ def take_back_file(
     _put_back(aside, path, log)
 
 
+def _same_hash(path: Path, sha256: str) -> bool:
+    """Does `path` hold the bytes `sha256` names? False when it cannot be read."""
+    try:
+        return sha256_of(path) == sha256
+    except OSError:
+        return False
+
+
 def _put_back(aside: Path | None, path: Path, log: _Log) -> None:
     """Rename the player's file set aside at install back to `path`, which is free."""
     if aside is None:
@@ -4684,21 +4692,38 @@ class Applier:
 
     @staticmethod
     def _adopt_orphans(copy: ClientCopy, dest: Path, claimed: set[Path], log: _Log) -> ClientCopy:
-        """Take on an aside of `dest` that no receipt records, left by an earlier crash (belt)."""
+        """Take on the asides of `dest` that no receipt records (belt), each in its own role.
+
+        Only `<name>.yulon-module-old` itself, and only while the live name is free or
+        holds this module's own bytes, is the player's file an earlier install moved
+        and never recorded: it becomes this receipt's aside, put back at Remove. Every
+        other one -- a numbered copy, which is a changed copy an earlier Remove named
+        as kept (m910q live check, D2), or one beside a file of the player's -- is
+        recorded as kept: named at Remove, never moved over the live name.
+        """
         orphans = [path for path in _aside_names(dest) if path not in claimed]
         if not orphans:
             return copy
         claimed.update(orphans)
+        primary = dest.name.casefold() + ASIDE_SUFFIX
+        live_is_ours = not os.path.lexists(dest) or _same_hash(dest, copy.sha256)
+        aside = copy.aside
+        kept = list(copy.kept)
         for orphan in orphans:
+            if not aside and orphan.name.casefold() == primary and live_is_ours:
+                aside = str(orphan)
+                log.done.append(
+                    f"found your own {dest.name} set aside as {orphan.name} in {dest.parent} "
+                    "by an earlier install that left no record of it; removing this module "
+                    "puts it back"
+                )
+                continue
+            kept.append(str(orphan))
             log.done.append(
-                f"found your own {dest.name} set aside as {orphan.name} in {dest.parent} by an "
-                "earlier install that left no record of it; it is kept, and removing this "
-                "module puts it back"
+                f"found {orphan.name} beside {dest.name} in {dest.parent}, a copy of yours "
+                "Yu'lon kept earlier; it stays as it is, and removing this module names it"
             )
-        if copy.aside:
-            return replace(copy, kept=(*copy.kept, *map(str, orphans)))
-        first, *rest = orphans
-        return replace(copy, aside=str(first), kept=(*copy.kept, *map(str, rest)))
+        return replace(copy, aside=aside, kept=tuple(kept))
 
     def _set_aside(
         self,
@@ -4885,10 +4910,13 @@ class Applier:
         """
         claimed = self._claimed_asides(_Log())
         for dest in sorted(dests):
+            primary = dest.name.casefold() + ASIDE_SUFFIX
             for orphan in _aside_names(dest):
                 if orphan in claimed:
                     continue
-                if not os.path.lexists(dest):
+                # Only the un-numbered aside is ever the player's file moved by an
+                # install; a numbered one is a kept copy, named and never put back (D2).
+                if orphan.name.casefold() == primary and not os.path.lexists(dest):
                     _put_back(orphan, dest, log)
                 else:
                     _aside_kept(orphan, dest, f"{dest.name} is there again", log)

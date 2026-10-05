@@ -1324,3 +1324,29 @@ def test_a_disk_full_copy_whose_put_back_fails_names_the_players_file(
     assert isinstance(failed.value, OSError) and failed.value.errno == 28
     assert str(aside) in str(failed.value)
     assert aside.read_bytes() == b"the player's own"
+
+
+def test_the_live_sequence_puts_the_players_original_back_after_a_second_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """m910q live check D2: install, the player edits, update (their edit kept as `.1`),
+    Remove, Install, Remove. The kept `.1` was adopted as the main aside by the second
+    Install, so the last Remove put the EDIT on the live name and called the player's
+    real file "your changed" copy. The file there when an install began must come back."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    data = tmp_path / "client" / "Data"
+    (data / "Patch-A.MPQ").write_bytes(b"the player's edit")
+    _update(applier, manifest, monkeypatch)
+    applier.remove(manifest)
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    kept = data / ("Patch-A.MPQ" + ASIDE + ".1")
+    assert kept.read_bytes() == b"the player's edit"
+
+    applier.install(manifest)
+    report = applier.remove(manifest)
+
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert kept.read_bytes() == b"the player's edit", "the kept copy stays a kept copy"
+    assert _names(data) == ["Patch-A.MPQ", "Patch-A.MPQ" + ASIDE + ".1"]
+    assert any(str(kept) in line for line in report.left_behind), "the kept copy is named"

@@ -9803,6 +9803,22 @@ def test_the_client_folder_row_reads_its_three_sentences(qapp: object, tmp_path:
     # instead of the "no Interface/" one.
 
 
+@needs_case_sensitive_disk
+def test_a_lowercase_interface_folder_is_the_clients_interface_folder(
+    qapp: object, tmp_path: Path
+) -> None:
+    """m910q live check of T261: `interface/` read as "no Interface/ folder yet", and
+    Tortoise's addons were refused a client that had one."""
+    real = tmp_path / "real-client"
+    (real / "interface" / "addons").mkdir(parents=True)
+
+    view, _ = _client_dir_view(WOTLK, tmp_path / "real", client_dir=real)
+
+    assert view.client_dir_label.text() == f"Client folder: {real}"
+    assert controller_view_module._client_dir_for_addons(real) == real
+    assert sorted(p.name for p in real.iterdir()) == ["interface"], "nothing renamed or added"
+
+
 def test_the_client_folder_buttons_read_set_or_change_and_forget_appears_once_recorded(
     qapp: object, tmp_path: Path
 ) -> None:
