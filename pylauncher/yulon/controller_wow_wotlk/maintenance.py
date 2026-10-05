@@ -174,7 +174,16 @@ _SCAN_OVERLAP = 512
 
 
 class MaintenanceError(RuntimeError):
-    """A backup or restore could not be completed, and nothing may be assumed about it."""
+    """A backup or restore could not be completed, and nothing may be assumed about it.
+
+    The message is a sentence for the player. What a program said -- `docker
+    exec`'s stderr, mysqldump's own error -- rides on `detail` instead, so the
+    screen can fold it under Details and the log can keep it (T194 R1).
+    """
+
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 # ------------------------------------------------------------------- seams
@@ -262,7 +271,9 @@ class DockerMysql:
             input_text="SHOW DATABASES;\n",
         )
         if proc.returncode != 0:
-            raise MaintenanceError(f"could not list the databases: {_stderr(proc)}")
+            raise MaintenanceError(
+                "Yu'lon could not list this server's databases.", detail=_stderr(proc)
+            )
         out = proc.stdout or b""
         return tuple(
             name
@@ -273,7 +284,9 @@ class DockerMysql:
     def dump_into(self, database: str, sink: IO[bytes]) -> None:
         proc = self._exec(self._dump_argv(database), stdout=sink)
         if proc.returncode != 0:
-            raise MaintenanceError(f"mysqldump of {database} failed: {_stderr(proc)}")
+            raise MaintenanceError(
+                f"The backup of {database} did not finish.", detail=_stderr(proc)
+            )
 
     def load_from(self, source: IO[bytes]) -> None:
         # No database in argv: a dump taken with `--databases` carries its own
@@ -283,7 +296,7 @@ class DockerMysql:
             [mysql_client(self.db_container, client=self.client), "-uroot"], stdin=source
         )
         if proc.returncode != 0:
-            raise MaintenanceError(f"restore failed: {_stderr(proc)}")
+            raise MaintenanceError("The database did not load the backup.", detail=_stderr(proc))
 
     def _dump_argv(self, database: str) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
@@ -535,7 +548,8 @@ def backup(
             finished = ", ".join(d.path.name for d in done) or "nothing"
             raise MaintenanceError(
                 f"{exc} — the backup is INCOMPLETE. Written and verified so far: {finished}. "
-                f"Not backed up: {', '.join(wanted[len(done) :])}."
+                f"Not backed up: {', '.join(wanted[len(done) :])}.",
+                detail=exc.detail,
             ) from exc
     report = BackupReport(
         directory=directory,
@@ -1084,10 +1098,13 @@ def restore(
         with plan.backup.open("rb") as source:
             mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
+        # A sentence of ours reads in place; a program's words go to `detail` (T194 R1).
+        said = f" {exc}" if isinstance(exc, MaintenanceError) else ""
         raise MaintenanceError(
-            f"the restore of {', '.join(plan.databases)} failed part-way: {exc}. Those databases "
+            f"the restore of {', '.join(plan.databases)} failed part-way.{said} Those databases "
             f"are now in an unknown state — {marker} records it, and the copy taken beforehand is "
-            f"{', '.join(str(p) for p in safety) or 'missing (none was taken)'}."
+            f"{', '.join(str(p) for p in safety) or 'missing (none was taken)'}.",
+            detail=exc.detail if isinstance(exc, MaintenanceError) else str(exc),
         ) from exc
     if unresolved is None:
         marker.unlink(missing_ok=True)

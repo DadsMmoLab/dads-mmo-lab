@@ -134,12 +134,14 @@ _COUNT_IN_CONF = "this family's random-bot count is in a conf file, not the over
 _WOTLK_DEFAULTS = "WotLK's Reset to default does not read its image: its defaults are not there"
 _COSMETIC = "cosmetic: a game without its own entry here gets the generic fallback"
 PARTY_REASON = (
-    "Building a bot party from the launcher works on the WotLK server only (owner decision, "
-    "2026-09-06). Its route is AzerothCore's Lua bridge and its bot module's own "
-    "addclass command, so this server would need a route of its own before there could be a "
-    "control here. One that sent those commands at it would be a button that cannot work."
+    "Building a bot party from the launcher works on the WotLK server only. It needs two "
+    "modules that only that server has, so this server has no party control here."
 )
 """The sentence the My Party group says on every game that has no route (T179 Task 5).
+
+The route is AzerothCore's Lua bridge and its bot module's own addclass command, and
+the WotLK-only scope is the owner's decision of 2026-09-06 (kept here, off the
+screen, since T194).
 
 The Bots tab draws exactly this (`controller_view._NO_MY_PARTY`), so the note and the
 UI cannot drift; `tests/test_centurion_view.py` asserts they are equal."""

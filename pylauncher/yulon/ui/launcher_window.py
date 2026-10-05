@@ -75,6 +75,7 @@ from yulon import (
     dashboard,
     dbreads,
     docker,
+    docker_advice,
     launcher_reads,
     play_client,
     ui_settings,
@@ -118,7 +119,6 @@ STOPPED_BANNER = "Play starts the server first (about 1 minute)"
 STARTING_BANNER = "The server is starting…"
 STOPPING_BANNER = "The server is stopping…"
 PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
-UNKNOWN_BANNER = "Yu'lon cannot ask Docker about this server right now"
 STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
 STOPPING_REASON = (
     "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
@@ -130,8 +130,8 @@ PARTIAL_REASON = (
     "The server is partly up: PLAY starts the rest, waits for the realm, then starts the game."
 )
 UNKNOWN_REASON = (
-    "Yu'lon can't ask Docker about this server right now, so it cannot tell whether the "
-    "server is up."
+    f"{docker_advice.UNKNOWN_TITLE}, so it cannot tell whether the server is up. The Server "
+    "tab says what to do."
 )
 """The line under PLAY for each realm badge word but REALM ONLINE (T188).
 
@@ -1262,7 +1262,8 @@ class LauncherWindow(QWidget):
         elif status == "partial":
             text = PARTIAL_BANNER
         elif status == "unknown":
-            text = UNKNOWN_BANNER
+            # T194 C7: the Server tab's Docker banner's own title.
+            text = docker_advice.UNKNOWN_TITLE
         elif status in ("starting", "importing", "working", "building", "restarting"):
             text = STARTING_BANNER
         else:

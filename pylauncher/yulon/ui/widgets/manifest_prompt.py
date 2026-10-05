@@ -166,7 +166,7 @@ class ManifestPromptDialog(QDialog):
             if removing
             else "its steps run again" if again else "it can be installed"
         )
-        self._notes: list[str] = [f"{manifest.name} ({manifest.id}) asks for this before {when}."]
+        self._notes: list[str] = [f"{manifest.name} asks for this before {when}."]
         # T104: what this install remembers, where the question still accepts it;
         # else the manifest's default. A saved answer the question now refuses (a
         # dropped `choice` option) is not shown, because OK would then be refused.
