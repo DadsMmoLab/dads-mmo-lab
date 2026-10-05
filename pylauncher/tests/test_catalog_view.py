@@ -815,6 +815,55 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back
 
 
+def test_an_install_stopped_in_its_ready_wait_says_press_install_again_in_the_popup(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T247 review: the server is up and loading, and no tab exists for it yet.
+
+    The popup says what the log says -- press Install again on the same folder
+    -- rather than the generic cancel copy, whose "Use existing..." advice is
+    not the way the log names. Driven through the real engine's ready wait.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from tests.support_native import Recorder
+    from tests.support_native import engine as wotlk_engine
+    from tests.support_stop import ready_wait_until_stop
+    from yulon.catalog import native
+
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append((a[1], a[2])))  # type: ignore[attr-defined]
+    reached = threading.Event()
+    held = ready_wait_until_stop(reached)
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda entry: wotlk_engine(Recorder(), wait_ready=held),
+        panel,
+        pick_dir=lambda *_: tmp_path / "server",
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: events.append((g, ok, m)))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    pump_until(reached.is_set, "the install reached its ready wait")
+    panel.stop()
+    wait_for_panel(panel)
+
+    assert panel.status_text() == "cancelled"
+    assert len(told) == 1, told
+    title, said = told[0]
+    assert title == INSTALL_STOPPED_TITLE, title
+    assert native.INSTALL_LEFT_LOADING in said, said
+    assert "Press Install again on the same folder" in said, said
+    assert "Use existing" not in said, said
+    assert native.INSTALL_LEFT_LOADING in panel.text(), "the log and the popup disagree"
+    assert events == [("wow-wotlk", False, said)], events
+
+
 class _StoppedThenKeptInstaller(_CancellableInstaller):
     """Stopped in the ready wait, then the world came up and stopped: the build is KEPT.
 

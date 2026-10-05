@@ -25,7 +25,7 @@ from typing import ClassVar
 
 from yulon import git
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -340,7 +340,7 @@ class AzerothCoreInstaller(StagedInstaller):
             # says "the install was stopped", and this is an update (cold review).
             self._check_run(run, "Applying the new build's database updates", None, "")
             if ctx.cancel is not None and ctx.cancel.is_set():
-                raise InstallerError(f"{press} was stopped. {CORE_UPDATES_NOTE}")
+                raise InstallStopped(f"{press} was stopped. {CORE_UPDATES_NOTE}")
             yield "The new build's database updates are in."
 
         return ServersDownWork(
