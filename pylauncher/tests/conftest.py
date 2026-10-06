@@ -1491,3 +1491,5 @@ def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
         raise ConsoleError(f"no console in the test suite ({command!r} was not typed)")
 
     monkeypatch.setattr(docker, "_console_send", unreachable)
+    # T496: the command channels the wiring registers for a stop are this test's alone.
+    monkeypatch.setattr(docker, "_save_channels", {})

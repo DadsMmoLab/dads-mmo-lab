@@ -53,6 +53,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- On Windows, Centurion and Tortoise's **Stop** asks for that save through the command channel and says when it could not.
 - **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
 - A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
