@@ -4525,6 +4525,40 @@ about ten minutes, and then not until the database comes up again."""
 _corrections_clock = time.monotonic
 """The clock the waits above are measured on; a test moves its own."""
 
+
+class _AskAgain:
+    """One reading's ask-again schedule (T381, T420): when it is next due, and how often it was asked.
+
+    The corrections check, the import probe and the adopt reading each keep one,
+    all on `CORRECTIONS_ASKED_AGAIN_AFTER` and `_corrections_clock`.
+    """
+
+    def __init__(self) -> None:
+        self.due: float | None = None
+        self.count = 0
+
+    def reset(self) -> None:
+        """The database went down or came back: nothing is owed, nothing was asked."""
+        self.due = None
+        self.count = 0
+
+    def after(self, unreadable: bool) -> bool:
+        """Arm the next wait for an unreadable answer. False once the waits are spent."""
+        if not unreadable:
+            return True
+        if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
+            return False
+        self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
+        return True
+
+    def is_due(self) -> bool:
+        """True once, when the wait is over; the ask it permits is counted."""
+        if self.due is None or _corrections_clock() < self.due:
+            return False
+        self.due = None
+        self.count += 1
+        return True
+
 REPAIR_DATABASE_LABEL = "Repair the database…"
 RESTORE_BACKUP_LABEL = "Restore a backup…"
 REPAIR_DATABASE_CONFIRM = (
@@ -7212,8 +7246,10 @@ class ControllerView(QWidget):
         self._corrections: native.CorrectionCheck | None = None
         # T381: an `unreadable` reading is asked again while the database stays
         # up -- when (on `_corrections_clock`), and how many times it has been.
-        self._corrections_again_at: float | None = None
-        self._corrections_asked_again = 0
+        # T420: the import probe and the adopt reading get the same schedule.
+        self._ask_again_corrections = _AskAgain()
+        self._ask_again_import = _AskAgain()
+        self._ask_again_adopt = _AskAgain()
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
@@ -8746,14 +8782,13 @@ class ControllerView(QWidget):
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
             self._forget_the_corrections_reading()
-            self._corrections_again_at = None
+            self._reset_ask_again()
             return
         if self._import_asked:
-            self._ask_about_the_corrections_again()
+            self._ask_about_the_unanswered_again()
             return
         self._import_asked = True
-        self._corrections_again_at = None
-        self._corrections_asked_again = 0
+        self._reset_ask_again()
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
@@ -8777,25 +8812,46 @@ class ControllerView(QWidget):
                 self._corrections_check_failed,
             )
 
-    def _ask_about_the_corrections_again(self) -> None:
-        """T381: put the corrections question again once its wait is over, the database still up.
+    def _reset_ask_again(self) -> None:
+        for schedule in (
+            self._ask_again_corrections,
+            self._ask_again_import,
+            self._ask_again_adopt,
+        ):
+            schedule.reset()
 
-        Only after a reading nobody could answer (`_corrections_checked()` sets
+    def _ask_about_the_unanswered_again(self) -> None:
+        """T381, T420: put a question again once its wait is over, the database still up.
+
+        Only after a reading nobody could answer (each `..._ready` method sets
         the wait), and never more than `CORRECTIONS_ASKED_AGAIN_AFTER` allows.
         """
-        due = self._corrections_again_at
+        if self._ask_again_import.is_due():
+            self._run(
+                self.services.controller.import_state,
+                self._import_state_ready,
+                self._import_failed,
+            )
+        adopt = self.services.adopt
+        if adopt is not None and self._ask_again_adopt.is_due():
+            self._run(adopt.state, self._adopt_state_ready, self._adopt_state_failed)
         route = self.services.corrections
-        if due is None or route is None or _corrections_clock() < due:
+        if route is not None and self._ask_again_corrections.is_due():
+            self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+
+    def _arm_ask_again(self, schedule: _AskAgain, unreadable: bool, what: str) -> None:
+        """An `unreadable` reading, taken while the database is up, gets a later ask."""
+        if not unreadable or not self._import_asked:
             return
-        self._corrections_again_at = None
-        self._corrections_asked_again += 1
-        self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+        if not schedule.after(True):
+            logger.info(f"{self.entry.id}: the {what} question is not asked again")
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
         if not isinstance(result, docker.ImportState):
             return
         self._import_state = result
+        self._arm_ask_again(self._ask_again_import, result.state == "unreadable", "import")
         self._show_repair()
 
     @Slot(object)
@@ -8803,6 +8859,7 @@ class ControllerView(QWidget):
         if not isinstance(result, docker.ImportState):
             return
         self._adopt_state = result
+        self._arm_ask_again(self._ask_again_adopt, result.state == "unreadable", "adopt")
         self._set_adopt_button()
 
     @Slot(object)
@@ -17014,19 +17071,10 @@ class ControllerView(QWidget):
         self._refresh_corrections_banner()
 
     def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
-        """T381: an `unreadable` reading, taken while the database is up, gets a later ask.
-
-        Asked on the poll once `CORRECTIONS_ASKED_AGAIN_AFTER`'s next wait is over
-        (`_ask_about_the_corrections_again()`), never once they are spent. Any
-        other answer is final until the database goes down and comes back.
-        """
-        asked = self._corrections_asked_again
-        if result.state != "unreadable" or not self._import_asked:
-            return
-        if asked >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
-            logger.info(f"{self.entry.id}: the corrections question is not asked again")
-            return
-        self._corrections_again_at = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[asked]
+        """T381: an `unreadable` corrections reading is asked again (`_arm_ask_again`)."""
+        self._arm_ask_again(
+            self._ask_again_corrections, result.state == "unreadable", "corrections"
+        )
 
     @Slot(object)
     def _corrections_check_failed(self, exc: object) -> None:
