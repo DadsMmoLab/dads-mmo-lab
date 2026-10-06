@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- Installing a module that asks a question about your characters starts a stopped database to check the answer.
+- Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
 - On Windows, **Stop** also ends the helper programs a build started on your PC.
 - The worldserver log saved when you stop a server has passwords masked, as the support file does.
