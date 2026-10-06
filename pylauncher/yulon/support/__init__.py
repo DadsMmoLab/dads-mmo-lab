@@ -2,5 +2,6 @@
 
 One rule governs the whole package: nothing read here leaves the machine
 unredacted. Log files on disk stay raw -- they are our evidence -- except
-`logsnap` snapshots (masked when written, T352); every viewer and every zip passes through `redact.Redactor` on the way out.
+`logsnap` snapshots (masked when written, T352);
+every viewer and every zip passes through `redact.Redactor` on the way out.
 """
