@@ -893,6 +893,90 @@ def test_evidence_for_another_client_forces_a_full_re_extract(tmp_path: Path) ->
     assert [record.name for record in fresh.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
 
 
+def test_a_tortoise_record_from_before_its_required_file_still_skips_and_a_changed_dbc_does_not(
+    tmp_path: Path,
+) -> None:
+    """T521 gave Tortoise `Data/dbc.MPQ`; its records from before hold no facts about that file.
+
+    The shipped plan and rule, through `run_plan()`. A `data/` extracted when the rule named no
+    file is still this client's and skips every tool; one recorded with the file's facts, whose
+    `dbc.MPQ` has since changed, is another client and extracts again.
+    """
+    native = load_catalog().get("wow-tortoise").install.native
+    assert native is not None and native.cmangos is not None
+    plan = native.cmangos.extract
+    required = native.cmangos.client.required_file
+    assert required == "Data/dbc.MPQ"
+    writes = {tool.argv[0]: dict(tool.produces) for tool in plan.tools}
+    every = [Path(tool.argv[0]).name for tool in plan.tools]
+    folder = tmp_path / "TurtleWoW"
+    (folder / "Data").mkdir(parents=True)
+    (folder / "Data" / "dbc.MPQ").write_bytes(b"MPQ" * 100)
+    data = tmp_path / "server" / "data"
+
+    def press(required_file: str | None, runner: Runner) -> list[str]:
+        return list(
+            extract.run_plan(
+                plan,
+                image_ref="yulon.local/wow-tortoise-server:1",
+                client_dir=folder,
+                data_dir=data,
+                run_container=runner,
+                user_args=("--user", "1000:1000"),
+                sink=lambda _line: None,
+                cancel=None,
+                required_file=required_file,
+                client_build=7272,
+                selinux_enforcing=lambda: None,
+            )
+        )
+
+    before = Runner(writes)
+    press(None, before)  # the rule as it was: no required file
+    old = extract.read_evidence(data)
+    assert old is not None and old.client_facts_complete
+    assert (old.required_file_size, old.required_file_mtime) == (None, None)
+    assert before.names() == every
+
+    after = Runner(writes)
+    said = press(required, after)
+
+    assert after.specs == [], "an unchanged client was extracted again"
+    assert sum("already extracted" in line for line in said) == len(plan.tools)
+    assert not any("another client" in line for line in said), said
+
+    shutil.rmtree(data)
+    press(required, Runner(writes))
+    recorded = extract.read_evidence(data)
+    assert recorded is not None and recorded.required_file_size == 300
+    (folder / "Data" / "dbc.MPQ").write_bytes(b"MPQ" * 200)  # repaired, or another client's
+
+    changed = Runner(writes)
+    said = press(required, changed)
+
+    assert any("another client" in line for line in said), said
+    assert changed.names() == every
+
+
+def test_only_a_complete_record_with_no_required_file_facts_matches_one_that_has_them(
+    tmp_path: Path,
+) -> None:
+    """The allowance is one shape wide: absent facts from a run that measured all it was asked.
+
+    Absent because a `stat()` failed (`client_facts_complete` False) is not that shape; nor is
+    the reverse direction, a record with facts against a run that names no file.
+    """
+    folder, _data = satisfied_data(tmp_path)
+    measured = extract.expected_evidence(PLAN, folder, REQUIRED)
+    bare = extract.expected_evidence(PLAN, folder, None)
+    unknown = extract.expected_evidence(PLAN, folder, "Data/expansion.MPQ/inner")
+    assert bare.client_facts_complete and not unknown.client_facts_complete
+
+    assert extract.same_stage(bare, measured) is True
+    assert extract.same_stage(unknown, measured) is False
+    assert extract.same_stage(measured, bare) is False
+
+
 def test_an_edited_plan_forces_a_full_re_extract_too(tmp_path: Path) -> None:
     """The plan hash is one of the four stage facts, and the whole point of hashing it."""
     run(PLAN, Runner(FULL), tmp_path)

@@ -142,9 +142,6 @@ def expected_evidence(
     is the one that was extracted from; a client that was patched or swapped
     changes both. `None` when the spec names no required file (Tortoise's did
     not until T521), in which case the client path is the only identity there is.
-    A Tortoise `data/` extracted before T521 recorded `None` here, so the next
-    run of this stage over it (Install pressed again on that folder) extracts
-    once more; Rebuild, Update and Repair never run this stage.
 
     Two filesystem calls happen here and either can fail. Neither is allowed to
     escape as a raw `OSError` out of a stage that is otherwise all `yield`ed
@@ -289,12 +286,44 @@ def same_stage(evidence: Evidence, expected: Evidence) -> bool:
     catch — the veto has to be there anyway, because `run_mmaps` compares an
     evidence with ITSELF, where every field agrees by construction. One rule,
     one place.
+
+    The required file's two facts have one allowance, `_same_required_file()`'s:
+    a record written when the game named no required file still matches once
+    it names one.
     """
     return (
         evidence.plan_hash == expected.plan_hash
         and evidence.client_path == expected.client_path
-        and evidence.required_file_size == expected.required_file_size
-        and evidence.required_file_mtime == expected.required_file_mtime
+        and _same_required_file(evidence, expected)
+    )
+
+
+def _same_required_file(evidence: Evidence, expected: Evidence) -> bool:
+    """The recorded required file's size and mtime against this run's, with one allowance.
+
+    A record holding NO required-file facts, made by a run that obtained every
+    fact it was asked for (`client_facts_complete`), was written when the game
+    named no required file: the client path was then its whole identity, and it
+    still is for that record. Tortoise named none until T521 gave it
+    `Data/dbc.MPQ`; without this, every Tortoise `data/` extracted before that
+    would be extracted again -- hours, with pathfinding -- the next time Install
+    was pressed on its folder, for a client nobody changed.
+
+    Only that shape. A record that HAS the facts and differs is another client
+    (a repaired or swapped archive) and extracts again. A record whose facts are
+    absent because a `stat()` failed carries `client_facts_complete` False and
+    does not match here, so `run_plan()` replaces it rather than appending new
+    tool records to a claim that can never license a skip.
+    """
+    if (evidence.required_file_size, evidence.required_file_mtime) == (
+        expected.required_file_size,
+        expected.required_file_mtime,
+    ):
+        return True
+    return (
+        evidence.client_facts_complete
+        and evidence.required_file_size is None
+        and evidence.required_file_mtime is None
     )
 
 
