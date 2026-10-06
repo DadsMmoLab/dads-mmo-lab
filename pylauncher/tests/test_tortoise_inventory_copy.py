@@ -748,7 +748,7 @@ def test_a_healthy_world_still_loading_is_waited_for_then_stopped_cleanly(
     )
     options = folder(tmp_path)
     said = list(engine.apply_corrections(engine.correction_check(options), options))
-    assert fake.events == ["look 1", "look 2", "stop"], fake.events  # type: ignore[attr-defined]
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"], fake.events  # type: ignore[attr-defined]
     assert docker.WORLD_STILL_LOADING in said and docker.WORLD_FINISHED_LOADING in said, said
     assert native.CORRECTIONS_WAIT_HINT in said
     assert "character_inventory_copy" in db.tables("tw_char")
@@ -764,7 +764,7 @@ def test_a_crash_looping_world_is_stopped_without_waiting(
     fake, db, engine = _through_docker(monkeypatch, tmp_path, [("restarting", "", None)])
     options = folder(tmp_path)
     said = list(engine.apply_corrections(engine.correction_check(options), options))
-    assert fake.events == ["look 1", "stop"], fake.events  # type: ignore[attr-defined]
+    assert fake.events == ["look 1", "look 2", "stop"], fake.events  # type: ignore[attr-defined]
     assert docker.WORLD_STILL_LOADING not in said
     assert "character_inventory_copy" in db.tables("tw_char")
 
@@ -870,7 +870,7 @@ def test_a_crash_loop_caught_mid_start_is_stopped_at_its_first_restart(
     )
     options = folder(tmp_path)
     said = list(engine.apply_corrections(engine.correction_check(options), options))
-    assert fake.events == ["look 1", "look 2", "stop"], fake.events  # type: ignore[attr-defined]
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"], fake.events  # type: ignore[attr-defined]
     assert docker.WORLD_RESTARTED_STOPPING in said
     assert "character_inventory_copy" in db.tables("tw_char")
 
@@ -901,7 +901,7 @@ def test_the_other_stops_still_wait_on_a_restarted_world(
     )
     monkeypatch.setattr(runner, "run", fake)
     docker.stop_containers([WORLD], known=(TORTOISE.container_spec(),))
-    assert fake.events == ["look 1", "look 2", "look 3", "stop"], fake.events
+    assert fake.events == ["look 1", "look 2", "look 3", "look 4", "stop"], fake.events
 
 
 def test_a_column_check_is_refused_where_nothing_would_ask_it() -> None:

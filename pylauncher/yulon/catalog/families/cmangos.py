@@ -1609,7 +1609,7 @@ class CmangosInstaller(StagedInstaller):
 
         try:
             yield from _speaking(stop_it, control.abandon)
-        except docker.StopAbandoned as exc:
+        except (docker.StopAbandoned, docker.SaveAbandoned) as exc:
             raise InstallStopped(
                 f"This was stopped while {self.entry.name}'s world server was being stopped, so "
                 "nothing was imported. Press Install again to go on."

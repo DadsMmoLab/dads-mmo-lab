@@ -1383,6 +1383,45 @@ def test_a_rebuild_cancelled_while_the_world_loads_replaces_nothing_and_puts_the
     assert "Nothing was touched" not in said and "was removed" in said, said
 
 
+def test_a_rebuild_cancelled_while_the_world_saves_first_says_saving_not_loading(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """T410/T411: the give-up of the save a world is asked for BEFORE its signal is a
+    `StopAbandoned` (nothing sent, nothing touched), said as the save it was, not as a load."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+
+    def give_up(control: docker.StopControl | None) -> None:
+        raise docker.SaveFirstAbandoned("given up while it saved")
+
+    rec.on_recreate = give_up
+    with pytest.raises(InstallerError) as raised:
+        list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "recreate" not in rec.calls, rec.calls
+    said = str(raised.value)
+    assert "saving its characters" in said and "still loading" not in said, said
+    assert "no container was replaced" in said, said
+
+
+def test_a_rebuild_stopped_while_the_signalled_world_saves_says_so(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """T384: after the signal a give-up is `SaveAbandoned`; it is the job's Stop, not "could not
+    be replaced" (cold review)."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+
+    def give_up(control: docker.StopControl | None) -> None:
+        raise docker.SaveAbandoned(docker.WORLD_SAVE_ABANDONED)
+
+    rec.on_recreate = give_up
+    with pytest.raises(InstallerError) as raised:
+        list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "saving its characters on the way down" in said, said
+    assert "could not be replaced" not in said, said
+
+
 def test_a_restart_during_the_replaces_wait_is_waited_for_and_heard(
     cmangos_gate: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

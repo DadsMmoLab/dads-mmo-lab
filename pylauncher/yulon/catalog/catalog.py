@@ -30,7 +30,7 @@ from pydantic import (
 )
 
 from yulon import server_build_presses
-from yulon.docker import ContainerSpec
+from yulon.docker import ContainerSpec, SaveFirst
 from yulon.manifest import Db, Source
 from yulon.platform import PlatformId
 
@@ -1393,6 +1393,55 @@ class TrinityCoreData(_Strict):
         return value
 
 
+class SaveBeforeStop(_Strict):
+    """How a world whose own close loses saves is asked to save everyone first (T410, T411).
+
+    Typed at the world's console, before the stop signal, by
+    `docker.save_then_stop_the_world()`. A fact about the server binary, like
+    `stop_waits_for_world_load`, so it is data. Read at the pins on 2026-10-06:
+    TrinityCore112 (Centurion) deletes every statement still queued when it closes
+    its character database (`~DatabaseWorker` -> `_queue->Cancel()`), so the logout
+    saves its shutdown queues are lost on a clean exit; Tortoise stops its character
+    database before it logs the headless sessions out, so a bot a player owns loses
+    its last save. Both answer `saveall` (`ObjectAccessor::SaveAllPlayers()`, every
+    player in the world, bots included). AzerothCore and CMaNGOS save everyone on
+    the signal and drain the queue, so their entries leave this out.
+    """
+
+    command: str = Field(
+        min_length=1,
+        pattern=r"^[^\r\n]+$",
+        description="The console line that saves every player in the world: `saveall`.",
+    )
+    queue_command: str = Field(
+        default="",
+        pattern=r"^[^\r\n]*$",
+        description=(
+            "A console line whose answer holds the character save queue's length, for a core "
+            "that drops what is still queued when it closes: the stop waits for the queue to be "
+            "back at its level from before the save. TrinityCore's `server debug` prints "
+            "`CharacterDatabase queue size: N` (`cs_server.cpp:256`). Empty: no wait."
+        ),
+    )
+    queue_pattern: str = Field(
+        default="",
+        description="A regular expression with ONE group, the length, found in that answer.",
+    )
+
+    @model_validator(mode="after")
+    def _a_queue_command_comes_with_a_pattern_of_one_group(self) -> SaveBeforeStop:
+        if bool(self.queue_command) != bool(self.queue_pattern):
+            raise ValueError("queue_command and queue_pattern are given together or not at all")
+        if self.queue_pattern:
+            try:
+                groups = re.compile(self.queue_pattern).groups
+            except re.error as exc:
+                raise ValueError(f"queue_pattern is not a regular expression: {exc}") from exc
+            if groups != 1:
+                raise ValueError("queue_pattern needs exactly one group: the queue's length")
+        return self
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -1482,6 +1531,13 @@ class NativeInstall(_Strict):
             "280.5 s later, exit 137, while a loaded one stopped in 22.2 s, exit 0. "
             "AzerothCore's worldserver installs its SIGINT/SIGTERM `signal_set` before it "
             "loads, so WotLK leaves this false."
+        ),
+    )
+    save_before_stop: SaveBeforeStop | None = Field(
+        default=None,
+        description=(
+            "How this world is asked to save everyone before it is signalled, when its own "
+            "close loses saves (T410, T411; `SaveBeforeStop`). None: the signal saves everyone."
         ),
     )
     azerothcore: AzerothCoreData | None = Field(
@@ -2922,6 +2978,22 @@ class CatalogEntry(_Strict):
             stop_waits_for_load=(
                 self.install.native is not None and self.install.native.stop_waits_for_world_load
             ),
+            save_first=self._save_first(),
+        )
+
+    def _save_first(self) -> SaveFirst | None:
+        """The entry's `save_before_stop` with its console's prompt, for the stop (T410, T411)."""
+        native = self.install.native
+        if native is None or native.save_before_stop is None:
+            return None
+        save = native.save_before_stop
+        console = self.console
+        return SaveFirst(
+            command=save.command,
+            queue_command=save.queue_command,
+            queue_pattern=save.queue_pattern,
+            prompt=console.prompt,
+            prompt_precedes_answer=console.prompt_precedes_answer,
         )
 
 
