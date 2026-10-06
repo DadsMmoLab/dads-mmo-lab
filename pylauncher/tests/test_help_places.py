@@ -23,11 +23,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollAre
 from tests.conftest import process_events
 from tests.support_player_text import command_faults, text_faults
 from tests.test_controller_view import ps  # noqa: F401 - the fixture, fakes `docker ps`
-from yulon.catalog.catalog import (
-    HELP_URL_PENDING,
-    HelpPlace,
-    load_catalog,
-)
+from yulon.catalog.catalog import HelpPlace, load_catalog
 from yulon.ui import help_places
 from yulon.ui.help_places import HelpPlacesBox
 from yulon.ui.message_box import QUESTION_SCROLL
@@ -35,13 +31,19 @@ from yulon.ui.message_box import QUESTION_SCROLL
 CATALOG = load_catalog()
 
 YULON_ISSUES = "https://github.com/DadsMmoLab/dads-mmo-lab/issues"
+SNAPJAW_DISCORD = "https://discord.gg/FQ2WfYD4Tz"
+TORTOISEBOTS_THREAD = "https://discord.com/channels/1496531781149528287/1542647578548772954"
+"""The TortoiseBots thread inside the Snapjaw Discord: it opens only for someone who has
+joined the server, which is what its line tells the player (owner, 2026-10-06)."""
+CENTURION_DISCORD = "https://discord.gg/YberzPtxwb"
 CMANGOS_ISSUES = "https://github.com/cmangos/issues/issues"
 """cMaNGOS takes every bug, server and playerbots, here: mangos-tbc, mangos-classic and
 playerbots have their own issue pages switched off (gh api, 2026-10-06)."""
 
 EXPECTED: dict[str, list[tuple[str, str]]] = {
     "wow-tortoise": [
-        ("Snapjaw Discord", HELP_URL_PENDING),
+        ("Snapjaw Discord", SNAPJAW_DISCORD),
+        ("TortoiseBots thread (Snapjaw Discord)", TORTOISEBOTS_THREAD),
         ("tortoise-wow (Penqle)", "https://github.com/tortoise-wow/tortoise-wow/issues"),
         ("Sagiroth/TortoiseBots", "https://github.com/Sagiroth/TortoiseBots/issues"),
         ("Yu'lon", YULON_ISSUES),
@@ -62,8 +64,13 @@ EXPECTED: dict[str, list[tuple[str, str]]] = {
         ("Yu'lon", YULON_ISSUES),
     ],
     "wow-centurion": [
-        # Issues are switched off on this repo (gh api, 2026-10-06): its page instead.
-        ("TrinityCore112 (Centurion)", "https://github.com/thomasjteachey/TrinityCore112"),
+        ("Centurion Discord", CENTURION_DISCORD),
+        # Issues are switched off on this repo (gh api, 2026-10-06): the CENTURION
+        # branch page instead, the owner's link.
+        (
+            "TrinityCore112 (Centurion)",
+            "https://github.com/thomasjteachey/TrinityCore112/tree/CENTURION",
+        ),
         ("Yu'lon", YULON_ISSUES),
     ],
 }
@@ -101,20 +108,15 @@ def test_every_purpose_line_is_a_plain_sentence_for_a_player() -> None:
     assert faults == []
 
 
-def test_PLACEHOLDER_snapjaw_discord_url_must_be_filled_in_before_merge() -> None:
-    """RED ON PURPOSE until the lead puts the real Snapjaw Discord invite in catalog.json.
+def test_the_thread_line_says_to_join_the_discord_first() -> None:
+    thread = CATALOG.get("wow-tortoise").help_places[1]
+    assert thread.url == TORTOISEBOTS_THREAD
+    assert "join the Snapjaw Discord first" in thread.purpose
 
-    The owner asked for it and its address was not known when T520 was built;
-    the catalog carries `SNAPJAW_DISCORD_URL_PENDING` so the rest could be
-    built, and this test keeps it from being merged that way.
-    """
-    pending = [
-        (entry.id, place.label)
-        for entry in CATALOG.games
-        for place in entry.help_places
-        if place.url == HELP_URL_PENDING
-    ]
-    assert pending == [], f"fill in the real address in catalog.json: {pending}"
+
+@pytest.mark.parametrize("url", [SNAPJAW_DISCORD, TORTOISEBOTS_THREAD, CENTURION_DISCORD])
+def test_the_discord_addresses_pass_the_https_check(url: str) -> None:
+    assert HelpPlace(label="A place", url=url, purpose="Questions.").url == url
 
 
 @pytest.mark.parametrize(
@@ -125,10 +127,11 @@ def test_PLACEHOLDER_snapjaw_discord_url_must_be_filled_in_before_merge() -> Non
         "github.com/x/y",
         "javascript:alert(1)",
         "",
-        "SNAPJAW_DISCORD_URL_PENDINGX",
+        "http://discord.gg/FQ2WfYD4Tz",
+        "discord.gg/FQ2WfYD4Tz",
     ],
 )
-def test_a_place_url_must_be_https_or_the_one_placeholder(url: str) -> None:
+def test_a_place_url_must_be_https(url: str) -> None:
     with pytest.raises(ValidationError):
         HelpPlace(label="A place", url=url, purpose="Bugs.")
 
@@ -141,16 +144,10 @@ def test_a_place_needs_its_label_and_its_line(field: str) -> None:
         HelpPlace(**data)
 
 
-def test_the_placeholder_loads_but_is_not_a_known_address() -> None:
-    assert not HelpPlace(label="A", url=HELP_URL_PENDING, purpose="B.").url_known
-    assert HelpPlace(label="A", url="https://example.org", purpose="B.").url_known
-
-
 # -- the dialog ----------------------------------------------------------------
 
 PLACES = (
     HelpPlace(label="First", url="https://example.org/one", purpose="The first place."),
-    HelpPlace(label="Pending", url=HELP_URL_PENDING, purpose="Not known yet."),
     HelpPlace(label="Second", url="https://example.org/two", purpose="The second place."),
 )
 
@@ -178,7 +175,7 @@ def _box(qapp: object, places: tuple[HelpPlace, ...] = PLACES) -> HelpPlacesBox:
     return box
 
 
-def test_the_box_lists_a_link_per_known_place_in_order_with_its_line(qapp: object) -> None:
+def test_the_box_lists_a_link_per_place_in_order_with_its_line(qapp: object) -> None:
     box = _box(qapp)
     assert [b.text() for b in box.link_buttons] == ["First", "Second"]
     assert box.purpose_texts() == ["The first place.", "The second place."]
@@ -245,7 +242,7 @@ def test_close_is_the_one_standard_button_and_escape_closes(qapp: object) -> Non
 def test_the_box_fits_the_screen_with_every_link_inside_it(qapp: object) -> None:
     tortoise = CATALOG.get("wow-tortoise").help_places
     box = _box(qapp, tortoise)
-    assert [b.text() for b in box.link_buttons] == [p.label for p in tortoise if p.url_known]
+    assert [b.text() for b in box.link_buttons] == [p.label for p in tortoise]
     room = box.screen().availableGeometry()
     frame = box.frameGeometry()
     assert room.contains(frame), (room, frame)

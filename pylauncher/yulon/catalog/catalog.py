@@ -2137,13 +2137,6 @@ def _inside(value: str, field: str, *, names_a_file: bool) -> str:
     return value
 
 
-HELP_URL_PENDING = "SNAPJAW_DISCORD_URL_PENDING"
-"""The one stand-in a help place's URL may hold: an address the owner wants listed and
-nobody has yet. It loads, the dialog leaves its place out, and
-`tests/test_help_places.py::test_PLACEHOLDER_snapjaw_discord_url_must_be_filled_in_before_merge`
-is red while any game still carries it (T520)."""
-
-
 class HelpPlace(_Strict):
     """One place a player can take a problem with this server, and what it looks after (T520).
 
@@ -2159,13 +2152,8 @@ class HelpPlace(_Strict):
 
     @field_validator("url")
     @classmethod
-    def _url_is_https_or_the_placeholder(cls, value: str) -> str:
-        return value if value == HELP_URL_PENDING else _https_url(value, "help place url")
-
-    @property
-    def url_known(self) -> bool:
-        """False while the URL is still `HELP_URL_PENDING`."""
-        return self.url != HELP_URL_PENDING
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "help place url")
 
 
 class PackSource(_Strict):

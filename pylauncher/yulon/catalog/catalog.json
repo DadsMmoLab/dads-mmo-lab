@@ -1442,8 +1442,13 @@
       "help_places": [
         {
           "label": "Snapjaw Discord",
-          "url": "SNAPJAW_DISCORD_URL_PENDING",
-          "purpose": "Questions about the Tortoise server and its bots."
+          "url": "https://discord.gg/FQ2WfYD4Tz",
+          "purpose": "Questions about the Tortoise server."
+        },
+        {
+          "label": "TortoiseBots thread (Snapjaw Discord)",
+          "url": "https://discord.com/channels/1496531781149528287/1542647578548772954",
+          "purpose": "Questions about the Tortoise bots (join the Snapjaw Discord first)."
         },
         {
           "label": "tortoise-wow (Penqle)",
@@ -2330,9 +2335,14 @@
       "has_manifests": false,
       "help_places": [
         {
+          "label": "Centurion Discord",
+          "url": "https://discord.gg/YberzPtxwb",
+          "purpose": "Questions about the Centurion server and its bots."
+        },
+        {
           "label": "TrinityCore112 (Centurion)",
-          "url": "https://github.com/thomasjteachey/TrinityCore112",
-          "purpose": "Bugs in the Centurion server."
+          "url": "https://github.com/thomasjteachey/TrinityCore112/tree/CENTURION",
+          "purpose": "The Centurion server's source code; it has no issue page, so take bugs to the Centurion Discord."
         },
         {
           "label": "Yu'lon",

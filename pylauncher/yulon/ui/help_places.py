@@ -52,9 +52,7 @@ class HelpPlacesBox(FittedMessageBox):
         super().__init__(
             QMessageBox.Icon.Information, HELP_TITLE, "", QMessageBox.StandardButton.Close, parent
         )
-        # A place whose address is not known yet is left out rather than drawn
-        # as a press that opens nothing (`HELP_URL_PENDING`).
-        self._places = tuple(place for place in places if place.url_known)
+        self._places = tuple(places)
         self._links: list[QPushButton] = []
         self._purposes: list[QLabel] = []
         self.setDefaultButton(QMessageBox.StandardButton.Close)
