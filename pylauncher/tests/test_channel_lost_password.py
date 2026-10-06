@@ -732,13 +732,12 @@ def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(
     assert box.view.enable_channel_button.isHidden()
 
 
-def test_an_override_that_reads_differently_is_not_called_off(box: _Box) -> None:
-    """A file from an older render is not 'off': Enable is refused on a running world."""
+def _real_override(box: _Box) -> tuple[object, str]:
+    """The channel-on override this install would write, and the setup that reads it."""
+    from yulon.catalog import bot_count
+
     setup = box.view.services.channel_setup
     assert setup is not None
-    (setup.server_dir / composegen.OVERRIDE_FILE).write_text(
-        "# some older text\n", encoding="utf-8"
-    )
     operations = box.entry.operations
     assert operations is not None
     if operations.enable_conf is not None:
@@ -748,4 +747,85 @@ def test_an_override_that_reads_differently_is_not_called_off(box: _Box) -> None
             "".join(f"{k} = {v}\n" for k, v in operations.enable_conf.keys.items()),
             encoding="utf-8",
         )
-    assert setup.is_enabled() is None
+    env = bot_count.world_env(
+        box.entry, setup.server_dir, channel_setup._world_env(box.entry, operations.enable_env)
+    )
+    text = composegen.render(
+        box.entry,
+        setup.server_dir,
+        templates_root=setup.templates_root,
+        world_env=env,
+        db_password=setup._password(),
+        bind_label="",
+    ).override
+    return setup, text
+
+
+def _write(setup: object, text: str) -> None:
+    (setup.server_dir / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8")  # type: ignore[attr-defined]
+
+
+def test_a_real_override_without_the_channel_lines_reads_off(box: _Box) -> None:
+    """The live case: an override is there (every install has one) and the channel is off in it."""
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if not operations.enable_env:
+        pytest.skip("this tree's channel is in its conf, not the override")
+    _write(setup, on)
+    assert setup.is_enabled() is True  # type: ignore[attr-defined]
+    off = "".join(
+        line
+        for line in on.splitlines(keepends=True)
+        if not any(key in line for key in operations.enable_env)
+    )
+    assert off != on
+    _write(setup, off)
+    assert setup.is_enabled() is False  # type: ignore[attr-defined]
+
+
+def test_an_override_with_some_but_not_all_channel_lines_is_not_called_off(box: _Box) -> None:
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if len(operations.enable_env) < 2:
+        pytest.skip("needs two channel lines to be mixed")
+    lines = on.splitlines(keepends=True)
+    first = next(i for i, ln in enumerate(lines) if any(k in ln for k in operations.enable_env))
+    del lines[first]
+    _write(setup, "".join(lines))
+    assert setup.is_enabled() is None  # type: ignore[attr-defined]
+
+
+def test_an_override_with_other_edits_but_the_channel_lines_reads_on(box: _Box) -> None:
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if not operations.enable_env:
+        pytest.skip("this tree's channel is in its conf, not the override")
+    _write(setup, on + "# edited by hand\n")
+    assert setup.is_enabled() is True  # type: ignore[attr-defined]
+
+
+def test_an_override_of_a_conf_tree_that_reads_differently_is_unknown(box: _Box) -> None:
+    setup, _on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_env:
+        pytest.skip("this tree's channel is in its override")
+    _write(setup, "# some older text\n")
+    assert setup.is_enabled() is None  # type: ignore[attr-defined]
+
+
+def test_a_start_finds_a_waiting_row_whose_account_was_deleted(box: _Box) -> None:
+    """The world is up and silent (channel off): only the database can say the row is gone."""
+    box.view._settle_the_channel()
+    box.wire.loading = True
+    box.view.repair_channel_button.click()
+    assert "waiting to be proved" in _line(box)
+    _drop_the_account(box)
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)

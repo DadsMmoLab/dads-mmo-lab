@@ -1541,6 +1541,12 @@ class InstallChannel:
         # because `ensure()` is the latch and returns it untouched. A third one
         # was written, and a mutation that deleted it changed no observable
         # behaviour -- which is the definition of a guard that guards nothing.
+        state = self._state
+        if isinstance(state, Pending) and self._account_is_gone(state.account):
+            # T423: a Start asks a waiting row whether its account is still in
+            # the database, as a Refresh does, before it asks the world.
+            self._state = gone(state.account)
+            return self._state
         if isinstance(self._state, Verified):
             return self.check()
         return self.prove()
@@ -1672,10 +1678,26 @@ class InstallChannel:
             return None
         if now in texts:
             return True
-        # No override at all is plainly off. One that is there and reads
-        # differently may be an older render of the same channel (a template
-        # updated since), which is not for this read to call off.
-        return False if not now else None
+        if not now:
+            return False
+        if not operations.enable_env:
+            return None
+        # The override differs from the channel-on render, which every install
+        # that is not freshly pressed does (its other settings, its label). So
+        # the channel's own lines are what is compared: each line the channel-on
+        # render has for one of its env keys, found or not in the file.
+        mine = {line.strip() for line in now.splitlines()}
+        lines = [
+            line.strip()
+            for line in texts[0].splitlines()
+            if any(key in line for key in operations.enable_env)
+        ]
+        if not lines:
+            return None
+        present = [line in mine for line in lines]
+        if all(present):
+            return True
+        return False if not any(present) else None
 
     def enable(self, *, world_running: bool) -> Enabled:
         """Write the channel on. Refuses while the world is running."""
