@@ -31,6 +31,7 @@ from tests.conftest import (
     three_way_only,
     wait_for_panel,
 )
+from tests.support_case import needs_case_sensitive_disk
 from yulon import apply as apply_module
 from yulon import (
     bot_population,
@@ -68,7 +69,7 @@ from yulon.apply import (
     DockerSql,
     required_prompts,
 )
-from yulon.catalog import composegen, native, upstream
+from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
@@ -9809,6 +9810,22 @@ def test_the_client_folder_row_reads_its_three_sentences(qapp: object, tmp_path:
     # instead of the "no Interface/" one.
 
 
+@needs_case_sensitive_disk
+def test_a_lowercase_interface_folder_is_the_clients_interface_folder(
+    qapp: object, tmp_path: Path
+) -> None:
+    """m910q live check of T261: `interface/` read as "no Interface/ folder yet", and
+    Tortoise's addons were refused a client that had one."""
+    real = tmp_path / "real-client"
+    (real / "interface" / "addons").mkdir(parents=True)
+
+    view, _ = _client_dir_view(WOTLK, tmp_path / "real", client_dir=real)
+
+    assert view.client_dir_label.text() == f"Client folder: {real}"
+    assert controller_view_module._client_dir_for_addons(real) == real
+    assert sorted(p.name for p in real.iterdir()) == ["interface"], "nothing renamed or added"
+
+
 def test_the_client_folder_buttons_read_set_or_change_and_forget_appears_once_recorded(
     qapp: object, tmp_path: Path
 ) -> None:
@@ -10116,6 +10133,41 @@ def test_wotlk_requires_at_least_a_data_folder(qapp: object, tmp_path: Path) -> 
     # Mutation: drop the `elif not (chosen / clientdir.DATA_DIR).is_dir(): ...
     # return` branch in `change_client_dir()` -- `empty` above is written
     # instead of refused.
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize("game", ["wotlk", "tbc"])
+def test_a_client_whose_data_folder_is_lowercase_is_taken(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T261: refused as having no `Data/` folder while it held `data/`.
+
+    WotLK through the press's own minimal rule, TBC through `clientdir.validate()`;
+    the folder written is the one picked, and nothing in it is renamed.
+    """
+    entry = WOTLK if game == "wotlk" else TBC
+    real = tmp_path / "real-client"
+    data = real / "data"
+    (data / "enus").mkdir(parents=True)
+    for index in range(8):
+        (data / f"patch-{index}.mpq").write_bytes(b"MPQ")
+    (data / "expansion.mpq").write_bytes(b"MPQ")
+    (data / "enus" / "locale-enus.mpq").write_bytes(b"MPQ")
+    monkeypatch.setattr(preflight, "free_bytes", lambda _path: 100 * 2**30)
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: asked.append(a) or 0
+    )
+    view, fake = _client_dir_view(entry, tmp_path / "server", pick_client_dir=lambda *_: real)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert failures == []
+    assert fake.written == [real]
+    assert asked == [], "no warning to answer: the client is complete"
+    assert sorted(p.name for p in real.iterdir()) == ["data"]
 
 
 def test_the_row_says_the_folder_is_missing_rather_than_no_interface(
@@ -12534,6 +12586,39 @@ def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_pa
     assert path.read_text(encoding="utf-8") != before
     view.tuning_panel.card("mod-transmog").revert_button.click()
     assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "2147483648"])
+def test_a_number_the_server_would_read_differently_is_refused_at_save(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """Through the card's own Save: `int()` reads each of these, the server does not.
+
+    `AuctionHouseBot.ItemsPerCycle` is an `int` with no bounds, so it is a text
+    box and nothing but the spelling rule stands between the text and the conf.
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    from tests.support_player_text import command_faults, text_faults
+
+    conf = "env/dist/etc/modules/mod_ahbot.conf"
+    _deploy(tmp_path, conf, "[worldserver]\nAuctionHouseBot.ItemsPerCycle = 200\n")
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-ah-bot-plus"}))
+    before = (tmp_path / conf).read_bytes()
+    card = view.tuning_panel.card("mod-ah-bot-plus")
+    box = card.editors["AuctionHouseBot.ItemsPerCycle"].control
+    assert isinstance(box, QLineEdit)
+    box.setText(typed)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert (tmp_path / conf).read_bytes() == before
+    assert tuning.backups_of(tmp_path / conf) == ()
+    said = view.tuning_report.toPlainText()
+    assert "AuctionHouseBot.ItemsPerCycle" in said
+    assert failures and command_faults(failures[0]) == [], failures
+    assert command_faults(said) == [] and text_faults(said) == [], said
 
 
 def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(

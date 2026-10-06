@@ -388,8 +388,16 @@ def create_account(
     gm_level: int = NO_GM,
     scheme: Scheme = "azerothcore",
     max_gm_level: int = MAX_GM_LEVEL,
+    names_are_names: bool = False,
 ) -> AccountResult:
     """Create one game account, or bring an existing one up to what was asked for.
+
+    `names_are_names` is True only from a caller whose tree is known to look an
+    account argument up by its name (`commands.NAME_LOOKUP_TREES`). Anywhere
+    else an all-digit name is refused: the CMaNGOS trees read digits as an
+    account id first (mangos-classic `src/game/Chat/Chat.cpp:3358`, mangos-tbc
+    `:3420`, tortoise-wow `:3549`), so such an account could never be named in a
+    later account command, and a tree added later starts on that safe side (T301).
 
     Reproduces what `AccountMgr::CreateAccount()` does, in the same order: the
     `account` row, then `realmcharacters` for every realm that has no counter
@@ -444,6 +452,12 @@ def create_account(
             contains the password.
     """
     name = _checked_username(username)
+    if name.isdigit() and not names_are_names:
+        raise AccountError(
+            f"{name} is made only of digits, and this server's account commands read digits as "
+            "an account number, so the account could never be changed or deleted by its name. "
+            "Choose a name with at least one letter in it."
+        )
     _check_password(password)
     if not NO_GM <= gm_level <= max_gm_level:
         raise AccountError(f"GM level must be between {NO_GM} and {max_gm_level}, got {gm_level}")
