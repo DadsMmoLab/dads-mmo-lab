@@ -220,6 +220,13 @@ that already has the account: `create` keeps the row's own password, as it
 must, so the one just minted can never prove it.
 """
 
+GONE_ACCOUNT = "Yu'lon's own server account is not in the database any more. Repair makes it again."
+"""The line for this app's own account missing from a server whose database was re-imported (T423).
+
+A saved password for a row that is not there: the channel said it was verified
+because nothing had asked the database since. Repair makes the row again.
+"""
+
 DATABASE_UNREACHABLE = (
     "Repair could not reach the server's database, so nothing was changed. "
     "Start the server, then press Repair again."
@@ -229,6 +236,11 @@ DATABASE_UNREACHABLE = (
 def lost(account: str, password: str = "") -> Refused:
     """This app's own account exists and its password is not one this machine has (T386)."""
     return Refused(account=account, password=password, reason=LOST_PASSWORD, plain=True)
+
+
+def gone(account: str) -> Refused:
+    """This app's own account was proved once and its row is not in the database now (T423)."""
+    return Refused(account=account, password="", reason=GONE_ACCOUNT, plain=True)
 
 
 @dataclass(frozen=True)
@@ -1132,6 +1144,17 @@ def ensure(
     return verified
 
 
+def _row_is_gone(exists: Callable[[str], bool] | None, account: str) -> bool:
+    """True only when the database was asked and said this account is not there (T423)."""
+    if exists is None:
+        return False
+    try:
+        return not exists(account)
+    except Exception as exc:  # noqa: BLE001 - a look that cannot be made says nothing
+        logger.info(f"could not look for {account}: {type(exc).__name__}")
+        return False
+
+
 def refused(state: Verified | Refused, *, reason: str) -> Refused:
     """Downgrade a credential the server has rejected.
 
@@ -1157,26 +1180,30 @@ def repair(
     namespace: str,
     config_dir: Path | None = None,
     gm_level: int = 3,
+    exists: Callable[[str], bool] | None = None,
     now: Callable[[], str] = now_utc,
 ) -> State:
     """Give the account this install already has a password that works.
 
-    `create` is taken and never called. It is here so the type of this function
-    says what it does not do, and so the test that proves it can hand in a seam
-    that raises: a repair that quietly minted a second account would look
-    identical from the outside -- the channel would work -- while leaving
-    another GM-level-3 row in the user's auth database every time a credential
-    went stale.
+    `create` is called only when `exists` says this app's own row is not there
+    (T423: a database Repair re-imported the server and took it with it). A
+    repair that quietly minted a second account would look identical from the
+    outside -- the channel would work -- while leaving another GM-level-3 row
+    in the user's auth database every time a credential went stale, so a row
+    that is there is reset and never made again, and a database that cannot
+    say is treated as one that has the row.
 
     A round trip still decides. The password is already changed in the database
     by the time it is tried, which is exactly the moment it is tempting to
     write the credential down anyway; a credential that has not answered is
     what this app refuses to keep.
     """
-    _ = create, gm_level
     password = generate_password()
     try:
-        reset(state.account, password)
+        if _row_is_gone(exists, state.account):
+            create(state.account, password, gm_level)
+        else:
+            reset(state.account, password)
     except Exception as exc:  # noqa: BLE001 - every way the write fails is the same sentence
         # The reset is a write to the auth database, and a database that is
         # not running is the ordinary reason it fails (T386). Nothing changed,
@@ -1370,6 +1397,13 @@ class InstallChannel:
         reopens of the app would leave the Start that follows given up.
         """
         state = self._state
+        if isinstance(state, Verified | Pending) and self._account_is_gone(state.account):
+            # T423: a database Repair re-imports the server and the app's row
+            # goes with it, while the saved credential (or the pending record)
+            # still says it works. A world that is not up cannot say otherwise,
+            # so the database is asked.
+            self._state = gone(state.account)
+            return self._state
         if isinstance(state, Pending):
             after = self.prove()
             if isinstance(after, Verified | Refused):
@@ -1395,6 +1429,22 @@ class InstallChannel:
             ),
         )
         return self._state
+
+    def _account_is_gone(self, account: str) -> bool:
+        """True when the auth database was asked and has no row by this name (T423).
+
+        Never true when the database cannot be asked. Only called for a state
+        that already has a row to ask about (`Verified` or `Pending`), so a
+        settle's `create` that has not landed yet is not a case here.
+        """
+        if self._exists is None or self.entry.operations is None:
+            return False
+        try:
+            there = self._exists(account)
+        except Exception as exc:  # noqa: BLE001 - a look that cannot be made changes nothing
+            logger.info(f"{self.entry.id}: could not look for {account}: {type(exc).__name__}")
+            return False
+        return not there
 
     def _find_a_lost_account(self) -> State:
         """`Idle`, or `lost()` when this app's own account is on the server already (T386).
@@ -1450,6 +1500,7 @@ class InstallChannel:
             namespace=endpoint.namespace,
             config_dir=self._config_dir,
             gm_level=(operations.gm_level if operations is not None else None) or 3,
+            exists=self._exists,
         )
         return self._state
 
@@ -1555,6 +1606,47 @@ class InstallChannel:
                 now = target.read_text(encoding="utf-8") if target.is_file() else None
                 expected = now if now in texts else texts[0]
         return roll_back(self.entry, self.server_dir, expected=expected)
+
+    def is_enabled(self) -> bool | None:
+        """Whether this install's files already switch the command channel on (T423).
+
+        A read of what `enable()` writes: the conf keys of the trees that read
+        them, and the override. `None` when it cannot be told -- an entry with
+        no measured channel, a file that is not there to read, a plan that does
+        not render -- so a caller offers Enable only on a plain `False`.
+        """
+        operations = self.entry.operations
+        if operations is None:
+            return None
+        try:
+            if operations.enable_conf is not None:
+                target = self.server_dir / operations.enable_conf.file
+                if not target.is_file():
+                    return None
+                wanted = dict(operations.enable_conf.keys)
+                found = _conf_values(target.read_text(encoding="utf-8"), wanted)
+                if any(found[key] != value for key, value in wanted.items()):
+                    return False
+            env = bot_count.world_env(
+                self.entry, self.server_dir, _world_env(self.entry, operations.enable_env)
+            )
+            texts = [
+                composegen.render(
+                    self.entry,
+                    self.server_dir,
+                    templates_root=self.templates_root,
+                    world_env=env,
+                    db_password=self._password(),
+                    bind_label=each,
+                ).override
+                for each in (":z", "")
+            ]
+            override = self.server_dir / composegen.OVERRIDE_FILE
+            now = override.read_text(encoding="utf-8") if override.is_file() else ""
+        except Exception as exc:  # noqa: BLE001 - not knowing is not a reason to offer a write
+            logger.info(f"could not tell whether {self.entry.id}'s channel is on: {exc}")
+            return None
+        return now in texts
 
     def enable(self, *, world_running: bool) -> Enabled:
         """Write the channel on. Refuses while the world is running."""

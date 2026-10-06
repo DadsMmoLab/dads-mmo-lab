@@ -584,3 +584,149 @@ def test_a_settle_that_finishes_during_the_look_is_not_overwritten(tmp_path: Pat
     assert isinstance(looked, channel_setup.Verified), looked
     assert isinstance(setup.setup_state(), channel_setup.Verified)
     assert world.resets == 0
+
+
+# -- after "Repair the database…" the account is gone (T423) --------------------
+
+GONE_LINE = "Yu'lon's own server account is not in the database any more. Repair makes it again."
+
+
+def _proved(box: _Box) -> None:
+    """The ground: a channel that was proved on this machine, so a credential is saved."""
+    box.view._settle_the_channel()
+    box.view.repair_channel_button.click()
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+
+
+def _drop_the_account(box: _Box) -> None:
+    """What re-importing the database does to a row the import did not carry."""
+    with box.auth.lock:
+        box.auth.conn.execute("DELETE FROM account WHERE username = ?", (box.app,))
+
+
+def _repair_the_database(box: _Box, monkeypatch: pytest.MonkeyPatch, *, ok: bool = True) -> None:
+    from tests.conftest import wait_for_panel
+
+    def route(cancel: object = None) -> Iterator[str]:
+        if not ok:
+            raise RuntimeError("the import failed")
+        yield "Repairing"
+
+    box.view.services.repair_database = route
+    monkeypatch.setattr(controller_view_module, "ask_yes_no", lambda *a, **k: True)
+    assert box.view.repair_database()
+    wait_for_panel(box.view.rebuild_log)
+
+
+def test_after_a_database_repair_the_channel_says_its_account_is_gone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live case: the world is not up yet, so only the database can say the row is gone."""
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    assert _line(box).startswith("Command channel: verified"), "the ground: the stale row"
+
+    _repair_the_database(box, monkeypatch)
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+    assert player_text_faults(box.view) == []
+    assert command_faults(_line(box)) == []
+
+
+def test_repair_makes_the_gone_account_again_and_proves_it(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    _repair_the_database(box, monkeypatch)
+    before = box.auth.rows()
+    assert box.app not in before
+
+    box.wire.loading = False
+    box.view.repair_channel_button.click()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+    after = box.auth.rows()
+    assert {k: v for k, v in after.items() if k != box.app} == before, "another account changed"
+    assert len([k for k in after if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_a_world_that_is_up_and_refuses_the_gone_account_is_repaired_too(box: _Box) -> None:
+    """Refresh with the world answering: it refuses the saved password, and Repair must still work.
+
+    A reset of a row that is not there changes nothing, so Repair on its own
+    would be refused a second time.
+    """
+    _proved(box)
+    _drop_the_account(box)
+
+    box.view.recheck()
+    assert _offers_repair(box)
+    box.view.repair_channel_button.click()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+
+
+def test_a_database_repair_that_failed_still_asks_the_channel_again(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-done import leaves a database nobody has read, so the row is not left as it was."""
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    _repair_the_database(box, monkeypatch, ok=False)
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+
+
+def test_a_database_that_cannot_be_asked_leaves_the_proved_channel_alone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proved(box)
+    box.auth.down = True
+    _repair_the_database(box, monkeypatch)
+    assert _line(box).startswith(f"Command channel: verified as {box.app}")
+    assert not _offers_repair(box)
+
+
+def test_with_the_channel_off_repair_leaves_enable_on_offer(box: _Box) -> None:
+    """The row is there, the setting is off: the world cannot answer, so Repair ends waiting.
+
+    Hiding Enable then left a player with a channel that could never be proved.
+    """
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        # The trees that read the channel from their conf: a conf with none of its keys.
+        conf = box.view.services.channel_setup.server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+    box.view._settle_the_channel()
+    assert _offers_repair(box)
+    box.wire.loading = True  # a world with the channel off answers nobody
+
+    box.view.repair_channel_button.click()
+
+    assert "waiting to be proved" in _line(box)
+    assert not box.view.enable_channel_button.isHidden(), "Enable is not offered"
+
+
+def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    monkeypatch.setattr(type(setup), "is_enabled", lambda self: True, raising=False)
+    box.view._settle_the_channel()
+    box.wire.loading = True
+
+    box.view.repair_channel_button.click()
+
+    assert "waiting to be proved" in _line(box)
+    assert box.view.enable_channel_button.isHidden()

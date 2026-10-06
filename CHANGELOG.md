@@ -32,6 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
+- After **Repair the database…**, the command channel offers **Repair** for its lost account, or turning on if it is off.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
