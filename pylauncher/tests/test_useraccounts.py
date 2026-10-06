@@ -183,7 +183,7 @@ def test_a_password_change_is_the_servers_own_command_and_not_a_row_written_here
     channel = _Channel()
 
     outcome = useraccounts.set_password(
-        channel, account="ALICE", password="n3w-p@ss", app_account="YULON_AB"
+        channel, account="ALICE", password="n3w-p@ss", app_account="YULON_AB", digits_are_ids=False
     )
 
     assert outcome.done is True
@@ -194,7 +194,13 @@ def test_a_level_change_is_the_servers_own_command_across_every_realm() -> None:
     channel = _Channel()
 
     outcome = useraccounts.set_gm_level(
-        channel, account="ALICE", level=2, app_account="YULON_AB", realms=True, highest=3
+        channel,
+        account="ALICE",
+        level=2,
+        app_account="YULON_AB",
+        realms=True,
+        highest=3,
+        digits_are_ids=False,
     )
 
     assert outcome.done is True
@@ -211,10 +217,20 @@ def test_neither_action_may_be_taken_on_the_apps_own_account() -> None:
     """
     for act in (
         lambda c: useraccounts.set_password(
-            c, account="yulon_ab", password="whatever1", app_account="YULON_AB"
+            c,
+            account="yulon_ab",
+            password="whatever1",
+            app_account="YULON_AB",
+            digits_are_ids=False,
         ),
         lambda c: useraccounts.set_gm_level(
-            c, account="YULON_AB", level=0, app_account="YULON_AB", realms=True, highest=3
+            c,
+            account="YULON_AB",
+            level=0,
+            app_account="YULON_AB",
+            realms=True,
+            highest=3,
+            digits_are_ids=False,
         ),
     ):
         channel = _Channel()
@@ -230,7 +246,7 @@ def test_an_argument_the_server_would_refuse_is_refused_here_instead() -> None:
     channel = _Channel()
 
     outcome = useraccounts.set_password(
-        channel, account="ALICE", password="no", app_account="YULON_AB"
+        channel, account="ALICE", password="no", app_account="YULON_AB", digits_are_ids=False
     )
 
     assert outcome.done is False
@@ -239,7 +255,11 @@ def test_an_argument_the_server_would_refuse_is_refused_here_instead() -> None:
 
 def test_a_server_that_says_no_is_reported_in_the_servers_own_words() -> None:
     outcome = useraccounts.set_password(
-        _Channel("no"), account="ALICE", password="n3w-p@ss", app_account="YULON_AB"
+        _Channel("no"),
+        account="ALICE",
+        password="n3w-p@ss",
+        app_account="YULON_AB",
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
@@ -259,6 +279,7 @@ def test_a_channel_that_could_not_ask_says_that_rather_than_that_it_failed() -> 
         app_account="YULON_AB",
         realms=True,
         highest=3,
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
@@ -332,7 +353,11 @@ def test_every_account_this_app_owns_is_protected_and_not_only_this_installs() -
     channel = _Channel()
 
     outcome = useraccounts.set_password(
-        channel, account="YULON_BBBBBBBB", password="n3w-p@ss", app_account="YULON_AAAAAAAA"
+        channel,
+        account="YULON_BBBBBBBB",
+        password="n3w-p@ss",
+        app_account="YULON_AAAAAAAA",
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
@@ -344,7 +369,11 @@ def test_an_ordinary_account_that_merely_starts_with_the_letters_is_not_protecte
     channel = _Channel()
 
     outcome = useraccounts.set_password(
-        channel, account="YULONGATE", password="n3w-p@ss", app_account="YULON_AAAAAAAA"
+        channel,
+        account="YULONGATE",
+        password="n3w-p@ss",
+        app_account="YULON_AAAAAAAA",
+        digits_are_ids=False,
     )
 
     assert outcome.done is True
@@ -387,7 +416,7 @@ def test_a_change_the_server_did_not_answer_in_time_is_not_reported_as_a_failure
             )()
 
     outcome = useraccounts.set_password(
-        _Slow(), account="ALICE", password="n3w-p@ss", app_account="YULON_AB"
+        _Slow(), account="ALICE", password="n3w-p@ss", app_account="YULON_AB", digits_are_ids=False
     )
 
     assert outcome.done is False
@@ -437,6 +466,7 @@ def test_a_password_change_this_core_reports_as_failed_is_confirmed_by_the_row()
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=row,
+        digits_are_ids=False,
     )
 
     assert outcome.done is True, outcome.problem
@@ -464,6 +494,7 @@ def test_a_row_that_changed_to_somebody_elses_password_is_not_a_yes() -> None:
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=row,
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
@@ -499,6 +530,7 @@ def test_a_yes_the_row_contradicts_is_not_a_yes() -> None:
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=row,
+        digits_are_ids=False,
     )
 
     assert outcome.done is False, "the server said yes and the row says otherwise"
@@ -514,6 +546,7 @@ def test_a_yes_the_row_agrees_with_is_a_yes() -> None:
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=_Row(True),
+        digits_are_ids=False,
     )
 
     assert outcome.done is True
@@ -528,6 +561,7 @@ def test_a_yes_stands_where_the_row_cannot_be_read_at_all() -> None:
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=lambda account, password: None,
+        digits_are_ids=False,
     )
 
     assert outcome.done is True
@@ -546,6 +580,7 @@ def test_a_reader_that_throws_leaves_the_servers_own_answer_standing() -> None:
         password="n3w-p@ss34",
         app_account="YULON_AB",
         password_is_in_force=broken,
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
@@ -564,6 +599,7 @@ def test_a_password_change_with_no_reader_falls_back_to_the_reply() -> None:
         account="ALICE",
         password="n3w-p@ss34",
         app_account="YULON_AB",
+        digits_are_ids=False,
     )
 
     assert outcome.done is True
@@ -592,6 +628,7 @@ def test_an_indeterminate_answer_does_not_invent_the_reason_it_is_indeterminate(
         account="ALICE",
         password="n3w-p@ss34",
         app_account="YULON_AB",
+        digits_are_ids=False,
     )
 
     assert outcome.indeterminate is True
@@ -699,6 +736,7 @@ def test_the_refusal_does_not_claim_an_account_this_tree_never_had() -> None:
         app_account="YULON_AB",
         realms=False,
         highest=4,
+        digits_are_ids=False,
     )
 
     assert outcome.done is False
