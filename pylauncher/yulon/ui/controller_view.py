@@ -2739,6 +2739,12 @@ def _assemble(
     function object in all four packages.
     """
     spec = entry.container_spec()
+    if spec.save_first is not None and channel_setup is not None:
+        # T496: where the console needs a terminal this host cannot open (Windows), the save
+        # a Stop asks for first goes through this install's command channel, on every route.
+        live_channel = getattr(channel_setup, "live_channel", None)
+        if callable(live_channel):
+            docker.save_through_channel(spec.world, server_dir, live_channel)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
