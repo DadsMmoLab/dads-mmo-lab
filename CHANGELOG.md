@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
 - Centurion can be installed from the Catalog on Windows and Linux: level-60 PvP WoW on the 3.3.5a client, with bots.
@@ -28,10 +29,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - WoW TBC, Vanilla and Tortoise servers keep their log files in a logs folder inside the server folder.
 - A server left broken by a failed update or rebuild is mended with **Repair server files…**, without a reinstall.
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
-- If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 
 ### Fixed
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
+- A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
+- **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
+- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.

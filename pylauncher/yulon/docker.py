@@ -1665,6 +1665,66 @@ def log_tail(
     return proc.stdout
 
 
+def last_lines(
+    container: str,
+    lines: int,
+    *,
+    wsl_distro: str | None = None,
+    timeout: float = 20.0,
+    max_bytes: int | None = None,
+) -> str | None:
+    """`log_tail()`, keeping what the container wrote to stderr as well (T249).
+
+    `docker logs` hands a container's stderr back on its OWN stderr, and
+    `log_tail()` keeps stdout alone. A world server runs with a tty, so all it
+    prints is on stdout; a container without one -- Tortoise's realmd, every
+    database -- writes its errors to stderr, which is where a failure's reason
+    is. The two come back as two pipes, so their interleaving is lost: the
+    stderr lines follow stdout's, `lines` of each at most.
+
+    `max_bytes` caps the answer, and each stream keeps its OWN end: cut
+    together, a long stderr would push the end of stdout -- where a world
+    server's crash reason is -- out of the cap (Codex T249 review). Every cut
+    starts on a whole line.
+
+    `None` when docker would not read it (no such container, a timeout, no
+    CLI), never the daemon's refusal passed off as the container's own words.
+    """
+    proc = _docker(
+        ["logs", "--tail", str(lines), container],
+        wsl_distro=wsl_distro,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
+        return None
+    out, err = proc.stdout, proc.stderr
+    if max_bytes is not None and len((out + err).encode("utf-8")) > max_bytes:
+        half = max_bytes // 2
+        # Whatever one stream leaves of its half, the other may have.
+        out_room = max(half, max_bytes - len(err.encode("utf-8")))
+        out = _end_of(out, out_room)
+        joint = 0 if not out or out.endswith("\n") else 1
+        err = _end_of(err, max_bytes - len(out.encode("utf-8")) - joint)
+    if not err:
+        return out
+    return (out if not out or out.endswith("\n") else out + "\n") + err
+
+
+def _end_of(text: str, limit: int) -> str:
+    """`text`'s last `limit` bytes (at least none), starting on a whole line.
+
+    Unless the last line alone is longer than `limit`: then its end, so one huge
+    line -- the newest, and perhaps the reason -- is cut rather than lost.
+    """
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    tail = data[len(data) - max(limit, 0) :].decode("utf-8", errors="ignore")
+    _, newline, whole = tail.partition("\n")
+    return whole if newline and whole else tail
+
+
 def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> str | None:
     """The Docker daemon's version, or `None` when it does not answer (T93's system-info.txt).
 

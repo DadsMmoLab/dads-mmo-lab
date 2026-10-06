@@ -2908,6 +2908,24 @@ def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
     return keys
 
 
+def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
+    """The store's settings-only mods, read once on first use (T380).
+
+    `apply.settings_only()` over the `mod` family: Experience Rates and its kin,
+    which leave no folder. `apply.installed_modules()` is handed them so an
+    install made before their receipt existed still reads Installed. Lazy and
+    cached for `_record_backed_keys()`'s reasons.
+    """
+    cached: list[tuple[Manifest, ...]] = []
+
+    def mods() -> tuple[Manifest, ...]:
+        if not cached:
+            cached.append(tuple(m for m in store.load_all("mod") if apply_module.settings_only(m)))
+        return cached[0]
+
+    return mods
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2917,6 +2935,7 @@ def _for_wotlk(
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
+    settings_mods = _settings_mods(wotlk_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3186,7 +3205,7 @@ def _for_wotlk(
         # mob multipliers leave no folder and read Not installed for ever
         # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            (lambda: apply_module.installed_modules(server_dir, record_backed(), settings_mods()))
             if entry.has_manifests
             else None
         ),
@@ -3295,6 +3314,7 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
+    tbc_settings_mods = _settings_mods(tbc_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3374,6 +3394,14 @@ def _for_tbc(
         ),
         create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
         store=tbc_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=tbc_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # `sql=sql`, the SAME runner the console and the account tile use, and
         # that is the point of `tbc_modules.applier()` requiring it: it carries
         # this install's generated password (read once, above) and this game's
@@ -3432,6 +3460,7 @@ def _for_vanilla(
     binding rather than a `del` a future manifest would have to come back and
     undo — the same call the TBC factory makes.
     """
+    vanilla_settings_mods = _settings_mods(vanilla_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3546,6 +3575,14 @@ def _for_vanilla(
         # `cross-faction` is ten keys here, because mangos-classic has
         # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
         store=vanilla_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=vanilla_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # The same two 8.7a seams as TBC and for the same reasons (T7), over
         # this tree's own containers.
         applier=(
@@ -3820,6 +3857,7 @@ def _for_tortoise(
     has no manifests that want it, but the Steam client entry is a path to that
     folder's own executable and there is nowhere else to get it.
     """
+    tortoise_settings_mods = _settings_mods(tortoise_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3928,8 +3966,12 @@ def _for_tortoise(
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # T380: the folders AND the settings-only mods (Experience Rates, Message
+        # of the Day, Performance Stats), which leave no folder.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, manifests=tortoise_settings_mods()))
+            if entry.has_manifests
+            else None
         ),
         # T121's seam rides with `installed_modules`. Tortoise ships no relative
         # (record-backed) mod, so nothing here writes a pending mark and this
@@ -4815,6 +4857,64 @@ FORGET_RECORD_QUESTION = (
     "creature values are already at their normal values, for example after restoring a backup."
 )
 """What the Forget question says, word for word (T121 fix wave)."""
+
+FORGET_INSTALL_QUESTION = (
+    "Yu'lon forgets that {name} is installed. The database is not changed. Use this only if the "
+    "stack sizes are already back to normal, for example after restoring a backup."
+)
+"""The Forget question for Bigger Stacks, whose record says it is installed (T385): its
+Remove restores from a backup table, which a restored database does not have."""
+
+SETTINGS_REMOVE_TAIL = (
+    ", including any value you set since {name} was installed.\n\n"
+    "Restart the server for this to take effect."
+)
+"""The end of a settings-only mod's Remove question (T380 cold review): a rate changed
+since the install goes back too, and the world reads its conf only at start."""
+
+SETTINGS_REMOVE_UNNAMED = "Every setting {name} changed goes back to the value the server came with"
+"""The Remove question's change line for a mod whose settings have no names to list."""
+
+SETTINGS_REMOVE_NOTHING = (
+    "Its settings already read the values the server came with, so nothing in them changes. "
+    "Yu'lon stops listing {name} as installed."
+)
+"""The Remove question when the remove steps would change no value."""
+
+
+def _and_join(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def remove_question(
+    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+) -> tuple[str, str]:
+    """The title and text of a settings-only mod's Remove question (T380 cold review).
+
+    Built from `apply.settings_removal()`, the manifest's remove patches over the
+    conf as it is: each setting by its name on the Tuning tab and the value it
+    goes back to, settings going to one value named together. A setting with no
+    name of its own is not listed by key; the line then says every setting the
+    mod changed goes back.
+    """
+    title = f"Remove {manifest.name}?"
+    if not changes:
+        return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
+    if any(change.label is None for change in changes):
+        said = SETTINGS_REMOVE_UNNAMED.format(name=manifest.name)
+    else:
+        groups: dict[str, list[str]] = {}
+        for change in changes:
+            groups.setdefault(change.after or "nothing", []).append(str(change.label))
+        said = "; ".join(
+            f"{_and_join(labels)} {'goes' if len(labels) == 1 else 'go'} back to {value}"
+            for value, labels in groups.items()
+        )
+    return title, said + SETTINGS_REMOVE_TAIL.format(name=manifest.name)
+
 
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
@@ -15697,6 +15797,21 @@ class ControllerView(QWidget):
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
             return
+        if action == "remove" and apply_module.settings_only(manifest):
+            # T380 cold review: one press of Remove put every rate this mod
+            # touched back to stock, a rate set since included. Asked first, No
+            # by default, naming each setting and the value it goes back to, in
+            # the box that fits the screen (T243).
+            title, text = remove_question(
+                manifest,
+                apply_module.settings_removal(self.services.controller.server_dir, manifest),
+            )
+            if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
         relative = reapplies_on_top(manifest)
         if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
@@ -18853,7 +18968,8 @@ class ControllerView(QWidget):
 
         A relative manifest (the four mob multipliers) leaves no folder, so its
         row can only read installed from the record (T121). That is the row a
-        stale record can lie on, and the one Forget is for.
+        stale record can lie on, and the one Forget is for. So is Bigger Stacks
+        with no repository (`database_receipt()`, T385).
         """
         manifest = self.selected_manifest()
         row = self.modules_panel.selected_row()
@@ -18861,7 +18977,7 @@ class ControllerView(QWidget):
             manifest is not None
             and row is not None
             and row.data.installed
-            and reapplies_on_top(manifest)
+            and (reapplies_on_top(manifest) or apply_module.database_receipt(manifest))
         )
 
     @Slot()
@@ -18880,7 +18996,9 @@ class ControllerView(QWidget):
         answer = QMessageBox.question(
             self,
             "Forget Yu'lon's record?",
-            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            (
+                FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
+            ).format(name=manifest.name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
