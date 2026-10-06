@@ -2476,6 +2476,59 @@ def test_a_conf_write_recommends_a_restart_the_world_reads_it_at_its_next_start(
     assert report.restart_recommended is True
 
 
+@pytest.mark.parametrize(
+    ("answer", "expected", "asks"),
+    [(False, True, 1), (True, False, 1), (None, False, 1)],
+)
+def test_a_conf_only_install_reads_the_world_to_say_which_press_is_owed(
+    tmp_path: Path, answer: bool | None, expected: bool, asks: int
+) -> None:
+    """T397: a conf-only install sends no SQL, so the SQL guard never read the world, and the
+    report told a player whose world was already stopped to press Stop and then Start.
+
+    The report now reads the world once when only a conf write asks for the restart. Only an
+    explicit "not running" says stopped; a running world, or a seam that cannot answer, keep
+    the old "Stop and then Start" line.
+
+    Catches the read dropped (stays False on a stopped world), the flag set for any answer,
+    and `None` read as stopped.
+    """
+    asked: list[int] = []
+
+    def world_running() -> bool | None:
+        asked.append(1)
+        return answer
+
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git, world_running=world_running).install(
+        parse_manifest(_THING_MODULE)
+    )
+
+    assert report.restart_recommended is True
+    assert report.world_stopped is expected
+    assert len(asked) == asks
+
+
+def test_a_conf_only_install_with_no_seam_does_not_claim_the_world_is_stopped(
+    tmp_path: Path,
+) -> None:
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+    assert report.restart_recommended is True and report.world_stopped is False
+
+
+def test_a_conf_that_writes_nothing_never_reads_the_world(tmp_path: Path) -> None:
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_text("Thing.Enabled = 1\n", encoding="utf-8")
+    asked: list[int] = []
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(
+        tmp_path, git=git, world_running=lambda: asked.append(1) or False
+    ).install(parse_manifest(_THING_MODULE))
+    assert report.world_stopped is False and asked == []
+
+
 def test_a_conf_that_writes_nothing_does_not_recommend_a_restart(tmp_path: Path) -> None:
     """The other half of the same fact: nothing written is nothing to restart for.
 

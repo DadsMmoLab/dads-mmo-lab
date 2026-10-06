@@ -78,6 +78,17 @@ class Check:
         said = f"[{self.verdict}] {self.name}: {self.detail}"
         return f"{said} {self.remedy}".rstrip()
 
+    def sentence(self) -> str:
+        """The paragraph a player reads in a refusal or warning dialog (T431).
+
+        `name: detail. remedy`: the name capitalised, and a full stop kept between the
+        detail and the remedy, so the two are two plain sentences and not one run-on.
+        """
+        head = f"{self.name[:1].upper()}{self.name[1:]}: {self.detail.rstrip()}"
+        if self.remedy and head[-1] not in ".!?":
+            head += "."
+        return f"{head} {self.remedy}".rstrip()
+
 
 ClientValidate = Callable[[Path | None, ClientSpec], tuple[Check, ...]]
 """The client-folder seam: `clientdir.validate` with preflight's free-space reader bound in.
@@ -292,9 +303,7 @@ class Report:
         Only the refusals: a dialog that also recites the warnings buries the
         one sentence that says what to change.
         """
-        return "\n".join(
-            f"{check.name}: {check.detail} {check.remedy}".rstrip() for check in self.refusals()
-        )
+        return "\n".join(check.sentence() for check in self.refusals())
 
 
 def gather(

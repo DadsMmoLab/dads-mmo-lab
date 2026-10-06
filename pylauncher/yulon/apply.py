@@ -5617,6 +5617,22 @@ class Applier:
                 f"so the next Update of {manifest.id} will offer the defaults instead"
             )
 
+    def _world_read_stopped_for_a_conf_write(self, log: _Log) -> bool:
+        """Whether a conf write that asks for a restart found the world already stopped (T397).
+
+        A conf-only install sends no SQL, so the SQL guard never read the world and the
+        report said "Stop and then Start" to a player who had stopped it first. One read,
+        only when a conf write is what asks for the restart; only an explicit "not running"
+        counts, a running world or a seam that cannot answer leave the old line.
+        """
+        if log.world_stopped or not log.conf_restart or self._world_running is None:
+            return log.world_stopped
+        try:
+            return self._world_running() is False
+        except Exception as exc:  # noqa: BLE001 - could not ask is not "stopped"
+            logger.warning(f"could not tell whether the world is running: {exc}")
+            return False
+
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(
             action=action,
@@ -5651,7 +5667,7 @@ class Applier:
             left_behind=(
                 _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
             ),
-            world_stopped=log.world_stopped,
+            world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "

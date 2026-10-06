@@ -24,6 +24,9 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from tests.test_controller_view import (
     WOTLK,
+    _forget_action,
+    _mob_tab,
+    _select_module,
     _adopt_services,
     _Ps,
     _rebuild_services,
@@ -100,6 +103,52 @@ def test_the_rebuild_question_is_the_fitted_box(
         ),
     )
     assert box["title"] == f"Rebuild {WOTLK.name}?"
+
+
+def test_the_forget_record_question_is_the_fitted_box(
+    qapp: object, ps: _Ps, tmp_path: Path, boxes: list[dict[str, Any]]
+) -> None:
+    """T399: "Forget Yu'lon's record..." asked through the static `question()`, which has no
+    height limit and no escape button. Answered No here: nothing is forgotten.
+
+    Catches the press going back to `QMessageBox.question(...)`: the recorder sees no box.
+    """
+    from yulon import module_answers
+    from yulon.controller_wow_wotlk import modules
+    from yulon.ui.controller_view import FORGET_RECORD_QUESTION
+
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    boxes.clear()  # the install's own questions are not this test's
+
+    action = _forget_action(view, "baby-mobs")
+    assert action is not None
+    action.trigger()
+
+    box = _the_yes_no_box(boxes, FORGET_RECORD_QUESTION.format(name="Baby Mobs"))
+    assert box["title"] == "Forget Yu'lon's record?"
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.read_applied(tmp_path / "srv", manifest) is not None, "No forgot it"
+
+
+def test_the_forget_press_has_no_static_question_call() -> None:
+    """T399's own static-call check, until a repo-wide guard covers `question` (T355 covers
+    warning/information/critical): no `QMessageBox.question(...)` inside the Forget press.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ControllerView._forget_module_record)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "question"
+    ]
+    assert calls == []
 
 
 def test_the_return_to_the_pin_question_is_the_fitted_box(
