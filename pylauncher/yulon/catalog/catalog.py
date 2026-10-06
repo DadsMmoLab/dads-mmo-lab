@@ -269,8 +269,8 @@ class ClientSpec(_Strict):
         default=None,
         description=(
             "A file that proves the expansion, relative to the client dir (`Data/expansion.MPQ` "
-            "for TBC, `Data/dbc.MPQ` for Vanilla). None disables this one rule — Tortoise's "
-            "7272 client has no single defining file — while `Data/` and the MPQ count still apply."
+            "for TBC, `Data/dbc.MPQ` for Vanilla and Tortoise). None disables this one rule "
+            "while `Data/` and the MPQ count still apply."
         ),
     )
     min_mpq: int = Field(default=5, ge=1, description="Fewer MPQs than this is a WARNING.")

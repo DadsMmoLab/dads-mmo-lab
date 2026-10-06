@@ -25,7 +25,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import git as git_module
 from yulon import module_answers
-from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
+from yulon.apply import Applier, ApplyError, ApplyRefusal, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import (
     Behind,
@@ -2470,6 +2470,108 @@ def test_the_database_is_not_started_for_a_module_with_no_question_to_check(
     ).install(parse_manifest(STACKABLES))
     # The direct-SQL path starts it once for its own reasons; the check adds none.
     assert start.calls == 1
+
+
+def _check_applier(
+    tmp_path: Path, reader: _FakeReader, *, started: bool = True, git: Any = None
+) -> tuple[Applier, Any]:
+    """An applier whose exists check finds the database stopped (`started`) or already up."""
+    git = git if git is not None else _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+
+    def start() -> bool:
+        if isinstance(reader, _StoppedThenStarted):
+            reader.up = True
+        return started
+
+    return (
+        Applier(tmp_path, git=git, sql=reader, world_running=lambda: False, start_database=start),
+        git,
+    )
+
+
+WRONG_GUID = "no character in this server's own database has GUID 999"
+STILL_UP = (
+    "Nothing was changed. Yu'lon started the database to check your answers, and it is "
+    "still running; press Stop if you do not need it."
+)
+
+
+def test_a_refused_answer_says_the_database_the_check_started_is_still_running(
+    tmp_path: Path,
+) -> None:
+    """T476: the check started the database alone, the GUID was wrong, and the
+    report said only "Nothing was changed" while the database was left running.
+
+    The refusal is the same exception, its own sentence first, then the database.
+    Mutation: drop the sentence and the refusal ends at "Nothing was changed."
+    """
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted(rows=""))
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    said = str(refusal.value)
+    assert WRONG_GUID in said and said.endswith(STILL_UP), said
+    assert git.calls == []
+
+
+def test_a_database_that_was_already_running_adds_nothing(tmp_path: Path) -> None:
+    """Only a database Yu'lon started is named: one the player had up says nothing more."""
+    applier, _git = _check_applier(tmp_path, _FakeReader(rows=""), started=False)
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    said = str(refusal.value)
+    assert WRONG_GUID in said and said.endswith("Nothing was changed."), said
+    assert "still running" not in said
+
+
+def test_a_conflict_after_the_check_says_it_too(tmp_path: Path) -> None:
+    """The check passes, then the conflict guard refuses: the database is still up.
+
+    Mutation: guard only `_check_values()` and the conflict says nothing of it.
+    """
+    seat = tmp_path / "modules" / "mod-ah-bot-plus"
+    seat.mkdir(parents=True)
+    (seat / "README.md").write_text("x\n", encoding="utf-8")
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted())
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    said = str(refusal.value)
+    assert "cannot both be installed" in said and said.endswith(STILL_UP), said
+    assert git.calls == []
+
+
+def test_a_finished_install_keeps_the_started_line_and_adds_nothing(tmp_path: Path) -> None:
+    """T396's report line is how a finished install says it; no refusal sentence appears."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted())
+
+    report = applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert not any("still running" in line for line in report.done + report.skipped)
+
+
+class _BrokenGit(_FakeGit):
+    """A clone that breaks with something that is not Yu'lon's refusal."""
+
+    def clone(self, spec: CloneSpec) -> None:
+        raise RuntimeError("the clone broke")
+
+
+def test_something_that_is_not_a_refusal_after_the_check_is_raised_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """Not a refusal the player reads as one: same type, same words, nothing added."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted(), git=_BrokenGit({}))
+
+    with pytest.raises(RuntimeError) as broke:
+        applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    assert str(broke.value) == "the clone broke"
 
 
 def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:

@@ -30,7 +30,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -675,6 +676,12 @@ class ApplyRefusal(ApplyError, SaidByYulon):
 
 
 _STARTED_DB_LINE = "started the database alone; the world server was left stopped"
+
+DATABASE_LEFT_UP = (
+    "Yu'lon started the database to check your answers, and it is still running; "
+    "press Stop if you do not need it."
+)
+"""What a stopped install adds when its exists check had to start the database (T476)."""
 
 
 def _kept(cause: BaseException, message: str) -> ApplyError:
@@ -2069,6 +2076,9 @@ class _Log:
     # was reached at all, which `_record_database()` needs and the `done` lines
     # cannot be counted for (a skipped step is not a line there either).
     sql_sent: int = 0
+    # T476. Set by `_check_exists()` when IT had to start the database alone:
+    # `Applier._says_the_database_is_up()` then names it if the install stops early.
+    database_started: bool = False
 
 
 def take_back_file(
@@ -2852,6 +2862,41 @@ class Applier:
         release: upstream.Release | None = None,
         expect_head: str | None = None,
     ) -> ApplyReport:
+        """`_install()`, saying so when it stops with a database it started still up (T476).
+
+        An install that stops early -- a refused answer, a conflict, a missing
+        requirement, or a failure further on -- after `_check_exists()` started
+        the database alone says the database is still running
+        (`_says_the_database_is_up()`). A finished install says it in its
+        report's "started the database alone" line instead.
+        """
+        log = _Log()
+        with self._says_the_database_is_up(log):
+            return self._install(
+                manifest,
+                values,
+                log,
+                folder=folder,
+                complete=complete,
+                replacing=replacing,
+                first_configure_sql=first_configure_sql,
+                release=release,
+                expect_head=expect_head,
+            )
+
+    def _install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None,
+        log: _Log,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+        replacing: bool = False,
+        first_configure_sql: bool = True,
+        release: upstream.Release | None = None,
+        expect_head: str | None = None,
+    ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
         `first_configure_sql` is False from `update()` only: a fresh deploy
@@ -2888,7 +2933,6 @@ class Applier:
         does not reach.
         """
         vals = self._values(manifest, values)
-        log = _Log()
         self._check_values(manifest, "install", vals, log)
         # T115, before anything is written: a relative install run again over
         # values nobody can read would compound them, so it is refused here.
@@ -3743,6 +3787,30 @@ class Applier:
 
     # -- the answers -------------------------------------------------------
 
+    @contextmanager
+    def _says_the_database_is_up(self, log: _Log) -> Iterator[None]:
+        """Say so when an install stops after its exists check started the database (T476).
+
+        T396 starts a stopped database alone so the answer is really checked.
+        An install refused after that said "Nothing was changed" and left the
+        database running, with only the header to show it. So an `ApplyError`
+        raised in this block, after `_check_exists()` had to start it
+        (`log.database_started`), ends with `DATABASE_LEFT_UP`; one that was
+        already up adds nothing. The same exception is raised again, its type
+        and detail kept, so `_module_failed()` reads it as before.
+
+        Said, not stopped (cold review): stopping it here took no hold, so it
+        could take the database from under a Start or a Backup pressed while
+        the check ran -- neither waits for a module job. Any other exception
+        passes through untouched.
+        """
+        try:
+            yield
+        except ApplyError as exc:
+            if log.database_started:
+                exc.args = (f"{exc} {DATABASE_LEFT_UP}", *exc.args[1:])
+            raise
+
     def _check_values(
         self, manifest: Manifest, action: When, vals: Mapping[str, str], log: _Log
     ) -> None:
@@ -3835,8 +3903,10 @@ class Applier:
                     f"{manifest.id}: the database could not be started to check "
                     f"{prompt.question!r}. {exc} Nothing was changed.",
                 ) from exc
-            if started and _STARTED_DB_LINE not in log.done:
-                log.done.append(_STARTED_DB_LINE)
+            if started:
+                log.database_started = True
+                if _STARTED_DB_LINE not in log.done:
+                    log.done.append(_STARTED_DB_LINE)
         statement = _render(check.query, vals, f"prompt {prompt.key}")
         try:
             rows = self.sql.query(check.db, statement)

@@ -33,10 +33,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Tortoise servers with hundreds of bots no longer lag heavily while the bots plan their travels and auction-house trips.
+- A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
 - A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
 - Stopping a Tortoise server with a hired companion online no longer crashes it or asks you to check your characters.
 - On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.
+- A module install refused after Yu'lon started the database to check your answers now says the database is still running.
 - Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
 - On Windows, **Stop** also ends the helper programs a build started on your PC.

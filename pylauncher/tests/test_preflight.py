@@ -1926,3 +1926,44 @@ def test_no_other_game_on_windows_is_asked_for_the_volumes_room(game: str) -> No
         entry, SERVER_DIR, facts(platform_id="windows", data_root_free=int(free))
     )
     assert verdict(report, "Docker's disk") != "refuse"
+
+
+def test_a_tortoise_client_with_no_dbc_archive_is_refused_by_the_installs_own_gather(
+    tmp_path: Path,
+) -> None:
+    """T521: the install's gate, with the real rules, refuses before anything is built.
+
+    `gather()` with no `client_validate` seam runs `clientdir.validate()` on the shipped
+    Tortoise entry. The folder has a `Data/` and fifteen archives, so only the DBC rule can
+    refuse it; with `dbc.MPQ` added the same call passes it and probes it for Docker.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    client = tmp_path / "TurtleWoW"
+    data = client / clientdir.DATA_DIR
+    data.mkdir(parents=True)
+    for name in ("terrain", "model", "texture", "wmo", "base", "misc", "patch", "patch-2"):
+        (data / f"{name}.MPQ").write_bytes(b"MPQ")
+    for number in range(3, 10):
+        (data / f"patch-{number}.mpq").write_bytes(b"MPQ")
+    probed: list[Path] = []
+
+    def probe(path: Path) -> bool | None:
+        probed.append(path)
+        return True
+
+    got = _client_gather(tortoise, tmp_path / "server", bind_mount_ok=probe, client_dir=client)
+    report = preflight.evaluate(tortoise, tmp_path / "server", got)
+
+    assert not report.ok()
+    assert [c.name for c in got.client_checks if c.verdict == "refuse"] == [
+        clientdir.REQUIRED_CHECK
+    ]
+    assert f"Data/dbc.MPQ is missing from {client}" in report.message()
+    assert "a complete client of the game this server runs, or repair" in report.message()
+    assert client not in probed, "a refused client is not probed"
+
+    (data / "dbc.MPQ").write_bytes(b"MPQ")
+    got = _client_gather(tortoise, tmp_path / "server", bind_mount_ok=probe, client_dir=client)
+
+    assert [c for c in got.client_checks if c.verdict == "refuse"] == []
+    assert client in probed
