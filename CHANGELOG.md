@@ -115,6 +115,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
+- New TBC, Vanilla and Centurion servers build from their projects' newest code of October 2026.
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
 - A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.

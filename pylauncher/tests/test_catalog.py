@@ -227,13 +227,13 @@ GATE_PINS = {
         "mod-playerbots/mod-playerbots": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f",
-        "cmangos/playerbots": "bc67a2ebde1f339eff2000dadec13d453ebf2cee",
-        "cmangos/tbc-db": "ba4755dee3d7375cfec9da036d903c7bbabf081b",
+        "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
+        "cmangos/playerbots": "76b97537f050d09e4cf021c86884de657b63a1e4",
+        "cmangos/tbc-db": "866723612d93791e442fb1b18d642118fa682edd",
     },
     "wow-vanilla": {
         "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
-        "cmangos/playerbots": "bc67a2ebde1f339eff2000dadec13d453ebf2cee",
+        "cmangos/playerbots": "76b97537f050d09e4cf021c86884de657b63a1e4",
         "cmangos/classic-db": "ec4f596146be6467ea93c57397858e329e2db852",
     },
 }
@@ -270,6 +270,16 @@ gate that ran on them was one fresh TBC and one fresh Vanilla install through
 the app's engine on `yulon-arch`, each read back from its own `src/` checkout.
 `contrib/` is byte-identical between the two `mangos-tbc` revisions, so every
 extractor citation made at f82e7d67 holds at 75f9ae68.
+
+T500 (2026-10-06) moved them again, to upstream's heads of that day:
+`mangos-tbc` 75f9ae68 -> 15b6ddb4, `tbc-db` ba4755de -> 86672361, the shared
+`playerbots` bc67a2eb -> 76b97537; `mangos-classic` 8ec338a1 and `classic-db`
+ec4f5961 were still upstream's heads and did not move. None of the three
+touches `contrib/`, a `.conf.dist`, `sql/` of the core, CMake or `InstallFullDB.sh`;
+`tbc-db` adds `Updates/0035`-`0043`, and `playerbots` changes the hunters' boot
+enchant in its TBC seed.
+The gate was one fresh TBC and one fresh Vanilla install through the app's
+engine on `yulon-fedora`, each read back from its own `src/` checkout.
 """
 
 

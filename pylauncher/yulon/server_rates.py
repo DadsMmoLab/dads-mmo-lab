@@ -220,7 +220,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",
-        rev="75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f",
+        rev="15b6ddb4ec9e443d49f4e438af73782ce5c16491",
         keys=_ALL_KEYS,
         notes={
             **{
@@ -247,7 +247,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="faac5fc9b0fe0934c26f08231793ca607d38327d",
+        rev="56fe34fa8f4ad655d297e132a520b7902feb26c2",
         keys=_ALL_KEYS,
         notes={},
     ),

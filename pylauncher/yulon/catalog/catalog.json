@@ -162,17 +162,17 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f"
+            "rev": "15b6ddb4ec9e443d49f4e438af73782ce5c16491"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "bc67a2ebde1f339eff2000dadec13d453ebf2cee"
+            "rev": "76b97537f050d09e4cf021c86884de657b63a1e4"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "ba4755dee3d7375cfec9da036d903c7bbabf081b"
+            "rev": "866723612d93791e442fb1b18d642118fa682edd"
           }
         ]
       },
@@ -389,7 +389,7 @@
                   "sort": "natural",
                   "on_error": "fail",
                   "notes": [
-                    "tbc-db's InstallFullDB.sh applies Updates/Instances/[0-9]*.sql straight after Updates/[0-9]*.sql and before the world core updates, dbc data and ACID, stopping on the first error; this phase sits in that same place (T141). At ba4755de that is 55 files, 000_setup.sql first, and this phase's natural order was measured equal to bash's glob order over them.",
+                    "tbc-db's InstallFullDB.sh applies Updates/Instances/[0-9]*.sql straight after Updates/[0-9]*.sql and before the world core updates, dbc data and ACID, stopping on the first error; this phase sits in that same place (T141). At ba4755de and at 86672361 that is 55 files, 000_setup.sql first, and this phase's natural order was measured equal to bash's glob order over them.",
                     "000_setup.sql deletes every creature and gameobject spawn on the instance maps from 36 tables and the files after it put them back, so the set is one rebuild and a failure part way leaves dungeons and raids short. It cannot be one transaction: the setup creates and drops real tables (DDL commits), and creature, gameobject, pool_template and most of the others are MyISAM in the Full_DB dump. So `fail`, which writes no marker, and the next press's `partial` arm drops the schemas and imports again.",
                     "Nothing in these files records that they ran: no db_version column, no ledger. New installs only, by the owner's decision of 2026-09-29: no `reapply_when_changed`, so a server imported before this phase existed reads it as withheld."
                   ]
@@ -595,7 +595,7 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "bc67a2ebde1f339eff2000dadec13d453ebf2cee"
+            "rev": "76b97537f050d09e4cf021c86884de657b63a1e4"
           },
           {
             "repo": "cmangos/classic-db",
@@ -1401,7 +1401,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "faac5fc9b0fe0934c26f08231793ca607d38327d"
+            "rev": "56fe34fa8f4ad655d297e132a520b7902feb26c2"
           }
         ]
       },
