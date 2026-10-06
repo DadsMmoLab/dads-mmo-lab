@@ -45,15 +45,15 @@ second on a Stop that has already been answered. Not a guarantee, and said as
 a bounded guess rather than a proof.
 """
 
-CREATE_TIMEOUT = 300.0
+CREATE_TIMEOUT = 120.0
 """How long `docker create` may take before it is given up (T321): a deadlock breaker.
 
 A create of an image Docker already holds answers in well under a second, and
 both callers' images are there before they run (the extraction image is built
 by the install, and preflight pulls the clone's). A create that has to pull
 first takes as long as the pull, and a Stop waits for it -- the price of a
-create no Stop interrupts -- so this is generous: five minutes of a daemon that
-does not answer, not of a slow line.
+create no Stop interrupts. Two minutes: room for a pull neither caller expects
+to need, and the longest a Stop can go unanswered on a daemon that has hung.
 """
 
 END_CONTAINER_TIMEOUT = 60.0

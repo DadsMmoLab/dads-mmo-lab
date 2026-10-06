@@ -6390,6 +6390,11 @@ def run_container(
         _ended(name)
         logger.warning(f"{launcher[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    except BaseException:
+        # Taken away mid-create: the CLI was ended, so the daemon may still make it.
+        if container_end.end_container(launcher, name, what=_TOOL) is None:
+            _ended(name)
+        raise
     if made.returncode != 0:
         if refused is None:
             _ended(name)
@@ -6407,7 +6412,9 @@ def run_container(
             except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
                 logger.warning(f"the output sink stopped accepting lines: {exc}")
                 break
-        return AttachedRun(made.returncode, said, container_left=name if refused else "")
+        # A Stop pressed while the create was failing is still the Stop (cold review).
+        code = CANCELLED_RETURNCODE if cancel is not None and cancel.is_set() else made.returncode
+        return AttachedRun(code, said, container_left=name if refused else "")
     try:
         if cancel is not None and cancel.is_set():
             # Stopped while Docker was creating it: it exists and has not started.

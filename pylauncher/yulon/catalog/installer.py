@@ -802,10 +802,17 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
         f"Stop was pressed, so {entry.name} has NOT been remembered as an install and the app "
         f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
         f"in {server_dir} to see what the installer had got to (a download it was in the "
-        "middle of may have removed its own leftovers; anything already finished stays). If "
-        "the build had started, Docker keeps finishing the step it was on in the background — "
-        "that is deliberate, and the finished pieces are what make a second attempt much "
-        "faster, so do not clear Docker's build cache to tidy up."
+        "middle of may have removed its own leftovers; anything already finished stays). "
+        + (
+            # macOS alone was not measured (T298): said as before there.
+            "If the build had started, Docker keeps finishing the step it was on in the "
+            "background — that is deliberate, and the finished pieces are what make a second "
+            "attempt much faster, so do not clear Docker's build cache to tidy up."
+            if native.build_cancel_note() == native.BUILD_CANCEL_NOTE
+            else "If the build had started, Stop ended it, and the steps it had finished are "
+            "kept: they are what make a second attempt much faster, so do not clear Docker's "
+            "build cache to tidy up."
+        )
     ]
     record = server_dir / native.STATE_FILE
     # This attempt got at least one recorded stage in, or started in a folder

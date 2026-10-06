@@ -203,6 +203,32 @@ def test_a_stop_before_a_tool_starts_starts_nothing(fake_docker: tuple[Path, Pat
     assert fake_calls(state) == [], "a docker command was run after the Stop"
 
 
+def test_a_stop_during_a_create_that_then_fails_is_still_the_stop(
+    fake_docker: tuple[Path, Path],
+) -> None:
+    """T321 cold review: the run says what the player did, not what the create answered."""
+    _cli, state = fake_docker
+    (state / "slow-create").write_text("", encoding="utf-8")
+    (state / "create-refused").write_text("", encoding="utf-8")
+    cancel = threading.Event()
+    got: list[docker.AttachedRun] = []
+    worker = threading.Thread(
+        target=lambda: got.append(docker.run_container(SPEC, sink=lambda _l: None, cancel=cancel))
+    )
+    worker.start()
+    deadline = time.monotonic() + HANG_BOUND
+    while not (state / "create-asked").exists():
+        assert time.monotonic() < deadline, "the create was never asked"
+        time.sleep(0.01)
+    cancel.set()
+    (state / "slow-create").unlink()
+    worker.join(HANG_BOUND)
+
+    assert not worker.is_alive(), "the stopped tool did not end"
+    assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE], got
+    assert "pull access denied" in got[0].tail[-1], "Docker's words are still kept"
+
+
 def test_a_create_that_timed_out_is_looked_for_twice_and_its_late_container_removed(
     fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -483,7 +483,7 @@ def test_stop_during_the_clone_ends_its_container_and_tries_no_other_clone(
     calls = (state / "calls.log").read_text(encoding="utf-8").splitlines()
     assert f"rm -f {started.name}" in calls, calls
     assert host_clones == [], "a stopped clone was cloned again with host git"
-    assert len([call for call in calls if call.startswith("run ")]) == 1, calls
+    assert len([call for call in calls if call.startswith("create ")]) == 1, calls
     assert panel.status_text() == "cancelled"
     assert finished == [(True, "stopped")], finished
 
@@ -1577,7 +1577,8 @@ def test_a_failure_before_anything_was_written_leaves_no_state_file(tmp_path: Pa
 def test_cancel_between_stages_stops_and_says_what_the_daemon_is_still_doing(
     tmp_path: Path,
 ) -> None:
-    """The honest cancel copy: BuildKit finishes its step and the work is kept."""
+    """The honest cancel copy: what this platform's Stop does to the build, and that the
+    finished steps are kept (T246, T298)."""
     cancel = threading.Event()
     rec = Recorder(images=False)
 
@@ -1594,8 +1595,10 @@ def test_cancel_between_stages_stops_and_says_what_the_daemon_is_still_doing(
         return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("stopped",))
 
     installer = engine(rec, build=build_then_cancel)
-    with pytest.raises(InstallerError, match="already on"):
+    with pytest.raises(InstallerError) as stopped:
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow"), cancel=cancel))
+    assert native.build_cancel_note() in str(stopped.value)
+    assert "kept in Docker's build cache" in native.build_cancel_note()
     assert "one-shot:ac-db-import" not in rec.calls
 
 

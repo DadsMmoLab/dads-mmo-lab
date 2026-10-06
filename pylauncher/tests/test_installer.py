@@ -1053,3 +1053,16 @@ def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
     monkeypatch.setattr(runner, "run", fake_run)
     assert platform.docker_ready() is True
     assert tried == ["docker", exe]
+
+
+@pytest.mark.parametrize("platform_name", ["win32", "linux", "darwin"])
+def test_the_stopped_install_window_says_what_a_stop_did_to_the_build_on_this_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str
+) -> None:
+    """T298 cold review: the window after a stopped install said Docker keeps finishing the
+    step in the background on every platform, under a build note that says Stop ends it."""
+    monkeypatch.setattr(native.sys, "platform", platform_name)
+    told = cancelled_install_message(WOTLK, tmp_path)
+    runs_on = "keeps finishing the step it was on in the background" in told
+    assert runs_on is (platform_name == "darwin"), told
+    assert "do not clear Docker's build cache" in told, "the cache advice is said everywhere"

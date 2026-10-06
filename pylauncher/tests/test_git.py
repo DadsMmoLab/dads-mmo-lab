@@ -2862,7 +2862,8 @@ def test_the_containerized_clone_streams_the_same_container_the_buffered_one_run
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """`docker run` hands the container's stderr to the client's, so the same split works.
+    """`docker start -a` (T321; `docker run` before it) hands the container's stderr to the
+    client's, so the same split works.
 
     What is asserted is that the STREAMED path runs the argv `_capture()`
     builds — same image, same mount, same working directory, same untrusted
@@ -2881,8 +2882,11 @@ def test_the_containerized_clone_streams_the_same_container_the_buffered_one_run
     said = list(git.ContainerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)))
 
     assert streamed, "the containerized clone did not reach stream_progress"
-    argv = streamed[0]
-    assert argv[:3] == ["docker", "run", "--rm"]
+    # T321: the container is created with `_argv()`'s options, then streamed by its name.
+    (argv,) = [call for call in seen if call[1:2] == ["create"]]
+    assert argv[:3] == ["docker", "create", "--rm"]
+    name = argv[argv.index("--name") + 1]
+    assert streamed[0] == ["docker", "start", "-a", name]
     assert f"{dest}:/git" in argv and "-w" in argv and "/git" in argv
     assert git._CONTAINER_GIT_IMAGE in argv
     assert "--progress" in argv
@@ -3406,6 +3410,82 @@ def test_a_stop_during_the_clones_create_ends_it_before_anything_starts(
     assert verbs == ["create", "rm"], verbs
     assert fake_containers(state) == [], "the created container is still there"
     assert settle.slept == []
+
+
+def test_a_stop_during_a_clone_create_that_then_fails_is_a_stop_not_a_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    """T321 cold review: the create fails (or times out) after the Stop was sent. A failed
+    containerized clone falls back to host git, which in an install would run to its end
+    with nobody hearing the Stop; a stopped one must not."""
+    cli, state = fake_docker
+    (state / "slow-create").write_text("", encoding="utf-8")
+    (state / "create-refused").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    host: list[git.CloneSpec] = []
+
+    def host_clone(
+        self: git.RunnerGit, spec: git.CloneSpec, *, stage: str = "clone"
+    ) -> Iterator[str]:
+        host.append(spec)
+        yield "host git cloned it"
+
+    monkeypatch.setattr(git.RunnerGit, "clone_lines", host_clone)
+    outcome: list[BaseException | None] = []
+
+    def clone() -> None:
+        try:
+            list(
+                container_git.clone_lines(git.CloneSpec(url="https://x/y.git", dest=tmp_path / "c"))
+            )
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is asserted
+            outcome.append(exc)
+        else:
+            outcome.append(None)
+
+    worker = threading.Thread(target=clone)
+    worker.start()
+    deadline = time.monotonic() + HANG_BOUND
+    while not (state / "create-asked").exists():
+        assert time.monotonic() < deadline, "the create was never asked"
+        time.sleep(0.01)
+    assert worker.ident is not None
+    runner.end_streams_started_on(worker.ident)
+    (state / "slow-create").unlink()
+    worker.join(HANG_BOUND)
+
+    assert not worker.is_alive(), "the stopped clone did not end"
+    assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
+    assert host == [], "a stopped clone was cloned again with host git"
+
+
+def test_a_stop_just_before_the_clones_stream_starts_is_not_lost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    """T321: the Stop lands after the create returned, before `start -a` has a process.
+
+    `end_streams_started_on()` ends only a child that exists, so this Stop ends nothing,
+    and in an install the panel drains rather than closing the clone. The clone reads
+    its thread's Stop count on the stream's lines and stops on the first.
+    """
+    cli, state = fake_docker
+    container_git = _container_git(monkeypatch, cli)
+    real = runner.stream_progress
+
+    def stop_first(argv: list[str], **kwargs: Any) -> Iterator[str]:
+        # The panel's Stop, sent while no child of this thread is running.
+        assert runner.end_streams_started_on(threading.get_ident()) == 0
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(runner, "stream_progress", stop_first)
+    clone = container_git.clone_lines(git.CloneSpec(url="https://x/y.git", dest=tmp_path / "c"))
+    with pytest.raises(git.GitStopped):
+        list(clone)
+
+    (create,) = [c.split() for c in fake_calls(state) if c.startswith("create ")]
+    name = create[create.index("--name") + 1]
+    assert fake_containers(state) == [], "the clone's container is still there"
+    assert [c for c in fake_calls(state) if c.startswith("rm ")] == [f"rm -f {name}"]
 
 
 def test_a_stopped_clone_whose_container_will_not_go_says_so_in_the_log(

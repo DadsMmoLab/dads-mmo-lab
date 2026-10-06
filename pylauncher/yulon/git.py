@@ -37,7 +37,7 @@ import sys
 import threading
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -1167,7 +1167,9 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
     return proc
 
 
-def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> Iterator[str]:
+def _streamed_git(
+    argv: list[str], *, stage: str, cwd: Path | None = None
+) -> Generator[str, None, None]:
     """One long git command, yielding its output as log-panel lines; `GitError` if it fails.
 
     `_run_git()`'s contract for a command worth watching, INCLUDING its
@@ -2996,21 +2998,33 @@ class ContainerGit:
         except OSError as exc:
             # The docker CLI gone from under the cached path: `_capture()`'s sentence.
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        except BaseException:
+            # Taken away mid-create: the CLI was ended, so the daemon may still make it.
+            container_end.end_container(launcher, name, what="clone")
+            raise
+        if runner.stops_sent_to(ident) != stops:
+            # The panel's Stop came during the create and found no stream to end.
+            # In an install the panel drains instead of closing this, and nothing
+            # here reads the install's cancel, so the clone would run to its end --
+            # or, had the create failed, fall back to host git (cold review).
+            if made.returncode == 0:
+                refused = self._end_container(launcher, name)
+                if refused is not None:
+                    yield container_left_line(name, dest, refused)
+            raise GitStopped(f"the clone into {dest} was stopped before it started.")
         if made.returncode != 0:
             # Nothing was started. A create that timed out had its late container
             # looked for and removed (or the refusal logged) by `create()`.
             said = (made.stderr or made.stdout).strip() or "no answer"
             raise GitError(f"docker create exited {made.returncode}: {said}")
-        if runner.stops_sent_to(ident) != stops:
-            # The panel's Stop came during the create and found no stream to end.
-            # In an install the panel drains instead of closing this, and nothing
-            # here reads the install's cancel, so the clone would run to its end.
-            refused = self._end_container(launcher, name)
-            if refused is not None:
-                yield container_left_line(name, dest, refused)
-            raise GitStopped(f"the clone into {dest} was stopped before it started.")
         try:
-            yield from _streamed_git([*launcher, "start", "-a", name], stage=stage)
+            with closing(_streamed_git([*launcher, "start", "-a", name], stage=stage)) as lines:
+                for line in lines:
+                    if runner.stops_sent_to(ident) != stops:
+                        # A Stop sent after the check above but before `start -a`
+                        # had a process ended nothing; it is heard here instead.
+                        raise GitStopped(f"the clone into {dest} was stopped.")
+                    yield line
         except GitStopped:
             refused = self._end_container(launcher, name)
             if refused is not None:

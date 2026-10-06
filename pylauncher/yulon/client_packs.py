@@ -65,6 +65,7 @@ from yulon import (
     play_client,
     server_build_presses,
 )
+from yulon.after_stop import StopTookEffect
 from yulon.catalog.catalog import ClientPack
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -113,8 +114,12 @@ class PackUnavailable(PackError):
     """
 
 
-class Cancelled(PackError):
-    """The player pressed Cancel. What arrived is kept, so the next try continues from there."""
+class Cancelled(PackError, StopTookEffect):
+    """The player pressed Cancel. What arrived is kept, so the next try continues from there.
+
+    Or Stop, in a Re-extract laying the packs (T303): the player's own press either way,
+    so it carries `StopTookEffect` and the log panel reads it as "cancelled" (T250).
+    """
 
 
 @dataclass(frozen=True)
