@@ -739,3 +739,60 @@ def test_a_spec_whose_tools_read_exact_names_still_refuses_another_case(tmp_path
 def test_every_cmangos_client_spec_accepts_archives_in_any_case(game: str) -> None:
     """T260: each CMaNGOS extraction reads another case through links, so each spec says so."""
     assert _native_client(game).archives_any_case is True
+
+
+# -- T261: a client whose Data folder itself is named in lower case --------------------
+
+
+def _lowercase_data_folder(root: Path) -> Path:
+    """`client(root)` with its `Data/` renamed `data/`, as `unzip -LL` leaves a client."""
+    folder = client(root)
+    (folder / "Data").rename(folder / "data")
+    return folder
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"])
+def test_a_lowercase_data_folder_is_a_client_for_every_game_that_extracts(
+    tmp_path: Path, game: str
+) -> None:
+    """T261: refused as "has no Data directory, so it is not a game client" while it held one."""
+    folder = _lowercase_data_folder(tmp_path)
+    (folder / "data" / "lichking.mpq").write_bytes(b"MPQ")
+    spec = _centurion_spec() if game == "wow-centurion" else _native_client(game)
+
+    checks = clientdir.validate(folder, spec, free_bytes=lambda _p: PLENTY)
+
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    first = checks[0]
+    assert first.name == clientdir.CLIENT_CHECK
+    assert first.detail == f"{folder} has a data directory", "named as the disk names it"
+    assert sorted(p.name for p in folder.iterdir()) == ["data"], "nothing was renamed"
+
+
+@needs_case_sensitive_disk
+def test_the_archives_of_a_lowercase_data_folder_are_counted(tmp_path: Path) -> None:
+    """The count and locale rules read the folder that is there, not an empty `Data/`."""
+    folder = _lowercase_data_folder(tmp_path)
+
+    checks = clientdir.validate(folder, _native_client("wow-tbc"), free_bytes=lambda _p: PLENTY)
+
+    found = {check.name: check for check in checks}
+    assert found[clientdir.MPQ_CHECK].verdict == "pass"
+    assert found[clientdir.MPQ_CHECK].detail.startswith("11 MPQ archives anywhere under ")
+    assert found[clientdir.MPQ_CHECK].detail.endswith(f"{folder / 'data'}")
+    assert found[clientdir.LOCALE_CHECK].detail == "locale archives in enUS"
+
+
+def test_a_folder_named_like_data_that_is_a_file_is_still_not_a_client(tmp_path: Path) -> None:
+    """Found whatever its case, and still has to be a folder."""
+    folder = tmp_path / "client"
+    folder.mkdir()
+    (folder / "data").write_bytes(b"not a folder")
+
+    (check,) = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
+
+    assert check.verdict == "refuse"
+    assert check.detail == (
+        f"{folder} has no {clientdir.DATA_DIR} directory, so it is not a game client"
+    )

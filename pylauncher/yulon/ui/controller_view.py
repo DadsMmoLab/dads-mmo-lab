@@ -74,6 +74,7 @@ from yulon import (
     channel_setup,
     client_config,
     client_exe,
+    client_names,
     client_packs,
     commands,
     dbreads,
@@ -90,6 +91,7 @@ from yulon import (
     reset_defaults,
     resources,
     server_build_presses,
+    server_rates,
     server_time_zone,
     serverlock,
     tuning,
@@ -422,6 +424,10 @@ class AccountAdmin(Protocol):
 
     def set_gm_level(self, account: str, level: int) -> object: ...
 
+    def delete_plan(self, account: str) -> object: ...
+
+    def delete_account(self, confirmed: useraccounts.DeletePlan) -> object: ...
+
 
 class BotDashboardSeam(Protocol):
     """The Bots tab's "Bot dashboard" switch (T127). Every method does IO: never on the GUI thread.
@@ -723,7 +729,8 @@ class PromptAsker(Protocol):
     is what gets applied now (T100 review). `remembered` is what this install
     last answered (T104, `Applier.remembered_answers()`), filled in over the
     manifest's defaults. `removing` is True for a Remove, which asks only what
-    the record cannot answer (`apply.must_ask()`).
+    the record cannot answer (`apply.must_ask()`). `notes` are sentences shown
+    above the questions (T302: an answer that replaces a Server rates value).
     """
 
     def __call__(
@@ -735,6 +742,7 @@ class PromptAsker(Protocol):
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
+        notes: Sequence[str] = (),
     ) -> Mapping[str, str] | None: ...
 
 
@@ -2240,11 +2248,12 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return factory(entry, server_dir, client_dir, wsl_distro)
+            return _with_take_back(factory(entry, server_dir, client_dir, wsl_distro))
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
+        services = _with_take_back(services)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
@@ -2269,6 +2278,18 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_take_back(services: ControllerServices) -> ControllerServices:
+    """Uninstall takes the module client files back through the module applier (T262).
+
+    The applier knows which folder is the ready-to-play client and which the
+    player's own, so a receipt from before the switch is acted on where Remove
+    would act on it.
+    """
+    if isinstance(services.uninstall, purge.Uninstaller) and services.applier is not None:
+        services.uninstall.take_back_client_files = services.applier.take_back_everything
+    return services
 
 
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
@@ -2927,6 +2948,7 @@ def _for_wotlk(
             pw,
             gm_level=level,
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
         exists=lambda name: wotlk_accounts.account_exists(sql, name),
@@ -3111,6 +3133,7 @@ def _for_wotlk(
             # The tab disables its button for an entry that declares no scheme;
             # this is the seam under it refusing rather than guessing (T12).
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         store=wotlk_modules.store() if entry.has_manifests else None,
         applier=module_applier,
@@ -3688,6 +3711,12 @@ WoW client does not refuse a `client` step: it GAINS an
 """
 
 
+def _has_interface(client_dir: Path) -> bool:
+    """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
+    found = client_names.find(client_dir, ADDONS_PARENT)
+    return found is not None and found.is_dir()
+
+
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """This install's client folder if a manifest may write an addon into it, else None.
 
@@ -3713,7 +3742,7 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """
     if client_dir is None:
         return None
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         logger.info(
             f"{client_dir} has no {ADDONS_PARENT}/ folder, so no client addon is written "
             "into it; start the game once, or point this install at the client you play"
@@ -3736,7 +3765,7 @@ def _client_dir_row_text(client_dir: Path | None) -> str:
         return "Client folder: none — addons and Play need one"
     if not client_dir.is_dir():
         return f"Client folder: {client_dir} — the folder is missing"
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         return (
             f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
             "once before installing addons"
@@ -4482,6 +4511,25 @@ RESTORE_WAITS_FOR_DISTRO = (
 )
 
 ACCOUNT_NEEDS_CHOICE = "Choose an account first."
+DELETE_ACCOUNT_LABEL = "Delete account…"
+"""The Accounts tab's delete press (T301), and its context-menu entry."""
+
+
+def delete_account_question(account: str, characters: tuple[str, ...]) -> str:
+    """What the delete press asks, naming everything the server will remove (T301)."""
+    if not characters:
+        what = f"{account} has no characters."
+    elif len(characters) == 1:
+        what = f"Its character {characters[0]} is deleted with it."
+    else:
+        names = f"{', '.join(characters[:-1])} and {characters[-1]}"
+        what = f"Its {len(characters)} characters are deleted with it: {names}."
+    return (
+        f"Delete the account {account}? {what} This cannot be undone from Yu'lon; only a "
+        "backup made before now can bring it back."
+    )
+
+
 CHARACTER_NEEDS_CHOICE = "Choose a character in the list first."
 CHARACTERS_EMPTY = (
     "There are no characters on this server yet. Make one in the game, logged in with an "
@@ -5857,6 +5905,9 @@ the file is one a person may also want to look at by hand.
 """
 
 TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
+
+TUNING_RATES_REFUSED = "Nothing was written. {why}"
+"""The Server rates card's refusal (T302): the sentence names the row, so no card id."""
 
 TUNING_REFUSED = "{module}: nothing was written — {why}"
 """A refusal that names the key, in the box every other answer on this tab is read in.
@@ -9959,7 +10010,7 @@ class ControllerView(QWidget):
                 )
                 if not said_yes(answer):
                     return
-        elif not (chosen / clientdir.DATA_DIR).is_dir():
+        elif not play_client.data_folder(chosen).is_dir():  # `data/` too (T261)
             self._client_dir_refused(
                 f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
                 "Nothing was changed."
@@ -11942,6 +11993,10 @@ class ControllerView(QWidget):
         change.addRow(self.set_password_button)
         change.addRow(_FieldLabel("GM level", self.selected_gm), self.selected_gm)
         change.addRow(self.set_gm_button)
+        # T301. Asks first, naming the characters that go with the account.
+        self.delete_account_button = QPushButton(DELETE_ACCOUNT_LABEL, existing)
+        self.delete_account_button.clicked.connect(self.delete_selected_account)
+        change.addRow(self.delete_account_button)
         # The list is what grows (T191 A16): the window's spare height is its.
         existing_box.addWidget(self.account_list, 1)
         existing_box.addWidget(self.refresh_accounts_button)
@@ -11952,11 +12007,17 @@ class ControllerView(QWidget):
             self.refresh_accounts_button,
             self.set_password_button,
             self.set_gm_button,
+            self.delete_account_button,
         ):
             control.setVisible(wired)
         # T195 (A23): why a press here is greyed, under both panels.
         self.account_reasons = ReasonLine(tab)
-        for press in (self.create_account_button, self.set_password_button, self.set_gm_button):
+        for press in (
+            self.create_account_button,
+            self.set_password_button,
+            self.set_gm_button,
+            self.delete_account_button,
+        ):
             self.account_reasons.watch(press)
         # Nothing is chosen yet, and a button that acts on "whichever row
         # happens to be first" is a trap rather than a convenience.
@@ -12628,9 +12689,9 @@ class ControllerView(QWidget):
         )
 
     def _account_chosen(self, row: int) -> None:
-        """Both changes act on the chosen account, so both wait for one."""
+        """Every change acts on the chosen account, so every one waits for one."""
         chosen = row >= 0 and self.account_list.item(row) is not None
-        for press in (self.set_password_button, self.set_gm_button):
+        for press in (self.set_password_button, self.set_gm_button, self.delete_account_button):
             set_enabled_why(press, None if chosen else ACCOUNT_NEEDS_CHOICE)
         if chosen:
             item = self.account_list.item(row)
@@ -12733,6 +12794,81 @@ class ControllerView(QWidget):
         # way; only the signal is withheld.
         if not getattr(outcome, "indeterminate", False):
             self.action_failed.emit(problem)
+
+    @Slot()
+    def delete_selected_account(self) -> None:
+        """T301: read what would go, ask, then have the server delete it.
+
+        The read comes first and off the GUI thread, so the question can name
+        the characters; a rule that keeps the account (the app's own, a bot's,
+        somebody in the game) is said instead of asking at all.
+        """
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is reading {account}.")
+        self.account_report.setText(f"Reading what deleting {account} would remove…")
+        self._run(
+            lambda: admin.delete_plan(account),
+            self._delete_planned,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _delete_planned(self, plan: object) -> None:
+        admin = self.services.accounts
+        account = str(getattr(plan, "account", ""))
+        problem = str(getattr(plan, "problem", ""))
+        if admin is None or not account:
+            self._account_chosen(self.account_list.currentRow())
+            return
+        if problem:
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(problem)
+            self.action_failed.emit(problem)
+            return
+        if not isinstance(plan, useraccounts.DeletePlan):
+            self._account_chosen(self.account_list.currentRow())
+            return
+        characters = plan.characters
+        if not self._confirm(f"Delete {account}?", delete_account_question(account, characters)):
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(f"{account} was not deleted.")
+            return
+        self.account_report.setText(f"Deleting {account}…")
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is deleting {account}.")
+        self._run(
+            lambda: admin.delete_account(plan),
+            self._account_deleted,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _account_deleted(self, outcome: object) -> None:
+        """Say what came back and read the list again.
+
+        Read again after a delete that may have happened, too: the sentence
+        asks the person to check, and the list is where they check.
+        """
+        self._account_chosen(self.account_list.currentRow())
+        if getattr(outcome, "done", False):
+            self.account_report.setText(getattr(outcome, "text", "") or "Deleted.")
+            self.refresh_accounts()
+            return
+        problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
+        self.account_report.setText(problem)
+        if getattr(outcome, "indeterminate", False):
+            self.refresh_accounts()
+            return
+        self.action_failed.emit(problem)
+
+    @Slot(object)
+    def _delete_failed(self, exc: object) -> None:
+        self._account_chosen(self.account_list.currentRow())
+        problem = f"Could not delete the account: {exc}"
+        self.account_report.setText(problem)
+        self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:
@@ -15475,6 +15611,16 @@ class ControllerView(QWidget):
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
+        # T302: an answer written to a Server rates key is held to that key's rule,
+        # because the world server stops at start on a rate it cannot read.
+        problem = server_rates.answer_problem(self.entry, manifest, values)
+        if problem is not None:
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+            )
+            self.action_failed.emit(problem)
+            return
         run = {
             "install": applier.install,
             "remove": applier.remove,
@@ -15536,6 +15682,22 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
+        extra: dict[str, tuple[str, ...]] = {}
+        if action != "remove":
+            # T302 (cold review): an answer written to a key the Server rates card
+            # writes starts at what the card says now -- over the mod's default and
+            # over last install's answer -- and the dialog says it replaces it.
+            rates = server_rates.rows(self.entry, self.services.controller.server_dir)
+            now = server_rates.prompt_values(manifest, rates)
+            if now:
+                asked = tuple(
+                    p.model_copy(update={"default": now[p.key]}) if p.key in now else p
+                    for p in asked
+                )
+                remembered = {k: v for k, v in remembered.items() if k not in now}
+                note = server_rates.prompt_note(manifest, rates)
+                if note is not None:
+                    extra["notes"] = (note,)
         answers = self._prompt_asker(
             self,
             manifest,
@@ -15543,6 +15705,7 @@ class ControllerView(QWidget):
             again=again,
             remembered=remembered,
             removing=action == "remove",
+            **extra,
         )
         return (False, None) if answers is None else (True, answers)
 
@@ -17079,6 +17242,8 @@ class ControllerView(QWidget):
         # collision and the truer one -- this tab is the modules' settings.
         self._add_panel_tab(tab, "modules", "Tuning")
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        # T302: the built-in Server rates card's rows, read with the modules'.
+        self._rate_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -17118,6 +17283,8 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
+        # T302: the world conf's rates, read in the same pass -- one file, no job.
+        self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -17137,13 +17304,19 @@ class ControllerView(QWidget):
         self._look_up_time_zone()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
-        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+        """The Server rates card (T302), the modules' rows, then the server's own bot keys
+        (T99, CMaNGOS and Tortoise).
 
-        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
-        latter is what T94's reset reads as "keys an installed MODULE keeps",
-        and these are the server's own keys, which a reset puts back.
+        Kept apart in `_rate_rows` and `_bot_rows` rather than folded into
+        `_tuning_rows`: the latter is what T94's reset reads as "keys an installed
+        MODULE keeps", and these are the server's own keys, which a reset puts
+        back. For the same reason a module row the rates card also writes is
+        made read-only HERE, for the drawing only (`server_rates.yield_to_card`),
+        and `_tuning_rows` keeps it as the module declared it.
         """
-        return self._tuning_rows + self._bot_rows
+        modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
+        rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
+        return rates + modules + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -18019,6 +18192,8 @@ class ControllerView(QWidget):
         """
         if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
+        if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
+            return server_rates.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -18061,7 +18236,9 @@ class ControllerView(QWidget):
                     tuning.check(specs[file].get(key), value)
                 except tuning.TuningError as exc:
                     self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                        TUNING_RATES_REFUSED.format(why=exc)
+                        if (family, module_id) == server_rates.CARD
+                        else TUNING_REFUSED.format(module=module_id, why=exc)
                     )
                     self.action_failed.emit(str(exc))
                     return
@@ -18430,6 +18607,10 @@ class ControllerView(QWidget):
         item = self.account_list.itemAt(pos)
         if item is None:
             return
+        # Every entry below acts on the chosen account, so the row clicked is
+        # made the chosen one: otherwise a right-click on CAROL could offer to
+        # delete whichever row was chosen before (Codex, T301).
+        self.account_list.setCurrentItem(item)
         username = str(item.data(Qt.ItemDataRole.UserRole) or "")
         menu = QMenu(self)
         copy_action = menu.addAction(f"Copy Username ({username})")
@@ -18441,6 +18622,9 @@ class ControllerView(QWidget):
         if self.set_gm_button.isEnabled():
             gm_action = menu.addAction("Set GM Level…")
             gm_action.triggered.connect(self.set_selected_gm_level)
+        if self.delete_account_button.isEnabled():
+            delete_action = menu.addAction(DELETE_ACCOUNT_LABEL)
+            delete_action.triggered.connect(self.delete_selected_account)
         menu.exec(self.account_list.mapToGlobal(pos))
 
     def _show_character_context_menu(self, pos: QPoint) -> None:
