@@ -21,6 +21,7 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import json
 import os
@@ -2388,6 +2389,10 @@ _STORED_INT = re.compile(r"\s*(?:\+?([0-9]+)|(-[0-9]+))\s*")
 """An `int` answer as a build before the digits rule stored it: spaces round it, or a `+`."""
 
 
+_STORED_FLOAT = re.compile(r"\s*\+?(-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?)\s*")
+"""A `float` answer as a build before the decimal rule stored it: spaces, a `+`, an exponent."""
+
+
 def stored_answer(prompt: Prompt, value: str) -> str:
     """A remembered or applied answer, in the spelling `check_answer()` takes today.
 
@@ -2398,6 +2403,16 @@ def stored_answer(prompt: Prompt, value: str) -> str:
     -- other scripts' digits, `1_0` -- is returned unchanged for `check_answer()`
     to refuse, because no server ever read it as the number Python does.
     """
+    if prompt.kind == "float":
+        # A build before T395 took `float()`'s spellings and the SQL it sent read
+        # spaces, a `+` and `2e0` as the number they say.
+        found = _STORED_FLOAT.fullmatch(value)
+        if found is None:
+            return value
+        try:
+            return format(decimal.Decimal(found.group(1)), "f")
+        except decimal.InvalidOperation:
+            return value
     old = _STORED_INT.fullmatch(value) if prompt.kind == "int" else None
     return value if old is None else (old.group(1) or old.group(2))
 
@@ -2597,16 +2612,27 @@ def check_answer(prompt: Prompt, value: str) -> str:
         if not _INT.fullmatch(value):
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
             return f"this must be a whole number, typed with the digits 0 to 9 only{spaces}"
-        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
-            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        smallest, largest = tuning.int_range(prompt.unsigned)
+        if not smallest <= int(value) <= largest:
+            return f"this must be a number from {smallest} to {largest}"
         return prompt.range_problem(text)
     if prompt.kind == "float":
-        try:
-            float(text)
-        except ValueError:
-            return "this must be a number"
+        # The answer is written as given, so it is held to the Tuning tab's decimal
+        # spelling (T395): `float("1_0")` is 10.0 here and 1 to the server.
+        fault = tuning.decimal_fault(value)
+        if fault == "spelling":
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            return (
+                f"this must be a number, typed with the digits 0 to 9 and one point at most{spaces}"
+            )
+        if fault == "decimals":
+            return f"this may have at most {tuning.DECIMAL_PLACES} digits after the point"
         # T122: the question's own range, finite; see `Prompt.range_problem()`.
-        return prompt.range_problem(text)
+        # Before the C `float` ceiling, so a question with a range names its range.
+        problem = prompt.range_problem(text)
+        if problem:
+            return problem
+        return "this is too large to be a number" if fault == "large" else ""
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
