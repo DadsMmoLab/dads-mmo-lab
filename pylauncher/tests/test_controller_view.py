@@ -18480,8 +18480,8 @@ def _server_with_the_plan_up(
     return view, window, view._tabs.currentWidget()
 
 
-SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Danger zone"]
-"""T189's Server tab, top to bottom, for a game with every part wired."""
+SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Help", "Danger zone"]
+"""T189's Server tab, top to bottom, for a game with every part wired; Help is T520's."""
 
 
 def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
@@ -18561,6 +18561,7 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
             view.enable_channel_button,
             view.repair_channel_button,
         ],
+        "Help": [view.help_button],
         "Danger zone": [
             view.remove_button,
             view.repair_button,

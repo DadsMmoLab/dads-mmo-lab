@@ -2137,6 +2137,37 @@ def _inside(value: str, field: str, *, names_a_file: bool) -> str:
     return value
 
 
+HELP_URL_PENDING = "SNAPJAW_DISCORD_URL_PENDING"
+"""The one stand-in a help place's URL may hold: an address the owner wants listed and
+nobody has yet. It loads, the dialog leaves its place out, and
+`tests/test_help_places.py::test_PLACEHOLDER_snapjaw_discord_url_must_be_filled_in_before_merge`
+is red while any game still carries it (T520)."""
+
+
+class HelpPlace(_Strict):
+    """One place a player can take a problem with this server, and what it looks after (T520).
+
+    The Server tab's "Where to get help…" lists them in order, a link button
+    (`label`) with its line (`purpose`) beside it.
+    """
+
+    label: str = Field(min_length=1, description="The link button's text: who runs the place.")
+    url: str = Field(description="The https page the button opens.")
+    purpose: str = Field(
+        min_length=1, description="One plain sentence: which problems belong there."
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https_or_the_placeholder(cls, value: str) -> str:
+        return value if value == HELP_URL_PENDING else _https_url(value, "help place url")
+
+    @property
+    def url_known(self) -> bool:
+        """False while the URL is still `HELP_URL_PENDING`."""
+        return self.url != HELP_URL_PENDING
+
+
 class PackSource(_Strict):
     """Where one client pack's zip comes from: the server's own checkout, or a URL.
 
@@ -2863,6 +2894,13 @@ class CatalogEntry(_Strict):
     )
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
+    )
+    help_places: tuple[HelpPlace, ...] = Field(
+        default=(),
+        description=(
+            "Where a player takes a problem with this server, in the order the Server tab's "
+            "'Where to get help…' lists them; Yu'lon's own issues page is last (T520)."
+        ),
     )
     notes: tuple[str, ...] = Field(
         default=(),

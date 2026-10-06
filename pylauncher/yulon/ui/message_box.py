@@ -315,6 +315,8 @@ class FittedMessageBox(QMessageBox):
             paragraph.installEventFilter(self)
             lines.addWidget(paragraph)
             self._paragraphs.append(paragraph)
+        for row in self._rows_under_the_question():
+            lines.addWidget(row)
         lines.addStretch(1)
         scroll = QScrollArea()
         scroll.setObjectName(QUESTION_SCROLL)
@@ -324,6 +326,16 @@ class FittedMessageBox(QMessageBox):
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidget(body)
         return scroll
+
+    def _rows_under_the_question(self) -> list[QWidget]:
+        """Widgets that scroll with the question, under its last paragraph; none here.
+
+        A box whose body is more than words (T520's link buttons) makes them
+        here, fresh on each call: the question's scroll area is made again
+        whenever its text changes, and these go with it. They are sized into
+        the box with the words, so the box still fits the screen.
+        """
+        return []
 
     def _room(self) -> QRect:
         """The free area of the screen the box opens on."""
