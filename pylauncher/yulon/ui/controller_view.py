@@ -156,7 +156,7 @@ from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
-from yulon.said import SaidByYulon
+from yulon.said import SaidByYulon, split_details
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -2894,6 +2894,24 @@ def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
     return keys
 
 
+def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
+    """The store's settings-only mods, read once on first use (T380).
+
+    `apply.settings_only()` over the `mod` family: Experience Rates and its kin,
+    which leave no folder. `apply.installed_modules()` is handed them so an
+    install made before their receipt existed still reads Installed. Lazy and
+    cached for `_record_backed_keys()`'s reasons.
+    """
+    cached: list[tuple[Manifest, ...]] = []
+
+    def mods() -> tuple[Manifest, ...]:
+        if not cached:
+            cached.append(tuple(m for m in store.load_all("mod") if apply_module.settings_only(m)))
+        return cached[0]
+
+    return mods
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2903,6 +2921,7 @@ def _for_wotlk(
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
+    settings_mods = _settings_mods(wotlk_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3174,7 +3193,7 @@ def _for_wotlk(
         # mob multipliers leave no folder and read Not installed for ever
         # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            (lambda: apply_module.installed_modules(server_dir, record_backed(), settings_mods()))
             if entry.has_manifests
             else None
         ),
@@ -3283,6 +3302,7 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
+    tbc_settings_mods = _settings_mods(tbc_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3364,6 +3384,14 @@ def _for_tbc(
         ),
         create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
         store=tbc_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=tbc_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # `sql=sql`, the SAME runner the console and the account tile use, and
         # that is the point of `tbc_modules.applier()` requiring it: it carries
         # this install's generated password (read once, above) and this game's
@@ -3422,6 +3450,7 @@ def _for_vanilla(
     binding rather than a `del` a future manifest would have to come back and
     undo — the same call the TBC factory makes.
     """
+    vanilla_settings_mods = _settings_mods(vanilla_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3538,6 +3567,14 @@ def _for_vanilla(
         # `cross-faction` is ten keys here, because mangos-classic has
         # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
         store=vanilla_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=vanilla_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # The same two 8.7a seams as TBC and for the same reasons (T7), over
         # this tree's own containers.
         applier=(
@@ -3814,6 +3851,7 @@ def _for_tortoise(
     has no manifests that want it, but the Steam client entry is a path to that
     folder's own executable and there is nowhere else to get it.
     """
+    tortoise_settings_mods = _settings_mods(tortoise_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3924,8 +3962,12 @@ def _for_tortoise(
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # T380: the folders AND the settings-only mods (Experience Rates, Message
+        # of the Day, Performance Stats), which leave no folder.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, manifests=tortoise_settings_mods()))
+            if entry.has_manifests
+            else None
         ),
         # T121's seam rides with `installed_modules`. Tortoise ships no relative
         # (record-backed) mod, so nothing here writes a pending mark and this
@@ -4538,6 +4580,11 @@ CHARACTERS_EMPTY = (
 
 CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log, and Stop ends it."
 CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
+CONSOLE_SHUTDOWN_REFUSED = (
+    "Not sent: a shutdown typed here closes the world server, and Docker starts it again at "
+    "once. To stop the server and keep it stopped, press Stop on the Server tab."
+)
+"""Said instead of sending a shutdown (`commands.ends_the_world`, T412)."""
 
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
@@ -4791,6 +4838,64 @@ FORGET_RECORD_QUESTION = (
     "creature values are already at their normal values, for example after restoring a backup."
 )
 """What the Forget question says, word for word (T121 fix wave)."""
+
+FORGET_INSTALL_QUESTION = (
+    "Yu'lon forgets that {name} is installed. The database is not changed. Use this only if the "
+    "stack sizes are already back to normal, for example after restoring a backup."
+)
+"""The Forget question for Bigger Stacks, whose record says it is installed (T385): its
+Remove restores from a backup table, which a restored database does not have."""
+
+SETTINGS_REMOVE_TAIL = (
+    ", including any value you set since {name} was installed.\n\n"
+    "Restart the server for this to take effect."
+)
+"""The end of a settings-only mod's Remove question (T380 cold review): a rate changed
+since the install goes back too, and the world reads its conf only at start."""
+
+SETTINGS_REMOVE_UNNAMED = "Every setting {name} changed goes back to the value the server came with"
+"""The Remove question's change line for a mod whose settings have no names to list."""
+
+SETTINGS_REMOVE_NOTHING = (
+    "Its settings already read the values the server came with, so nothing in them changes. "
+    "Yu'lon stops listing {name} as installed."
+)
+"""The Remove question when the remove steps would change no value."""
+
+
+def _and_join(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def remove_question(
+    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+) -> tuple[str, str]:
+    """The title and text of a settings-only mod's Remove question (T380 cold review).
+
+    Built from `apply.settings_removal()`, the manifest's remove patches over the
+    conf as it is: each setting by its name on the Tuning tab and the value it
+    goes back to, settings going to one value named together. A setting with no
+    name of its own is not listed by key; the line then says every setting the
+    mod changed goes back.
+    """
+    title = f"Remove {manifest.name}?"
+    if not changes:
+        return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
+    if any(change.label is None for change in changes):
+        said = SETTINGS_REMOVE_UNNAMED.format(name=manifest.name)
+    else:
+        groups: dict[str, list[str]] = {}
+        for change in changes:
+            groups.setdefault(change.after or "nothing", []).append(str(change.label))
+        said = "; ".join(
+            f"{_and_join(labels)} {'goes' if len(labels) == 1 else 'go'} back to {value}"
+            for value, labels in groups.items()
+        )
+    return title, said + SETTINGS_REMOVE_TAIL.format(name=manifest.name)
+
 
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
@@ -7052,6 +7157,7 @@ class ControllerView(QWidget):
         # may have been force-stopped. And whether the problem label is showing
         # a stop's words at all, so the end of ANY job can take them down.
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._stop_words_shown = False
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
@@ -9054,6 +9160,7 @@ class ControllerView(QWidget):
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
@@ -9212,7 +9319,7 @@ class ControllerView(QWidget):
         # (T158) left "stopping it now" in this label, which is false once the
         # stop is over. Only the forced-stop warning is carried past it.
         self.problem_label.setText(self._after_the_stop(said))
-        self.problem_details.set_text(why)
+        self.problem_details.set_text(self._after_the_stop_details(why))
         self.refresh_status()
         self.refresh_verdict()
 
@@ -9245,14 +9352,17 @@ class ControllerView(QWidget):
         removal use it: the status line does not wrap, and "the world is
         finishing its load before it can stop" needs its second sentence.
         """
-        self.problem_label.setText(text)
+        sentence, details = split_details(text)
+        self.problem_label.setText(sentence)
+        # T414: a crash's last lines go in the fold, never into the line.
+        self.problem_details.set_text(details)
         self._stop_words_shown = True
         self._heard_from_a_stop(text)
 
     @Slot(str)
     def _uninstall_stop_notice(self, text: str) -> None:
         """The same, for the uninstall's own removal of the containers, in its own label."""
-        self.uninstall_label.setText(text)
+        self.uninstall_label.setText(split_details(text)[0])
         self._heard_from_a_stop(text)
 
     def _heard_from_a_stop(self, text: str) -> None:
@@ -9262,8 +9372,8 @@ class ControllerView(QWidget):
             self.stop_anyway_button.setVisible(True)
         else:
             self.stop_anyway_button.setVisible(False)
-        if text in docker.FORCE_STOP_WARNINGS:
-            self._stop_forced = text
+        if docker.outlives_the_stop(text):
+            self._stop_forced, self._stop_forced_details = split_details(text)
 
     @Slot()
     def stop_now_anyway(self) -> None:
@@ -9279,6 +9389,11 @@ class ControllerView(QWidget):
         """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
         forced, self._stop_forced = self._stop_forced, ""
         return "\n\n".join(part for part in (forced, said) if part)
+
+    def _after_the_stop_details(self, why: str) -> str:
+        """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
+        forced, self._stop_forced_details = self._stop_forced_details, ""
+        return "\n\n".join(part for part in (forced, why) if part)
 
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
@@ -9792,6 +9907,7 @@ class ControllerView(QWidget):
             self.uninstall_label.setText(PLAY_PENDING)
             return
         self._stop_forced = ""
+        self._stop_forced_details = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
             self.action_failed.emit(UNINSTALL_NO_PLAN)
@@ -11577,6 +11693,7 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._set_busy(True, "Remove containers")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self.problem_label.setText("")
         self._say_under_the_presses("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
@@ -11850,6 +11967,12 @@ class ControllerView(QWidget):
     @Slot()
     def send_console_command(self) -> None:
         command = self.command_edit.text().strip()
+        if command and commands.ends_the_world(command):
+            # T412: the world would close and Docker would start it again at once.
+            self.console_log.append(f"> {command}")
+            self.console_log.append(CONSOLE_SHUTDOWN_REFUSED)
+            self.command_edit.clear()
+            return
         if command:
             self._send(command)
             self.command_edit.clear()
@@ -15582,6 +15705,21 @@ class ControllerView(QWidget):
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
             return
+        if action == "remove" and apply_module.settings_only(manifest):
+            # T380 cold review: one press of Remove put every rate this mod
+            # touched back to stock, a rate set since included. Asked first, No
+            # by default, naming each setting and the value it goes back to, in
+            # the box that fits the screen (T243).
+            title, text = remove_question(
+                manifest,
+                apply_module.settings_removal(self.services.controller.server_dir, manifest),
+            )
+            if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
         relative = reapplies_on_top(manifest)
         if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
@@ -18709,7 +18847,8 @@ class ControllerView(QWidget):
 
         A relative manifest (the four mob multipliers) leaves no folder, so its
         row can only read installed from the record (T121). That is the row a
-        stale record can lie on, and the one Forget is for.
+        stale record can lie on, and the one Forget is for. So is Bigger Stacks
+        with no repository (`database_receipt()`, T385).
         """
         manifest = self.selected_manifest()
         row = self.modules_panel.selected_row()
@@ -18717,7 +18856,7 @@ class ControllerView(QWidget):
             manifest is not None
             and row is not None
             and row.data.installed
-            and reapplies_on_top(manifest)
+            and (reapplies_on_top(manifest) or apply_module.database_receipt(manifest))
         )
 
     @Slot()
@@ -18736,7 +18875,9 @@ class ControllerView(QWidget):
         answer = QMessageBox.question(
             self,
             "Forget Yu'lon's record?",
-            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            (
+                FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
+            ).format(name=manifest.name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

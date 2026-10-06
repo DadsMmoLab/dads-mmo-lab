@@ -1071,6 +1071,7 @@
             "restart_loop": 4
           },
           "stop_waits_for_world_load": true,
+          "save_before_stop": { "command": "saveall" },
           "cmangos": {
             "client": {
               "required_file": null,
@@ -1439,6 +1440,11 @@
             "regex": false,
             "timeout_s": 1800,
             "restart_loop": 4
+          },
+          "save_before_stop": {
+            "command": "saveall",
+            "queue_command": "server debug",
+            "queue_pattern": "CharacterDatabase queue size: (\\d+)"
           },
           "trinitycore": {
             "checkout": "src/centurion",
