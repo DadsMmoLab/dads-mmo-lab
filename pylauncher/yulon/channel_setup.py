@@ -1334,6 +1334,8 @@ class InstallChannel:
         # runs on a worker while a Refresh or a tab's opening look can run on
         # another, and the look from `Idle` must not judge a row mid-settle.
         self._settles = 0
+        self.channel_is_off = False
+        """Set by `check()`, `settle()` and `repair()`: waiting, and the files say off (T423)."""
 
     def _password(self) -> str | None:
         """The install's database password, read now if it was handed over as a reader."""
@@ -1373,6 +1375,10 @@ class InstallChannel:
         )
 
     def check(self) -> State:
+        """`_check()`, and a note of whether a waiting row is waiting on a channel that is off."""
+        return self._noted(self._check())
+
+    def _check(self) -> State:
         """Ask whether the saved credential still works, and keep the answer.
 
         Only the SERVER rejecting this credential downgrades it, which is what
@@ -1430,6 +1436,16 @@ class InstallChannel:
         )
         return self._state
 
+    def _noted(self, state: State) -> State:
+        """Remember, for the tab, whether a waiting row waits on a channel that is off (T423).
+
+        Read here, on the worker that ran the look or the press, and not by the
+        tab: `is_enabled()` reads files, which for an install inside a WSL
+        distro can boot a stopped one if it is done on the GUI thread.
+        """
+        self.channel_is_off = isinstance(state, Pending) and self.is_enabled() is False
+        return state
+
     def _account_is_gone(self, account: str) -> bool:
         """True when the auth database was asked and has no row by this name (T423).
 
@@ -1472,6 +1488,10 @@ class InstallChannel:
         return self._state
 
     def repair(self) -> State:
+        """`_repair()`, and the same note as `check()`."""
+        return self._noted(self._repair())
+
+    def _repair(self) -> State:
         """Give the account this install already has a password that works.
 
         Does nothing unless the credential has actually been refused: this is a
@@ -1505,6 +1525,10 @@ class InstallChannel:
         return self._state
 
     def settle(self) -> State:
+        """`_settle()`, and the same note as `check()`."""
+        return self._noted(self._settle())
+
+    def _settle(self) -> State:
         """Move the channel to wherever the live server says it is.
 
         One entry point for the tab, because the right thing to do depends on

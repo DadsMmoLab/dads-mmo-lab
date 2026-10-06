@@ -8548,8 +8548,9 @@ class ControllerView(QWidget):
 
     def _channel_is_off(self) -> bool:
         """True only when this install's files plainly do not switch the channel on (T423)."""
-        reader = getattr(self.services.channel_setup, "is_enabled", None)
-        return callable(reader) and reader() is False
+        # Noted by the setup's own worker-side calls; reading files here would be
+        # a read on the GUI thread, of a distro that may be stopped.
+        return getattr(self.services.channel_setup, "channel_is_off", False) is True
 
     @Slot()
     def repair_channel(self) -> None:
