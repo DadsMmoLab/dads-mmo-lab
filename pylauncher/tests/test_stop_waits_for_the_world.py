@@ -278,7 +278,9 @@ def test_tortoises_ready_banner_is_not_taken_for_a_world_that_can_hear_the_stop(
     fake = _install(monkeypatch, "wow-tortoise", frames)
     controller, _ = _controller(fake, tmp_path)
     assert controller.stop() is True
-    assert fake.events == ["look 1", "look 2", "stop"]
+    # The third look is the save's (T411): Tortoise is asked to save everyone at its console
+    # before the signal, only if it is running.
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"]
 
 
 def test_a_world_that_restarts_while_it_is_waited_on_is_waited_on_again(

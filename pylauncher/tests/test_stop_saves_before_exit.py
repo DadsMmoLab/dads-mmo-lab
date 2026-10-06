@@ -378,7 +378,7 @@ def test_every_world_that_drains_its_saves_on_a_signal_is_waited_for(
 ) -> None:
     fake = _install(monkeypatch, game, _rising(STALL * 2))
     if fake.spec.stop_waits_for_load:
-        monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: None)
+        monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
     _stop(fake, tmp_path)
     assert fake.events == ["SIGTERM", "world exited by itself", "compose stop (world down)"]
 
@@ -481,8 +481,10 @@ class _Console:
     """The world's console as `docker._console_send` reaches it: the commands typed, in order.
 
     `queue` is what each `server debug` finds in the character save queue (None: a reply with no
-    queue line in it); the last value repeats. Each `server debug` advances the fake's clock by
-    its step. `refuse` makes every command fail as a console this host cannot reach does.
+    queue line in it); the last value repeats. Each `server debug` after the first advances the
+    fake's clock by its step. `refuse` makes every command fail as a console this host cannot
+    reach does; `prompted` False answers every command with no prompt in the window, which is
+    also what an attach that never reached the console looks like.
     """
 
     def __init__(self, fake: _Docker, queue: list[int | None] | None = None) -> None:
@@ -490,6 +492,8 @@ class _Console:
         self.queue = list(queue or [])
         self.looks = 0
         self.refuse = ""
+        self.prompted = True
+        self.after_look: object = None
 
     def __call__(self, command: str, **kw: object) -> object:
         from yulon.controller_wow_wotlk.console import ConsoleError, ConsoleReply
@@ -500,7 +504,7 @@ class _Console:
             raise ConsoleError(self.refuse)
         self.fake.events.append(f"console: {command}")
         if command != "server debug":
-            return ConsoleReply(command=command, lines=("All players saved.",), prompted=True)
+            return ConsoleReply(command, ("All players saved.",), prompted=self.prompted)
         self.looks += 1
         if self.looks > 1:
             self.fake.now += self.fake.step
@@ -508,7 +512,9 @@ class _Console:
         lines = ["Using World DB: TDB 335.21101", "LoginDatabase queue size: 0"]
         if size is not None:
             lines.append(f"CharacterDatabase queue size: {size}")
-        return ConsoleReply(command=command, lines=tuple(lines), prompted=True)
+        if callable(self.after_look):
+            self.after_look()
+        return ConsoleReply(command, tuple(lines), prompted=self.prompted)
 
 
 def _with_console(
@@ -558,38 +564,48 @@ def test_centurion_saves_everyone_and_waits_for_the_queue_before_the_signal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The T410 loss: whatever is still queued when Centurion closes is thrown away. So the world
-    is told to save everyone while it still runs, and signalled only once those saves are out of
-    the queue."""
+    is told to save everyone while it still runs, and signalled only once the queue is empty."""
     fake = _install(monkeypatch, "wow-centurion", _rising(10))
-    console = _with_console(monkeypatch, fake, [3, 2137, 1500, 600, 40, 2])
+    console = _with_console(monkeypatch, fake, [2137, 1500, 600, 40, 0])
     stopped, said, _ = _stop(fake, tmp_path)
     assert stopped is True
-    assert fake.events[: 2 + 6] == [
-        "console: server debug",
+    assert fake.events[:7] == [
         "console: saveall",
         *["console: server debug"] * 5,
         "SIGTERM",
     ]
     assert fake.events[-2:] == ["world exited by itself", "compose stop (world down)"]
-    assert console.looks == 6
-    assert said[0] == docker.SAVE_FIRST_ASKED
-    assert said[1] == docker.SAVE_FIRST_QUEUED.format(count=2137)
-    assert said[2] == docker.SAVE_FIRST_WRITTEN
-    assert said[3:] == [docker.WORLD_SAVING, docker.WORLD_SAVED]
+    assert console.looks == 5
+    assert said == [
+        docker.SAVE_FIRST_ASKED,
+        docker.SAVE_FIRST_QUEUED.format(count=2137),
+        docker.SAVE_FIRST_WRITTEN,
+        docker.WORLD_SAVING,
+        docker.WORLD_SAVED,
+    ]
 
 
-def test_a_queue_already_back_at_its_level_is_not_waited_on(
+def test_a_queue_back_at_an_older_level_is_not_taken_for_the_saves_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One worker writes the queue in order. With items queued before the save, the length is
+    back at its earlier level while every save `saveall` queued is still behind them; only an
+    empty queue holds none of them (cold review)."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake, [2140, 3, 3, 3, 0])
+    _, said, _ = _stop(fake, tmp_path)
+    assert console.looks == 5
+    assert fake.events.index("SIGTERM") == 1 + 5
+    assert docker.SAVE_FIRST_WRITTEN in said
+
+
+def test_a_queue_already_empty_is_not_waited_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
-    _with_console(monkeypatch, fake, [5, 5])
+    _with_console(monkeypatch, fake, [0])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:4] == [
-        "console: server debug",
-        "console: saveall",
-        "console: server debug",
-        "SIGTERM",
-    ]
+    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
     assert said[:2] == [docker.SAVE_FIRST_ASKED, docker.SAVE_FIRST_WRITTEN]
 
 
@@ -597,7 +613,7 @@ def test_a_queue_that_stops_shrinking_is_given_up_on_and_the_stop_goes_on_said_p
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
-    _with_console(monkeypatch, fake, [0, 900, 800])
+    _with_console(monkeypatch, fake, [900, 800])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.termed_at is not None
     assert STALL <= fake.termed_at < STALL + 4 * fake.step
@@ -611,7 +627,7 @@ def test_a_queue_that_keeps_shrinking_slowly_is_waited_out_past_the_stall(
 ) -> None:
     looks = int(STALL / 2.0) * 2
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
-    _with_console(monkeypatch, fake, [0, *range(looks, -1, -1)])
+    _with_console(monkeypatch, fake, [*range(looks, -1, -1)])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.termed_at is not None and fake.termed_at > STALL
     assert docker.SAVE_FIRST_UNFINISHED not in said
@@ -624,7 +640,7 @@ def test_a_queue_that_cannot_be_read_mid_wait_does_not_hold_the_stop_past_the_st
     """Not like the world's traffic after the signal: here the world is still RUNNING, so a wait
     on looks that never answer would hold a running server for half an hour on nothing."""
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
-    _with_console(monkeypatch, fake, [0, None])
+    _with_console(monkeypatch, fake, [900, None])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.termed_at is not None
     assert fake.termed_at < STALL + 4 * fake.step
@@ -635,23 +651,49 @@ def test_the_ceiling_bounds_a_queue_that_shrinks_forever(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
-    _with_console(monkeypatch, fake, [0, *range(10**6, 0, -1)])
+    _with_console(monkeypatch, fake, [*range(10**6, 0, -1)])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.termed_at is not None
     assert CEILING <= fake.termed_at < CEILING + 4 * fake.step
     assert docker.SAVE_FIRST_UNFINISHED in said
 
 
-def test_a_queue_length_that_cannot_be_read_before_the_save_is_not_waited_on(
+def test_a_queue_length_that_cannot_be_read_at_all_is_not_waited_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No level to wait back down to: the save is still asked for, and the stop goes on."""
+    """Nothing to wait for: the save was asked for (the console answered), and the stop goes on."""
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _with_console(monkeypatch, fake, [None])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:3] == ["console: server debug", "console: saveall", "SIGTERM"]
-    assert said[0] == docker.SAVE_FIRST_ASKED
-    assert said[1] == docker.WORLD_SAVING
+    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
+    assert said[:2] == [docker.SAVE_FIRST_ASKED, docker.WORLD_SAVING]
+
+
+def test_a_console_with_no_prompt_and_no_queue_line_is_not_said_to_have_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An attach that never reached the console comes back as a reply with no prompt, not as an
+    error (cold review): "asked" would be untrue."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake, [None])
+    console.prompted = False
+    _, said, _ = _stop(fake, tmp_path)
+    assert said[0] == docker.SAVE_FIRST_NOT_ASKED
+    assert docker.SAVE_FIRST_ASKED not in said
+
+
+def test_a_queue_line_proves_the_console_answered_even_without_a_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake, [40, 0])
+    console.prompted = False
+    _, said, _ = _stop(fake, tmp_path)
+    assert said[:3] == [
+        docker.SAVE_FIRST_ASKED,
+        docker.SAVE_FIRST_QUEUED.format(count=40),
+        docker.SAVE_FIRST_WRITTEN,
+    ]
 
 
 def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
@@ -661,7 +703,7 @@ def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
     while the database is up; Tortoise drains what that queued on the signal, which the wait after
     the signal already sees."""
     fake = _install(monkeypatch, "wow-tortoise", _rising(10))
-    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: None)
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
     _with_console(monkeypatch, fake)
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events == [
@@ -671,6 +713,18 @@ def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
         "compose stop (world down)",
     ]
     assert said == [docker.SAVE_FIRST_ASKED, docker.WORLD_SAVING, docker.WORLD_SAVED]
+
+
+def test_a_tortoise_console_with_no_prompt_is_said_as_not_asked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-tortoise", _rising(4))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    console = _with_console(monkeypatch, fake)
+    console.prompted = False
+    _, said, _ = _stop(fake, tmp_path)
+    assert said[0] == docker.SAVE_FIRST_NOT_ASKED
+    assert docker.SAVE_FIRST_NOT_ASKED in docker.FORCE_STOP_WARNINGS
 
 
 def test_wotlk_types_nothing_at_its_console(
@@ -708,23 +762,38 @@ def test_giving_up_while_the_queue_drains_sends_nothing_and_says_the_world_still
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Before the signal the world is still running, so this give-up IS a `StopAbandoned`: every
-    handler of that one says so, and here it is true."""
+    handler of that one says so, and here it is true. The rebuild's `before_signal` -- the moment
+    past which it reads the servers as touched -- is not reached (cold review)."""
     fake = _install(monkeypatch, "wow-centurion", _rising(10))
-    console = _with_console(monkeypatch, fake, [0, 900, 800, 700, 600, 500])
+    console = _with_console(monkeypatch, fake, [900, 800, 700, 600, 500])
     control = docker.StopControl()
-    original = console.__call__
-
-    def give_up_on_the_third_look(command: str, **kw: object) -> object:
-        reply = original(command, **kw)
-        if console.looks == 3:
-            control.abandon.set()
-        return reply
-
-    monkeypatch.setattr(docker, "_console_send", give_up_on_the_third_look)
-    with pytest.raises(docker.StopAbandoned):
-        docker.save_then_stop_the_world(fake.spec, control)
+    console.after_look = lambda: control.abandon.set() if console.looks == 3 else None
+    touched: list[bool] = []
+    with pytest.raises(docker.SaveFirstAbandoned) as raised:
+        docker.stop_servers_staged(
+            fake.spec, tmp_path, control=control, before_signal=lambda: touched.append(True)
+        )
+    assert isinstance(raised.value, docker.StopAbandoned)
     assert "SIGTERM" not in fake.events
     assert fake.spec.world in fake.running
+    assert touched == []
+
+
+def test_the_rebuilds_hook_comes_after_the_save_and_right_before_the_signal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [10, 0])
+    docker.stop_servers_staged(
+        fake.spec, tmp_path, before_signal=lambda: fake.events.append("about to signal")
+    )
+    assert fake.events[:5] == [
+        "console: saveall",
+        "console: server debug",
+        "console: server debug",
+        "about to signal",
+        "SIGTERM",
+    ]
 
 
 def test_a_give_up_mid_save_tells_the_panel_what_it_left() -> None:
@@ -733,3 +802,44 @@ def test_a_give_up_mid_save_tells_the_panel_what_it_left() -> None:
     from yulon.after_stop import TrueAfterStop
 
     assert issubclass(docker.SaveAbandoned, TrueAfterStop)
+
+
+# -- "Stop now anyway" on a world that may still be deaf (cold review) --------------------------
+
+
+@pytest.mark.parametrize("game", ["wow-tortoise", "wow-vanilla"])
+def test_a_forced_stop_of_a_loading_world_is_neither_saved_first_nor_watched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, game: str
+) -> None:
+    """T158's premise: a CMaNGOS world still loading drops the SIGTERM. "Stop now anyway" ends
+    the load wait with the world possibly deaf; its loading traffic is not a save, so it is left
+    to the ordinary stop and its grace, as before T384 -- not watched for half an hour and said to
+    be "saving every character"."""
+    fake = _install(monkeypatch, game, _rising(CEILING * 2), exits=False)
+    console = _with_console(monkeypatch, fake, [0])
+
+    def forced(*_a: object, **_k: object) -> object:
+        yield docker.WORLD_STOPPED_ANYWAY
+
+    monkeypatch.setattr(docker, "world_load_steps", forced)
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events == ["compose stop (world up)", "world stopped by the grace"]
+    assert console.looks == 0
+    assert docker.WORLD_SAVING not in said
+    assert said == [docker.WORLD_STOPPED_ANYWAY]
+
+
+def test_the_load_wait_says_whether_the_world_can_hear_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = CATALOG.get("wow-tortoise").container_spec()
+    monkeypatch.setattr(
+        docker, "world_load_steps", lambda *a, **k: iter([docker.WORLD_STOPPED_ANYWAY])
+    )
+    assert docker.wait_for_the_world_to_load(spec, docker.StopControl()) is False
+    monkeypatch.setattr(
+        docker, "world_load_steps", lambda *a, **k: iter([docker.WORLD_FINISHED_LOADING])
+    )
+    assert docker.wait_for_the_world_to_load(spec, docker.StopControl()) is True
+    monkeypatch.setattr(docker, "world_load_steps", lambda *a, **k: iter([]))
+    assert docker.wait_for_the_world_to_load(spec, docker.StopControl()) is True

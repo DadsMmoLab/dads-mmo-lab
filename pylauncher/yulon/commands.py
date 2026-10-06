@@ -356,27 +356,32 @@ the channel works and something a person can read in a capture.
 """
 
 
-_ENDS_THE_WORLD = re.compile(
-    r"^\.?server\s+(?:shutdown|exit|idleshutdown)(?:\s+(?P<rest>.*))?$", re.I
-)
+_ENDS_THE_WORLD = ("shutdown", "exit", "idleshutdown")
 
 
 def ends_the_world(typed: str) -> bool:
     """Does this console line shut the world server down for good (T412)?
 
     `server shutdown`, `server exit` and `server idleshutdown`, with or without a
-    leading dot, in any case -- and not their `cancel`. Measured on yulon-ubuntu
-    2026-10-05 (WotLK): `server shutdown 1` saved and closed the world cleanly,
-    exit 0, and Docker started it again at once, because every service here has
-    `restart: unless-stopped` and an exit the container chose itself is not a
-    stop. `server restart` is not one of these: Docker bringing it back is what
-    it asks for.
+    leading dot, in any case, and ABBREVIATED as the consoles accept them
+    (AzerothCore, TrinityCore and CMaNGOS all take a command by any prefix of each
+    word, so `ser shut 1` is `server shutdown 1`) -- and not their `cancel`.
+    Measured on yulon-ubuntu 2026-10-05 (WotLK): `server shutdown 1` saved and
+    closed the world cleanly, exit 0, and Docker started it again at once,
+    because every service here has `restart: unless-stopped` and an exit the
+    container chose itself is not a stop. `server restart` is not one of these:
+    Docker bringing it back is what it asks for.
+
+    A prefix the console itself would find ambiguous (`server s`) is refused
+    too: nothing a player needs is lost by that, and the console would not have
+    run it either.
     """
-    found = _ENDS_THE_WORLD.match(typed.strip())
-    if found is None:
+    words = typed.strip().lstrip(".").lower().split()
+    if len(words) < 2 or not "server".startswith(words[0]):
         return False
-    rest = (found.group("rest") or "").split()
-    return not (rest and rest[0].lower() == "cancel")
+    if not any(verb.startswith(words[1]) for verb in _ENDS_THE_WORLD):
+        return False
+    return not (len(words) > 2 and "cancel".startswith(words[2]))
 
 
 def _require(ok: bool, message: str) -> None:

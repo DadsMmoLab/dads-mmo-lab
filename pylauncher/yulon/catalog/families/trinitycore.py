@@ -1546,6 +1546,12 @@ class TrinityCoreInstaller(CmangosInstaller):
         control = _stop_control(ctx, rollback=False)
         try:
             self._seams.recreate(spec, ctx.server_dir, control=control)
+        except docker.SaveAbandoned as exc:
+            raise InstallStopped(
+                "The world update is finished, but starting the server was stopped while the "
+                "world server was saving its characters on the way down. It closes by itself "
+                "once the saves are written; then press Start on the Server tab."
+            ) from exc
         except docker.StopAbandoned as exc:
             raise InstallStopped(
                 f"The world update is finished, but starting the server was cancelled: {exc}. "
@@ -1827,6 +1833,12 @@ class TrinityCoreInstaller(CmangosInstaller):
 
         try:
             yield from _speaking(stop_it, control.abandon)
+        except docker.SaveAbandoned as exc:
+            raise InstallStopped(
+                f"This was stopped while {self.entry.name}'s world server was saving its "
+                f"characters on the way down, so these world tables were not imported again: "
+                f"{_listed(names)}. Press “{FINISH_WORLD_BUTTON}” again once it has stopped."
+            ) from exc
         except (docker.StopAbandoned, docker.DockerCommandError) as exc:
             raise InstallerError(
                 f"Yu'lon could not stop {self.entry.name}'s world server ({exc}), so these world "

@@ -6663,6 +6663,19 @@ class StagedInstaller:
 
         try:
             yield from _with_hint(_speaking(stop_it, control.abandon), CORRECTIONS_WAIT_HINT)
+        except docker.SaveAbandoned as exc:
+            # T384: the world heard the stop and is saving; Yu'lon stopped watching.
+            raise InstallStopped(
+                f"This was stopped while {self.entry.name}'s world server was saving its "
+                f"characters on the way down, so nothing was applied. The world server closes "
+                f"by itself once the saves are written."
+            ) from exc
+        except docker.SaveFirstAbandoned as exc:
+            raise InstallStopped(
+                f"This was stopped while {self.entry.name}'s world server was saving its "
+                f"characters, before it was told to stop, so nothing was applied. It is still "
+                f"running."
+            ) from exc
         except docker.StopAbandoned as exc:
             raise InstallStopped(
                 f"This was stopped while {self.entry.name}'s world server was still loading, so "
@@ -7239,6 +7252,17 @@ class StagedInstaller:
 
             try:
                 yield from _with_hint(_speaking(stop_them, control.abandon), REBUILD_WAIT_HINT)
+            except docker.SaveAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was stopped while the world server was saving its characters "
+                    "on the way down, before the new build replaced it."
+                ) from exc
+            except docker.SaveFirstAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was cancelled while the world server was saving its characters, "
+                    "before it was told to stop, so its containers were not replaced -- the "
+                    "server you have is still the one that was running before this rebuild."
+                ) from exc
             except docker.StopAbandoned as exc:
                 raise InstallStopped(
                     "The rebuild was cancelled while the world was still loading, so its "
@@ -7265,6 +7289,17 @@ class StagedInstaller:
                 _speaking(replace_them, control.abandon),
                 ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
             )
+        except docker.SaveAbandoned as exc:
+            raise InstallStopped(
+                "The rebuild was stopped while the world server was saving its characters on "
+                "the way down, before the new build replaced it."
+            ) from exc
+        except docker.SaveFirstAbandoned as exc:
+            raise InstallStopped(
+                "The rebuild was cancelled while the world server was saving its characters, "
+                "before it was told to stop, so its containers were not replaced -- the server "
+                "you have is still the one that was running before this rebuild."
+            ) from exc
         except docker.StopAbandoned as exc:
             raise InstallStopped(
                 "The rebuild was cancelled while the world was still loading, so its "

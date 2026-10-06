@@ -465,7 +465,14 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "typed", ["server shutdown 1", ".server shutdown 60", "server exit", "SERVER IdleShutdown 5"]
+    "typed",
+    [
+        "server shutdown 1",
+        ".server shutdown 60",
+        "server exit",
+        "SERVER IdleShutdown 5",
+        "ser shut 1",
+    ],
 )
 def test_a_shutdown_typed_at_the_console_is_not_sent_and_stop_is_named(
     qapp: object, ps: _Ps, tmp_path: Path, typed: str
