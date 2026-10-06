@@ -424,7 +424,7 @@ INT32_LARGEST = 2**31 - 1
 AzerothCore module may read a key as `uint32` instead (`mod-ah-bot`'s GUID), and
 then 2147483648 and up is refused although that module could read it: no real
 GUID or count lives there, while accepting it for an `int32` reader is a value
-the server never sees. The catalog has no way yet to say a key is unsigned.
+the server never sees. A key the module reads as `uint32` says so with `unsigned`.
 """
 
 
@@ -452,15 +452,16 @@ def check(key: ConfKey | None, value: str) -> None:
     if key.type == "int":
         if WHOLE_NUMBER.fullmatch(value) is None:
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            example = "like 12" if key.unsigned else "like 12 or -5"
             raise TuningError(
                 f"{key.key}: '{value}' is not a whole number; "
-                f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
+                f"type it with the digits 0 to 9 only{spaces}, {example}"
             )
         number = int(value)
         smallest, largest = int_range(key.unsigned)
         if not smallest <= number <= largest:
             raise TuningError(
-                f"{key.key}: {value} is more than the server can hold; "
+                f"{key.key}: {value} is not a number the server can hold; "
                 f"use a number from {smallest} to {largest}"
             )
         if key.min is not None and number < key.min:
@@ -506,6 +507,27 @@ FLOAT_LARGEST = 3.4028234663852886e38
 and `std::stof` throws `out_of_range` above it while Python's `float()` does not."""
 
 
+def decimal_fault(text: str) -> str:
+    """Why this text is not a decimal the cores read as typed, or `""` (T395).
+
+    `"spelling"` (not `DECIMAL`), `"decimals"` (past `DECIMAL_PLACES`) or `"large"`
+    (past a C `float`). The one rule behind a `float` Tuning key AND a `float`
+    module question, each wording the refusal its own way.
+    """
+    if DECIMAL.fullmatch(text) is None:
+        return "spelling"
+    _, point, places = text.partition(".")
+    if point and len(places) > DECIMAL_PLACES:
+        return "decimals"
+    number = float(text)
+    # Digits only, and still past what the server's float holds: `float()` says
+    # `inf` or a large double, and the core's parser says out of range (Codex
+    # review and cold review, 2026-10-05).
+    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
+        return "large"
+    return ""
+
+
 def _check_decimal(key: ConfKey, value: str) -> None:
     """A `float` key's rule: a plain decimal, inside whichever bounds the key states.
 
@@ -516,20 +538,17 @@ def _check_decimal(key: ConfKey, value: str) -> None:
     text = value.strip()
     if not text:
         raise RateRefused(f"{row} is empty. Write a number like 1, 2 or 1.5.")
-    if DECIMAL.fullmatch(text) is None:
+    fault = decimal_fault(text)
+    if fault == "spelling":
         raise RateRefused(f"{row}: {text} is not a number. Write it like 1, 2 or 1.5.")
-    _, point, places = text.partition(".")
-    if point and len(places) > DECIMAL_PLACES:
+    if fault == "decimals":
         raise RateRefused(
             f"{row}: {text} has too many decimals; use at most "
             f"{DECIMAL_PLACES} digits after the point, like 0.0001."
         )
-    number = float(text)
-    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
-        # Digits only, and still past what the server's float holds: `float()` says
-        # `inf` or a large double, and the core's parser says out of range (Codex
-        # review and cold review, 2026-10-05).
+    if fault == "large":
         raise RateRefused(f"{row}: {text} is too large to be a number.")
+    number = float(text)
     if key.min is not None and number < key.min:
         raise RateRefused(f"{row}: {text} is below the smallest allowed value {key.min}.")
     if key.max is not None and number > key.max:

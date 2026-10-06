@@ -431,6 +431,12 @@ def test_an_unsigned_int_key_takes_zero_to_uint32_and_refuses_a_negative() -> No
             tuning.check(_key(type="int", unsigned=True), value)
     with pytest.raises(tuning.TuningError, match="^K: "):
         tuning.check(_key(type="int"), "3000000000")
+    with pytest.raises(tuning.TuningError, match="0 to 4294967295") as refusal:
+        tuning.check(_key(type="int", unsigned=True), "-1")
+    assert "more than" not in str(refusal.value)
+    with pytest.raises(tuning.TuningError) as refusal:
+        tuning.check(_key(type="int", unsigned=True), "+5")
+    assert "-5" not in str(refusal.value)
 
 
 def test_unsigned_belongs_to_an_int_key_only() -> None:
@@ -443,15 +449,18 @@ def test_the_shipped_ah_bot_keys_are_unsigned() -> None:
     import json
 
     base = Path(__file__).resolve().parent.parent / "manifests" / "wow-wotlk" / "modules"
-    for name, wanted in (
-        ("mod-ah-bot", {"AuctionHouseBot.GUID", "AuctionHouseBot.Account"}),
-        ("mod-ah-bot-plus", {"AuctionHouseBot.ItemsPerCycle"}),
+    for name, wanted, prompts in (
+        (
+            "mod-ah-bot",
+            {"AuctionHouseBot.GUID", "AuctionHouseBot.Account"},
+            {"bot_guid", "bot_account"},
+        ),
+        ("mod-ah-bot-plus", {"AuctionHouseBot.ItemsPerCycle"}, {"bot_guid"}),
     ):
         manifest = parse_manifest(json.loads((base / f"{name}.json").read_text(encoding="utf-8")))
         keys = {k.key: k for conf in manifest.conf for k in conf.keys}
         assert {k for k in wanted if keys[k].unsigned} == wanted, name
-    guid = next(p for p in manifest.prompts if p.key == "bot_guid")
-    assert guid.unsigned
+        assert {p.key for p in manifest.prompts if p.unsigned} == prompts, name
 
 
 def test_a_raw_conf_text_names_each_declared_int_key_whose_value_fails_check() -> None:

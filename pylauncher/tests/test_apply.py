@@ -2300,6 +2300,31 @@ def test_a_decimal_answer_in_any_spelling_but_plain_digits_is_refused(typed: str
     assert command_faults(apply_module.check_answer(prompt, typed)) == []
 
 
+@pytest.mark.parametrize(
+    ("stored", "read"), [("2 ", "2"), (" 2", "2"), ("+2", "2"), ("2e0", "2"), ("1.5e1", "15")]
+)
+def test_a_decimal_stored_before_the_spelling_rule_is_still_read_back(
+    stored: str, read: str
+) -> None:
+    """The SQL that build sent read each of these as the number it says (cold review)."""
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, stored) != "", "typing stays strict"
+    assert apply_module.stored_answer(prompt, stored) == read
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) == ""
+
+
+@pytest.mark.parametrize("stored", ["1_0", "１.５", "inf", "1e-7", "1e99999"])
+def test_a_stored_decimal_no_server_reads_is_still_refused(stored: str) -> None:
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) != ""
+
+
+@pytest.mark.parametrize("typed", ["0.00001", "9" * 50])
+def test_a_decimal_answer_follows_the_tuning_rules_on_places_and_size(typed: str) -> None:
+    """One rule with the Server rates card (`tuning.decimal_fault`), not a second regex."""
+    assert apply_module.check_answer(_prompt(kind="float"), typed) != ""
+
+
 def test_a_decimal_answer_in_plain_digits_still_passes() -> None:
     for good in ("0", "1", "1.5", "2.", ".5", "-0.5", "007", "0.0001"):
         assert apply_module.check_answer(_prompt(kind="float"), good) == "", good
