@@ -8,6 +8,7 @@ becomes a line in the manifest rather than the end of the bundle.
 
 from __future__ import annotations
 
+import json
 import os
 import platform as host_platform
 import sys
@@ -66,6 +67,8 @@ class InstallFacts:
     wsl_distro: str | None
     entry: CatalogEntry | None
     """None when this version's catalog does not know the game (an old `state.json`)."""
+    failed: bool = False
+    """An install that failed and was never remembered, found in its default folder (T351)."""
 
     @property
     def label(self) -> str:
@@ -117,8 +120,54 @@ class Viewable:
     path: Path
 
 
+def _failed_installs(
+    remembered: Sequence[KnownInstall], catalog: Catalog, home: Path
+) -> list[InstallFacts]:
+    """Catalog games whose default folder holds an install that failed (T351).
+
+    A failed install is never remembered, so nothing else leads the bundle to its
+    containers or its generated database password. Only the default folder is
+    known: a folder the player picked is written nowhere until the install
+    succeeds. The state file is read as plain JSON, never raising.
+    """
+    # Lazy: `catalog.native` imports the support package.
+    from yulon.catalog.installer import default_server_dir
+    from yulon.catalog.native import ERROR_RUN_INSTALL, STATE_FILE
+
+    held = {known.server_dir for known in remembered}
+    found: list[InstallFacts] = []
+    for entry in catalog.games:
+        try:
+            folder = default_server_dir(entry, home)
+            if folder in held:
+                continue
+            parsed = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("error_run") == ERROR_RUN_INSTALL
+            and parsed.get("last_error")
+        ):
+            found.append(
+                InstallFacts(
+                    game=entry.id,
+                    install_id=composegen.install_id(folder),
+                    server_dir=folder,
+                    wsl_distro=None,
+                    entry=entry,
+                    failed=True,
+                )
+            )
+    return found
+
+
 def sources_for_app(
-    installs: Sequence[KnownInstall], catalog: Catalog, *, qt_version: str = ""
+    installs: Sequence[KnownInstall],
+    catalog: Catalog,
+    *,
+    qt_version: str = "",
+    home: Path | None = None,
 ) -> Sources:
     """The window's installs and this process's files, as a `Sources`.
 
@@ -141,6 +190,7 @@ def sources_for_app(
                 entry=entry,
             )
         )
+    facts += _failed_installs(installs, catalog, home if home is not None else Path.home())
     public = frozenset(
         value
         for entry in catalog.games
@@ -478,7 +528,8 @@ def collect_live_logs(
             )
             continue
         started = monotonic()
-        text = docker.log_tail(
+        # Both streams (T350): a container without a tty writes its errors to stderr.
+        text = docker.last_lines(
             container, LIVE_TAIL_LINES, wsl_distro=target, timeout=LIVE_TIMEOUT_S
         )
         if text is None:
@@ -539,6 +590,7 @@ def system_info(
     for install in sources.installs:
         where = f", WSL distro {install.wsl_distro}" if install.wsl_distro else ""
         unknown = "" if install.entry is not None else " (not in this version's catalog)"
+        unknown += " (an install that failed)" if install.failed else ""
         folder = f"folder {install.server_dir}{where}{unknown}"
         lines.append(f"  {install.game}, id {install.install_id}, {folder}")
     return "\n".join(lines) + "\n"

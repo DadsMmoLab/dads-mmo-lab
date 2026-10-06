@@ -30,6 +30,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- **Save logs for support…** keeps what database and Tortoise login containers wrote as errors, not only their normal output.
+- **Save logs for support…** also reads the servers of an install that failed, even though it was never added to the list.
 - A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
 - A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
