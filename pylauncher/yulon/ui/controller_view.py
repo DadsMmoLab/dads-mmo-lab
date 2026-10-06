@@ -8788,7 +8788,8 @@ class ControllerView(QWidget):
         # T188 A4: offered only while there is something to turn on -- not under
         # "verified as …", not while an account waits to be proved, not where
         # Repair is the answer, and not again after a press that took. GaveUp
-        # is offered even after a press: it means the press did not take.
+        # is offered even after a press: a press puts the waiting row back
+        # (T497), so GaveUp after one is a Start whose tries went unanswered.
         self.enable_channel_button.setVisible(
             self.services.channel_setup is not None
             and (
