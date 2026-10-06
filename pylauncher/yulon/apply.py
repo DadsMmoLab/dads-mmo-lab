@@ -677,6 +677,12 @@ class ApplyRefusal(ApplyError, SaidByYulon):
 
 _STARTED_DB_LINE = "started the database alone; the world server was left stopped"
 
+DATABASE_LEFT_UP = (
+    "Yu'lon started the database to check your answers, and it is still running; "
+    "press Stop if you do not need it."
+)
+"""What a stopped install adds when its exists check had to start the database (T476)."""
+
 
 def _kept(cause: BaseException, message: str) -> ApplyError:
     """`message`, around `cause`'s text, as Yu'lon's sentence only if `cause` was one (T214).
@@ -2071,7 +2077,7 @@ class _Log:
     # cannot be counted for (a skipped step is not a line there either).
     sql_sent: int = 0
     # T476. Set by `_check_exists()` when IT had to start the database alone:
-    # what `Applier._database_back_down()` may stop again if the install stops early.
+    # `Applier._says_the_database_is_up()` then names it if the install stops early.
     database_started: bool = False
 
 
@@ -2662,7 +2668,6 @@ class Applier:
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
-        stop_database: Callable[[], None] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
@@ -2735,11 +2740,6 @@ class Applier:
         # is `PendingSql`'s closed bug wearing a different hat. Absent means the
         # behaviour every caller had before this landed, byte for byte.
         self._start_database = start_database
-        # T476: "Stop this install's database again." Called only after an install
-        # whose exists check STARTED the database (`_check_exists()`) stops before
-        # it finishes, and only while the world reads as stopped; see
-        # `_database_back_down()`. Absent, a refusal says the database is still up.
-        self._stop_database = stop_database
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -2862,16 +2862,16 @@ class Applier:
         release: upstream.Release | None = None,
         expect_head: str | None = None,
     ) -> ApplyReport:
-        """`_install()`, with the database its exists check started put back down (T476).
+        """`_install()`, saying so when it stops with a database it started still up (T476).
 
         An install that stops early -- a refused answer, a conflict, a missing
         requirement, or a failure further on -- after `_check_exists()` started
-        the database alone stops that database again (`_database_back_down()`),
-        so a refusal's "Nothing was changed" is true. A finished install keeps
-        it up, as its report's "started the database alone" line says.
+        the database alone says the database is still running
+        (`_says_the_database_is_up()`). A finished install says it in its
+        report's "started the database alone" line instead.
         """
         log = _Log()
-        with self._database_back_down(log):
+        with self._says_the_database_is_up(log):
             return self._install(
                 manifest,
                 values,
@@ -3788,52 +3788,28 @@ class Applier:
     # -- the answers -------------------------------------------------------
 
     @contextmanager
-    def _database_back_down(self, log: _Log) -> Iterator[None]:
-        """Stop the database the exists check started if what follows raises (T476).
+    def _says_the_database_is_up(self, log: _Log) -> Iterator[None]:
+        """Say so when an install stops after its exists check started the database (T476).
 
         T396 starts a stopped database alone so the answer is really checked.
         An install refused after that said "Nothing was changed" and left the
         database running, with only the header to show it. So an `ApplyError`
         raised in this block, after `_check_exists()` had to start it
-        (`log.database_started`), stops it again; one that was already up is
-        never touched.
+        (`log.database_started`), ends with `DATABASE_LEFT_UP`; one that was
+        already up adds nothing. The same exception is raised again, its type
+        and detail kept, so `_module_failed()` reads it as before.
 
-        Only while the world reads as stopped: a Start pressed while the check
-        ran has a world using that database now, and the module job does not
-        hold the Server tab busy. A world that cannot be read, no stop seam, or
-        a stop that fails leaves it up, and the refusal then says so in one
-        sentence after its own. Its type is kept where nothing is added.
+        Said, not stopped (cold review): stopping it here took no hold, so it
+        could take the database from under a Start or a Backup pressed while
+        the check ran -- neither waits for a module job. Any other exception
+        passes through untouched.
         """
         try:
             yield
         except ApplyError as exc:
-            if not log.database_started:
-                raise
-            log.database_started = False
-            try:
-                world = self._world_running() if self._world_running is not None else None
-            except Exception as world_exc:  # noqa: BLE001 - could not ask is not "stopped"
-                logger.warning(f"could not tell whether the world is running: {world_exc}")
-                world = None
-            if world is True:
-                raise
-            if world is False and self._stop_database is not None:
-                try:
-                    self._stop_database()
-                except Exception as stop_exc:  # noqa: BLE001 - any failure is one answer here
-                    logger.warning(f"could not stop the database the check started: {stop_exc}")
-                    raise _kept(
-                        exc,
-                        f"{exc} Yu'lon started the database to check your answers and could not "
-                        f"stop it again ({stop_exc}), so it is still running.",
-                    ) from exc
-                logger.info("stopped the database the exists check started")
-                raise
-            raise _kept(
-                exc,
-                f"{exc} Yu'lon started the database to check your answers, "
-                "and it is still running.",
-            ) from exc
+            if log.database_started:
+                exc.args = (f"{exc} {DATABASE_LEFT_UP}", *exc.args[1:])
+            raise
 
     def _check_values(
         self, manifest: Manifest, action: When, vals: Mapping[str, str], log: _Log

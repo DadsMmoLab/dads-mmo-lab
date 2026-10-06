@@ -16,7 +16,7 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
@@ -2472,151 +2472,106 @@ def test_the_database_is_not_started_for_a_module_with_no_question_to_check(
     assert start.calls == 1
 
 
-class _StopDb:
-    """A `stop_database` seam that records its presses and can fail."""
-
-    def __init__(self, boom: Exception | None = None) -> None:
-        self.boom = boom
-        self.calls = 0
-
-    def __call__(self) -> None:
-        self.calls += 1
-        if self.boom is not None:
-            raise self.boom
-
-
 def _check_applier(
-    tmp_path: Path,
-    reader: _FakeReader,
-    *,
-    started: bool = True,
-    world: Callable[[], bool | None] = lambda: False,
-    stop: _StopDb | None = None,
-) -> tuple[Applier, _FakeGit, _StopDb]:
-    """An applier whose exists check finds the database stopped (`started`) or up."""
-    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
-    stop = stop if stop is not None else _StopDb()
+    tmp_path: Path, reader: _FakeReader, *, started: bool = True, git: Any = None
+) -> tuple[Applier, Any]:
+    """An applier whose exists check finds the database stopped (`started`) or already up."""
+    git = git if git is not None else _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
 
     def start() -> bool:
         if isinstance(reader, _StoppedThenStarted):
             reader.up = True
         return started
 
-    applier = Applier(
-        tmp_path,
-        git=git,
-        sql=reader,
-        world_running=world,
-        start_database=start,
-        stop_database=stop,
+    return (
+        Applier(tmp_path, git=git, sql=reader, world_running=lambda: False, start_database=start),
+        git,
     )
-    return applier, git, stop
 
 
 WRONG_GUID = "no character in this server's own database has GUID 999"
+STILL_UP = (
+    "Nothing was changed. Yu'lon started the database to check your answers, and it is "
+    "still running; press Stop if you do not need it."
+)
 
 
-def test_a_refused_answer_stops_the_database_the_check_started(tmp_path: Path) -> None:
+def test_a_refused_answer_says_the_database_the_check_started_is_still_running(
+    tmp_path: Path,
+) -> None:
     """T476: the check started the database alone, the GUID was wrong, and the
-    report said "Nothing was changed" while the database was left running.
+    report said only "Nothing was changed" while the database was left running.
 
-    Stopped again, so the sentence is true, and the sentence is the refusal's own.
-    Mutation: drop the stop and `stop.calls` is 0.
+    The refusal is the same exception, its own sentence first, then the database.
+    Mutation: drop the sentence and the refusal ends at "Nothing was changed."
     """
-    applier, git, stop = _check_applier(tmp_path, _StoppedThenStarted(rows=""))
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted(rows=""))
 
     with pytest.raises(ApplyRefusal) as refusal:
         applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
 
-    assert stop.calls == 1
     said = str(refusal.value)
-    assert WRONG_GUID in said and said.endswith("Nothing was changed.")
-    assert "still running" not in said
+    assert WRONG_GUID in said and said.endswith(STILL_UP), said
     assert git.calls == []
 
 
-def test_a_database_that_was_already_running_is_left_running(tmp_path: Path) -> None:
-    """Only what Yu'lon started is stopped: a database the player had up stays up."""
-    applier, _git, stop = _check_applier(tmp_path, _FakeReader(rows=""), started=False)
+def test_a_database_that_was_already_running_adds_nothing(tmp_path: Path) -> None:
+    """Only a database Yu'lon started is named: one the player had up says nothing more."""
+    applier, _git = _check_applier(tmp_path, _FakeReader(rows=""), started=False)
 
     with pytest.raises(ApplyRefusal) as refusal:
         applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
 
-    assert stop.calls == 0
     said = str(refusal.value)
-    assert WRONG_GUID in said and said.endswith("Nothing was changed.")
+    assert WRONG_GUID in said and said.endswith("Nothing was changed."), said
+    assert "still running" not in said
 
 
-def test_a_conflict_after_the_check_stops_the_database_too(tmp_path: Path) -> None:
-    """The check passes, then the conflict guard refuses: still nothing was changed.
+def test_a_conflict_after_the_check_says_it_too(tmp_path: Path) -> None:
+    """The check passes, then the conflict guard refuses: the database is still up.
 
-    Mutation: guard only `_check_values()` and the conflict leaves it running.
+    Mutation: guard only `_check_values()` and the conflict says nothing of it.
     """
     seat = tmp_path / "modules" / "mod-ah-bot-plus"
     seat.mkdir(parents=True)
     (seat / "README.md").write_text("x\n", encoding="utf-8")
-    applier, git, stop = _check_applier(tmp_path, _StoppedThenStarted())
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted())
 
     with pytest.raises(ApplyRefusal) as refusal:
         applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
 
-    assert "cannot both be installed" in str(refusal.value)
-    assert stop.calls == 1
+    said = str(refusal.value)
+    assert "cannot both be installed" in said and said.endswith(STILL_UP), said
     assert git.calls == []
 
 
-def test_an_install_that_goes_on_leaves_the_database_up_as_its_report_says(
-    tmp_path: Path,
-) -> None:
-    """A finished install keeps T396's "started the database alone" line and the database."""
-    applier, _git, stop = _check_applier(tmp_path, _StoppedThenStarted())
+def test_a_finished_install_keeps_the_started_line_and_adds_nothing(tmp_path: Path) -> None:
+    """T396's report line is how a finished install says it; no refusal sentence appears."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted())
 
     report = applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
 
-    assert stop.calls == 0
     assert "started the database alone; the world server was left stopped" in report.done
+    assert not any("still running" in line for line in report.done + report.skipped)
 
 
-@pytest.mark.parametrize("world", [True, None])
-def test_a_world_that_is_or_may_be_running_keeps_its_database(
-    tmp_path: Path, world: bool | None
+class _BrokenGit(_FakeGit):
+    """A clone that breaks with something that is not Yu'lon's refusal."""
+
+    def clone(self, spec: CloneSpec) -> None:
+        raise RuntimeError("the clone broke")
+
+
+def test_something_that_is_not_a_refusal_after_the_check_is_raised_as_it_was(
+    tmp_path: Path,
 ) -> None:
-    """A Start pressed while the check ran must not lose its database under it.
+    """Not a refusal the player reads as one: same type, same words, nothing added."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted(), git=_BrokenGit({}))
 
-    Running: the database is the world's now, nothing to say. Could not tell:
-    not stopped, and the refusal says the database is still running.
-    """
-    applier, _git, stop = _check_applier(
-        tmp_path, _StoppedThenStarted(rows=""), world=lambda: world
-    )
+    with pytest.raises(RuntimeError) as broke:
+        applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
 
-    with pytest.raises(ApplyRefusal) as refusal:
-        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
-
-    assert stop.calls == 0
-    said = str(refusal.value)
-    assert WRONG_GUID in said
-    if world is None:
-        assert said.endswith(
-            "Nothing was changed. Yu'lon started the database to check your answers, "
-            "and it is still running."
-        ), said
-    else:
-        assert said.endswith("Nothing was changed."), said
-
-
-def test_a_stop_that_fails_says_the_database_is_still_running(tmp_path: Path) -> None:
-    stop = _StopDb(boom=RuntimeError("docker stop timed out"))
-    applier, _git, _stop = _check_applier(tmp_path, _StoppedThenStarted(rows=""), stop=stop)
-
-    with pytest.raises(ApplyRefusal) as refusal:
-        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
-
-    assert stop.calls == 1
-    assert str(refusal.value).endswith(
-        "Nothing was changed. Yu'lon started the database to check your answers and could "
-        "not stop it again (docker stop timed out), so it is still running."
-    )
+    assert str(broke.value) == "the clone broke"
 
 
 def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:
@@ -5246,8 +5201,6 @@ def test_no_applier_the_app_builds_is_left_without_the_world_running_seam() -> N
 
     assert [f"{f}:{n}" for f, n, kw in sites if "world_running" not in kw] == []
     assert [f"{f}:{n}" for f, n, kw in sites if "start_database" not in kw] == []
-    # T476: the half that puts back what the exists check started, beside it.
-    assert [f"{f}:{n}" for f, n, kw in sites if "stop_database" not in kw] == []
     assert len(sites) == 13, where
 
 
@@ -5279,14 +5232,6 @@ def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> No
         "passthrough",
         "docker.start_database",
     }
-    # T476: only the database container, as the backup's `DatabaseAlone` stops it --
-    # `stop_staged()` would take the whole project down.
-    assert {source for _, source in _seam_bindings("stop_database")} == {
-        "passthrough",
-        "docker.stop_containers",
-    }
-    stops = [w for w, s in _seam_bindings("stop_database") if s == "docker.stop_containers"]
-    assert [w.split(":")[0] for w in stops] == ["ui/controller_view.py"] * 4, stops
     # Four games, four real readings, and all of them in the one file that knows
     # this install's container spec and WSL distro. By file rather than by line:
     # a line number here would go stale on the next edit above it and be
@@ -5555,66 +5500,6 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert start.calls == 1
     assert "started the database alone; the world server was left stopped" in report.done
     assert sql.files == [("world", "up.sql")]
-
-
-def test_the_wotlk_factory_hands_over_the_database_stop_too(tmp_path: Path) -> None:
-    """T476 through the factory the WotLK tab builds: a refused GUID stops what it started.
-
-    Catches `stop_database` accepted by the factory and dropped on the way to `Applier`.
-    """
-    from yulon.controller_wow_wotlk import modules as wotlk_modules
-
-    reader = _StoppedThenStarted(rows="")
-    stop = _StopDb()
-
-    def start() -> bool:
-        reader.up = True
-        return True
-
-    applier = wotlk_modules.applier(
-        tmp_path,
-        git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}),
-        sql=reader,
-        world_running=lambda: False,
-        start_database=start,
-        stop_database=stop,
-    )
-
-    with pytest.raises(ApplyRefusal):
-        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
-
-    assert stop.calls == 1
-
-
-@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"])
-def test_each_tab_stops_only_its_own_database_container(
-    game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """T476's stop as each game's tab binds it: `docker stop` of the database alone.
-
-    Catches the seam bound to `stop_staged()` (the whole project) or to another
-    container, which the audit above, reading only the callee's name, would pass.
-    """
-    from yulon import docker
-    from yulon.catalog.catalog import load_catalog
-    from yulon.ui.controller_view import ControllerServices
-
-    stopped: list[tuple[list[str], str | None]] = []
-    monkeypatch.setattr(
-        docker,
-        "stop_containers",
-        lambda names, *, wsl_distro=None, **_: stopped.append((list(names), wsl_distro)),
-    )
-    entry = load_catalog().get(game)
-    services = ControllerServices.for_entry(entry, tmp_path / game)
-    assert services.applier is not None
-
-    stop = services.applier._stop_database
-    assert stop is not None
-
-    stop()
-
-    assert [names for names, _ in stopped] == [[entry.container_spec().db]]
 
 
 def test_install_refuses_a_module_that_conflicts_with_one_already_here(tmp_path: Path) -> None:

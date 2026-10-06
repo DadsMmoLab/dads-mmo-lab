@@ -116,7 +116,6 @@ def applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
-    stop_database: Callable[[], None] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> GuardedApplier:
@@ -153,7 +152,6 @@ def applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
-        stop_database=stop_database,
         git=git,
         client_dir=client_dir,
     )
@@ -168,7 +166,6 @@ def apply_module(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
-    stop_database: Callable[[], None] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the Tortoise server at `server_dir`, guard first.
@@ -184,7 +181,6 @@ def apply_module(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
-        stop_database=stop_database,
         client_dir=client_dir,
     ).install(manifest, values)
 

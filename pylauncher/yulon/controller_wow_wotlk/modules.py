@@ -256,7 +256,6 @@ def applier(
     *,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
-    stop_database: Callable[[], None] | None = None,
     git: Git | None = None,
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
@@ -297,7 +296,6 @@ def applier(
         dbc=dbc,
         world_running=world_running,
         start_database=start_database,
-        stop_database=stop_database,
     )
 
 
@@ -356,7 +354,6 @@ def apply_module(
     *,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
-    stop_database: Callable[[], None] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the WotLK server at `server_dir` (the roadmap 2.3 entry point).
@@ -374,7 +371,6 @@ def apply_module(
         server_dir,
         world_running=world_running,
         start_database=start_database,
-        stop_database=stop_database,
         client_dir=client_dir,
     ).install(manifest, values)
 
