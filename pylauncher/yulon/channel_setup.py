@@ -1405,9 +1405,7 @@ class InstallChannel:
         database that cannot be asked leaves the state as it was.
         """
         looked_from = self._state
-        if self._exists is None or self.entry.operations is None or self._settles:
-            # A settle running now is what makes a row with nothing saved: it
-            # has its own answer coming, and the look is not the one to give it.
+        if self._exists is None or self.entry.operations is None:
             return looked_from
         account = account_name(self.install_id)
         try:
@@ -1415,9 +1413,10 @@ class InstallChannel:
         except Exception as exc:  # noqa: BLE001 - a look that cannot be made changes nothing
             logger.info(f"{self.entry.id}: could not look for {account}: {type(exc).__name__}")
             return self._state
-        # Only over the same `Idle` and with no settle started since: one that
-        # began and even finished while the database was asked knows better
-        # than the look, and a `Verified` it left must not become a Repair.
+        # Only over the same `Idle` and with no settle running: a settle is what
+        # makes a row with nothing saved yet, and one that began and even
+        # finished while the database was asked knows better than the look --
+        # a `Verified` it left must not become a Repair.
         if there and self._state is looked_from and not self._settles:
             self._state = lost(account)
         return self._state
