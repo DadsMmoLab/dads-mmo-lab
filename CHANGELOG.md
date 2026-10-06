@@ -31,6 +31,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
+- The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
+- The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
+- A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.

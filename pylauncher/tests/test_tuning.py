@@ -422,6 +422,51 @@ def test_an_int_key_refuses_a_number_past_what_the_servers_int_holds(value: str)
     assert "2147483647" in str(refusal.value)
 
 
+def test_an_unsigned_int_key_takes_zero_to_uint32_and_refuses_a_negative() -> None:
+    """T370: `mod-ah-bot` reads its GUID as `uint32`, so 3000000000 is real and -1 is not."""
+    for value in ("0", "5", "2147483648", "3000000000", "4294967295"):
+        tuning.check(_key(type="int", unsigned=True), value)
+    for value in ("-1", "4294967296", "99999999999999999999"):
+        with pytest.raises(tuning.TuningError, match="^K: "):
+            tuning.check(_key(type="int", unsigned=True), value)
+    with pytest.raises(tuning.TuningError, match="^K: "):
+        tuning.check(_key(type="int"), "3000000000")
+
+
+def test_unsigned_belongs_to_an_int_key_only() -> None:
+    with pytest.raises(ValueError, match="unsigned"):
+        _key(type="bool", unsigned=True)
+
+
+def test_the_shipped_ah_bot_keys_are_unsigned() -> None:
+    """`GetOption<uint32>` at the pin: GUID, Account (mod-ah-bot) and ItemsPerCycle (plus)."""
+    import json
+
+    base = Path(__file__).resolve().parent.parent / "manifests" / "wow-wotlk" / "modules"
+    for name, wanted in (
+        ("mod-ah-bot", {"AuctionHouseBot.GUID", "AuctionHouseBot.Account"}),
+        ("mod-ah-bot-plus", {"AuctionHouseBot.ItemsPerCycle"}),
+    ):
+        manifest = parse_manifest(json.loads((base / f"{name}.json").read_text(encoding="utf-8")))
+        keys = {k.key: k for conf in manifest.conf for k in conf.keys}
+        assert {k for k in wanted if keys[k].unsigned} == wanted, name
+    guid = next(p for p in manifest.prompts if p.key == "bot_guid")
+    assert guid.unsigned
+
+
+def test_a_raw_conf_text_names_each_declared_int_key_whose_value_fails_check() -> None:
+    """T371: the raw editor's text, read against the declared keys; free text stays free."""
+    spec = _key(type="int", min=0, max=100)
+    text = "[worldserver]\n# K = oops\nK = +5\nOther = nothing\n"
+    problems = tuning.int_problems(text, {"K": spec})
+    assert len(problems) == 1 and problems[0].startswith("K: ")
+    assert tuning.int_problems("K = 5\n", {"K": spec}) == ()
+    assert tuning.int_problems("Other = +5\n", {"K": spec}) == ()
+    assert tuning.int_problems("K = +5\n", {"K": _key(type="bool")}) == ()
+    assert "K" in tuning.value_sentence(problems)
+    assert tuning.value_sentence(()) is None
+
+
 def test_a_key_with_no_type_accepts_anything_because_it_is_a_text_box() -> None:
     """T43's safety rule: a refusal the catalog never declared is a refusal we invented."""
     for value in ("anything at all", "", "3.5", "0,1,2"):

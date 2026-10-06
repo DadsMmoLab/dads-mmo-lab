@@ -2319,14 +2319,18 @@ def check_answer(prompt: Prompt, value: str) -> str:
         if not _INT.fullmatch(value):
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
             return f"this must be a whole number, typed with the digits 0 to 9 only{spaces}"
-        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
-            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        smallest, largest = tuning.int_range(prompt.unsigned)
+        if not smallest <= int(value) <= largest:
+            return f"this must be a number from {smallest} to {largest}"
         return prompt.range_problem(text)
     if prompt.kind == "float":
-        try:
-            float(text)
-        except ValueError:
-            return "this must be a number"
+        # The answer is written as given, so it is held to the Tuning tab's decimal
+        # spelling (T395): `float("1_0")` is 10.0 here and 1 to the server.
+        if tuning.DECIMAL.fullmatch(value) is None:
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            return (
+                f"this must be a number, typed with the digits 0 to 9 and one point at most{spaces}"
+            )
         # T122: the question's own range, finite; see `Prompt.range_problem()`.
         return prompt.range_problem(text)
     if prompt.kind == "bool":

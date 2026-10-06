@@ -428,6 +428,16 @@ the server never sees. The catalog has no way yet to say a key is unsigned.
 """
 
 
+UINT32_LARGEST = 2**32 - 1
+"""The top of a `uint32` key's range (T370): `ConfKey.unsigned` / `Prompt.unsigned` says
+the module reads the value with `GetOption<uint32>`, so it starts at 0 and ends here."""
+
+
+def int_range(unsigned: bool) -> tuple[int, int]:
+    """The (smallest, largest) a whole-number key or answer may hold: one rule for both callers."""
+    return (0, UINT32_LARGEST) if unsigned else (INT32_SMALLEST, INT32_LARGEST)
+
+
 def check(key: ConfKey | None, value: str) -> None:
     """Refuse a value that fails its own declared type, naming the key.
 
@@ -447,10 +457,11 @@ def check(key: ConfKey | None, value: str) -> None:
                 f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
             )
         number = int(value)
-        if not INT32_SMALLEST <= number <= INT32_LARGEST:
+        smallest, largest = int_range(key.unsigned)
+        if not smallest <= number <= largest:
             raise TuningError(
                 f"{key.key}: {value} is more than the server can hold; "
-                f"use a number from {INT32_SMALLEST} to {INT32_LARGEST}"
+                f"use a number from {smallest} to {largest}"
             )
         if key.min is not None and number < key.min:
             raise TuningError(f"{key.key}: {number} is below the smallest allowed value {key.min}")
@@ -862,6 +873,36 @@ def lint(text: str) -> tuple[LintIssue, ...]:
         if line.find("=") <= 0:
             issues.append(LintIssue(number, line))
     return tuple(issues)
+
+
+def int_problems(text: str, keys: Mapping[str, ConfKey]) -> tuple[str, ...]:
+    """Each declared `int` key whose ACTIVE value in this raw conf text fails `check()` (T371).
+
+    The value is the one the server reads (`conf_value()`: first wins, comments
+    and sections skipped), checked by the same function the cards use, so the
+    raw box and the card cannot disagree. A key the catalog does not declare as
+    an `int` is free text and is never looked at.
+    """
+    found: list[str] = []
+    for name, key in keys.items():
+        if key.type != "int":
+            continue
+        value = conf_value(text, name)
+        if value is None:
+            continue
+        try:
+            check(key, value)
+        except TuningError as exc:
+            found.append(str(exc))
+    return tuple(found)
+
+
+VALUE_SENTENCE = "{first} Save it anyway?"
+
+
+def value_sentence(problems: Sequence[str]) -> str | None:
+    """The FIRST bad value in the sentence the confirm asks, or `None` when all are fine."""
+    return VALUE_SENTENCE.format(first=problems[0]) if problems else None
 
 
 LINT_SENTENCE = (

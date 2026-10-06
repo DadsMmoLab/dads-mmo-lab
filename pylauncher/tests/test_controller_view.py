@@ -12588,7 +12588,7 @@ def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_pa
     assert path.read_text(encoding="utf-8") == before
 
 
-@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "2147483648"])
+@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "4294967296", "-1"])
 def test_a_number_the_server_would_read_differently_is_refused_at_save(
     qapp: object, ps: _Ps, tmp_path: Path, typed: str
 ) -> None:
@@ -12619,6 +12619,39 @@ def test_a_number_the_server_would_read_differently_is_refused_at_save(
     assert "AuctionHouseBot.ItemsPerCycle" in said
     assert failures and command_faults(failures[0]) == [], failures
     assert command_faults(said) == [] and text_faults(said) == [], said
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_the_raw_editor_warns_about_a_bad_int_key_and_the_player_decides(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: bool
+) -> None:
+    """T371: `ItemsPerCycle = +5` typed in the raw box is the same refusal the card gives.
+
+    Non-blocking, as the editor's lint always is: one confirm that names the key,
+    and Yes still saves. A good value and another key's free text ask nothing.
+    """
+    from yulon.ui import controller_view as controller_view_module
+
+    conf = "env/dist/etc/modules/mod_ahbot.conf"
+    _deploy(tmp_path, conf, "[worldserver]\nAuctionHouseBot.ItemsPerCycle = 200\n")
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-ah-bot-plus"}))
+    view.open_tuning_file(conf)
+    asked: list[str] = []
+
+    def question(_parent: object, _title: str, said: str, *_a: object, **_k: object) -> int:
+        asked.append(said)
+        buttons = controller_view_module.QMessageBox.StandardButton
+        return int(buttons.Yes if answer else buttons.No)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    bad = "[worldserver]\nAuctionHouseBot.ItemsPerCycle = +5\n"
+    view.save_tuning_file(bad)
+    assert len(asked) == 1 and "AuctionHouseBot.ItemsPerCycle" in asked[0], asked
+    kept = "[worldserver]\nAuctionHouseBot.ItemsPerCycle = 200\n"
+    assert (tmp_path / conf).read_text(encoding="utf-8") == (bad if answer else kept)
+    asked.clear()
+    view.save_tuning_file("[worldserver]\nAuctionHouseBot.ItemsPerCycle = 3000000000\n")
+    assert asked == []
 
 
 def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
