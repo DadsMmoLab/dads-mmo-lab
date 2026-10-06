@@ -9622,7 +9622,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
