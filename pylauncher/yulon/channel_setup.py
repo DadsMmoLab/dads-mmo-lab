@@ -204,6 +204,31 @@ class Refused:
     account: str
     password: str = field(repr=False)
     reason: str
+    plain: bool = False
+    """True when `reason` is the whole line, not why a server said no (T386).
+
+    The account's password is lost, or Repair could not reach the database:
+    neither is the server refusing anything, so the tab does not say "refused".
+    """
+
+
+LOST_PASSWORD = "Yu'lon lost the password for its own server account. Repair sets a new one."
+"""The line for this app's own account on the server with no password this machine keeps (T386).
+
+A fresh data folder, a reinstall of Yu'lon or a new machine against a server
+that already has the account: `create` keeps the row's own password, as it
+must, so the one just minted can never prove it.
+"""
+
+DATABASE_UNREACHABLE = (
+    "Repair could not reach the server's database, so nothing was changed. "
+    "Start the server, then press Repair again."
+)
+
+
+def lost(account: str, password: str = "") -> Refused:
+    """This app's own account exists and its password is not one this machine has (T386)."""
+    return Refused(account=account, password=password, reason=LOST_PASSWORD, plain=True)
 
 
 @dataclass(frozen=True)
@@ -938,6 +963,25 @@ def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None
     _sync_folder(path.parent)
 
 
+def _forget_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove a saved credential a Repair has just made wrong. Never raises (T386).
+
+    One left behind -- a locked file on Windows -- costs a later launch a
+    refusal and a second Repair, which is what this is here to save; it is not
+    a reason to fail a Repair whose reset has already landed.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(f"could not remove the replaced credential {path}: {type(exc).__name__}")
+        return
+    _sync_folder(path.parent)
+
+
 def load_credential(
     game: str, install_id: str, *, config_dir: Path | None = None
 ) -> soap.Endpoint | None:
@@ -1011,7 +1055,14 @@ def ensure(
     if isinstance(current, Verified | Refused | GaveUp):
         return current
     if isinstance(current, Idle):
-        create(account, password, gm_level)
+        made = create(account, password, gm_level)
+        if getattr(made, "created", None) is False:
+            # The row was already there, and `create` kept its password, as it
+            # must (T386). The one minted above can never prove it, so no round
+            # trip is needed to know that and nothing is kept as pending: the
+            # way out is a reset of this app's own row, which is Repair.
+            logger.info(f"{account} already exists with a password this machine does not have")
+            return lost(account, password)
         current = current.created(account, password)
         # After `create` and not before it: a record on disk says the row is
         # there, which is what lets a later launch re-verify rather than
@@ -1124,22 +1175,54 @@ def repair(
     """
     _ = create, gm_level
     password = generate_password()
-    reset(state.account, password)
+    try:
+        reset(state.account, password)
+    except Exception as exc:  # noqa: BLE001 - every way the write fails is the same sentence
+        # The reset is a write to the auth database, and a database that is
+        # not running is the ordinary reason it fails (T386). Nothing changed,
+        # so the state is the one the press found, with a line that says what
+        # to do; the detail goes to the log, never onto the line.
+        logger.info(f"{game}: the reset of {state.account} did not land: {type(exc).__name__}")
+        return Refused(
+            account=state.account,
+            password=state.password,
+            reason=DATABASE_UNREACHABLE,
+            plain=True,
+        )
+    # The row has this password now, whatever the server says next, so it is
+    # kept the way a fresh account's is (T138, T386): a world that is still
+    # loading proves it at the next ask, and closing Yu'lon first loses nothing.
+    pending = Pending(account=state.account, password=password)
+    try:
+        save_pending(pending, game=game, install_id=install_id, config_dir=config_dir)
+    except OSError as exc:
+        logger.warning(
+            f"could not keep the reset command-channel account for {game} "
+            f"({type(exc).__name__}); closing Yu'lon before it is proved will need a repair"
+        )
+    # And the saved credential, when the press found one, is wrong from now on:
+    # left on disk it is read ahead of the record above, so the next launch
+    # would call a password the row no longer has "verified" and need a
+    # second Repair once the world answered.
+    _forget_credential(game, install_id, config_dir=config_dir)
     # Built from the password that was just written, not before it: a channel
     # made ahead of the reset carries the credential the server has already
     # refused, and would prove nothing while looking like a repair that failed.
     channel = channel_for(password)
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
-    if getattr(answer, "outcome", "") != "yes":
-        logger.info(f"{game}: the reset password did not answer either; nothing saved")
+    if getattr(answer, "denied", False):
+        logger.info(f"{game}: the reset password was refused too; it is kept as not proved")
         return Refused(
             account=state.account,
             password=password,
             reason=(
-                "the account's password was reset and the server still did not answer, "
-                "so nothing was saved"
+                "the account's password was reset and the server still did not accept it, "
+                "so the channel is not working yet"
             ),
         )
+    if getattr(answer, "outcome", "") != "yes":
+        logger.info(f"{game}: the reset password has not answered yet; it waits to be proved")
+        return pending
     verified = Verified(account=state.account, password=password, at=now())
     save_credential(
         verified,
@@ -1199,6 +1282,7 @@ class InstallChannel:
         create: Callable[[str, str, int], object],
         channel_for: Callable[[soap.Endpoint], object],
         reset: Callable[[str, str], object] | None = None,
+        exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
     ) -> None:
@@ -1208,6 +1292,10 @@ class InstallChannel:
         self.install_id = install_id
         self._create = create
         self._reset = reset
+        # A read of the auth database: is this app's own account there (T386)?
+        # Asked by `check()` with nothing saved, so a tab or a Refresh can offer
+        # Repair for a lost password without writing a row.
+        self._exists = exists
         self._channel_for = channel_for
         self._config_dir = config_dir
         # A reader rather than the value for a server inside a WSL distro
@@ -1215,6 +1303,10 @@ class InstallChannel:
         # renders, not when the tab is built.
         self._db_password = db_password
         self._state: State = self._from_disk()
+        # How many `prove()`s are running now. A Start's or an install's settle
+        # runs on a worker while a Refresh or a tab's opening look can run on
+        # another, and the look from `Idle` must not judge a row mid-settle.
+        self._settles = 0
 
     def _password(self) -> str | None:
         """The install's database password, read now if it was handed over as a reader."""
@@ -1284,6 +1376,8 @@ class InstallChannel:
                 return after
             self._state = state
             return state
+        if isinstance(state, Idle):
+            return self._find_a_lost_account()
         if not isinstance(state, Verified):
             return state
         channel = self._channel_for(self._endpoint(state.account, state.password))
@@ -1300,6 +1394,31 @@ class InstallChannel:
                 "install has changed; the account's password can be reset for it."
             ),
         )
+        return self._state
+
+    def _find_a_lost_account(self) -> State:
+        """`Idle`, or `lost()` when this app's own account is on the server already (T386).
+
+        Nothing on this machine remembers a password for it -- that is what
+        `Idle` means -- so an account that is there has one nobody here has.
+        Only read: the database is asked whether the row exists, and a
+        database that cannot be asked leaves the state as it was.
+        """
+        looked_from = self._state
+        if self._exists is None or self.entry.operations is None:
+            return looked_from
+        account = account_name(self.install_id)
+        try:
+            there = self._exists(account)
+        except Exception as exc:  # noqa: BLE001 - a look that cannot be made changes nothing
+            logger.info(f"{self.entry.id}: could not look for {account}: {type(exc).__name__}")
+            return self._state
+        # Only over the same `Idle` and with no settle running: a settle is what
+        # makes a row with nothing saved yet, and one that began and even
+        # finished while the database was asked knows better than the look --
+        # a `Verified` it left must not become a Repair.
+        if there and self._state is looked_from and not self._settles:
+            self._state = lost(account)
         return self._state
 
     def repair(self) -> State:
@@ -1472,18 +1591,25 @@ class InstallChannel:
         # `urn:AC`, answered HTTP 500, and read as a world that had not finished
         # loading. `live_channel()` had been fixed and this had not.
         endpoint = self._endpoint(account, password)
-        self._state = ensure(
-            account=account,
-            password=password,
-            create=self._create,
-            channel=self._channel_for(endpoint),
-            game=self.entry.id,
-            install_id=self.install_id,
-            host=endpoint.host,
-            port=endpoint.port,
-            namespace=endpoint.namespace,
-            config_dir=self._config_dir,
-            state=self._state,
-            gm_level=operations.gm_level or 3,
-        )
+        # Counted while it runs (T386): between `create` and the round trip
+        # the row is there and nothing is saved, which a look from `Idle` would
+        # otherwise read as a lost password.
+        self._settles += 1
+        try:
+            self._state = ensure(
+                account=account,
+                password=password,
+                create=self._create,
+                channel=self._channel_for(endpoint),
+                game=self.entry.id,
+                install_id=self.install_id,
+                host=endpoint.host,
+                port=endpoint.port,
+                namespace=endpoint.namespace,
+                config_dir=self._config_dir,
+                state=self._state,
+                gm_level=operations.gm_level or 3,
+            )
+        finally:
+            self._settles -= 1
         return self._state
