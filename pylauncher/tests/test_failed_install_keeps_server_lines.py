@@ -245,6 +245,112 @@ def test_a_stop_during_the_reads_ends_them_at_once(tmp_path: Path) -> None:
     assert CRASH not in _shown(said)
 
 
+class _LoadsThenLoops(World):
+    """A world that is still loading at the first look and crash-loops after it."""
+
+    def __init__(self) -> None:
+        super().__init__("loop")
+
+    def output(self, spec: object) -> native.WorldOutput:
+        self.reads += 1
+        if self.reads <= 2:
+            return native.WorldOutput(f"loading, part {self.reads}", 0, "running")
+        return native.WorldOutput(f"boot {self.reads}", 9, "running")
+
+
+def test_a_load_let_finish_after_a_stop_that_then_crashes_still_shows_its_lines(
+    tmp_path: Path,
+) -> None:
+    """T249 meets T158: a Stop heard during a rebuild's load lets the load finish.
+
+    The job's Stop is set from then on, so reads ended by IT would be skipped at
+    once, on exactly the crash the player most needs explained. Once the Stop is
+    heard the wait ends only on "Stop now anyway", and so do the reads.
+    """
+    cancel = docker.CancelWithForce()
+    cancel.set()
+    tails = Tails()
+    engine = _engine(_LoadsThenLoops(), tails)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in engine.stage_ready(_ctx(tmp_path, cancel), stop_lets_it_load=True):
+            said.append(line)
+    shown = _shown(said)
+
+    assert docker.STOP_WAITS_FOR_THE_LOAD in said, "the Stop was heard and the load let finish"
+    assert "crash loop" in str(caught.value)
+    assert CRASH in shown, "the crash's own line was not shown"
+    assert "Stopped before" not in shown
+    assert tails.asked == [WORLD, AUTH]
+
+
+class _LoadsThenDies(World):
+    """Still loading at the first look; then prints its banner and is gone again."""
+
+    def __init__(self) -> None:
+        super().__init__("stops")
+        self.windows = 0
+
+    def wait_ready(self, spec: object, ready: docker.ReadySpec) -> bool:
+        self.windows += 1
+        self.elapsed += ready.timeout
+        return self.windows > 1
+
+    def output(self, spec: object) -> native.WorldOutput:
+        self.reads += 1
+        if self.reads <= 2:
+            return native.WorldOutput(f"loading, part {self.reads}", 0, "running")
+        return native.WorldOutput("World initialized\n>> ABORTED", 0, "exited")
+
+
+def test_a_load_let_finish_after_a_stop_that_then_dies_still_shows_its_lines(
+    tmp_path: Path,
+) -> None:
+    """The crashed-after-Stop failure carries the lines and names where they are, like the rest."""
+    cancel = docker.CancelWithForce()
+    cancel.set()
+    tails = Tails()
+    engine = _engine(_LoadsThenDies(), tails)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in engine.stage_ready(_ctx(tmp_path, cancel), stop_lets_it_load=True):
+            said.append(line)
+
+    assert native.READY_CRASHED_AFTER_STOP in str(caught.value)
+    assert CRASH in _shown(said)
+    assert "Save logs for support" in str(caught.value)
+
+
+def test_stop_now_anyway_ends_the_reads_of_a_load_let_finish(tmp_path: Path) -> None:
+    """After the Stop is heard, "Stop now anyway" pressed during a read ends it at once."""
+    cancel = docker.CancelWithForce()
+    cancel.set()
+    released = threading.Event()
+    asked: list[str] = []
+
+    def slow(container: str) -> str | None:
+        asked.append(container)
+        cancel.anyway.set()
+        released.wait(HANG_BOUND)
+        return WORLD_LOG
+
+    engine = _engine(_LoadsThenLoops(), Tails())
+    engine._seams.container_tail = slow
+    said: list[str] = []
+    started = time.monotonic()
+    try:
+        with pytest.raises(InstallerError) as caught:
+            for line in engine.stage_ready(_ctx(tmp_path, cancel), stop_lets_it_load=True):
+                said.append(line)
+    finally:
+        released.set()
+
+    assert time.monotonic() - started < HANG_BOUND / 2
+    assert asked == [WORLD], "nothing more is asked once Stop now anyway is pressed"
+    assert "crash loop" in str(caught.value), "the failure is still the failure"
+    assert CRASH not in _shown(said)
+
+
 VERDICT_WORDS = {
     "loop": "which is a crash loop",
     "gone": "is not running any more",

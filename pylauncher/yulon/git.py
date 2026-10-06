@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from yulon import platform, rmtree, runner
+from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.ui import lines
 
@@ -395,7 +396,7 @@ class GitError(RuntimeError):
     """A git operation failed. The message carries git's own last words."""
 
 
-class GitStopped(GitError):
+class GitStopped(GitError, StopTookEffect):
     """A streamed git command was ended by a Stop, and did not fail on its own (T240).
 
     A `GitError`, so everything that stops on a failed clone stops on it too. Its
