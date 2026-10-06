@@ -1922,7 +1922,7 @@ class CmangosInstaller(StagedInstaller):
         return CorrectionCheck("current")
 
     def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
-        """The confirmation's step list: the same `expand()` the press streams, by `sqlplan.step_name()`."""
+        """The confirmation's step list: the steps the press streams, by name."""
         plan = self._data().sql
         return tuple(
             sqlplan.step_name(run) for run in self._runs_of(plan, ctx, self._named(plan, phases))

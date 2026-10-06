@@ -3036,9 +3036,8 @@ def test_a_literal_step_is_named_in_a_dialog_by_its_phase_and_never_as_statement
     """T424: `rel` stays `statement N` for the log and the record; a person sees what it does."""
     one = SqlPhase(name="character_inventory_copy table", into="mangos", statements=("SELECT 1",))
     two = SqlPhase(name="two steps", into="mangos", statements=("SELECT 1", "SELECT 2"))
-    assert sqlplan.step_name(sqlplan.PhaseRun(one, "mangos", None, "SELECT 1", False, "statement 1")) == (
-        "character_inventory_copy table"
-    )
+    first = sqlplan.PhaseRun(one, "mangos", None, "SELECT 1", False, "statement 1")
+    assert sqlplan.step_name(first) == "character_inventory_copy table"
     second = sqlplan.PhaseRun(two, "mangos", None, "SELECT 2", False, "statement 2")
     assert sqlplan.step_name(second) == "two steps (step 2 of 2)"
     path = sqlplan.PhaseRun(one, "mangos", Path("a.sql"), None, False, "src/a.sql")

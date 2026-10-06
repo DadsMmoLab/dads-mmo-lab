@@ -4527,7 +4527,7 @@ _corrections_clock = time.monotonic
 
 
 class _AskAgain:
-    """One reading's ask-again schedule (T381, T420): when it is next due, and how often it was asked.
+    """One reading's ask-again schedule (T381, T420): when it is due, and how often it was asked.
 
     The corrections check, the import probe and the adopt reading each keep one,
     all on `CORRECTIONS_ASKED_AGAIN_AFTER` and `_corrections_clock`.
@@ -4542,10 +4542,8 @@ class _AskAgain:
         self.due = None
         self.count = 0
 
-    def after(self, unreadable: bool) -> bool:
-        """Arm the next wait for an unreadable answer. False once the waits are spent."""
-        if not unreadable:
-            return True
+    def arm(self) -> bool:
+        """Arm the next wait after an unreadable answer. False once the waits are spent."""
         if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
             return False
         self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
@@ -8845,7 +8843,7 @@ class ControllerView(QWidget):
         """An `unreadable` reading, taken while the database is up, gets a later ask."""
         if not unreadable or not self._import_asked:
             return
-        if not schedule.after(True):
+        if not schedule.arm():
             logger.info(f"{self.entry.id}: the {what} question is not asked again")
 
     @Slot(object)

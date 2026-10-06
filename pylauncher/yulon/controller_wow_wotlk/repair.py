@@ -169,7 +169,7 @@ def _databases_when_up(mysql: MysqlDocker) -> tuple[str, ...]:
         except MaintenanceError as exc:
             if not _is_not_up_yet(exc):
                 raise
-            logger.info(f"the database is not accepting connections yet; asking again in {wait:g} s")
+            logger.info(f"the database is not accepting connections yet; asking in {wait:g} s")
             _sleep(wait)
     return mysql.databases()
 

@@ -544,3 +544,13 @@ def test_pressing_repair_takes_the_kept_sentence_down(
     wait_for_panel(view.rebuild_log)
     view._stop_done(True)
     assert database_presence.MISSING not in view.problem_label.text()
+
+
+def test_a_rebuild_refused_on_an_empty_volume_says_it_is_empty(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    """T421 in the Rebuild panel: the view picks whichever refusal sentence the message carries."""
+    view = _view(db, tmp_path, [])
+    view._rebuild_finished(False, f"{database_presence.EMPTY} Nothing was changed.")
+    assert view.problem_label.text() == database_presence.EMPTY
+    assert view.repair_database_button.isVisibleTo(view)

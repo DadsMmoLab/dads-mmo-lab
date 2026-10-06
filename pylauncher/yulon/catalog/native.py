@@ -1460,8 +1460,8 @@ def corrections_confirmation(
 ) -> str:
     """What the user agrees to before a corrections press (T129). Pure, for Qt-free assertions.
 
-    The step list is the `expand()` output the press streams, named as the
-    run's own log names each step, for `updates_confirmation()`'s reason. The
+    The step list is the `expand()` output the press streams: a file by its path
+    as the run's log names it, a literal statement by its phase's name. The
     withheld phases are named too: the person is told what this version changed
     that a press will NOT put on their server, and why, rather than finding out
     from a log.
@@ -6645,7 +6645,8 @@ class StagedInstaller:
         )
 
     def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
-        """The steps `phases` would stream into this install, named as the run's log names them.
+        """The steps `phases` would stream into this install, named as the confirmation names them
+        (a file by its path, a literal statement by its phase).
 
         Empty on the spine, `update_files()`'s reason; the CMaNGOS family expands
         its plan the same way its press does.

@@ -60,7 +60,7 @@ EMPTY = (
 
 
 def sentence_for(presence: str) -> str:
-    """The refusal's sentence for a `missing` or an `empty` reading; `missing`'s for anything else."""
+    """The refusal's sentence for an `empty` reading, else the `missing` one."""
     return EMPTY if presence == "empty" else MISSING
 
 

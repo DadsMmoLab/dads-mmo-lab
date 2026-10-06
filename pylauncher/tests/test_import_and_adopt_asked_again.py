@@ -38,8 +38,8 @@ class _Reads:
         return self()
 
 
-def _with(ps: _Ps, tmp_path: Path, *, imports: _Reads, adopts: _Reads) -> object:
-    view = _view(ps, tmp_path, _Route("current"))
+def _with(fake: _Ps, tmp_path: Path, *, imports: _Reads, adopts: _Reads) -> object:
+    view = _view(fake, tmp_path, _Route("current"))
     view.services.controller.import_probe = imports  # type: ignore[attr-defined]
     view.services.adopt = adopts  # type: ignore[attr-defined]
     return view

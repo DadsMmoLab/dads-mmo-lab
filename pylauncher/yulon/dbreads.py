@@ -272,7 +272,8 @@ def population(sql: SqlReader, entry: CatalogEntry, marker: Marker) -> Populatio
         # A schema the world has not created yet is the poll arriving early (T424): the
         # next tick asks again, so it is said at info; anything else is a warning.
         early = "Unknown database" in str(exc)
-        (logger.info if early else logger.warning)(f"could not count this server's population: {exc}")
+        say = logger.info if early else logger.warning
+        say(f"could not count this server's population: {exc}")
         return Population(problem=f"could not read the server's characters: {exc}")
     numbers = _four_numbers(raw)
     if numbers is None:
