@@ -1646,7 +1646,12 @@ class InstallChannel:
         except Exception as exc:  # noqa: BLE001 - not knowing is not a reason to offer a write
             logger.info(f"could not tell whether {self.entry.id}'s channel is on: {exc}")
             return None
-        return now in texts
+        if now in texts:
+            return True
+        # No override at all is plainly off. One that is there and reads
+        # differently may be an older render of the same channel (a template
+        # updated since), which is not for this read to call off.
+        return False if not now else None
 
     def enable(self, *, world_running: bool) -> Enabled:
         """Write the channel on. Refuses while the world is running."""

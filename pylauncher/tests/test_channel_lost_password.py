@@ -730,3 +730,22 @@ def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(
 
     assert "waiting to be proved" in _line(box)
     assert box.view.enable_channel_button.isHidden()
+
+
+def test_an_override_that_reads_differently_is_not_called_off(box: _Box) -> None:
+    """A file written by an older render is not 'off': Enable would be refused on a running world."""
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    (setup.server_dir / composegen.OVERRIDE_FILE).write_text(
+        "# some older text\n", encoding="utf-8"
+    )
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        conf = setup.server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(
+            "".join(f"{k} = {v}\n" for k, v in operations.enable_conf.keys.items()),
+            encoding="utf-8",
+        )
+    assert setup.is_enabled() is None
