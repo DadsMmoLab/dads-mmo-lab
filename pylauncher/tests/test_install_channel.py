@@ -423,17 +423,19 @@ class _StartDuringTheLook:
     made in order -- and then goes unanswered; every later ask answers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, start_hears: str = "yes", look_hears: str = "unknown") -> None:
         self.channel: setup.InstallChannel | None = None
         self.started: list[object] = []
+        self.start_hears = start_hears
+        self.look_hears = look_hears
 
     def send(self, command: object) -> object:
         if self.started:
-            return _Answering("yes").send(command)
+            return _Answering(self.start_hears).send(command)
         assert self.channel is not None
         self.started.append(None)
         self.started[0] = self.channel.settle()
-        return _Answering("unknown").send(command)
+        return _Answering(self.look_hears).send(command)
 
 
 def test_a_look_after_giving_up_keeps_a_proof_a_start_made_meanwhile(tmp_path: Path) -> None:
@@ -458,6 +460,25 @@ def test_a_look_at_a_waiting_row_keeps_a_proof_a_start_made_meanwhile(tmp_path: 
 
     looked = channel.check()
 
+    assert isinstance(looked, setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_a_look_after_giving_up_keeps_its_own_proof_over_a_start_that_heard_nothing(
+    tmp_path: Path,
+) -> None:
+    """The other order (cold review): the Start asked first, the world was still loading.
+
+    The look's ask is the one that got through, and its credential is on the
+    disk already, so it is kept over the Start's unanswered try.
+    """
+    wire = _StartDuringTheLook(start_hears="unknown", look_hears="yes")
+    channel = _gave_up_over_a_waiting_row(tmp_path, wire)  # type: ignore[arg-type]
+    wire.channel = channel
+
+    looked = channel.check()
+
+    assert isinstance(wire.started[0], setup.Pending), "the ground: the Start heard nothing"
     assert isinstance(looked, setup.Verified)
     assert isinstance(channel.setup_state(), setup.Verified)
 

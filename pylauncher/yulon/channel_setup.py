@@ -1801,10 +1801,12 @@ class InstallChannel:
             )
         finally:
             self._settles -= 1
-        # Kept only over the state it was asked from (cold review, T427): a
-        # Refresh's look and a Start's settle can each have an ask out, and
-        # the one that answers last is not the newer news -- a proof the other
-        # made meanwhile must not be put back to waiting, or to gave up.
-        if self._state is asked_from:
+        # Kept only over the state it was asked from, or when it is a proof
+        # (cold review, T427): a Refresh's look and a Start's settle can each
+        # have an ask out, and the one that answers last is not the newer news
+        # -- a proof the other made meanwhile must not be put back to waiting,
+        # or to gave up. A proof is kept whichever lands last: its credential
+        # is on the disk already.
+        if self._state is asked_from or isinstance(answer, Verified):
             self._state = answer
         return self._state
