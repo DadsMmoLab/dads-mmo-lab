@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- A bots' database table that stays missing is now reported once, with how to fix it, instead of silently every few seconds.
 - Stopping a Tortoise server with a hired companion online no longer crashes it or asks you to check your characters.
 - On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.

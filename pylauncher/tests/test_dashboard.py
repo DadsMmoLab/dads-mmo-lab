@@ -1424,3 +1424,34 @@ def test_a_run_past_the_settle_time_is_ready_without_its_marker(tmp_path: Path) 
     )
 
     assert watch.tick().ready is True
+
+
+def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_five_seconds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T437: the uptime the dashboard already measures decides young (info) from old (warn)."""
+
+    class _NoTable:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError("ERROR 1146 (42S02): Table 'acore_playerbots.x' doesn't exist")
+
+    young = _running("2026-09-06T17:59:00.000000000Z")  # up 1 minute
+    old = _running("2026-09-06T17:50:00.000000000Z")  # up 10 minutes
+    dash = dashboard.Dashboard(
+        SPEC,
+        WOTLK,
+        _install(tmp_path),
+        sql=_NoTable(),
+        state_of=lambda _c: states.pop(0),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: "",
+        now=lambda: NOW,
+    )
+    states = [young, young, old, old, old, old]
+    with caplog.at_level("INFO"):
+        for _ in range(2):
+            dash.tick()
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        for _ in range(4):
+            dash.tick()
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
