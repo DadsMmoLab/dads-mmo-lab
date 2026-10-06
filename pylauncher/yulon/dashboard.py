@@ -417,7 +417,8 @@ class Dashboard:
         """
         if not self._saw_ready(run):
             return False
-        return self._ready_seen_at is not None and self._now() - self._ready_seen_at >= RECOVERED_AFTER
+        seen_at = self._ready_seen_at
+        return seen_at is not None and self._now() - seen_at >= RECOVERED_AFTER
 
     def _saw_ready(self, run: str) -> bool:
         """Whether run `run`'s own log has printed the ready marker; read until it has (T390, T451).

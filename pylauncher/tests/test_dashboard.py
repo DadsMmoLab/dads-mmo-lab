@@ -1198,7 +1198,7 @@ def test_a_run_that_said_ready_and_then_died_does_not_end_the_loop(tmp_path: Pat
 def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     tmp_path: Path,
 ) -> None:
-    """A tick is one inspect and one SQL read; the log is read only until a run says ready (T390, T451)."""
+    """A tick is one inspect and one SQL read; the log is read only until a run says ready."""
     fixed = _stamp(NOW + timedelta(seconds=9))
     reads: list[timedelta] = []
     ready = _said_ready_from(timedelta(seconds=10), fixed)
