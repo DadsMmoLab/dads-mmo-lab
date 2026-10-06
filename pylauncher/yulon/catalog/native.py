@@ -12174,13 +12174,13 @@ class StagedInstaller:
         if problem:
             raise InstallerError(
                 f"Yu'lon could not update {module_answers.ANSWERS_FILE} in {ctx.server_dir} "
-                f"({problem}). That file still says which mob multipliers were applied to the "
+                f"({problem}). That file still says which mods were applied to the "
                 "old databases, and these are new, so nothing was imported. Fix its permissions "
                 "(or, if it is damaged, move it aside) and press Install again."
             )
         if forgot:
             yield (
-                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "Cleared Yu'lon's record of the mods applied to the old databases: "
                 "these are new."
             )
 

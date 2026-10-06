@@ -149,6 +149,7 @@ class ManifestPromptDialog(QDialog):
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
+        notes: Sequence[str] = (),
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
@@ -198,6 +199,8 @@ class ManifestPromptDialog(QDialog):
                 )
             if reapplies_on_top(manifest):
                 self._notes.append(REAPPLIES_NOTE)
+        # The caller's own sentences (T302: an answer that replaces a Server rates value).
+        self._notes.extend(notes)
         for text in self._notes:
             note = QLabel(text, self)
             note.setWordWrap(True)
@@ -390,6 +393,7 @@ def ask_manifest_prompts(
     again: bool = False,
     remembered: Mapping[str, str] | None = None,
     removing: bool = False,
+    notes: Sequence[str] = (),
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -398,7 +402,13 @@ def ask_manifest_prompts(
     manifest with nothing to ask produces.
     """
     dialog = ManifestPromptDialog(
-        parent, manifest, prompts, again=again, remembered=remembered, removing=removing
+        parent,
+        manifest,
+        prompts,
+        again=again,
+        remembered=remembered,
+        removing=removing,
+        notes=notes,
     )
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")

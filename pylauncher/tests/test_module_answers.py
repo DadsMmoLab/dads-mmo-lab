@@ -614,3 +614,51 @@ def test_the_accountwide_manifest_still_parses(tmp_path: Path) -> None:
         )
     )
     assert parse_manifest(raw).id == "accountwide"
+
+
+def _counted() -> Manifest:
+    """A relative mod whose Remove renders its one `int` answer."""
+    return parse_manifest(
+        {
+            "schema_version": 1,
+            "id": "counted",
+            "name": "Counted",
+            "type": "mod",
+            "game": "wow-vanilla",
+            "description": "one number, multiplied in and divided out",
+            "sql": [
+                {"db": "world", "statement": "UPDATE t SET n = n * {n};"},
+                {"db": "world", "statement": "UPDATE t SET n = n / {n};", "when": "remove"},
+            ],
+            "prompts": [{"key": "n", "question": "How many?", "kind": "int"}],
+        }
+    )
+
+
+@pytest.mark.parametrize("stored", [" 5", "5 ", "+5", " +5 "])
+def test_a_number_stored_before_the_digits_rule_is_still_remembered_and_removable(
+    tmp_path: Path, stored: str
+) -> None:
+    """Typed, ` 5` and `+5` are refused now; stored by an older build, they still mean 5.
+
+    The SQL that build sent read them as 5, so Remove must divide by 5 and the
+    dialog must offer 5, rather than calling the record unusable.
+    """
+    manifest = _counted()
+    assert module_answers.record_answers(tmp_path, manifest, {"n": stored}) == ""
+    assert module_answers.record_applied(tmp_path, manifest, {"n": stored}) == ""
+    applier = Applier(tmp_path)
+    assert applier.remembered_answers(manifest) == {"n": "5"}
+    assert applier.applied_record(manifest) == ({"n": "5"}, "")
+    assert apply_module.check_answer(manifest.prompts[0], stored) != "", "typing stays strict"
+
+
+@pytest.mark.parametrize("stored", ["１２", "١٢", "1_0", "+-5", "0x10", "2147483648"])
+def test_a_stored_number_no_server_reads_is_still_not_offered(tmp_path: Path, stored: str) -> None:
+    manifest = _counted()
+    assert module_answers.record_answers(tmp_path, manifest, {"n": stored}) == ""
+    assert module_answers.record_applied(tmp_path, manifest, {"n": stored}) == ""
+    applier = Applier(tmp_path)
+    assert applier.remembered_answers(manifest) == {}
+    values, why = applier.applied_record(manifest)
+    assert values is None and why, (values, why)

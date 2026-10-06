@@ -96,7 +96,7 @@
     },
     "ConfKey": {
       "additionalProperties": false,
-      "description": "A config key the app sets or surfaces, with its default, the why, and how to edit it.\n\nThe four T43 fields below are what the Tuning tab draws a control from, and\nthey are on the manifest rather than in a second registry on purpose: one\nfile describes a module's install AND its tuning, so the two cannot name\ndifferent keys (T43 decision 2).\n\nEvery one of them is OPTIONAL, and the absence of each is a decision rather\nthan a gap:\n\n* no `label` -> the tab shows the key itself, which is what the module's own\n  documentation calls it;\n* no `explain` -> the tab shows nothing. The author's silence is honest;\n  invented prose about somebody else's module is not;\n* **no `type` -> a text box.** Never a switch, never a spinner. This is the\n  safety rule of the whole feature: a wrong `type` writes a wrong value into\n  somebody's live server, and \"unknown\" has to degrade to the one control\n  that can express anything;\n* no `min`/`max` on an `int` -> no clamping is invented. The module decides\n  what it accepts; a bound this catalog made up would refuse a value the\n  module is happy with.",
+      "description": "A config key the app sets or surfaces, with its default, the why, and how to edit it.\n\nThe four T43 fields below are what the Tuning tab draws a control from, and\nthey are on the manifest rather than in a second registry on purpose: one\nfile describes a module's install AND its tuning, so the two cannot name\ndifferent keys (T43 decision 2).\n\nEvery one of them is OPTIONAL, and the absence of each is a decision rather\nthan a gap:\n\n* no `label` -> the tab shows the key itself, which is what the module's own\n  documentation calls it;\n* no `explain` -> the tab shows nothing. The author's silence is honest;\n  invented prose about somebody else's module is not;\n* **no `type` -> a text box.** Never a switch, never a spinner. This is the\n  safety rule of the whole feature: a wrong `type` writes a wrong value into\n  somebody's live server, and \"unknown\" has to degrade to the one control\n  that can express anything;\n* no `min`/`max` on an `int` -> no clamping is invented. The module decides\n  what it accepts; a bound this catalog made up would refuse a value the\n  module is happy with.\n\n`float` (T302) is a decimal number such as a server rate (`Rate.XP.Kill = 1.5`):\na text box that takes digits and one point, checked against its bounds at Save.\nIts `min`/`max` are whole numbers, like an `int`'s: the one card that uses it\n(Server rates, 0 to 100) needs no more, and widening the bound type reaches\nevery `TuningRow` and the spinner.",
       "properties": {
         "default": {
           "anyOf": [
@@ -152,7 +152,7 @@
             }
           ],
           "default": null,
-          "description": "`int` keys only; no bound is invented.",
+          "description": "`int` and `float` keys only; no bound is invented.",
           "title": "Max"
         },
         "min": {
@@ -165,7 +165,7 @@
             }
           ],
           "default": null,
-          "description": "`int` keys only; no bound is invented.",
+          "description": "`int` and `float` keys only; no bound is invented.",
           "title": "Min"
         },
         "note": {
@@ -186,6 +186,7 @@
               "enum": [
                 "bool",
                 "int",
+                "float",
                 "list",
                 "text"
               ],

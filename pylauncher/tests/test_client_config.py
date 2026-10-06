@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import client_config, play_client
 from yulon.catalog.catalog import ConfigWtf
 
@@ -310,6 +311,35 @@ def test_a_client_without_a_data_folder_has_nothing_to_remove(tmp_path: Path) ->
     shutil.rmtree(play / "Data")
 
     assert client_config.remove_locale_realmlists(play) == ()
+
+
+@needs_case_sensitive_disk
+def test_the_locale_realmlists_under_a_lowercase_data_folder_are_removed(tmp_path: Path) -> None:
+    """T261: a ready-to-play client made from a `data/` client has `data/`, not `Data/`."""
+    _, play = make_play(tmp_path)
+    (play / "Data").rename(play / "data")
+
+    removed = client_config.remove_locale_realmlists(play)
+
+    assert removed == (
+        play / "data" / "deDE" / "REALMLIST.WTF",
+        play / "data" / "enUS" / "realmlist.wtf",
+    )
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_data_folder_that_is_a_link_is_not_entered(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    original, play = make_play(tmp_path)
+    shutil.rmtree(play / "Data")
+    (play / "data").symlink_to(original / "Data", target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        assert client_config.remove_locale_realmlists(play) == ()
+
+    assert (original / "Data" / "enUS" / "realmlist.wtf").is_file()
+    assert any(str(play / "data") in r.getMessage() for r in caplog.records)
 
 
 def test_a_folder_without_the_marker_keeps_its_realmlist_wtf_files(tmp_path: Path) -> None:
