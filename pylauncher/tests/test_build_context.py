@@ -610,20 +610,67 @@ def test_a_junction_counts_by_its_target_and_is_not_entered(
 def test_a_junction_the_dockerignore_leaves_out_is_not_looked_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_type: type[_AsWindowsSees]
 ) -> None:
-    """The live #312 case: `.claude/skills/...` a junction, and `.claude` not sent."""
+    """A junction in a folder that is walked, at a name the `.dockerignore` leaves out.
+
+    3.12+ refused it by name before asking whether Docker sends it at all.
+    """
     root = _plain_server(tmp_path, "*\n!src\n")
     _write(root / "src/main.c", "x")
     _write(root / "outside/x.txt", "one")
-    (root / ".claude").mkdir()
     without = _fp(root)
     try:
-        os.symlink("../outside", root / ".claude/junction")
+        os.symlink("outside", root / "junction")
     except OSError:
         pytest.skip("this account may not make symlinks")
-    _windows_listing(
-        monkeypatch, entry_type, root / ".claude/junction", _MOUNT_POINT, enter_fails=True
-    )
+    _windows_listing(monkeypatch, entry_type, root / "junction", _MOUNT_POINT, enter_fails=True)
     assert _fp(root) == without
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_reparse_point_with_no_tag_reported_counts_as_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cautious answer: an unknown reparse point is not entered."""
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    try:
+        os.symlink("../outside", root / "src/unknown")
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    _windows_listing(monkeypatch, _AsWindowsSees, root / "src/unknown", 0, enter_fails=True)
+    before = _fp(root)
+    _write(root / "outside/x.txt", "two")
+    assert _fp(root) == before
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_link_whose_target_windows_cannot_read_answers_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WSL symlink: Python on Windows raises ValueError, not OSError, for its target.
+
+    That must be "no answer", never an exception out of the build.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    link = root / "src/wsl-link"
+    try:
+        os.symlink("../outside", link)
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    assert fingerprint(root) is not None
+    _windows_listing(monkeypatch, _AsWindowsSees, link, 0xA000001D, enter_fails=True)
+    real_readlink = os.readlink
+
+    def readlink(path: str) -> str:
+        if Path(path) == link:
+            raise ValueError("not a symbolic link")  # CPython's words for another tag
+        return real_readlink(path)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+    assert fingerprint(root) is None
 
 
 def test_a_reparse_point_that_names_no_other_file_is_walked_as_a_folder(

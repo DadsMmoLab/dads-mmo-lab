@@ -638,14 +638,23 @@ def _walk(stream: _Stream, context: Path, rules: Rules, known: _Known | None = N
         info = entry.stat(follow_symlinks=False)
         if links.stat_is_link(info):
             # A symlink, or a junction or other link on Windows, which Python
-            # reports as a folder (T375): never entered, as Docker never does.
+            # reports as a folder (T375). Never entered: BuildKit's context walk
+            # (fsutil, Go's `filepath.WalkDir`) enters only what Go calls a folder,
+            # and Go has not called a name-surrogate reparse point one since 1.23
+            # (`os/types_windows.go`; before 1.23 a junction was a symlink to it).
             if decision.excluded:
                 continue
+            try:
+                target = os.readlink(entry.path)
+            except ValueError as exc:
+                # CPython on Windows reads only symlinks and junctions; any other
+                # link (a WSL symlink) is "not a symbolic link", and so is it to Go.
+                raise _NoAnswer(f"{rel} is a link whose target cannot be read: {exc}") from exc
             _send_folders(stream, stack)
             stream.put(b"l")
             stream.put(_utf8(rel))
             stream.put(oct(stat.S_IMODE(info.st_mode)).encode("ascii"))
-            stream.put(_utf8(os.readlink(entry.path)))
+            stream.put(_utf8(target))
             continue
         if stat.S_ISDIR(info.st_mode):
             if decision.excluded and not rules.may_admit_under(parts):
