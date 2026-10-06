@@ -374,8 +374,7 @@ def _static_notices(source: str) -> list[int]:
         and (
             (isinstance(node.func.value, ast.Name) and node.func.value.id in names)
             or (
-                isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "QMessageBox"
+                isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "QMessageBox"
             )
         )
     ]

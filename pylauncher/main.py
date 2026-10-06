@@ -1192,9 +1192,7 @@ def build_window() -> object:
             logger.error(f"could not forget {game} at {folder}: {exc}")
             from yulon.ui.message_box import show_warning
 
-            show_warning(
-                window, forgetting.SAVE_FAILED_TITLE, forgetting.save_failed(folder, exc)
-            )
+            show_warning(window, forgetting.SAVE_FAILED_TITLE, forgetting.save_failed(folder, exc))
             return
         logger.info(
             f"{game} at {folder} removed from Yu'lon's list; "

@@ -16095,9 +16095,7 @@ class ControllerView(QWidget):
         if source is None:
             return False
         if self.rebuild_log.running:
-            show_information(
-                self, "Already rebuilding", "This server is already being rebuilt."
-            )
+            show_information(self, "Already rebuilding", "This server is already being rebuilt.")
             return False
         if self._busy:
             # A rebuild replaces the very containers the Server tab's actions

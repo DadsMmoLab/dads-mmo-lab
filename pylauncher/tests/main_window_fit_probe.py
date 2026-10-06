@@ -176,12 +176,14 @@ def measure(window: QMainWindow) -> dict[str, Any]:
         "minimum": [window.minimumWidth(), window.minimumHeight()],
         "inside": available.contains(frame),
         "scrolls": isinstance(window.centralWidget(), QScrollArea),
-        "content_minimum": [
-            window.centralWidget().widget().minimumWidth(),
-            window.centralWidget().widget().minimumHeight(),
-        ]
-        if isinstance(window.centralWidget(), QScrollArea)
-        else None,
+        "content_minimum": (
+            [
+                window.centralWidget().widget().minimumWidth(),
+                window.centralWidget().widget().minimumHeight(),
+            ]
+            if isinstance(window.centralWidget(), QScrollArea)
+            else None
+        ),
         "tabs": titles,
         "unreachable": unreachable,
         "checked": len(CHECKED),
