@@ -162,6 +162,7 @@ from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
+from yulon.ui.help_places import HELP_BUTTON, show_help_places
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
 from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
@@ -7815,6 +7816,11 @@ class ControllerView(QWidget):
             "Stop listing this server in Yu'lon. Nothing is deleted; you are asked first."
         )
         self.forget_install_button.clicked.connect(self.forget_install)
+        # T520: where a player takes a problem with this game -- its server's
+        # project, its bots' project, its community, Yu'lon -- from the catalog.
+        # Never greyed: a job running is no reason not to read where help is.
+        self.help_button = QPushButton(HELP_BUTTON, tab)
+        self.help_button.clicked.connect(self.show_help)
         self.keep_characters_check = QCheckBox(
             "Keep my characters (the database volume is left alone)", tab
         )
@@ -7971,6 +7977,11 @@ class ControllerView(QWidget):
             or _is_console_channel(self.entry)
             or self.services.console_probe is not None,
         )
+
+        # T520: above the Danger zone, which stays the tab's last box.
+        help_box, help_column = section("Help", tab)
+        help_column.addWidget(_bar(help_box, self.help_button))
+        self._add_section(box, help_box, bool(self.entry.help_places))
 
         # Every press that removes something, in one red-bordered box (T189
         # A22/C27): none of them sits beside Refresh any more. Under the
@@ -10496,6 +10507,11 @@ class ControllerView(QWidget):
             self.uninstall_label.setText(UNINSTALL_FAILED_BROKE)
             self.uninstall_details.set_text(str(exc))
             self.action_failed.emit(f"{UNINSTALL_FAILED_BROKE}\n{exc}")
+
+    @Slot()
+    def show_help(self) -> None:
+        """Open this game's "Where to get help" box (T520)."""
+        show_help_places(self, self.entry)
 
     @Slot()
     def forget_install(self) -> None:

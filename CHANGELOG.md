@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **Where to get help…** on the Server tab links each game's server, bots and community, and Yu'lon's issues page.
 - If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
