@@ -88,6 +88,8 @@ class _Docker:
         self.exit_code: str = "0"
         """What `docker inspect --format {{.State.ExitCode}}` answers once the world exited."""
         self.log_tail = "Halting process...\n"
+        self.working_dir = ""
+        """The world's compose working-dir label (T496), for telling two installs apart."""
 
     def _world_look(self) -> subprocess.CompletedProcess:
         world = self.spec.world
@@ -157,6 +159,8 @@ class _Docker:
         if verb[:2] == ["logs", "--tail"]:
             return _done(self.log_tail)
         if verb[:1] == ["inspect"]:
+            if docker.WORKING_DIR_LABEL in verb[-1]:
+                return _done(f"{self.working_dir}\n")
             if docker.PROJECT_LABEL in verb[-1]:
                 return _done("t384-server\n")
             if "{{.State.Status}}" in verb[-1] and verb[1] == world:
@@ -532,6 +536,8 @@ def _with_console(
 ) -> _Console:
     console = _Console(fake, queue)
     monkeypatch.setattr(docker, "_console_send", console)
+    # The console path is this host's, whatever host the suite runs on (T496).
+    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: True)
     return console
 
 
@@ -977,14 +983,18 @@ class _Channel:
         return Answer("yes", "\n".join(lines))
 
 
+SERVER = Path("/srv/this-install")
+"""The install folder the tests' channel is registered for."""
+
+
 def _on_windows(
     monkeypatch: pytest.MonkeyPatch, fake: _Docker, channel: _Channel | None
 ) -> _Console:
     """This host cannot type at the console (no terminal), and `channel` is the install's own."""
-    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: False)
     console = _with_console(monkeypatch, fake)
+    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: False)
     if channel is not None:
-        docker.save_through_channel(fake.spec.world, lambda: channel)
+        docker.save_through_channel(fake.spec.world, SERVER, lambda: channel)
     return console
 
 
@@ -1037,13 +1047,13 @@ def test_on_windows_a_channel_that_cannot_ask_is_said_and_never_claims_the_save(
         channel.outcome = why
     _on_windows(monkeypatch, fake, None if why == "no channel" else channel)
     if why == "not set up":
-        docker.save_through_channel(fake.spec.world, lambda: None)
+        docker.save_through_channel(fake.spec.world, SERVER, lambda: None)
     if why == "raises":
 
         def broken() -> object:
             raise OSError("the credential file could not be read")
 
-        docker.save_through_channel(fake.spec.world, broken)
+        docker.save_through_channel(fake.spec.world, SERVER, broken)
     _, said, _ = _stop(fake, tmp_path)
     assert not [e for e in fake.events if e.startswith("console")]
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
@@ -1059,9 +1069,8 @@ def test_where_the_console_can_be_typed_at_the_channel_is_not_used(
     """Linux (and a WSL-resident server) keep #326's console path exactly."""
     fake = _install(monkeypatch, "wow-tortoise", _rising(10))
     monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
-    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: True)
     _with_console(monkeypatch, fake)
-    docker.save_through_channel(fake.spec.world, lambda: _Channel(fake))
+    docker.save_through_channel(fake.spec.world, SERVER, lambda: _Channel(fake))
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events[:2] == ["console: saveall", "SIGTERM"]
     assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
@@ -1105,7 +1114,8 @@ def test_the_real_wiring_hands_the_stop_this_installs_command_channel(
     services = ControllerServices.for_entry(entry, server_dir, client_dir=None)
     setup = services.channel_setup
     assert setup is not None
-    assert docker._save_channels[entry.container_spec().world] == setup.live_channel  # type: ignore[attr-defined]
+    registered = docker._save_channels[entry.container_spec().world]
+    assert registered == {docker._folder_key(str(server_dir)): setup.live_channel}  # type: ignore[attr-defined]
 
 
 def test_a_game_that_does_not_save_first_registers_no_channel(tmp_path: Path) -> None:
@@ -1116,3 +1126,61 @@ def test_a_game_that_does_not_save_first_registers_no_channel(tmp_path: Path) ->
     server_dir.mkdir()
     ControllerServices.for_entry(entry, server_dir, client_dir=None)
     assert entry.container_spec().world not in docker._save_channels
+
+
+def test_with_two_installs_of_one_game_the_running_worlds_own_channel_is_asked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A world's container name is the game's, so two installs register under one name; the
+    world's compose working-dir label says which install it was brought up from (cold review)."""
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _on_windows(monkeypatch, fake, None)
+    other, mine = _Channel(fake), _Channel(fake)
+    other.outcome = "unknown"
+    docker.save_through_channel(fake.spec.world, tmp_path / "other", lambda: other)
+    docker.save_through_channel(fake.spec.world, tmp_path / "mine", lambda: mine)
+    docker.save_through_channel(fake.spec.world, tmp_path / "third", lambda: other)
+    fake.working_dir = str(tmp_path / "mine")
+    _, said, _ = _stop(fake, tmp_path)
+    assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+    fake2 = _install(monkeypatch, "wow-tortoise", _rising(10))
+    fake2.working_dir = ""
+    other.fake = mine.fake = fake2
+    _, said, _ = _stop(fake2, tmp_path)
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
+    assert "channel: saveall" not in fake2.events
+
+
+@pytest.mark.parametrize(
+    ("outcome", "saved"), [("answered", True), ("unauthorised", False), ("silent", False)]
+)
+def test_the_real_soap_channel_answers_the_save_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str, saved: bool
+) -> None:
+    """Through `SoapChannel` itself, so the mapping of a SOAP reply onto "asked" is the shipped
+    one: only a command the server ran and reported as succeeding is a save."""
+    from yulon import soap
+    from yulon.channel import SoapChannel
+
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _on_windows(monkeypatch, fake, None)
+    sent: list[str] = []
+
+    def execute(endpoint: soap.Endpoint, command: str, **_kw: object) -> soap.Reply:
+        sent.append(command)
+        return soap.Reply(outcome, "All players saved." if outcome == "answered" else "")  # type: ignore[arg-type]
+
+    endpoint = soap.Endpoint("127.0.0.1", 7878, "YULON", "pw", namespace="urn:MaNGOS")
+    channel = SoapChannel(
+        endpoint=endpoint, state_of=lambda: docker.ContainerState("running"), send=execute
+    )
+    docker.save_through_channel(fake.spec.world, SERVER, lambda: channel)
+    _, said, _ = _stop(fake, tmp_path)
+    assert sent == ["saveall"]
+    if saved:
+        assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+    else:
+        assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
+        assert said[-1] == docker.WORLD_CLOSED

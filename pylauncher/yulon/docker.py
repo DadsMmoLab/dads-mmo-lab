@@ -3542,23 +3542,48 @@ def _console_reaches(wsl_distro: str | None) -> bool:
     return console.can_send(wsl_distro)
 
 
-_save_channels: dict[str, Callable[[], object | None]] = {}
-"""Each world's command channel, for a save asked where its console cannot be typed at (T496).
+_save_channels: dict[str, dict[str, Callable[[], object | None]]] = {}
+"""Each install's command channel, for a save asked where its console cannot be typed at (T496).
 
-Keyed by the world's container name, which is one install's on a Docker host. Filled by the
+World container name -> that install's folder -> its `live_channel`. A world's name is the
+game's, the same for every install of it, so the folder says whose channel it is: the one whose
+folder the running world was brought up from (`WORKING_DIR_LABEL`, cold review). Filled by the
 tab's wiring (`save_through_channel()`), read by every stop route through `_type_at_the_world()`.
 """
 
 
-def save_through_channel(world: str, channel_of: Callable[[], object | None]) -> None:
+def save_through_channel(
+    world: str, server_dir: Path, channel_of: Callable[[], object | None]
+) -> None:
     """Where this host cannot type at `world`'s console, ask its save through this channel (T496).
 
     `channel_of` is the install's `InstallChannel.live_channel`: asked at the moment of the save,
     it hands back a channel on the saved credential (an object whose `send(command)` returns a
-    `channel.Answer`), or None when the channel is not set up. The latest registration for a world
-    wins; on a host that can type at the console this is never read, so Linux stops are #326's.
+    `channel.Answer`), or None when the channel is not set up. On a host that can type at the
+    console this is never read, so Linux stops are #326's.
     """
-    _save_channels[world] = channel_of
+    _save_channels.setdefault(world, {})[_folder_key(str(server_dir))] = channel_of
+
+
+def _folder_key(folder: str) -> str:
+    """One spelling per folder, for matching an install to a compose working-dir label."""
+    return os.path.normcase(os.path.normpath(folder))
+
+
+def _channel_of_the_running_world(
+    spec: ContainerSpec, wsl_distro: str | None
+) -> Callable[[], object | None] | None:
+    """The registered `live_channel` of the install whose world is running, or None (T496)."""
+    installs = _save_channels.get(spec.world, {})
+    if len(installs) == 1:
+        return next(iter(installs.values()))
+    if not installs:
+        return None
+    folder = container_working_dir(spec.world, wsl_distro=wsl_distro)
+    if folder is None or folder == UNREADABLE:
+        logger.warning(f"could not tell which install {spec.world} belongs to")
+        return None
+    return installs.get(_folder_key(folder))
 
 
 @dataclass(frozen=True)
@@ -3569,13 +3594,15 @@ class _ChannelReply:
     prompted: bool = True
 
 
-def _ask_the_channel(spec: ContainerSpec, command: str) -> _ChannelReply | None:
+def _ask_the_channel(
+    spec: ContainerSpec, command: str, wsl_distro: str | None
+) -> _ChannelReply | None:
     """One command through the world's command channel; None when it was not asked or not run.
 
     Only a `yes` is an answer: `no` is a refusal, and `unknown` is no answer about it (a timeout
     may have run it, which is still not a save anyone saw).
     """
-    channel_of = _save_channels.get(spec.world)
+    channel_of = _channel_of_the_running_world(spec, wsl_distro)
     if channel_of is None:
         logger.warning(
             f"could not ask {spec.world} for {command!r}: its console needs a terminal on this "
@@ -3598,7 +3625,12 @@ def _ask_the_channel(spec: ContainerSpec, command: str) -> _ChannelReply | None:
         why = getattr(answer, "reason", "") or getattr(answer, "text", "") or "no answer"
         logger.warning(f"the command channel did not run {command!r} on {spec.world}: {why}")
         return None
-    return _ChannelReply(tuple(str(getattr(answer, "text", "")).splitlines()))
+    lines = tuple(str(getattr(answer, "text", "")).splitlines())
+    logger.info(
+        f"asked {spec.world} for {command!r} through its command channel: "
+        f"{lines[0] if lines else 'answered'}"
+    )
+    return _ChannelReply(lines)
 
 
 def _type_at_the_world(
@@ -3612,7 +3644,7 @@ def _type_at_the_world(
     save = spec.save_first
     assert save is not None
     if not _console_reaches(wsl_distro):
-        return _ask_the_channel(spec, command)
+        return _ask_the_channel(spec, command, wsl_distro)
     try:
         return _console_send(
             command,
