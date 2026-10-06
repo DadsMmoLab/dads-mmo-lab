@@ -361,7 +361,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "97c663d2fd91669b3601289979eced9a4552f9fe", (
+    assert module.rev == "83d88fdc034b224d88a2ecade975e26f8d1d513c", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -388,11 +388,19 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "migrations (a `tortoise_bots_hire` ledger, CREATE TABLE IF NOT EXISTS, and world "
         "quest rows deleted before they are inserted), hired companions deleted when their "
         "hire ends or at the next start, and the dashboard protocol 5 -> 8 (the dashboard "
-        "is rebuilt from the same checkout, T162); and since T416's second bump it is "
-        "97c663d2, the commit release v2026-10-06 names after upstream merged #517 (fix "
+        "is rebuilt from the same checkout, T162); T416's second bump moved it to "
+        "97c663d2, the commit release v2026-10-06 named after upstream merged #517 (fix "
         "#516: the module logs every bot out at shutdown, so a companion hired in this run "
         "no longer outlives the databases and crashes the world with exit 139): 9 commits, "
-        "no conf key, SQL or build change, a consumable-mimic toggle that is off by default"
+        "no conf key, SQL or build change, a consumable-mimic toggle that is off by default; "
+        "and since T522 it is 83d88fdc, the commit release v2026-10-06 names at its last "
+        "build that day, v10 (it named e9bde368, build v9, when the bump began), after "
+        "upstream merged #519 (fix #518: the bots' auction-house and travel planning read "
+        "the shared spawn tables by reference instead of copying them on every call, which "
+        "had pinned the world thread at 100% with a few hundred bots) and #521 (travel "
+        "destinations looked up by hash and filtered by distance before the costly checks, "
+        "cross-map distances without a heap allocation): 4 commits, no conf key, SQL or "
+        "build change"
     )
     for source in sources:
         assert re.fullmatch(
