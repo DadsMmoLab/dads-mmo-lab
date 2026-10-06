@@ -112,10 +112,37 @@ def _repair_text() -> str:
     )
 
 
+def _error_text() -> str:
+    """A compose failure as the install dialogs show it: a long message, then its output."""
+    lines = [
+        f"  service {n}: pull access denied for azerothcore/ac-wotlk-worldserver-{n}, "
+        "repository does not exist or may require 'docker login': denied: requested access "
+        "to the resource is denied"
+        for n in range(30)
+    ]
+    return "The install stopped: docker compose could not start the containers.\n\n" + "\n\n".join(
+        lines
+    )
+
+
 def _yes_no(parent: QWidget, title: str, text: str) -> object:
     from yulon.ui.message_box import ask_yes_no
 
     return ask_yes_no(parent, title, text)
+
+
+def _warning(parent: QWidget, title: str, text: str) -> object:
+    from yulon.ui.message_box import show_warning
+
+    show_warning(parent, title, text)
+    return "ok"
+
+
+def _information(parent: QWidget, title: str, text: str) -> object:
+    from yulon.ui.message_box import show_information
+
+    show_information(parent, title, text)
+    return "ok"
 
 
 def _update(parent: QWidget, title: str, text: str) -> object:
@@ -141,6 +168,9 @@ def dialogs(server_dir: Path) -> dict[str, tuple[Callable[..., object], str, str
         ),
         "repair": (_yes_no, "Repair server files…", _repair_text()),
         "longest": (_yes_no, f"Rebuild {TORTOISE.name}?", _longest_text(server_dir)),
+        # T355: the one-button notices, with a docker error's text at its longest.
+        "warning-longest": (_warning, "Install failed", _error_text()),
+        "information-longest": (_information, "Something else is running", _error_text()),
         "longest-three-way": (
             _update,
             f"Update {TORTOISE.name} to the newest code?",
@@ -220,9 +250,11 @@ def measure(box: QMessageBox) -> dict[str, Any]:
         "question": " ".join(box.text().split()),
         "first_focus": _name(QApplication.focusWidget(), box),
         "decline": (
-            box.button(QMessageBox.StandardButton.No).text()
-            if box.button(QMessageBox.StandardButton.No) is not None
-            else box.button(QMessageBox.StandardButton.Cancel).text()
+            (
+                box.button(QMessageBox.StandardButton.No)
+                or box.button(QMessageBox.StandardButton.Cancel)
+                or box.button(QMessageBox.StandardButton.Ok)
+            ).text()
         ),
     }
 
@@ -370,8 +402,10 @@ def run() -> dict[str, Any]:
                     seen.update(measure(box))
                 except Exception:  # the measuring failed; say so, and still answer
                     seen["error"] = traceback.format_exc()
-                decline = box.button(QMessageBox.StandardButton.No) or box.button(
-                    QMessageBox.StandardButton.Cancel
+                decline = (
+                    box.button(QMessageBox.StandardButton.No)
+                    or box.button(QMessageBox.StandardButton.Cancel)
+                    or box.button(QMessageBox.StandardButton.Ok)
                 )
                 if decline is None:
                     seen["error"] = "no decline button"

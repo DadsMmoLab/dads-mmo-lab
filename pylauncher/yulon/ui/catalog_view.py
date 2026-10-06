@@ -50,7 +50,7 @@ from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon
-from yulon.ui.message_box import FittedMessageBox
+from yulon.ui.message_box import FittedMessageBox, show_information, show_warning
 from yulon.ui.theme import COLOR_TEXT_GOLD
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
@@ -795,7 +795,7 @@ class CatalogView(QWidget):
         if server_dir is None:
             return False
         if compose_file(server_dir) is None:
-            QMessageBox.warning(
+            show_warning(
                 self,
                 "Not a server folder",
                 f"{server_dir} has no compose file (compose.yml or docker-compose.yml) — "
@@ -807,7 +807,7 @@ class CatalogView(QWidget):
         # one to act on.
         folder_problem = self._dir_problem(server_dir)
         if folder_problem is not None:
-            QMessageBox.warning(self, "That folder will not work", folder_problem)
+            show_warning(self, "That folder will not work", folder_problem)
             return False
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
@@ -848,7 +848,7 @@ class CatalogView(QWidget):
         """
         found = wsl.find_servers()
         if not found:
-            QMessageBox.information(
+            show_information(
                 self,
                 "No servers found in WSL",
                 "No Docker Compose projects were found in the running WSL distros.\n\n"
@@ -864,7 +864,7 @@ class CatalogView(QWidget):
 
         identified = _identify(entry, chosen.server_dir)
         if identified is Identification.DIFFERENT:
-            QMessageBox.warning(
+            show_warning(
                 self,
                 "That is a different server",
                 f"{chosen.project} in {chosen.distro} does not look like a "
@@ -988,14 +988,14 @@ class CatalogView(QWidget):
     def start_install(self, entry: CatalogEntry) -> bool:
         """Ask for folders, then run the installer into the log panel. False if not started."""
         if self._log.running:
-            QMessageBox.information(self, "Busy", "Another job is still running.")
+            show_information(self, "Busy", "Another job is still running.")
             return False
         if not entry.install.supports(self._platform_id()):
             # Before the folder prompts, not after them (roadmap 6.1): asking
             # where to install something that cannot be installed is the rudest
             # possible order.
             message = unsupported_platform_message(entry, self._platform_id())
-            QMessageBox.information(self, "Not available on this platform", message)
+            show_information(self, "Not available on this platform", message)
             self.install_finished.emit(entry.id, False, message)
             return False
         # Offered BEFORE the picker, because the picker cannot offer it. The
@@ -1073,7 +1073,7 @@ class CatalogView(QWidget):
             # rather than the plain-cancel copy beside it. Not remembered either.
             said = self._log.status_text()
             logger.info(f"install of {game_id} was stopped and left something: {message}")
-            QMessageBox.warning(self, INSTALL_STOPPED_TITLE, said)
+            show_warning(self, INSTALL_STOPPED_TITLE, said)
             self.install_finished.emit(game_id, False, said)
             return
         stopped_by = self._log.stopped_by
@@ -1088,7 +1088,7 @@ class CatalogView(QWidget):
             # wait and then remembers it -- not the generic cancel copy.
             note = ready_wait_stopped_message(self._catalog.get(game_id), stopped_by)
             logger.info(f"install of {game_id} was stopped in its ready wait; not remembered yet")
-            QMessageBox.information(self, INSTALL_STOPPED_TITLE, note)
+            show_information(self, INSTALL_STOPPED_TITLE, note)
             self.install_finished.emit(game_id, False, note)
             return
         if self._log.cancelled:
@@ -1103,7 +1103,7 @@ class CatalogView(QWidget):
             # not exist at all (install gate, 2026-08-23).
             note = cancelled_install_message(self._catalog.get(game_id), server_dir)
             logger.info(f"install of {game_id} was cancelled; nothing remembered")
-            QMessageBox.information(self, "Install cancelled", note)
+            show_information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)
             return
         if ok and compose_file(server_dir) is None:
@@ -1128,7 +1128,7 @@ class CatalogView(QWidget):
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok and not self._offer_a_restart_instead(message):
-            QMessageBox.warning(self, "Install failed", message)
+            show_warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             _pin_compose_project(server_dir)
@@ -1262,5 +1262,5 @@ def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title:
                 box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
                 box.show()
             return True
-        QMessageBox.warning(parent, failed_title, message)
+        show_warning(parent, failed_title, message)
     return True
