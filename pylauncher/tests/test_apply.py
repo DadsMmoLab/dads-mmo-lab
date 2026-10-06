@@ -2523,9 +2523,9 @@ def test_a_conf_that_writes_nothing_never_reads_the_world(tmp_path: Path) -> Non
     deployed.write_text("Thing.Enabled = 1\n", encoding="utf-8")
     asked: list[int] = []
     git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
-    report = Applier(
-        tmp_path, git=git, world_running=lambda: asked.append(1) or False
-    ).install(parse_manifest(_THING_MODULE))
+    report = Applier(tmp_path, git=git, world_running=lambda: asked.append(1) or False).install(
+        parse_manifest(_THING_MODULE)
+    )
     assert report.world_stopped is False and asked == []
 
 
