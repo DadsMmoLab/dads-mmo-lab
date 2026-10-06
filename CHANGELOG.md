@@ -139,7 +139,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A build that loses Docker, often from too little memory, says so in plain words and what to try.
 - After **PLAY**, the launcher says when the game was started instead of a lasting "is starting".
 - The **Logs** tab colours warnings amber and errors red.
-- Fresh Tortoise installs build TortoiseBots v2026-10-06: a hired companion is deleted when dismissed or the server restarts.
+- Fresh Tortoise installs build TortoiseBots v2026-10-06: hired companions are deleted when dismissed or on restart.
 - Removing **Bigger Stacks** asks first and says every item's stack size goes back.
 
 ## v0.8.90-Public — 2026-09-26
