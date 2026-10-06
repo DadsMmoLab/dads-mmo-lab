@@ -153,6 +153,29 @@ def test_a_stop_during_a_tool_ends_its_container_within_seconds(
     assert sleeps.slept == [], "a created container was asked about again"
 
 
+def test_a_stopped_tool_whose_removal_is_already_in_progress_is_not_asked_about_again(
+    fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T321: `--rm` got there first ("removal ... already in progress"): the container was
+    created before it started, so that "gone" is the end of it, with no settle and no
+    second `rm -f`."""
+    _cli, state = fake_docker
+    (state / "rm-in-progress").write_text("", encoding="utf-8")
+    sleeps = _Sleeps()
+    monkeypatch.setattr(container_end, "time", sleeps)
+    cancel = threading.Event()
+    worker, got, name = _tool_on_a_worker(cancel, [], state)
+
+    cancel.set()
+    worker.join(HANG_BOUND)
+
+    assert not worker.is_alive(), "the stopped tool did not end"
+    assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
+    assert got[0].container_left == ""
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    assert sleeps.slept == [], "a created container's removal in progress was asked again"
+
+
 def test_a_stop_during_the_create_waits_for_it_and_removes_what_it_made(
     fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
