@@ -15,9 +15,10 @@ ends it.
 from __future__ import annotations
 
 import re
+import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, finish_late_create, lay_fake_docker
 from yulon import container_end, docker, platform
-from yulon.after_stop import TrueAfterStop
+from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog.families import extract
 from yulon.catalog.installer import InstallerError
 
@@ -64,15 +65,35 @@ def _tool_on_a_worker(
     worker = threading.Thread(target=tool)
     worker.start()
     deadline = time.monotonic() + HANG_BOUND
-    while not any(call.startswith("run ") for call in fake_calls(state)):
+    while not any(call.startswith("start -a ") for call in fake_calls(state)):
         assert time.monotonic() < deadline, "the tool's docker CLI never started"
         time.sleep(0.01)
-    while not fake_containers(state) and (state / "late-create").exists() is False:
+    name = _created(state)
+    while (state / "containers" / name).read_text(encoding="utf-8") == "created":
         assert time.monotonic() < deadline, "the tool's container never started"
         time.sleep(0.01)
-    (run,) = [call for call in fake_calls(state) if call.startswith("run ")]
-    argv = run.split()
-    return worker, got, argv[argv.index("--name") + 1]
+    return worker, got, name
+
+
+def _created(state: Path) -> str:
+    """The name the one `docker create` gave its container (T321)."""
+    (create,) = [call.split() for call in fake_calls(state) if call.startswith("create ")]
+    return create[create.index("--name") + 1]
+
+
+class _Sleeps:
+    """`container_end.time` with its sleeps recorded (and `during` run) instead of slept."""
+
+    def __init__(self, during: Callable[[], None] = lambda: None) -> None:
+        self.slept: list[float] = []
+        self._during = during
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self._during()
+
+    def __getattr__(self, attr: str) -> object:
+        return getattr(time, attr)
 
 
 def test_each_tool_container_is_named_by_yulon() -> None:
@@ -80,10 +101,30 @@ def test_each_tool_container_is_named_by_yulon() -> None:
     argv = SPEC.to_argv(name="yulon-extract-0123456789ab")
     assert argv[:4] == ["run", "--rm", "--name", "yulon-extract-0123456789ab"]
     assert argv.index("--name") < argv.index(SPEC.image)
+    # T321: what `run_container()` runs is the same container, created and then started.
+    created = SPEC.to_create_argv(name="yulon-extract-0123456789ab")
+    assert created == ["create", *argv[1:]]
+
+
+def test_a_tool_container_is_created_before_it_is_started(
+    fake_docker: tuple[Path, Path],
+) -> None:
+    """T321: `docker create --rm --name`, then `docker start -a`, never one `docker run`."""
+    _cli, state = fake_docker
+    cancel = threading.Event()
+    worker, _got, name = _tool_on_a_worker(cancel, [], state)
+    cancel.set()
+    worker.join(HANG_BOUND)
+
+    made = [call for call in fake_calls(state) if not call.startswith("rm ")]
+    assert made == [
+        " ".join(SPEC.to_create_argv(name=name)),
+        f"start -a {name}",
+    ], made
 
 
 def test_a_stop_during_a_tool_ends_its_container_within_seconds(
-    fake_docker: tuple[Path, Path],
+    fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fake tool goes quiet after its first lines, as `vmap4assembler` does for minutes.
 
@@ -91,6 +132,8 @@ def test_a_stop_during_a_tool_ends_its_container_within_seconds(
     itself, and then the container by its name.
     """
     _cli, state = fake_docker
+    sleeps = _Sleeps()
+    monkeypatch.setattr(container_end, "time", sleeps)
     cancel = threading.Event()
     said: list[str] = []
     worker, got, name = _tool_on_a_worker(cancel, said, state)
@@ -105,7 +148,48 @@ def test_a_stop_during_a_tool_ends_its_container_within_seconds(
     assert time.monotonic() - stopped < ENDS_WITHIN
     assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
     assert fake_containers(state) == [], "the tool's container is still running"
-    assert f"rm -f {name}" in fake_calls(state)
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    # T321: a container that was created before it started needs no second look.
+    assert sleeps.slept == [], "a created container was asked about again"
+
+
+def test_a_stop_during_the_create_waits_for_it_and_removes_what_it_made(
+    fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T321: a Stop while the daemon is still creating cannot lose the container.
+
+    The create is not ended by the Stop, so its answer arrives; the container it made
+    is removed, once, and nothing is started.
+    """
+    _cli, state = fake_docker
+    sleeps = _Sleeps()
+    monkeypatch.setattr(container_end, "time", sleeps)
+    (state / "slow-create").write_text("", encoding="utf-8")
+    cancel = threading.Event()
+    got: list[docker.AttachedRun] = []
+    worker = threading.Thread(
+        target=lambda: got.append(docker.run_container(SPEC, sink=lambda _l: None, cancel=cancel))
+    )
+    worker.start()
+    deadline = time.monotonic() + HANG_BOUND
+    while not (state / "create-asked").exists():
+        assert time.monotonic() < deadline, "the create was never asked"
+        time.sleep(0.01)
+
+    cancel.set()
+    worker.join(0.5)
+    assert worker.is_alive(), "the run did not wait for the create it had asked for"
+    assert fake_containers(state) == [], "the ground: the daemon has not created it yet"
+    (state / "slow-create").unlink()
+    worker.join(HANG_BOUND)
+
+    assert not worker.is_alive(), "the stopped tool did not end"
+    name = _created(state)
+    assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
+    assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    assert fake_containers(state) == [], "the created container is still there"
+    assert sleeps.slept == []
 
 
 def test_a_stop_before_a_tool_starts_starts_nothing(fake_docker: tuple[Path, Path]) -> None:
@@ -119,49 +203,65 @@ def test_a_stop_before_a_tool_starts_starts_nothing(fake_docker: tuple[Path, Pat
     assert fake_calls(state) == [], "a docker command was run after the Stop"
 
 
-def test_a_tool_container_the_daemon_creates_after_the_stop_is_removed_too(
+def test_a_create_that_timed_out_is_looked_for_twice_and_its_late_container_removed(
     fake_docker: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T240's second look: the Stop ended the CLI before the daemon had the name.
+    """T240's second look, kept by T321 for the one case still open to a late create.
 
-    The daemon finishes the create during the settle, at the moment the test lays it
-    (T305's way: `finish_late_create()`), not on a real second's race.
+    A create that does not answer in time is ended by its timeout, and the daemon may
+    still make the container after the first `rm -f` found nothing. The daemon finishes
+    the create during the settle, at the moment the test lays it (T305's way:
+    `finish_late_create()`), not on a real second's race.
     """
     _cli, state = fake_docker
     (state / "late-create").write_text("", encoding="utf-8")
+    monkeypatch.setattr(container_end, "CREATE_TIMEOUT", 0.5)
     late: list[str] = []
 
     def the_daemon_finishes_the_create() -> None:
+        name = _created(state)
         assert [call for call in fake_calls(state) if call.startswith("rm -f ")] == [
             f"rm -f {name}"
         ], "the ground: the first look came before the create"
         assert fake_containers(state) == []
         late.append(finish_late_create(state))
 
-    slept: list[float] = []
+    sleeps = _Sleeps(during=the_daemon_finishes_the_create)
+    monkeypatch.setattr(container_end, "time", sleeps)
 
-    class Settle:
-        def sleep(self, seconds: float) -> None:
-            slept.append(seconds)
-            the_daemon_finishes_the_create()
+    run = docker.run_container(SPEC, sink=lambda _line: None, cancel=threading.Event())
 
-        def __getattr__(self, attr: str) -> object:
-            return getattr(time, attr)
-
-    monkeypatch.setattr(container_end, "time", Settle())
-    cancel = threading.Event()
-    worker, got, name = _tool_on_a_worker(cancel, [], state)
-
-    cancel.set()
-    worker.join(HANG_BOUND)
-
-    assert not worker.is_alive(), "the stopped tool did not end"
-    assert slept == [container_end.LATE_CREATE_SETTLE]
+    name = _created(state)
+    assert sleeps.slept == [container_end.LATE_CREATE_SETTLE]
     assert late == [name]
-    assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
+    assert run.returncode not in (0, docker.CANCELLED_RETURNCODE), run
+    assert any("did not answer" in line for line in run.tail), run.tail
+    assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
     removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
     assert removals == [f"rm -f {name}", f"rm -f {name}"], removals
     assert fake_containers(state) == [], "the late container is still there"
+
+
+def test_a_create_docker_refused_is_the_tools_failure_in_dockers_words(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """T321: what `docker run` said for a missing image, `docker create` now says; it is
+    returned as the run's failure, and nothing is started, removed or remembered."""
+    _cli, state = fake_docker
+    (state / "create-refused").write_text("", encoding="utf-8")
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(tmp_path, "/out"),)
+    )
+    heard: list[str] = []
+
+    run = docker.run_container(spec, sink=heard.append, cancel=threading.Event())
+
+    assert run.returncode == 125
+    assert "pull access denied" in run.tail[-1], run.tail
+    assert heard == list(run.tail), "Docker's words reach the log as `docker run`'s did"
+    assert [call.split()[0] for call in fake_calls(state)] == ["create"]
+    remembered = [writes for writes in docker._UNENDED.values() if tmp_path in writes]
+    assert remembered == [], "a container that was never made is remembered"
 
 
 def test_a_tool_container_that_will_not_go_is_named_in_the_run_log(
@@ -197,9 +297,7 @@ def test_an_abandoned_tool_run_ends_its_container(fake_docker: tuple[Path, Path]
     with pytest.raises(KeyboardInterrupt):
         docker.run_container(SPEC, sink=interrupted, cancel=threading.Event())
 
-    (run,) = [call for call in fake_calls(state) if call.startswith("run ")]
-    argv = run.split()
-    name = argv[argv.index("--name") + 1]
+    name = _created(state)
     assert fake_containers(state) == []
     assert f"rm -f {name}" in fake_calls(state)
 
@@ -293,6 +391,14 @@ def test_a_tool_that_finishes_on_its_own_is_left_to_its_rm(
         return docker.AttachedRun(0, ("done",))
 
     monkeypatch.setattr(docker, "run_attached", finished)
+    monkeypatch.setattr(
+        container_end,
+        "create",
+        lambda launcher, argv, name, **_kw: (
+            subprocess.CompletedProcess(argv, 0, "id\n", ""),
+            None,
+        ),
+    )
     removed: list[str] = []
     monkeypatch.setattr(
         container_end, "end_container", lambda *args, **kwargs: removed.append("rm") or None
@@ -301,7 +407,7 @@ def test_a_tool_that_finishes_on_its_own_is_left_to_its_rm(
     run = docker.run_container(SPEC, sink=lambda _line: None, cancel=threading.Event())
 
     assert run == docker.AttachedRun(0, ("done",))
-    assert len(ran) == 1 and "--name" in ran[0]
+    assert len(ran) == 1 and ran[0][:2] == ["start", "-a"], ran
     assert removed == []
 
 
@@ -328,6 +434,8 @@ def test_a_stop_before_the_first_tool_runs_no_tool(tmp_path: Path) -> None:
         f"Stop was pressed before {test_extract.AD.name} started, so it was not run."
     )
     assert extract.EXTRACT_CANCEL_NOTE in str(stopped.value)
+    # T250 on Yulon: only a failure marked as the Stop taking effect reads "cancelled".
+    assert stop_took_effect(stopped.value), "the Stop before a tool would be shown as a failure"
 
 
 class LeftRunning(test_extract.Runner):

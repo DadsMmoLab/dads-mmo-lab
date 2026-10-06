@@ -147,6 +147,7 @@ REEXTRACT_KEPT_ASIDE = (
 )
 """What a stopped `reextract()` ends with when a tool's container could not be removed (T303)."""
 
+
 def reextract_kept_tiles(kept: int) -> str:
     """What a failed `reextract()` adds when a part-made pathfinding run's tiles stay (T263).
 
@@ -662,7 +663,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     cancelled=stopped,
                 )
             except client_packs.Cancelled as exc:
-                raise InstallerError(
+                raise InstallStopped(
                     f"Stop was pressed while {pack.label} was being laid into the temporary "
                     "copy of your client, so nothing was extracted."
                 ) from exc

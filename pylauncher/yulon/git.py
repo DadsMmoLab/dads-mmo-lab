@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
@@ -2971,13 +2972,45 @@ class ContainerGit:
         cloning as an orphan for minutes after the run had moved on (yulon-win11,
         2026-10-04). So when the stream was stopped, or abandoned, the container
         is killed and removed by its name (`_end_container()`).
+
+        **Created, then started (T321)**, as `docker.run_container()` does and for
+        its reason (`container_end`'s module docstring): `docker create` runs to its
+        end before anything can be stopped, then `docker start -a <name>` is the
+        stream a Stop ends. A Stop pressed during the create finds no stream to
+        end; the log panel, which reads its Stop between lines, closes this on
+        the start's first line (git says "Cloning into" at once), and the
+        container it ends is one known to exist.
         """
         launcher = self._launcher()
         name = f"yulon-git-{uuid.uuid4().hex[:12]}"
         argv = self._argv(launcher, dest, git_args, writes=True, name=name)
-        logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
+        create = ["create", *argv[len(launcher) + 1 :]]
+        logger.info(
+            f"containerized git (streamed): `{' '.join(create)}`, then `start -a {name}`, "
+            f"into {dest}"
+        )
+        ident = threading.get_ident()
+        stops = runner.stops_sent_to(ident)
         try:
-            yield from _streamed_git(argv, stage=stage)
+            made, _refused = container_end.create(launcher, create, name, what="clone")
+        except OSError as exc:
+            # The docker CLI gone from under the cached path: `_capture()`'s sentence.
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        if made.returncode != 0:
+            # Nothing was started. A create that timed out had its late container
+            # looked for and removed (or the refusal logged) by `create()`.
+            said = (made.stderr or made.stdout).strip() or "no answer"
+            raise GitError(f"docker create exited {made.returncode}: {said}")
+        if runner.stops_sent_to(ident) != stops:
+            # The panel's Stop came during the create and found no stream to end.
+            # In an install the panel drains instead of closing this, and nothing
+            # here reads the install's cancel, so the clone would run to its end.
+            refused = self._end_container(launcher, name)
+            if refused is not None:
+                yield container_left_line(name, dest, refused)
+            raise GitStopped(f"the clone into {dest} was stopped before it started.")
+        try:
+            yield from _streamed_git([*launcher, "start", "-a", name], stage=stage)
         except GitStopped:
             refused = self._end_container(launcher, name)
             if refused is not None:
@@ -3006,10 +3039,10 @@ class ContainerGit:
         """Kill the clone container `name` and remove it (T240): `container_end.end_container()`.
 
         Never raises; None once it is gone, or why it could not be removed. The
-        recipe, the second look for a container created after the Stop included,
-        is shared with the extraction tools' containers (T303).
+        recipe is shared with the extraction tools' containers (T303); the
+        container was created before it started (T321), so "gone" is final.
         """
-        return container_end.end_container(launcher, name, what="clone")
+        return container_end.end_container(launcher, name, what="clone", created=True)
 
     @staticmethod
     def _user_args() -> list[str]:

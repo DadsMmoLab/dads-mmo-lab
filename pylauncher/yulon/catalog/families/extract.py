@@ -1278,7 +1278,7 @@ def run_plan(
             # T303: a Stop that landed before this tool -- while the client packs
             # were laid, or before the first tool -- starts no tool. `_conclude()`
             # answers a Stop during a tool; nothing else asked before the first.
-            raise InstallerError(
+            raise InstallStopped(
                 f"Stop was pressed before {tool.name} started, so it was not run. "
                 f"{EXTRACT_CANCEL_NOTE}"
             )

@@ -5431,8 +5431,7 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
         nearby = [ln for ln in said[:where] if not _BUILD_DETAILS.search(ln)]
         said_too = f" / {_elided(nearby[-1])}" if nearby else ""
         return (
-            f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
-            f"{said_too}"
+            f"{code}Docker Desktop kept this build's log instead of printing it: {kept}{said_too}"
         )
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
@@ -5527,11 +5526,12 @@ def run_attached(
     back as `CANCELLED_RETURNCODE`. What a Stop does to work already handed to
     the daemon differs by platform. A one-shot container keeps running to
     completion everywhere, unless its caller ends it by name, as
-    `run_container()` does for the extraction tools (T303). A build goes on
-    to finish its current step on Linux and macOS, where only the docker CLI
-    is ended (T298 asks whether that holds). On Windows the client's whole
-    process tree is ended (T246), and the yulon-win11 probe of 2026-10-05 saw
-    BuildKit's build end at once as `Error`. Either way the layer cache keeps
+    `run_container()` does for the extraction tools (T303). A build ends with
+    its client: on Linux only the docker CLI is ended, and the T298 probes of
+    2026-10-06 saw compose and its `buildx bake` end within 2 s and the build
+    never tag; on Windows the client's whole process tree is ended (T246), and
+    the yulon-win11 probe of 2026-10-05 saw BuildKit's build end at once as
+    `Error`. macOS was not probed. Either way the layer cache keeps
     every finished step and a resumed install re-probes the databases, and it
     is the caller's job to say what a Stop costs, per stage — see
     `native.build_cancel_note()` and its neighbours. `repair_import()`
@@ -6250,6 +6250,15 @@ class ContainerRun:
         name_args = ["--name", name] if name is not None else []
         return ["run", "--rm", *name_args, *self._options_and_command()]
 
+    def to_create_argv(self, name: str) -> list[str]:
+        """`to_argv(name)` as `docker create`: the same container, made and not started (T321).
+
+        `run_container()` creates the container under its name and then attaches to
+        it with `docker start -a <name>`, so the name exists before anything can be
+        stopped (`container_end`'s module docstring has why).
+        """
+        return ["create", *self.to_argv(name=name)[1:]]
+
     def to_detached_argv(self, name: str) -> list[str]:
         """`to_argv()` for a job that outlives this process: `-d --name <name>`, and NO `--rm`.
 
@@ -6307,6 +6316,15 @@ def run_container(
     run abandoned by an exception ends its container the same way. A `cancel`
     already set when this is called starts nothing.
 
+    **Created, then started (T321).** `docker create --rm --name <name>` runs to
+    its end first (`container_end.create()`; no Stop ends it), then a streamed
+    `docker start -a <name>` attaches, and its exit code is the container's, as
+    `docker run`'s was. A Stop during the create is seen once it returns, and the
+    container it made is removed without having started; one during the start
+    ends a container known to exist, so "gone" needs no second look. A create
+    Docker refused (an image it does not have: 125, as `docker run` said) comes
+    back as the run's failure in Docker's words, with nothing started.
+
     Output is read merged because the tools this exists for — the map, vmap and
     mmap extractors — print their progress to stderr, which
     `runner.stream()` otherwise withholds until the tool has exited.
@@ -6356,25 +6374,59 @@ def run_container(
         logger.info(f"run_container(): stopped before it began; not running {spec.argv[0]}")
         return AttachedRun(CANCELLED_RETURNCODE)
     name = f"{TOOL_CONTAINER_PREFIX}{uuid.uuid4().hex[:12]}"
-    argv = spec.to_argv(name=name)
-    logger.info(f"run_container(): `docker {' '.join(argv)}`")
+    argv = spec.to_create_argv(name=name)
     launcher = platform.docker_prefix(None)
+    if launcher is None:
+        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    logger.info(f"run_container(): `docker {' '.join(argv)}`, then `docker start -a {name}`")
     writes = tuple(mount.host for mount in spec.mounts if not mount.read_only)
     with _UNENDED_LOCK:
         _UNENDED[name] = writes
     try:
-        with _cli_ended_on(cancel):
-            run = run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+        made, refused = container_end.create(launcher, argv, name, what=_TOOL)
+    except OSError as exc:
+        # Docker uninstalled while the launcher is open, as `run_attached()` meets it.
+        _ended(name)
+        logger.warning(f"{launcher[0]} could not be started: {exc}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    if made.returncode != 0:
+        if refused is None:
+            _ended(name)
+        said = tuple(
+            line for line in ansi.strip(f"{made.stdout}\n{made.stderr}").splitlines() if line
+        ) or (f"docker create exited {made.returncode}",)
+        if runner.timed_out(made):
+            said = (
+                *said,
+                f"docker create did not answer within {container_end.CREATE_TIMEOUT:g} s.",
+            )
+        for line in said:
+            try:
+                sink(line)
+            except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
+                logger.warning(f"the output sink stopped accepting lines: {exc}")
+                break
+        return AttachedRun(made.returncode, said, container_left=name if refused else "")
+    try:
+        if cancel is not None and cancel.is_set():
+            # Stopped while Docker was creating it: it exists and has not started.
+            run = AttachedRun(CANCELLED_RETURNCODE)
+        else:
+            with _cli_ended_on(cancel):
+                run = run_attached(
+                    ["start", "-a", name], Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True
+                )
     except BaseException:
         # Abandoned: whatever took the run away mid-tool left its container running.
         # A refusal cannot travel in a result here, so it stays in `_UNENDED`.
-        if launcher is None or container_end.end_container(launcher, name, what=_TOOL) is None:
+        if container_end.end_container(launcher, name, what=_TOOL, created=True) is None:
             _ended(name)
         raise
     if cancel is None or not cancel.is_set():
         _ended(name)  # it ran to its end, and `--rm` removed it
         return run
-    refused = container_end.end_container(launcher, name, what=_TOOL) if launcher else None
+    refused = container_end.end_container(launcher, name, what=_TOOL, created=True)
     if refused is None:
         _ended(name)
     else:

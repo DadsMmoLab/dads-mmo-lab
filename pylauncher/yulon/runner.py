@@ -107,6 +107,22 @@ _LIVE_STREAMS: weakref.WeakKeyDictionary[Generator[str, None, None], _Child] = (
 )
 _LIVE_STREAMS_LOCK = threading.Lock()
 
+_STOPS_SENT: dict[int, int] = {}
+"""How many Stops `end_streams_started_on()` was sent per thread ident, under the lock (T321)."""
+
+
+def stops_sent_to(ident: int) -> int:
+    """How many times a Stop was sent to thread `ident`, live stream or not (T321).
+
+    `end_streams_started_on()` ends only what is live, and a Stop that lands while
+    the thread is in a plain `run()` -- `docker create`, which no Stop may cut short
+    (`container_end`) -- finds nothing to end. A caller that must not lose that
+    Stop reads this before such a call and again after it: a different count is a
+    Stop sent in between. A count, not a flag, so nothing has to be reset.
+    """
+    with _LIVE_STREAMS_LOCK:
+        return _STOPS_SENT.get(ident, 0)
+
 
 def _register(generator: Generator[str, None, None], child: _Child) -> None:
     """Put `generator` under the exit hook's eye, with the holder its body reports `proc` in."""
@@ -129,9 +145,15 @@ def _end_child(proc: _AnyPopen) -> None:
     terminated its children's parent is gone.
 
     `terminate()`/`kill()` stay after it as the fallback, and are what a
-    taskkill that failed, timed out or could not start leaves in charge. Off
-    Windows nothing changes; T298 is the follow-up that asks whether Linux and
-    macOS need a process group.
+    taskkill that failed, timed out or could not start leaves in charge.
+
+    Off Windows the docker CLI alone is signalled, and on Linux that was
+    measured to be enough (T298, 2026-10-06, yulon-ubuntu and m910q): SIGTERM,
+    and SIGKILL too, left no compose or `buildx bake` process 2 s later, and the
+    stopped build never tagged its image. The CLI closes its plugin's socket and
+    compose ends its bake on that; both plugins ran in the CLI's own process
+    group, so a group signal would also have reached them, had it been needed.
+    macOS was not probed.
     """
     if proc.poll() is None:
         if sys.platform == "win32":
@@ -359,6 +381,7 @@ def end_streams_started_on(ident: int) -> int:
     where it is said (`LogPanel._on_finished`).
     """
     with _LIVE_STREAMS_LOCK:
+        _STOPS_SENT[ident] = _STOPS_SENT.get(ident, 0) + 1  # `stops_sent_to()` (T321)
         # Copied out under the lock and left before anything is terminated: the
         # dictionary is weak and every other reader takes the same lock, and
         # `_end_child()` can take seconds.

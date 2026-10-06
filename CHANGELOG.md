@@ -33,6 +33,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
+- **Stop** during a clone or a map tool always finds that tool's container and removes it, even right as it starts.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.

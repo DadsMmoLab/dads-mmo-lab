@@ -34,6 +34,7 @@ from tests.conftest import HANG_BOUND
 from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import running as fake_running
 from tests.support_trinitycore import (
     AUTH,
     CHARS,
@@ -56,6 +57,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     machine,
 )
 from yulon import client_packs, docker, platform
+from yulon.after_stop import stop_took_effect
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
@@ -1232,7 +1234,7 @@ def _stop_a_reextract(
     worker.start()
     if stop_when == "tool":
         deadline = time.monotonic() + HANG_BOUND
-        while not fake_containers(state):
+        while not fake_running(state):
             assert time.monotonic() < deadline, "the first tool's container never started"
             time.sleep(0.01)
         stopped_at.append(time.monotonic())
@@ -1264,6 +1266,8 @@ def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_an
 
         assert took < 10.0, f"the Stop took {took:.1f} s to end the press"
         assert len(outcome) == 1 and isinstance(outcome[0], InstallerError), outcome
+        # T250 on Yulon: the panel says "cancelled" only for a failure marked as the Stop.
+        assert stop_took_effect(outcome[0]), "the stopped Re-extract would read as a failure"
         if stop_when == "tool":
             assert str(outcome[0]).startswith(f"{TOOL_NAMES[0]} was stopped."), outcome[0]
         else:
@@ -1271,7 +1275,7 @@ def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_an
                 "Stop was pressed while Centurion world was being laid into the temporary copy"
             ), outcome[0]
         assert str(outcome[0]).endswith(trinitycore.REEXTRACT_PUT_BACK)
-        runs = [call for call in fake_calls(state) if call.startswith("run ")]
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
         if stop_when == "proof":
             assert runs == [], "a tool was started after the Stop"
             assert laid == ["stopped while proved"], laid
@@ -1349,7 +1353,7 @@ def test_a_second_reextract_is_refused_while_the_first_ones_tool_may_still_write
     _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
     try:
         (name,) = fake_containers(state)
-        runs = [call for call in fake_calls(state) if call.startswith("run ")]
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
         left = data_files(box)
         put_back: list[Path] = []
         monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
@@ -1361,7 +1365,7 @@ def test_a_second_reextract_is_refused_while_the_first_ones_tool_may_still_write
         assert name in said and "Nothing was changed." in said, said
         assert put_back == [], "the earlier press was settled under a running tool"
         assert data_files(box) == left, "data/ was touched"
-        assert [c for c in fake_calls(state) if c.startswith("run ")] == runs, "a tool ran"
+        assert [c for c in fake_calls(state) if c.startswith("create ")] == runs, "a tool ran"
     finally:
         end_fake_containers(state)
 
@@ -1413,7 +1417,7 @@ def test_a_reextract_closed_while_a_tool_container_will_not_go_leaves_the_old_da
             if ": running " in line:
                 break
         deadline = time.monotonic() + HANG_BOUND
-        while not fake_containers(state):
+        while not fake_running(state):
             assert time.monotonic() < deadline, "the first tool's container never started"
             time.sleep(0.01)
 
