@@ -12289,10 +12289,10 @@ class StagedInstaller:
         The install's database password is masked here, where the lines are
         made: the screen and the transcript are not redacted on the way out.
 
-        `cancel` is what ends the reads. The ready wait passes what ends ITS
-        window: the job's Stop, or, once a Stop has been heard and the load let
-        finish (T158), "Stop now anyway", so a load that then crashes still
-        shows its lines.
+        `cancel` is what ends the reads. The ready wait passes the job's Stop,
+        or, on a press that lets a loading world finish (T158) once a Stop has
+        come, "Stop now anyway", so a load that then crashes still shows its
+        lines.
 
         Returns the sentence the failure appends, naming where the lines are, or
         `""` when none could be read and so none were shown.
@@ -12428,6 +12428,15 @@ class StagedInstaller:
         ends: threading.Event | None = ctx.cancel
         pending = False
         ready = replace(self._ready_spec(markers), cancel=ends)
+
+        def reads_end() -> threading.Event | None:
+            # What ends a failure's last-line reads (T249). On a press that lets
+            # the load finish, a Stop means "let it load" whether or not it was
+            # heard before the crash was seen: only "Stop now anyway" ends them.
+            if stop_lets_it_load and not pending and ends is not None and ends.is_set():
+                return force
+            return ends
+
         service, container = spec.service_for(spec.world), spec.world
         # T248: the line says whose log in words; the command is under Details.
         logs = f"{container}'s own log"
@@ -12501,7 +12510,7 @@ class StagedInstaller:
                     # every run the container has had.
                     else " What it said as it went is in the log of the run before this one."
                 )
-                kept = yield from self._last_lines(ctx, servers, ends)
+                kept = yield from self._last_lines(ctx, servers, reads_end())
                 if pending:
                     # The lead's ruling (2026-10-05): the player asked to stop and
                     # the build then crashed -- both point back, so this is a crashed
@@ -12548,7 +12557,7 @@ class StagedInstaller:
             # cost its whole bound to get nothing. Nor for "alive": nothing ended.
             kept = ""
             if verdict in ("loop", "gone", "fatal", "quiet"):
-                kept = yield from self._last_lines(ctx, servers, ends)
+                kept = yield from self._last_lines(ctx, servers, reads_end())
             if verdict == "loop":
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
@@ -12592,7 +12601,7 @@ class StagedInstaller:
             before = now
             yield (f"Still loading after {_spell_seconds(spent)}, and still printing — waiting on.")
         lasted = self._seams.monotonic() - started
-        kept = yield from self._last_lines(ctx, servers, ends)
+        kept = yield from self._last_lines(ctx, servers, reads_end())
         raise InstallerError(
             f"{never_ready}. It was still printing after "
             f"{_spell_seconds(lasted)}, so it is doing something "

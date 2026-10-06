@@ -321,6 +321,47 @@ def test_a_load_let_finish_after_a_stop_that_then_dies_still_shows_its_lines(
     assert "Save logs for support" in str(caught.value)
 
 
+def test_a_stop_in_the_window_a_let_finish_load_crashes_in_still_shows_its_lines(
+    tmp_path: Path,
+) -> None:
+    """Cold review: a Stop not yet heard when the crash is seen is still a let-it-load Stop.
+
+    On a press that lets the load finish, the Stop never means "drop what you
+    were about to show"; one window earlier the same crash shows its lines.
+    """
+    cancel = docker.CancelWithForce()
+    cancel.set()
+    tails = Tails()
+    engine = _engine(World("loop"), tails)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in engine.stage_ready(_ctx(tmp_path, cancel), stop_lets_it_load=True):
+            said.append(line)
+
+    assert "crash loop" in str(caught.value)
+    assert CRASH in _shown(said)
+    assert "Stopped before" not in _shown(said)
+
+
+def test_a_load_let_finish_that_runs_to_the_ceiling_still_shows_its_lines(
+    tmp_path: Path,
+) -> None:
+    """The ceiling is the third way a let-finish load ends; its reads follow the same rule."""
+    cancel = docker.CancelWithForce()
+    cancel.set()
+    tails = Tails()
+    engine = _engine(World("ceiling"), tails)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in engine.stage_ready(_ctx(tmp_path, cancel), stop_lets_it_load=True):
+            said.append(line)
+
+    assert docker.STOP_WAITS_FOR_THE_LOAD in said, "the Stop was heard and the load let finish"
+    assert VERDICT_WORDS["ceiling"] in str(caught.value)
+    assert CRASH in _shown(said)
+    assert "Stopped before" not in _shown(said)
+
+
 def test_stop_now_anyway_ends_the_reads_of_a_load_let_finish(tmp_path: Path) -> None:
     """After the Stop is heard, "Stop now anyway" pressed during a read ends it at once."""
     cancel = docker.CancelWithForce()
