@@ -986,7 +986,7 @@ def test_vanilla_and_tortoise_carry_their_deltas() -> None:
     tortoise = load_catalog().get("wow-tortoise").install.native
     assert tortoise is not None and tortoise.cmangos is not None
     assert tortoise.db.image == "mariadb:10.6"
-    assert tortoise.cmangos.client.required_file is None
+    assert tortoise.cmangos.client.required_file == "Data/dbc.MPQ"
     assert tortoise.cmangos.client.mpq_depth == 2
     assert tortoise.cmangos.mmaps.required is False
     assert tortoise.cmangos.sql.create == ()

@@ -30,7 +30,7 @@ merely *not disproved* is ever allowed to license a skip.
 
 That principle is why `Evidence` carries `client_facts_complete` as well as the
 facts. `required_file_size = None` means two different things — "this game names
-no required file" (Tortoise: the client path is the only identity there is) and
+no required file" (Tortoise until T521: the client path was the only identity) and
 "a required file was named and could not be measured" — and stored as two
 `null`s they compare equal, so a run whose `stat()` failed would write a claim
 that the NEXT failing run reads as a match. The flag keeps the states apart and
@@ -140,8 +140,11 @@ def expected_evidence(
 
     The required file's size and mtime are the cheapest proof that the client
     is the one that was extracted from; a client that was patched or swapped
-    changes both. `None` when the spec names no required file (Tortoise), in
-    which case the client path is the only identity there is.
+    changes both. `None` when the spec names no required file (Tortoise's did
+    not until T521), in which case the client path is the only identity there is.
+    A Tortoise `data/` extracted before T521 recorded `None` here, so the next
+    run of this stage over it (Install pressed again on that folder) extracts
+    once more; Rebuild, Update and Repair never run this stage.
 
     Two filesystem calls happen here and either can fail. Neither is allowed to
     escape as a raw `OSError` out of a stage that is otherwise all `yield`ed

@@ -25,7 +25,8 @@ TBC = ClientSpec(
     near_client_warn_gb=8,
 )
 VANILLA = ClientSpec(required_file="Data/dbc.MPQ", min_mpq=5, mpq_depth=1)
-TORTOISE = ClientSpec(required_file=None, min_mpq=5, mpq_depth=2)
+NO_REQUIRED_FILE = ClientSpec(required_file=None, min_mpq=5, mpq_depth=2)
+"""Tortoise's rule until T521 (2026-10-06), when it gained `Data/dbc.MPQ`; kept for the rule."""
 
 
 def client(
@@ -112,7 +113,7 @@ def test_a_missing_required_file_is_refused_by_name(tmp_path: Path) -> None:
 
 def test_required_file_none_disables_only_that_rule(tmp_path: Path) -> None:
     folder = client(tmp_path, required=False)
-    checks = clientdir.validate(folder, TORTOISE, free_bytes=lambda _p: PLENTY)
+    checks = clientdir.validate(folder, NO_REQUIRED_FILE, free_bytes=lambda _p: PLENTY)
     assert not [check for check in checks if check.verdict == "refuse"]
 
 
@@ -564,7 +565,7 @@ def test_the_warn_table_is_the_four_rules_in_reading_order(tmp_path: Path) -> No
     tbc = [check.name for check in clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)]
     assert tbc == [
         "the client folder",
-        "the client's expansion data",
+        "the client's game data",
         "the client's archives",
         "the client's locale",
         "the client's origin",
@@ -575,7 +576,7 @@ def test_the_warn_table_is_the_four_rules_in_reading_order(tmp_path: Path) -> No
     ]
     assert vanilla == [
         "the client folder",
-        "the client's expansion data",
+        "the client's game data",
         "the client's archives",
         "the client's origin",
         "free space next to the client",
@@ -830,3 +831,75 @@ def test_a_folder_named_like_data_that_is_a_file_is_still_not_a_client(tmp_path:
     assert check.detail == (
         f"{folder} has no {clientdir.DATA_DIR} directory, so it is not a game client"
     )
+
+
+# --- a Tortoise client with no DBC archive (T521) --------------------------------------------
+
+TURTLE_ARCHIVES = (
+    "terrain.MPQ",
+    "model.MPQ",
+    "texture.MPQ",
+    "wmo.MPQ",
+    "base.MPQ",
+    "misc.MPQ",
+    "patch.MPQ",
+    "patch-2.MPQ",
+    *(f"patch-{n}.mpq" for n in range(3, 10)),
+)
+"""What a Turtle WoW 1.18.1 client's `Data/` held apart from `dbc.MPQ`, on 2026-09 gate logs.
+
+The mapextractor's own `Opening /client/Data/...` lines on yulon-ubuntu. Fifteen archives, so
+the count rule (`min_mpq` 5) passes and the only rule this folder can break is the DBC one.
+"""
+
+
+def _turtle_client(root: Path, dbc: str | None) -> Path:
+    data = root / "TurtleWoW" / "Data"
+    data.mkdir(parents=True)
+    for name in TURTLE_ARCHIVES:
+        (data / name).write_bytes(b"MPQ")
+    if dbc is not None:
+        (data / dbc).write_bytes(b"MPQ")
+    return root / "TurtleWoW"
+
+
+def test_a_tortoise_client_with_no_dbc_archive_is_refused_before_the_build(
+    tmp_path: Path,
+) -> None:
+    """A user's install compiled for 43 minutes and then extracted 0 DBC files (T521).
+
+    The real catalog's Tortoise rule, on a folder that breaks that rule alone: it has a `Data/`
+    and fifteen archives, so neither the folder rule nor the count rule can be what refuses it.
+    """
+    from yulon.catalog import preflight
+
+    folder = _turtle_client(tmp_path, dbc=None)
+
+    checks = clientdir.validate(
+        folder, _native_client("wow-tortoise"), free_bytes=lambda _p: PLENTY
+    )
+
+    refused = [check for check in checks if check.verdict == "refuse"]
+    assert [check.name for check in refused] == [clientdir.REQUIRED_CHECK]
+    assert verdicts(checks)[clientdir.CLIENT_CHECK] == "pass"
+    assert preflight.Report(checks=checks).message() == (
+        f"The client's game data: Data/dbc.MPQ is missing from {folder}, so this is not the "
+        "client this server needs, or it is an incomplete copy of it. Repair or re-download "
+        "the client, or pick the folder of a complete one, then try again."
+    )
+
+
+@pytest.mark.parametrize("dbc", ["dbc.MPQ", "dbc.mpq", "DBC.MPQ"])
+def test_a_tortoise_client_with_its_dbc_archive_passes_in_any_case(
+    tmp_path: Path, dbc: str
+) -> None:
+    """`archives_any_case` is true for Tortoise: the extraction reads through links (T260)."""
+    folder = _turtle_client(tmp_path, dbc=dbc)
+
+    checks = clientdir.validate(
+        folder, _native_client("wow-tortoise"), free_bytes=lambda _p: PLENTY
+    )
+
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    required = next(check for check in checks if check.name == clientdir.REQUIRED_CHECK)
+    assert (required.verdict, required.detail) == ("pass", f"Data/{dbc} is there")
