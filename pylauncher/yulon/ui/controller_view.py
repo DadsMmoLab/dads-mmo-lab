@@ -9014,6 +9014,10 @@ class ControllerView(QWidget):
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        # T386: a Start's one ask lands while the world loads, as an install's
+        # does, so it gets the same second ask; `_resettle_if_pending` makes it
+        # only while the channel still waits to be proved.
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
         if self.play_label.text() == PLAY_START_FAILED:
             # A later Start (or "Stop the other server and start this one") worked.
             self._say_play("")

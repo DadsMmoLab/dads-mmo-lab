@@ -28,6 +28,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.

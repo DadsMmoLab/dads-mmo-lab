@@ -80,8 +80,8 @@ class _Auth:
     """The SQL seam, answered by SQLite evaluating the statement that was sent.
 
     MySQL spellings the writer uses are translated and nothing else: the
-    `_utf8mb4 X'…'` text literal becomes a quoted string, `NOW()` and `IF()` are
-    registered, and `ON DUPLICATE KEY UPDATE` becomes SQLite's upsert.
+    `_utf8mb4 X'…'` text literal becomes a quoted string, `NOW()`, `IF()` and
+    `GREATEST()` are registered, and `ON DUPLICATE KEY UPDATE` becomes SQLite's upsert.
     """
 
     def __init__(self, entry: CatalogEntry) -> None:
@@ -95,6 +95,7 @@ class _Auth:
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.conn.create_function("NOW", 0, lambda: "2026-10-06 00:00:00")
         self.conn.create_function("IF", 3, lambda test, yes, no: yes if test else no)
+        self.conn.create_function("GREATEST", -1, max)
         for statement in _SCHEMA[self.scheme]:
             self.conn.execute(statement)
         self.conn.execute("CREATE TABLE realmlist (id INTEGER)")
@@ -441,3 +442,89 @@ def test_refresh_on_a_server_without_the_account_creates_nothing(
         assert "not set up yet" in _line(box)
         assert not _offers_repair(box)
         assert box.auth.writes == []
+
+
+def test_a_start_that_lands_while_the_world_loads_asks_again_a_minute_later(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No row yet, so the Start's settle makes one; the world is loading, so it waits.
+
+    One ask after a Start used to be all there was: the line sat at "waiting
+    to be proved" until something else asked. An install already asks once
+    more a minute later; a Start now does the same, and only while it waits.
+    """
+    with box.auth.lock:
+        box.auth.conn.execute("DELETE FROM account WHERE username = ?", (box.app,))
+    scheduled: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
+    )
+    box.wire.loading = True
+
+    box.view._server_action_done(None)  # the Start press, finished
+
+    assert "waiting to be proved" in _line(box)
+    again = [fn for ms, fn in scheduled if ms == controller_view_module._POST_INSTALL_RESETTLE_MS]
+    assert len(again) == 1, "a Start that found the world loading never asked again"
+
+    box.wire.loading = False
+    again[0]()  # type: ignore[operator]
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+    assert not _offers_repair(box)
+
+
+def test_a_repair_that_waits_for_the_world_outlives_a_close_of_yulon(
+    box: _Box, tmp_path: Path
+) -> None:
+    """A saved password the server stopped taking, a Repair while the world loads, a close.
+
+    The reset changed the row, so the saved credential is wrong from that
+    moment. Left on disk it is read first at the next launch, the tab calls a
+    stale password "verified", and the world's first answer is a refusal and
+    a second Repair.
+    """
+    operations = box.entry.operations
+    assert operations is not None and operations.port is not None
+    channel_setup.save_credential(
+        channel_setup.Verified(account=box.app, password="Stale_pw_1", at="2026-10-01 00:00 UTC"),
+        game=box.entry.id,
+        install_id=box.install_id,
+        host="127.0.0.1",
+        port=operations.port,
+        namespace=operations.namespace or "urn:AC",
+    )
+
+    def opened() -> ControllerView:
+        services = ControllerServices.for_entry(box.entry, tmp_path / box.entry.id)
+        services.update_to_latest = None
+        return ControllerView(box.entry, services, status_poll_ms=0)
+
+    first = opened()
+    first.recheck()
+    assert _offers_repair_on(first), "the ground: the stale password is refused"
+    box.wire.loading = True
+    first.repair_channel_button.click()
+    assert "waiting to be proved" in first.channel_label.text()
+    first.shutdown()
+
+    second = opened()
+    try:
+        second.recheck()
+        assert "waiting to be proved" in second.channel_label.text(), second.channel_label.text()
+        box.wire.loading = False
+        second.recheck()
+        assert second.channel_label.text().startswith(f"Command channel: verified as {box.app} at ")
+        saved = _saved(box)
+        assert saved is not None and box.auth.accepts(box.app, saved.password)
+        assert not _offers_repair_on(second)
+    finally:
+        second.shutdown()
+
+
+def _offers_repair_on(view: ControllerView) -> bool:
+    return not view.repair_channel_button.isHidden()

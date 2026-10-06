@@ -963,6 +963,25 @@ def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None
     _sync_folder(path.parent)
 
 
+def _forget_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove a saved credential a Repair has just made wrong. Never raises (T386).
+
+    One left behind -- a locked file on Windows -- costs a later launch a
+    refusal and a second Repair, which is what this is here to save; it is not
+    a reason to fail a Repair whose reset has already landed.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(f"could not remove the replaced credential {path}: {type(exc).__name__}")
+        return
+    _sync_folder(path.parent)
+
+
 def load_credential(
     game: str, install_id: str, *, config_dir: Path | None = None
 ) -> soap.Endpoint | None:
@@ -1181,6 +1200,11 @@ def repair(
             f"could not keep the reset command-channel account for {game} "
             f"({type(exc).__name__}); closing Yu'lon before it is proved will need a repair"
         )
+    # And the saved credential, when the press found one, is wrong from now on:
+    # left on disk it is read ahead of the record above, so the next launch
+    # would call a password the row no longer has "verified" and need a
+    # second Repair once the world answered.
+    _forget_credential(game, install_id, config_dir=config_dir)
     # Built from the password that was just written, not before it: a channel
     # made ahead of the reset carries the credential the server has already
     # refused, and would prove nothing while looking like a repair that failed.
