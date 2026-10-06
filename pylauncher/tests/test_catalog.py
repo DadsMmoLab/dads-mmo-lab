@@ -279,7 +279,7 @@ touches `contrib/`, a `.conf.dist`, `sql/` of the core, CMake or `InstallFullDB.
 `tbc-db` adds `Updates/0035`-`0043`, and `playerbots` changes the hunters' boot
 enchant in its TBC seed.
 The gate was one fresh TBC and one fresh Vanilla install through the app's
-engine on `yulon-fedora`, each read back from its own `src/` checkout.
+engine on `yulon-fedora-gate`, each read back from its own `src/` checkout.
 """
 
 
