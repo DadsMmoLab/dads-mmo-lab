@@ -539,6 +539,11 @@ def _stop_child_here(child: _Child) -> None:
     in `_end_child` has `_SHUTDOWN_TIMEOUT_SECONDS`, and the kill's reap is left
     to the stream's `finally`. It never raises, so one child that cannot be
     ended does not keep the Stop from the next.
+
+    What it cannot do (cold review of T365): on Windows a child with no job is
+    ended through taskkill, and `_end_tree` reads taskkill's output with
+    threads; with none to start, it falls through to `terminate()`, which ends
+    docker.exe alone, the T246 case. That needs no job and no threads at once.
     """
     try:
         _stop_child(child, bounded=True)
