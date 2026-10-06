@@ -1211,13 +1211,13 @@ def repair(
     channel = channel_for(password)
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
     if getattr(answer, "denied", False):
-        logger.info(f"{game}: the reset password was refused too; nothing saved")
+        logger.info(f"{game}: the reset password was refused too; it is kept as not proved")
         return Refused(
             account=state.account,
             password=password,
             reason=(
                 "the account's password was reset and the server still did not accept it, "
-                "so nothing was saved"
+                "so the channel is not working yet"
             ),
         )
     if getattr(answer, "outcome", "") != "yes":
@@ -1303,6 +1303,10 @@ class InstallChannel:
         # renders, not when the tab is built.
         self._db_password = db_password
         self._state: State = self._from_disk()
+        # How many `prove()`s are running now. A Start's or an install's settle
+        # runs on a worker while a Refresh or a tab's opening look can run on
+        # another, and the look from `Idle` must not judge a row mid-settle.
+        self._settles = 0
 
     def _password(self) -> str | None:
         """The install's database password, read now if it was handed over as a reader."""
@@ -1400,15 +1404,21 @@ class InstallChannel:
         Only read: the database is asked whether the row exists, and a
         database that cannot be asked leaves the state as it was.
         """
-        if self._exists is None or self.entry.operations is None:
-            return self._state
+        looked_from = self._state
+        if self._exists is None or self.entry.operations is None or self._settles:
+            # A settle running now is what makes a row with nothing saved: it
+            # has its own answer coming, and the look is not the one to give it.
+            return looked_from
         account = account_name(self.install_id)
         try:
             there = self._exists(account)
         except Exception as exc:  # noqa: BLE001 - a look that cannot be made changes nothing
             logger.info(f"{self.entry.id}: could not look for {account}: {type(exc).__name__}")
             return self._state
-        if there:
+        # Only over the same `Idle` and with no settle started since: one that
+        # began and even finished while the database was asked knows better
+        # than the look, and a `Verified` it left must not become a Repair.
+        if there and self._state is looked_from and not self._settles:
             self._state = lost(account)
         return self._state
 
@@ -1582,18 +1592,25 @@ class InstallChannel:
         # `urn:AC`, answered HTTP 500, and read as a world that had not finished
         # loading. `live_channel()` had been fixed and this had not.
         endpoint = self._endpoint(account, password)
-        self._state = ensure(
-            account=account,
-            password=password,
-            create=self._create,
-            channel=self._channel_for(endpoint),
-            game=self.entry.id,
-            install_id=self.install_id,
-            host=endpoint.host,
-            port=endpoint.port,
-            namespace=endpoint.namespace,
-            config_dir=self._config_dir,
-            state=self._state,
-            gm_level=operations.gm_level or 3,
-        )
+        # Counted while it runs (T386): between `create` and the round trip
+        # the row is there and nothing is saved, which a look from `Idle` would
+        # otherwise read as a lost password.
+        self._settles += 1
+        try:
+            self._state = ensure(
+                account=account,
+                password=password,
+                create=self._create,
+                channel=self._channel_for(endpoint),
+                game=self.entry.id,
+                install_id=self.install_id,
+                host=endpoint.host,
+                port=endpoint.port,
+                namespace=endpoint.namespace,
+                config_dir=self._config_dir,
+                state=self._state,
+                gm_level=operations.gm_level or 3,
+            )
+        finally:
+            self._settles -= 1
         return self._state

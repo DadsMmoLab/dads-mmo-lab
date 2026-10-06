@@ -528,3 +528,59 @@ def test_a_repair_that_waits_for_the_world_outlives_a_close_of_yulon(
 
 def _offers_repair_on(view: ControllerView) -> bool:
     return not view.repair_channel_button.isHidden()
+
+
+# -- a look from Idle and a settle from Idle, at once (cold review) -------------
+
+
+def _racing(tmp_path: Path) -> tuple[object, list[object]]:
+    """A WotLK install over `test_channel_pending`'s world, with the row lookup wired."""
+    from tests.test_channel_pending import _launch, _World
+
+    world = _World()
+    world.loading = False
+    looks: list[object] = []
+    setup = _launch(tmp_path, world)
+    setup._exists = lambda name: name in world.rows
+    return (world, setup), looks
+
+
+def test_a_refresh_during_a_start_settle_does_not_call_the_new_row_lost(tmp_path: Path) -> None:
+    """The settle's `create` has made the row and its round trip is still out.
+
+    The row is there and nothing is saved yet, which is exactly what a lost
+    password looks like from a look alone. A Refresh landing then must not
+    say so, nor leave a Repair that would reset a password that works.
+    """
+    (world, setup), looks = _racing(tmp_path)
+    made = world.create
+
+    def create_then_refresh(name: str, password: str, level: int) -> None:
+        made(name, password, level)
+        looks.append(setup.check())  # the Refresh press, on another thread
+
+    world.create = create_then_refresh
+    setup._create = create_then_refresh
+
+    after = setup.settle()
+
+    assert isinstance(after, channel_setup.Verified)
+    assert not any(isinstance(look, channel_setup.Refused) for look in looks), looks
+    assert isinstance(setup.setup_state(), channel_setup.Verified)
+
+
+def test_a_settle_that_finishes_during_the_look_is_not_overwritten(tmp_path: Path) -> None:
+    """The look asked the database, and the settle proved the row before it answered."""
+    (world, setup), _looks = _racing(tmp_path)
+
+    def exists_while_the_settle_lands(name: str) -> bool:
+        setup.settle()  # the Start's settle, finishing on another thread
+        return name in world.rows
+
+    setup._exists = exists_while_the_settle_lands
+
+    looked = setup.check()
+
+    assert isinstance(looked, channel_setup.Verified), looked
+    assert isinstance(setup.setup_state(), channel_setup.Verified)
+    assert world.resets == 0
