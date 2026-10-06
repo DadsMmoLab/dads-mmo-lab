@@ -2983,6 +2983,8 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
         # exists, because silently changing an owner's password is worse than
@@ -3345,6 +3347,8 @@ def _for_tbc(
         # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
         # implementation here would write a row that looks right and can never
         # log in.
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3491,6 +3495,8 @@ def _for_vanilla(
         create=lambda name, pw, level: vanilla_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3663,6 +3669,8 @@ def _for_centurion(
         create=lambda name, pw, level: centurion_accounts.create_account(
             entry, sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3896,6 +3904,8 @@ def _for_tortoise(
         create=lambda name, pw, level: tortoise_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -4200,6 +4210,9 @@ def _channel_sentence(state: object) -> str:
         when = f" at {state.at}" if state.at else " (before this app recorded when)"
         return f"Command channel: verified as {state.account}{when}."
     if isinstance(state, channel_setup.Refused):
+        # A lost password (T386) is nobody refusing anything: its reason is the line.
+        if state.plain:
+            return f"Command channel: {state.reason}"
         return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
         return (
@@ -4919,6 +4932,18 @@ SETTINGS_REMOVE_NOTHING = (
 )
 """The Remove question when the remove steps would change no value."""
 
+SETTINGS_REMOVE_UNREADABLE = (
+    "Yu'lon could not read {files}, so it cannot tell which settings Remove would change. "
+    "If you go on, Remove tries to put them back and stops with nothing changed if it still "
+    "cannot read the file; {name} stays listed as installed."
+)
+"""The Remove question when a conf the remove steps patch cannot be read (T393)."""
+
+BIGGER_STACKS_REMOVE = (
+    "Every item's stack size goes back to what it was before {name} was installed."
+)
+"""The Remove question for a mod whose record is in the database (T398): Bigger Stacks."""
+
 
 def _and_join(items: Sequence[str]) -> str:
     """`a`, `a and b`, `a, b and c`."""
@@ -4928,7 +4953,9 @@ def _and_join(items: Sequence[str]) -> str:
 
 
 def remove_question(
-    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+    manifest: Manifest,
+    changes: Sequence[apply_module.SettingChange],
+    unreadable: Sequence[str] = (),
 ) -> tuple[str, str]:
     """The title and text of a settings-only mod's Remove question (T380 cold review).
 
@@ -4939,6 +4966,10 @@ def remove_question(
     mod changed goes back.
     """
     title = f"Remove {manifest.name}?"
+    if unreadable:
+        # T393: not "nothing changes" -- Yu'lon could not look.
+        files = _and_join([Path(file).name for file in unreadable])
+        return title, SETTINGS_REMOVE_UNREADABLE.format(files=files, name=manifest.name)
     if not changes:
         return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
     if any(change.label is None for change in changes):
@@ -8579,6 +8610,10 @@ class ControllerView(QWidget):
         self._import_asked = False
         self.refresh_status()
         self.check_server_files()
+        # T386: and the channel. A check proves an account that waits to be
+        # proved, re-asks a saved credential, and finds this app's own account
+        # on a server this machine keeps no password for; it creates nothing.
+        self._check_the_channel()
         # T124: the day's cache answers this, so pressing Refresh repeatedly
         # costs no network.
         self._refresh_upstream_news()
@@ -9285,6 +9320,10 @@ class ControllerView(QWidget):
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        # T386: a Start's one ask lands while the world loads, as an install's
+        # does, so it gets the same second ask; `_resettle_if_pending` makes it
+        # only while the channel still waits to be proved.
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
         if self.play_label.text() == PLAY_START_FAILED:
             # A later Start (or "Stop the other server and start this one") worked.
             self._say_play("")
@@ -9320,9 +9359,11 @@ class ControllerView(QWidget):
 
         `check()` and not `settle()`: settle creates an account on an install
         that has none, and opening a tab is not permission to write a row into
-        the user's auth database. `check()` asks nothing at all unless there is
-        a saved credential or an account an earlier run created and did not
-        prove (T138) to ask about, and it never creates one.
+        the user's auth database. `check()` asks the server about a saved
+        credential or an account an earlier run created and did not prove
+        (T138); with neither, it only reads whether this app's own account is
+        in the auth database, to offer Repair for a lost password (T386). It
+        never creates one.
         """
         setup = self.services.channel_setup
         if setup is None:
@@ -15893,8 +15934,23 @@ class ControllerView(QWidget):
             title, text = remove_question(
                 manifest,
                 apply_module.settings_removal(self.services.controller.server_dir, manifest),
+                apply_module.settings_removal_unreadable(
+                    self.services.controller.server_dir, manifest
+                ),
             )
             if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
+        if action == "remove" and apply_module.database_receipt(manifest):
+            # T398: Bigger Stacks' Remove put every item's stack size back at once,
+            # where a settings-only Remove has asked since T380. Asked first, No by
+            # default, in the box that fits the screen (T243).
+            if not self._confirm(
+                f"Remove {manifest.name}?", BIGGER_STACKS_REMOVE.format(name=manifest.name)
+            ):
                 self._module_pending = None
                 self.module_report.setPlainText(
                     f"remove {manifest.id}: cancelled — nothing on this machine was changed."
