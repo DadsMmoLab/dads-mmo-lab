@@ -78,6 +78,7 @@ from typing import Any, ClassVar, Literal, Protocol
 from yulon import (
     __version__,
     ansi,
+    database_presence,
     dbsecret,
     docker,
     git,
@@ -131,6 +132,7 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
 from yulon.said import SaidByYulon, carry_detail
+from yulon.support.redact import Redactor
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -533,6 +535,12 @@ Stop, then press … again"* — and a refusal that names a button which does no
 exist under that name is exactly the defect T7's ticket is titled after: an
 instruction the user cannot follow. One string, so a rename moves both.
 """
+
+REPAIR_DATABASE_OPENING_NOTE = (
+    "This makes the server's databases again from its own files, the way the install did, then "
+    "starts the server. Accounts and characters are not in those files; a backup brings them back."
+)
+"""Said once at the top of a database Repair (T377)."""
 
 UPDATES_OPENING_NOTE = (
     "You can stop this at any time. This does two things and nothing else: it starts this "
@@ -1636,7 +1644,7 @@ REBUILD_WAIT_HINT = (
 controls does at this point. Stop is the panel's Cancel."""
 
 ROLLBACK_STOPPING = (
-    "Stopping the new build (it may be force-stopped) and putting the previous build " "back\u2026"
+    "Stopping the new build (it may be force-stopped) and putting the previous build back\u2026"
 )
 """The rollback's first line once the containers were replaced (T158, round 3, the lead's words).
 
@@ -5236,6 +5244,74 @@ def wait_ready_quietly(
         before = now
 
 
+FAILURE_TAIL_LINES = 500
+"""How many of a container's last lines a failed `ready` shows (T249), per stream.
+
+Shown on the install's log, where the panel keeps 5000 lines, so the world and
+login servers together take a fifth of it; written in full to the run log the
+support file zips. A crash-looping world server's last start is a few hundred
+lines, and its reason is at the end.
+"""
+
+FAILURE_TAIL_BYTES = 256 * 1024
+"""A cap on those lines, END kept, for a server that prints very long lines."""
+
+FAILURE_TAIL_TIMEOUT_S = 20.0
+"""Per read: a failure is being reported, and a slow daemon must not hold it up long."""
+
+
+def _container_tail(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """`docker.last_lines()` of one container, for a failed `ready` (T249). `None`: unread."""
+    return docker.last_lines(
+        container,
+        FAILURE_TAIL_LINES,
+        wsl_distro=wsl_distro,
+        timeout=FAILURE_TAIL_TIMEOUT_S,
+        max_bytes=FAILURE_TAIL_BYTES,
+    )
+
+
+_STOPPED = object()
+"""`_unless_stopped()`'s answer when Stop was pressed before the read came back."""
+
+_STOP_POLL_S = 0.1
+
+
+def _unless_stopped(
+    read: Callable[[str], str | None], container: str, cancel: threading.Event | None
+) -> object:
+    """`read(container)`, or `_STOPPED` as soon as `cancel` is set (T249 review).
+
+    A tail read is bounded at `FAILURE_TAIL_TIMEOUT_S`, two of them 40 s, and a
+    Stop pressed while a failure is being reported must not wait that out. The
+    read runs on a daemon thread that is left to finish on its own: it holds no
+    lock, writes nothing, and its own timeout ends it.
+    """
+    if cancel is None:
+        return read(container)
+    if cancel.is_set():
+        return _STOPPED
+    answer: list[str | None] = []
+    worker = threading.Thread(
+        target=lambda: answer.append(read(container)), name="yulon-tail-read", daemon=True
+    )
+    worker.start()
+    while worker.is_alive():
+        if cancel.wait(_STOP_POLL_S):
+            return _STOPPED
+    return answer[0] if answer else None
+
+
+def _kept_end(text: str, limit: int) -> str:
+    """`text`'s last `limit` bytes, starting on a whole line."""
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    tail = data[len(data) - limit :].decode("utf-8", errors="ignore")
+    _, newline, whole = tail.partition("\n")
+    return whole if newline else tail
+
+
 @dataclass
 class Seams:
     """Everything the engine reaches outside itself through. Real by default.
@@ -5388,6 +5464,12 @@ class Seams:
     """
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
+    container_tail: Callable[[str], str | None] = _container_tail
+    """A container's last lines, read when `ready` fails (T249). `None`: docker would not say.
+
+    A failed install is never remembered, so the support file has no install to
+    read a container for; the lines it needs travel in the run's own log instead.
+    """
     world_output: Callable[[docker.ContainerSpec], WorldOutput] = _world_output
     """What the world server has printed, asked BETWEEN waits rather than during one.
 
@@ -5497,6 +5579,15 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
+        database_presence.take_reading
+    )
+    """Is this install's database there at all (T377)? Asked by Rebuild and by Repair.
+
+    `database_presence.take_reading()`: `missing` (no volume), `empty` (no login
+    database), `present`, or `unknown` when Docker could not say. A Rebuild
+    refuses the first two before it compiles; Repair runs only on them.
+    """
     world_running: Callable[[str], bool | None] | None = None
     """Is this install's world server up? Three-valued, and `None` is not "no".
 
@@ -5684,6 +5775,7 @@ class Seams:
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
+            container_tail=on(_container_tail, wsl_distro=distro),
             selinux_enforcing=lambda: False,
             # Asked beside `selinux_enforcing` by the compose render whatever the
             # answer; left to default it ran `stat -f` on the HOST (found by the
@@ -5694,6 +5786,7 @@ class Seams:
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
             volume_exists=on(docker.volume_exists, wsl_distro=distro),
+            read_database=on(database_presence.take_reading, wsl_distro=distro),
             world_running=on(docker.world_running, wsl_distro=distro),
             db_running=on(docker.world_running, wsl_distro=distro),
             stop_db=on(docker.stop_containers, wsl_distro=distro),
@@ -6382,6 +6475,66 @@ class StagedInstaller:
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
 
+    def repair_database_stages(self) -> tuple[Stage, ...]:
+        """What Repair runs on a database Docker no longer has (T377): the install's own four.
+
+        The database started (compose makes its volume again, empty), the
+        family's import -- whose own probe reads `absent` there and imports the
+        whole plan, as the install did -- the servers started and the wait for
+        the world. Each is the family's own stage with its record taken away:
+        the install already recorded them, and this press must not write a
+        record of its own (`update_stages()`'s rule). AzerothCore puts its
+        client-data download first, because that data lives in a volume too.
+        """
+        return tuple(
+            replace(self.stage_named(name), recorded=False)
+            for name in ("start-db", "import", "up", "ready")
+        )
+
+    def repair_database(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Make a database Docker no longer has again, from the server files, and start (T377).
+
+        The Server tab offers it only after a Start or a Rebuild refused because
+        the database was missing or empty, and the press asks Docker again
+        before anything: it runs only when the answer is still `missing` or
+        `empty`. A database that is there, or one nobody could ask, is never
+        imported over -- the import's own probe would refuse a populated one,
+        but a press that consented to "make it again" must not reach a database
+        that holds anything.
+
+        Raises:
+            InstallerError: the database is there or could not be asked, a
+                stage failed, or the press was cancelled.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        reading = self._seams.read_database(self.entry, server_dir)
+        if reading.presence == "present":
+            raise InstallerError(
+                f"Docker has {self.entry.name}'s database again, with its login database in it, "
+                f"so there is nothing to repair. Nothing was changed. Press Start."
+            )
+        if not reading.refuses:
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s database is there "
+                f"({reading.why or 'Docker did not say'}), so nothing was imported. Check that "
+                f"Docker is running, then press Repair again."
+            )
+        yield f"Repairing {self.entry.name}'s database in {server_dir}"
+        yield REPAIR_DATABASE_OPENING_NOTE
+        self._check_cancel(cancel)
+        ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
+        yield from self._staged(self.repair_database_stages(), ctx)
+        yield (
+            f"{self.entry.name}'s database was made again from the server files and the server "
+            f"is running. If you have a backup, restore it on the Maintenance tab."
+        )
+
     def _guard_then(
         self, stage: Stage, button: str, *, remedy: str = ""
     ) -> Callable[[StageContext], Iterator[str]]:
@@ -6663,6 +6816,19 @@ class StagedInstaller:
 
         try:
             yield from _with_hint(_speaking(stop_it, control.abandon), CORRECTIONS_WAIT_HINT)
+        except docker.SaveAbandoned as exc:
+            # T384: the world heard the stop and is saving; Yu'lon stopped watching.
+            raise InstallStopped(
+                f"This was stopped while {self.entry.name}'s world server was saving its "
+                f"characters on the way down, so nothing was applied. The world server closes "
+                f"by itself once the saves are written."
+            ) from exc
+        except docker.SaveFirstAbandoned as exc:
+            raise InstallStopped(
+                f"This was stopped while {self.entry.name}'s world server was saving its "
+                f"characters, before it was told to stop, so nothing was applied. It is still "
+                f"running."
+            ) from exc
         except docker.StopAbandoned as exc:
             raise InstallStopped(
                 f"This was stopped while {self.entry.name}'s world server was still loading, so "
@@ -7107,8 +7273,7 @@ class StagedInstaller:
             self._stopped_waiting_for_docker(stop)
             if answered:
                 yield (
-                    f"Docker answered after "
-                    f"{_spell_elapsed(self._seams.monotonic() - started)}."
+                    f"Docker answered after {_spell_elapsed(self._seams.monotonic() - started)}."
                 )
                 return None
         return self._seams.monotonic() - started
@@ -7239,6 +7404,17 @@ class StagedInstaller:
 
             try:
                 yield from _with_hint(_speaking(stop_them, control.abandon), REBUILD_WAIT_HINT)
+            except docker.SaveAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was stopped while the world server was saving its characters "
+                    "on the way down, before the new build replaced it."
+                ) from exc
+            except docker.SaveFirstAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was cancelled while the world server was saving its characters, "
+                    "before it was told to stop, so its containers were not replaced -- the "
+                    "server you have is still the one that was running before this rebuild."
+                ) from exc
             except docker.StopAbandoned as exc:
                 raise InstallStopped(
                     "The rebuild was cancelled while the world was still loading, so its "
@@ -7265,6 +7441,17 @@ class StagedInstaller:
                 _speaking(replace_them, control.abandon),
                 ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
             )
+        except docker.SaveAbandoned as exc:
+            raise InstallStopped(
+                "The rebuild was stopped while the world server was saving its characters on "
+                "the way down, before the new build replaced it."
+            ) from exc
+        except docker.SaveFirstAbandoned as exc:
+            raise InstallStopped(
+                "The rebuild was cancelled while the world server was saving its characters, "
+                "before it was told to stop, so its containers were not replaced -- the server "
+                "you have is still the one that was running before this rebuild."
+            ) from exc
         except docker.StopAbandoned as exc:
             raise InstallStopped(
                 "The rebuild was cancelled while the world was still loading, so its "
@@ -7401,6 +7588,11 @@ class StagedInstaller:
             refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
+        # T377: a rebuild ends in a start, and a start on a database Docker no
+        # longer has puts the server on a new, empty one. Asked before an hour of
+        # compiling; `unknown` goes on, as a Start does.
+        if self._seams.read_database(self.entry, server_dir).refuses:
+            raise InstallerError(f"{database_presence.MISSING} Nothing was changed.")
         # T217 (B): a plain Rebuild compiles the folder as it is, so a source that is
         # not on the commit the running build was made from would compile a mix of
         # two versions. The update route moves them together and passes its work.
@@ -10656,8 +10848,7 @@ class StagedInstaller:
             )
         if existing is not None and existing.game_id != self.entry.id:
             raise InstallerError(
-                f"{server_dir} already holds an install of {existing.game_id}. Pick another "
-                "folder."
+                f"{server_dir} already holds an install of {existing.game_id}. Pick another folder."
             )
         if existing is not None and existing.family and existing.family != self.family:
             raise InstallerError(
@@ -10970,8 +11161,7 @@ class StagedInstaller:
             existing = self._remote_of(dest)
             if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
-                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
-                    "changed."
+                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was changed."
                 )
             if not has_git and dest.is_dir():
                 leftovers = _listing(dest, ignoring=OUR_OWN_FILES)
@@ -12185,12 +12375,66 @@ class StagedInstaller:
         spec = self.entry.container_spec()
         yield "Waiting for the database."
         if not self._seams.wait_db_healthy(spec):
+            kept = yield from self._last_lines(ctx, (spec.db,), ctx.cancel)
             raise InstallerError(
-                "The database never reported healthy. Its own log says why.",
+                f"The database never reported healthy. Its own log says why.{kept}",
                 detail=docker.logs_command(spec.service_for(spec.db), ctx.server_dir),
             )
         yield from self.wait_for_ready(
             ctx, self._native().ready, stop_lets_it_load=stop_lets_it_load
+        )
+
+    def _last_lines(
+        self,
+        ctx: StageContext,
+        containers: Sequence[str],
+        cancel: threading.Event | None,
+    ) -> Generator[str, None, str]:
+        """Show each container's last lines before a failure is raised (T249).
+
+        A failed install is never remembered, so **Save logs for support…** has
+        no install to read a container for, and the world server's own log was
+        the one thing the reported crash loop needed. What the job yields is on
+        the screen, in the CLI's transcript and in the run log the support file
+        zips, so the lines go there, each as a program's output under its
+        container's name (`lines.TOOL`): a server line spelled like `Step 3 of
+        9` or `--- ` is never read as the engine's own.
+
+        The install's database password is masked here, where the lines are
+        made: the screen and the transcript are not redacted on the way out.
+
+        `cancel` is what ends the reads. The ready wait passes the job's Stop,
+        or, on a press that lets a loading world finish (T158) once a Stop has
+        come, "Stop now anyway", so a load that then crashes still shows its
+        lines.
+
+        Returns the sentence the failure appends, naming where the lines are, or
+        `""` when none could be read and so none were shown.
+        """
+        redact = Redactor.build([ctx.secrets.db_password]).redact
+        shown = False
+        for container in dict.fromkeys(containers):
+            read = _unless_stopped(self._seams.container_tail, container, cancel)
+            if read is _STOPPED:
+                yield f"Stopped before {container}'s log was read."
+                break
+            text = read if isinstance(read, str) else None
+            if text is None:
+                yield f"{container}'s log could not be read."
+                continue
+            said = _kept_end(text, FAILURE_TAIL_BYTES).splitlines()
+            if not said:
+                yield f"{container} has printed nothing."
+                continue
+            yield f"The last lines {container} printed:"
+            for line in said:
+                yield lines.TOOL + f"{container} | {redact(line)}"
+            shown = True
+        if not shown:
+            return ""
+        return (
+            " Its last lines are in the log above, and Logs → Save logs for support… puts "
+            "them in a file you can send to whoever is helping you."
         )
 
     def wait_for_ready(
@@ -12298,9 +12542,19 @@ class StagedInstaller:
         ends: threading.Event | None = ctx.cancel
         pending = False
         ready = replace(self._ready_spec(markers), cancel=ends)
+
+        def reads_end() -> threading.Event | None:
+            # What ends a failure's last-line reads (T249). On a press that lets
+            # the load finish, a Stop means "let it load" whether or not it was
+            # heard before the crash was seen: only "Stop now anyway" ends them.
+            if stop_lets_it_load and not pending and ends is not None and ends.is_set():
+                return force
+            return ends
+
         service, container = spec.service_for(spec.world), spec.world
         # T248: the line says whose log in words; the command is under Details.
         logs = f"{container}'s own log"
+        servers = (spec.world, spec.auth)
         read_it = docker.logs_command(service, ctx.server_dir)
         quiet = markers.timeout_s
         never_ready = "The server started but never reported ready"
@@ -12370,16 +12624,19 @@ class StagedInstaller:
                     # every run the container has had.
                     else " What it said as it went is in the log of the run before this one."
                 )
+                kept = yield from self._last_lines(ctx, servers, reads_end())
                 if pending:
                     # The lead's ruling (2026-10-05): the player asked to stop and
                     # the build then crashed -- both point back, so this is a crashed
                     # wait's rollback, not T71's keep.
-                    raise CrashedAfterStop(f"{READY_CRASHED_AFTER_STOP} {logs} has the rest.{said}")
+                    raise CrashedAfterStop(
+                        f"{READY_CRASHED_AFTER_STOP} {logs} has the rest.{kept}{said}"
+                    )
                 raise WorldStoppedAfterReadyError(
                     f"The world server came up and then stopped. {container} printed its "
                     f"ready marker and was gone again inside "
                     f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
-                    f"even though it started. {logs} has the rest."
+                    f"even though it started. {logs} has the rest.{kept}"
                     f"{_missing_table_hint(after.words, self.entry)}{said}",
                     detail=read_it,
                 )
@@ -12410,24 +12667,30 @@ class StagedInstaller:
                     yield READY_WAIT_STOP_HINT
                 before = now
                 continue
+            # Not for "unreadable": docker is not answering, and each ask would
+            # cost its whole bound to get nothing. Nor for "alive": nothing ended.
+            kept = ""
+            if verdict in ("loop", "gone", "fatal", "quiet"):
+                kept = yield from self._last_lines(ctx, servers, reads_end())
             if verdict == "loop":
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
                     f"which is a crash loop and not a slow start. {logs} has what it printed "
-                    f"before each one.{_corrections_hint(self.entry, now.text)}",
+                    f"before each one.{kept}{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )
             if verdict == "gone":
                 raise InstallerError(
                     f"{never_ready}: {container} is not running any more (docker says "
                     f"{detail!r}), so nothing is going to print it. {logs} has its "
-                    f"last words.",
+                    f"last words.{kept}",
                     detail=read_it,
                 )
             if verdict == "fatal":
                 raise InstallerError(
                     f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest.{_corrections_hint(self.entry, now.text)}",
+                    f"{detail!r}. {logs} has the rest.{kept}"
+                    f"{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )
             if verdict == "quiet":
@@ -12435,7 +12698,8 @@ class StagedInstaller:
                 raise InstallerError(
                     f"{never_ready}, and it stopped printing anything at all for the last "
                     f"{_spell_seconds(silent_for)} — a server that is still loading says so as "
-                    f"it goes, so this one is stuck rather than slow. {logs} has its last words.",
+                    f"it goes, so this one is stuck rather than slow. {logs} has its last words."
+                    f"{kept}",
                     detail=read_it,
                 )
             if verdict == "unreadable":
@@ -12450,13 +12714,15 @@ class StagedInstaller:
                 )
             before = now
             yield (f"Still loading after {_spell_seconds(spent)}, and still printing — waiting on.")
+        lasted = self._seams.monotonic() - started
+        kept = yield from self._last_lines(ctx, servers, reads_end())
         raise InstallerError(
             f"{never_ready}. It was still printing after "
-            f"{_spell_seconds(self._seams.monotonic() - started)}, so it is doing something "
+            f"{_spell_seconds(lasted)}, so it is doing something "
             f"without finishing it. This wait gives a server that keeps talking another "
             f"{_spell_seconds(quiet)} every time it prints, up to a ceiling of "
             f"{_spell_seconds(READY_CEILING_SECONDS)}, which is many times the slowest first "
-            f"boot this has been measured against. {logs} has what it is doing.",
+            f"boot this has been measured against. {logs} has what it is doing.{kept}",
             detail=read_it,
         )
 

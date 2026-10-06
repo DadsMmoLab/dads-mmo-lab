@@ -29,6 +29,7 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import docker as docker_module
 from yulon import log as log_module
 from yulon import platform
 from yulon.catalog import upstream
@@ -1170,6 +1171,30 @@ def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
 
 
+REAL_DATABASE_VOLUME = docker_module.database_volume
+"""The real `docker.database_volume`, for the tests that ask Docker's double about the database."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_whether_the_database_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks Docker whether the database is there (T377); a unit test hears nothing.
+
+    `docker.database_volume()` is the first question `database_presence.take_reading()`
+    asks, and None -- no volume named -- makes the reading `unknown` before
+    anything else is asked. `unknown` changes nothing: the Start goes on as it
+    did before T377, so every test written about something else keeps testing
+    that, through doubles that never answered `compose config`. The tests
+    about the question itself put the real one back with `real_database_read`.
+    """
+    monkeypatch.setattr(docker_module, "database_volume", lambda *_a, **_k: None)
+
+
+@pytest.fixture
+def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_whether_the_database_is_there` for a test about the question."""
+    monkeypatch.setattr(docker_module, "database_volume", REAL_DATABASE_VOLUME)
+
+
 @pytest.fixture(autouse=True)
 def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the client probe without touching the seam the tests assert on.
@@ -1382,3 +1407,40 @@ def the_compose_project_is_not_pinned(monkeypatch: pytest.MonkeyPatch) -> list[P
         docker, "pin_project_name", lambda server_dir, **_kw: pinned.append(server_dir)
     )
     return pinned
+
+
+@pytest.fixture(autouse=True)
+def _no_save_wait_runs_on_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop's wait for a saving world never sleeps, and its clock moves 2 s a look (T384).
+
+    `docker.save_then_stop_the_world()` waits up to `WORLD_SAVE_CEILING_SECONDS` (30 minutes)
+    for a world it has seen running and cannot read the traffic of. A test's fake docker that
+    answers "running" to every inspect and nothing to every exec is exactly that world, and on
+    the real clock it would hold the run for half an hour instead of failing on its argv. The
+    tests of the wait itself (`test_stop_saves_before_exit.py`) set their own clock.
+    """
+    from yulon import docker
+
+    ticks = iter(range(0, 10**9, 2))
+    monkeypatch.setattr(docker, "_save_clock", lambda: float(next(ticks)))
+    monkeypatch.setattr(docker, "_SAVE_POLL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop of a world that saves first never runs a real `docker attach` (T410, T411).
+
+    `docker.save_then_stop_the_world()` types `saveall` at a Centurion or Tortoise
+    console through the console transport, which opens a pty and starts the docker
+    CLI with `subprocess.Popen` -- outside the `runner.run` every stop test fakes.
+    Here it fails as a console this host cannot reach does, so such a stop says
+    `SAVE_FIRST_NOT_ASKED` and goes on. The tests of the save itself
+    (`test_stop_saves_before_exit.py`) put their own console in its place.
+    """
+    from yulon import docker
+    from yulon.controller_wow_wotlk.console import ConsoleError
+
+    def unreachable(command: str, **_kw: object) -> object:
+        raise ConsoleError(f"no console in the test suite ({command!r} was not typed)")
+
+    monkeypatch.setattr(docker, "_console_send", unreachable)

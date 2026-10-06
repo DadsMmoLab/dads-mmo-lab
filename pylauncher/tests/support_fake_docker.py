@@ -46,6 +46,20 @@ if args[:1] == ["run"]:
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
+if args[:1] == ["logs"]:
+    # `docker logs [--tail N] <name>`: the container's stdout on stdout and its
+    # stderr on stderr, as the real CLI splits them (T249).
+    name = args[-1]
+    out, err = state / "logs" / (name + ".out"), state / "logs" / (name + ".err")
+    if not out.exists():
+        sys.stderr.write(f"Error response from daemon: No such container: {{name}}\\n")
+        sys.exit(1)
+    tail = int(args[args.index("--tail") + 1]) if "--tail" in args else None
+    for path, stream in ((out, sys.stdout), (err, sys.stderr)):
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        kept = text.splitlines(keepends=True)
+        stream.write("".join(kept if tail is None else kept[-tail:] if tail else []))
+    sys.exit(0)
 if args[:2] == ["rm", "-f"]:
     box = state / "containers" / args[2]
     if (state / "refuse-rm").exists():
@@ -87,6 +101,14 @@ def lay_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
     )
     cli.chmod(0o755)
     return cli, state
+
+
+def set_fake_log(state: Path, name: str, *, stdout: str, stderr: str = "") -> None:
+    """Give the fake daemon a container `name` whose log is `stdout` and `stderr` (T249)."""
+    folder = state / "logs"
+    folder.mkdir(exist_ok=True)
+    (folder / f"{name}.out").write_text(stdout, encoding="utf-8")
+    (folder / f"{name}.err").write_text(stderr, encoding="utf-8")
 
 
 def containers(state: Path) -> list[str]:

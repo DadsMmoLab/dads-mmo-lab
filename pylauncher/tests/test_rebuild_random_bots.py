@@ -1296,6 +1296,8 @@ def test_restart_world_says_which_half_failed() -> None:
         def refuse_start(self) -> None:
             return None
 
+        refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+
         def stop(self) -> None:
             raise RuntimeError("no stop")
 
@@ -1307,6 +1309,8 @@ def test_restart_world_says_which_half_failed() -> None:
 
         def refuse_start(self) -> None:
             return None
+
+        refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
 
         def stop(self) -> None:
             return None
