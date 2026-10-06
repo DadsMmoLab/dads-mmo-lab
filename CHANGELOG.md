@@ -29,6 +29,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
+- The Server tab no longer says "restart loop" after Docker itself was stopped and started.
+- Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
+- On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.
+- Long questions such as **Rebuild the server…** scroll inside a dialog that fits the screen; the buttons always show.
 - A fresh Centurion server no longer restarts over and over at the end of its install.
 - A fresh Centurion server no longer crashes on its first start while it makes its bots.
 - On Windows, Centurion no longer stalls at start-up; older installs need **Repair server files…**, then **Recreate containers…**.

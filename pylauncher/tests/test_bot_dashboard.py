@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QMessageBox
 from tests.conftest import pump_until
 from tests.support_native import Recorder
 from yulon import docker, resources, useraccounts
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import bot_dashboard as files
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
@@ -266,6 +267,21 @@ def test_a_failed_build_changes_nothing(tmp_path: Path, monkeypatch: pytest.Monk
         .read_text(encoding="utf-8")
         .count(files.SECRET_VAR)
     )
+
+
+def test_a_stopped_build_is_a_stop_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T250: the build Stop ended is raised as a Stop, so the panel says "cancelled" for it."""
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    fake.build_code = docker.CANCELLED_RETURNCODE
+    before = _base(server_dir)
+
+    with pytest.raises(botdash.SwitchStopped, match="Stopped before anything was changed"):
+        list(_switch(server_dir).switch_on(lan=False))
+
+    assert _base(server_dir) == before
 
 
 def test_a_daemon_that_will_not_start_puts_both_files_back(
@@ -572,6 +588,57 @@ def test_the_update_rebuilds_the_dashboard_and_restarts_only_for_a_new_address(
     fake.ips = iter(["10.0.0.5", "10.0.0.9"])
     list(botdash.after_update(_update, None, dashboard=switch))
     assert lifecycle.calls == ["stop", "start"], "a new address: the world is restarted"
+
+
+def test_an_update_whose_stop_came_too_late_still_rebuilds_the_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T247 review: the real update press, Stop pressed in the last pause of T71's watch.
+
+    The press SUCCEEDED (the lead's ruling), so what Tortoise runs after it --
+    the dashboard rebuild, on the same Cancel -- must not see a Stop already set
+    and end "Stopped. FAILED". The build here answers as the real one does to
+    a set Cancel.
+    """
+    from tests.support_native import engine as wotlk_engine
+    from tests.test_ready_wait_stop import WATCH_PAUSES
+    from tests.test_update_to_latest import _ready
+    from yulon.catalog.installer import InstallOptions
+
+    rec, update_dir = _ready(tmp_path / "update")
+    cancel = threading.Event()
+    pauses = {"n": 0}
+
+    def pause(_seconds: float) -> None:
+        pauses["n"] += 1
+        if pauses["n"] == WATCH_PAUSES:
+            cancel.set()  # the panel's Stop, in the last pause of the watch
+
+    made = wotlk_engine(rec, sleep=pause)
+
+    def update(c: threading.Event | None) -> Iterator[str]:
+        return made.update_to_latest(InstallOptions(server_dir=update_dir), cancel=c)
+
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    built = fake.build_image
+
+    def build_image(context: Path, tag: str, **kw: object) -> docker.AttachedRun:
+        stop = kw.get("cancel")
+        if isinstance(stop, threading.Event) and stop.is_set():
+            return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ())
+        return built(context, tag, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "build_image", build_image)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+
+    said = list(botdash.after_update(update, cancel, dashboard=switch))
+
+    assert any(line == native.READY_STOP_TOO_LATE for line in said), said
+    assert "up tortoise-observability --force-recreate" in fake.calls, (fake.calls, said)
+    assert not files.state(server_dir).rebuild_owed, "the dashboard rebuild was stopped"
 
 
 def test_the_update_does_nothing_more_for_a_switched_off_install(
@@ -1303,6 +1370,25 @@ def test_a_rebuild_press_that_fails_again_stays_owed_and_says_so(
     assert "up tortoise-observability --force-recreate" not in fake.calls
     state = files.state(server_dir)
     assert state.rebuild_owed and "exit 2" in state.rebuild_why
+
+
+def test_a_stopped_rebuild_says_what_it_left_after_the_stop_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T250 review: a Stop that ended the rebuild's build left the dashboard stopped and a rebuild
+    owed. That sentence is true after the Stop, so it is typed to be shown after one."""
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = docker.CANCELLED_RETURNCODE
+
+    with pytest.raises(botdash.SwitchError) as raised:
+        list(switch.rebuild(None))
+
+    assert isinstance(raised.value, TrueAfterStop), type(raised.value)
+    assert "the build was stopped" in str(raised.value)
+    assert files.state(server_dir).rebuild_owed
 
 
 def test_switching_off_a_dashboard_that_owes_a_rebuild_forgets_the_debt(
