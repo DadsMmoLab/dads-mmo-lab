@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, module_answers, platform, play_client, rmtree, runner
+from yulon import client_names, docker, module_answers, platform, play_client, rmtree, runner
 from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -62,6 +62,7 @@ from yulon.git import (
 )
 from yulon.log import get_logger
 from yulon.manifest import (
+    ClientFile,
     Db,
     Deploy,
     ExistsCheck,
@@ -525,9 +526,47 @@ class ClientCopy:
     step: str
     path: str
     sha256: str
+    aside: str = ""
+    """Where the player's own file of that name was set aside, absolute; empty: none was.
 
-    def as_json(self) -> dict[str, str]:
-        return {"step": self.step, "path": self.path, "sha256": self.sha256}
+    The owner's decision on the cold review of T262 ("set aside, put back"): a
+    module's file that lands on a file of the player's with other bytes moves that
+    file to `<name>` + `ASIDE_SUFFIX` first, and Remove puts it back. Written to
+    the claim only when set, so a receipt without one reads as it always did.
+    """
+
+    kept: tuple[str, ...] = ()
+    """The player's changed copies of this file kept aside by a later install, absolute.
+
+    A reinstall over a file the player changed since keeps it under another aside
+    name (`Applier._set_aside()`); `aside` stays their original, and Remove names
+    each of these, never deletes one.
+    """
+    aside_unknown: bool = False
+    """The claim held an `aside` this build cannot read: one may exist, nobody knows where.
+
+    Kept as a receipt rather than dropped (the module's own file is still known),
+    and Remove names the gap and looks beside the file for an aside of its name.
+    """
+
+    def as_json(self) -> dict[str, object]:
+        out: dict[str, object] = {"step": self.step, "path": self.path, "sha256": self.sha256}
+        if self.aside:
+            out["aside"] = self.aside
+        if self.kept:
+            out["kept"] = list(self.kept)
+        if self.aside_unknown:
+            out["aside_unknown"] = True
+        return out
+
+
+ASIDE_SUFFIX = ".yulon-module-old"
+"""Appended to the name of a player's file a module's client file takes the place of.
+
+Not an `.MPQ` any more, so the game loads no archive under it, and a name of
+Yu'lon's own, as `client_packs`' `.yulon-pack-old` is. `.1`, `.2`, ... follow when
+that name is taken already.
+"""
 
 
 def sha256_of(path: Path) -> str:
@@ -565,8 +604,26 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
         if not isinstance(entry, dict):
             continue
         step, path, digest = entry.get("step"), entry.get("path"), entry.get("sha256")
-        if isinstance(step, str) and isinstance(path, str) and isinstance(digest, str):
-            out.append(ClientCopy(step=step, path=path, sha256=digest))
+        if not (isinstance(step, str) and isinstance(path, str) and isinstance(digest, str)):
+            continue
+        # An `aside` or `kept` this build cannot read keeps the receipt: the module's
+        # file is still known, and the gap is named at Remove (cold review of T262).
+        aside, kept = entry.get("aside", ""), entry.get("kept", [])
+        unknown = entry.get("aside_unknown") is True
+        if not isinstance(aside, str):
+            aside, unknown = "", True
+        if not isinstance(kept, list) or not all(isinstance(k, str) for k in kept):
+            kept, unknown = [], True
+        out.append(
+            ClientCopy(
+                step=step,
+                path=path,
+                sha256=digest,
+                aside=aside,
+                kept=tuple(kept),
+                aside_unknown=unknown,
+            )
+        )
     return tuple(out)
 
 
@@ -624,6 +681,89 @@ def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> 
         tmp.unlink(missing_ok=True)
         raise
     return dst
+
+
+def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
+    """`(source file, destination)` for every file a copy of `src` into `target` writes.
+
+    Reads only: the names each destination folder already holds, so every folder
+    and file lands on the name the client has in any case (`client_names.match()`,
+    exact spelling first) and takes the source's spelling only when nothing is
+    there (T262). Every name planned joins its folder's listing, so two source
+    names that differ only in case land on one name. A destination folder that
+    is not there yet holds nothing. `_NOT_FOR_THE_CLIENT` stays in the clone, as
+    `copytree`'s `ignore` left it; the source is walked in name order, following
+    its links as `copytree` did.
+
+    Raises:
+        OSError: a destination folder that is there could not be listed.
+    """
+    pairs: list[tuple[Path, Path]] = []
+    into = {src: target}
+    for folder, dirs, files in os.walk(src, followlinks=True):
+        here = Path(folder)
+        dest = into.pop(here)
+        names = os.listdir(dest) if dest.is_dir() else []
+        ignored = _NOT_FOR_THE_CLIENT(folder, [*dirs, *files])
+        dirs[:] = sorted(name for name in dirs if name not in ignored)
+        for name in dirs:
+            onto = client_names.match(names, name) or name
+            names.append(onto)  # a twin later in the source lands on it too
+            into[here / name] = dest / onto
+        for name in sorted(name for name in files if name not in ignored):
+            onto = client_names.match(names, name) or name
+            names.append(onto)
+            pairs.append((here / name, dest / onto))
+    return pairs
+
+
+def _copy_onto(
+    src: Path, target: Path, place: Callable[[Path, Path], object] = _copy_unshared
+) -> list[Path]:
+    """Copy the tree at `src` into `target` as `_plan_onto()` plans it; the names written.
+
+    `shutil.copytree(dirs_exist_ok=True)` made every folder and file under the
+    source's spelling, so on a disk that tells cases apart a keg's `enUS/` landed
+    beside the client's `enus/` and its `patch-4.MPQ` beside `PATCH-4.MPQ`: two
+    archives of one name to the game, which runs under Wine and ignores case, and
+    a receipt for the new one only (T262).
+
+    Copies go through `place`, `_copy_unshared()` unless the caller sets a file of
+    the player's aside first (`Applier._placer()`), so a hard-linked archive is
+    replaced, never written through. One name per file, of what is there last.
+
+    Raises:
+        OSError: a folder could not be made or listed, or a file not copied. What
+            was written before it stays, as with `copytree`.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for source, dest in _plan_onto(src, target):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        place(source, dest)
+        if dest not in written:
+            written.append(dest)
+    return written
+
+
+def _aside_names(dest: Path) -> list[Path]:
+    """The aside files of `dest` beside it: `<name>.yulon-module-old` and its numbered ones.
+
+    Matched whatever the case of `<name>`, the exact suffix first. A folder that
+    cannot be listed has none.
+    """
+    try:
+        names = os.listdir(dest.parent)
+    except OSError:
+        return []
+    stem = (dest.name + ASIDE_SUFFIX).casefold()
+    found = [
+        name
+        for name in names
+        if name.casefold() == stem
+        or (name.casefold().startswith(stem + ".") and name[len(stem) + 1 :].isdigit())
+    ]
+    return [dest.parent / name for name in sorted(found, key=lambda n: (len(n), n))]
 
 
 COMPLETED_KEY = "install_completed"
@@ -942,10 +1082,43 @@ def write_clone_claim(
     tmp = Path(name)
     try:
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        # On disk before the rename, and the rename on disk after it: since T262 this
+        # record is written BEFORE a player's file is moved, and a power cut must not
+        # leave the file moved and the record still in the page cache.
+        _fsync_file(tmp)
         os.replace(tmp, clone / CLAIM_FILE)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_folder(clone)
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush a file Yu'lon just wrote to disk. Raises OSError, as the write would have."""
+    fd = os.open(path, os.O_RDWR)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_folder(folder: Path) -> None:
+    """Flush a folder's entries (a rename into it) to disk; POSIX only, best effort.
+
+    Windows has no folder handle to flush this way, and NTFS journals the rename.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
@@ -1601,21 +1774,58 @@ class _Log:
     # claim) and by `_unclient()` on a remove (the client lines of `left_behind`,
     # which on a remove replace the ones `_left_behind()` reads off the manifest).
     client_copies: list[ClientCopy] = field(default_factory=list)
+    previous_copies: tuple[ClientCopy, ...] = ()
+    """The receipts this item's claim held before this install: its own files in the client."""
+    current_copies: dict[str, ClientCopy] = field(default_factory=dict)
+    """This install's receipts so far, by path: a file landed, or a player's file set aside."""
+    new_asides: dict[str, str] = field(default_factory=dict)
+    """The paths whose player's file THIS install set aside: what a failure puts back."""
+    persist: Callable[[Sequence[ClientCopy]], None] | None = None
+    """Writes the claim with the receipts handed to it; None when this item has no claim."""
+    client_ran: bool = False
+    """`_client()` reached a client folder: its receipts replace the claim's."""
     client_left_behind: list[str] = field(default_factory=list)
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
 
 
-def take_back_file(path: Path, sha256: str, log: _Log) -> None:
+def take_back_file(
+    path: Path,
+    sha256: str,
+    log: _Log,
+    aside: Path | None = None,
+    *,
+    kept: Sequence[Path] = (),
+    aside_unknown: bool = False,
+) -> None:
     """Delete `path` if it still holds the bytes a receipt recorded; else say why not (T67).
 
     The one place a client file this app copied is deleted, for a module's
     Remove (`Applier._take_back()`) and for the ready-to-play client's "Also
     remove them from your original client" (`take_back_files()`, T181).
+
+    `aside` is the player's own file that was at `path` before (`ClientCopy.aside`):
+    once `path` is free it is renamed back, which keeps its bytes, date and
+    read-only flag. While `path` holds a file that is not deleted, or when the
+    rename fails, it stays where it is and is named; it is never deleted. `kept`
+    (a changed copy kept by a reinstall) is named, never moved; `aside_unknown`
+    (a record of an aside that could not be read) looks beside `path` for one.
     """
-    if not path.exists():
+    for other in kept:
+        if os.path.lexists(other):
+            log.client_left_behind.append(
+                f"your changed {path.name}, which Yu'lon kept as {other} when it installed "
+                f"this again; rename it back to {path.name} when you want it again"
+            )
+    if aside is None and aside_unknown:
+        log.client_left_behind.append(
+            f"Yu'lon's record of where it set your own {path.name} aside could not be read; "
+            f"look beside it in {path.parent} for {path.name}{ASIDE_SUFFIX}"
+        )
+    if not os.path.lexists(path):
         log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+        _put_back(aside, path, log)
         return
     try:
         same = sha256_of(path) == sha256
@@ -1624,12 +1834,14 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
             f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
             f"check whether it is still the file it copied: {exc})"
         )
+        _aside_kept(aside, path, "that name still holds the file above", log)
         return
     if not same:
         log.client_left_behind.append(
             f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
             f"copied it, so it left it alone)"
         )
+        _aside_kept(aside, path, "that name still holds the changed file above", log)
         return
     try:
         path.unlink()
@@ -1638,8 +1850,44 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
             f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
             f"{exc} — close the game and delete it by hand)"
         )
+        _aside_kept(aside, path, "that name still holds the file above", log)
         return
     log.done.append(f"took back {path.name} from {path.parent}")
+    _put_back(aside, path, log)
+
+
+def _same_hash(path: Path, sha256: str) -> bool:
+    """Does `path` hold the bytes `sha256` names? False when it cannot be read."""
+    try:
+        return sha256_of(path) == sha256
+    except OSError:
+        return False
+
+
+def _put_back(aside: Path | None, path: Path, log: _Log) -> None:
+    """Rename the player's file set aside at install back to `path`, which is free."""
+    if aside is None:
+        return
+    if not os.path.lexists(aside):
+        log.client_left_behind.append(
+            f"your own {path.name}, which Yu'lon set aside as {aside} when it installed this, "
+            "is no longer there, so it could not be put back"
+        )
+        return
+    try:
+        os.rename(aside, path)
+    except OSError as exc:
+        _aside_kept(aside, path, f"it could not be put back: {exc}", log)
+        return
+    log.done.append(f"put your own {path.name} back in {path.parent}")
+
+
+def _aside_kept(aside: Path | None, path: Path, why: str, log: _Log) -> None:
+    if aside is not None and os.path.lexists(aside):
+        log.client_left_behind.append(
+            f"your own {path.name}, which Yu'lon set aside as {aside} when it installed this "
+            f"({why}); rename it back to {path.name} when you want it again"
+        )
 
 
 def _record_taken_back(play_dir: Path, rel: Path, *, game: str, server_dir: Path) -> None:
@@ -1660,7 +1908,14 @@ def take_back_files(copies: Iterable[ClientCopy]) -> tuple[tuple[str, ...], tupl
     """
     log = _Log()
     for copy in copies:
-        take_back_file(Path(copy.path), copy.sha256, log)
+        take_back_file(
+            Path(copy.path),
+            copy.sha256,
+            log,
+            Path(copy.aside) if copy.aside else None,
+            kept=[Path(k) for k in copy.kept],
+            aside_unknown=copy.aside_unknown,
+        )
     return tuple(log.done), (*log.skipped, *log.client_left_behind)
 
 
@@ -2343,6 +2598,7 @@ class Applier:
         # them "no record", i.e. never taken back, if any later step raised
         # before `_record_client_copies()` wrote the new ones (round 1 review).
         previous_copies = read_client_copies(clone, item_id=manifest.id)
+        log.previous_copies = previous_copies
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -2432,6 +2688,20 @@ class Applier:
                     release=release_tag,
                 )
                 claimed = True
+
+                def persist(files: Sequence[ClientCopy]) -> None:
+                    # The same whole record, with the receipts as they stand: a
+                    # player's file is never moved before this write (T262).
+                    write_clone_claim(
+                        clone,
+                        item_id=manifest.id,
+                        url=url,
+                        completed=was_completed,
+                        client_files=files,
+                        release=release_tag,
+                    )
+
+                log.persist = persist
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
                 # is what the user asked for — but never silent either: without
@@ -2449,6 +2719,7 @@ class Applier:
                     log.done.append("touch include.sh")
         if complete is not None:
             manifest = self._completed(manifest, clone, complete)
+        self._refuse_a_clash(manifest, clone)
         self._deploy(manifest, clone, log)
         self._patches(manifest, clone, vals, "install", log)
         # Both SQL passes are refused as one, BEFORE either runs: the guard's
@@ -2466,15 +2737,41 @@ class Applier:
         self._patches(manifest, clone, vals, "configure", log)
         if first_configure_sql:
             self._sql(manifest, clone, vals, "configure", log)
-        self._client(manifest, clone, log)
-        self._dbc(manifest, clone, log)
+        try:
+            self._client(manifest, clone, log)
+            self._dbc(manifest, clone, log)
+        except BaseException as failure:
+            # The player's files this run set aside go back before the failure is
+            # told (cold review of T262); what could not is in the claim and named.
+            left = self._put_asides_back(log)
+            told = " ".join(left)
+            if left and isinstance(failure, ApplyError):
+                failure.args = (f"{failure} {told}",)
+            elif left and isinstance(failure, OSError):
+                # Its own type and number kept, so whatever reads them still can, and
+                # the player's file named in the words the person reads.
+                raise type(failure)(
+                    failure.errno, f"{failure.strerror or failure}. {told}", failure.filename
+                ) from failure
+            elif left:
+                logger.warning(f"after a failed install of {manifest.id}: {told}")
+            raise
+        if log.client_ran:
+            # An update that no longer ships a file takes it back, with the player's
+            # own file put back, before its receipts replace the old ones.
+            now = {self._here(copy.path) for copy in log.client_copies}
+            for copy in previous_copies:
+                if self._here(copy.path) not in now:
+                    self._take_back(copy, log)
+            log.skipped.extend(log.client_left_behind)  # an install's report has no left_behind
+            log.client_left_behind.clear()
         self._finish_claim(
             manifest,
             clone,
             url,
             claimed,
             log,
-            log.client_copies or previous_copies,
+            log.client_copies if log.client_ran else previous_copies,
             release=release_tag,
         )
         self._remember(manifest, values, log)
@@ -4228,81 +4525,323 @@ class Applier:
         removes and reinstalls also gets no stale `.git` back, because the
         clone is where the history lives and it stays there.
         """
+        if self.client_dir is not None:
+            log.client_ran = True
+        claimed = self._claimed_asides(log)
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
                 continue
             src = clone / step.src
-            if step.dest == "addons":
-                target = self.client_dir / "Interface" / "AddOns" / (step.name or src.name)
-            elif step.dest == "interface":
-                target = self.client_dir / "Interface"
-            else:
-                target = self.client_dir / "Data"
+            target = self._client_target(step, src)
+            place = self._placer(step.src, log, claimed) if step.dest == "data" else _copy_unshared
             if src.is_dir():
-                shutil.copytree(
-                    src,
-                    target,
-                    dirs_exist_ok=True,
-                    ignore=_NOT_FOR_THE_CLIENT,
-                    copy_function=_copy_unshared,
-                )
-                if step.dest == "data":
-                    log.client_copies += self._receipts(step.src, src, target)
+                _copy_onto(src, target, place)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
-                _copy_unshared(src, target / src.name)
-                if step.dest == "data":
-                    log.client_copies += self._receipts(step.src, src, target)
+                place(src, target / (client_names.match(os.listdir(target), src.name) or src.name))
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             log.done.append(f"client {step.src} → {step.dest}")
+        log.client_copies = list(log.current_copies.values())
+
+    def _client_target(self, step: ClientFile, src: Path) -> Path:
+        """The client folder a `client` step copies into, under the names already on disk."""
+        assert self.client_dir is not None
+        if step.dest == "addons":
+            where = f"Interface/AddOns/{step.name or src.name}"
+        elif step.dest == "interface":
+            where = "Interface"
+        else:
+            where = client_names.DATA_FOLDER
+        # The client's own folders, whatever their case (T261/T262): `data/` and
+        # `interface/addons/` are those folders on a disk that tells cases apart.
+        return self.client_dir.joinpath(*client_names.on_disk(self.client_dir, where).parts)
+
+    def _data_destinations(self, manifest: Manifest, clone: Path) -> list[tuple[str, Path]]:
+        """`(step, path)` for every file this manifest's `dest: data` steps would write.
+
+        Reads only (`_plan_onto()`): for the module-on-module refusal and for the
+        asides an earlier install left with no record. Empty with no client folder.
+        """
+        if self.client_dir is None:
+            return []
+        out: list[tuple[str, Path]] = []
+        for step in manifest.client:
+            if step.dest != "data":
+                continue
+            src = clone / step.src
+            target = self._client_target(step, src)
+            if src.is_dir():
+                out.extend((step.src, dest) for _source, dest in _plan_onto(src, target))
+            elif src.is_file():
+                names = os.listdir(target) if target.is_dir() else []
+                out.append((step.src, target / (client_names.match(names, src.name) or src.name)))
+        return out
+
+    def _here(self, path: str) -> Path:
+        """A receipt's path in the client this applier writes to (`rebased()`)."""
+        if self.client_dir is None:
+            return Path(path)
+        return rebased(Path(path), self.client_dir, self.client_origins)
+
+    def _receipts_by_item(self) -> list[tuple[str, ClientCopy]]:
+        """Every client-file receipt of this server's clones, with the item that wrote it."""
+        found: list[tuple[str, ClientCopy]] = []
+        for folder in sorted(set(CLONE_DIRS.values())):
+            for name in sorted(docker.clone_names(self.server_dir / folder)):
+                clone = self.server_dir / folder / name
+                found.extend((name, copy) for copy in read_client_copies(clone, item_id=name))
+        return found
+
+    def _claimed_asides(self, log: _Log) -> set[Path]:
+        """Every aside a receipt of this server records, in this client; and this run's."""
+        claimed: set[Path] = set()
+        copies = [copy for _item, copy in self._receipts_by_item()]
+        for copy in [*copies, *log.previous_copies, *log.current_copies.values()]:
+            claimed.update(self._here(name) for name in (copy.aside, *copy.kept) if name)
+        return claimed
+
+    def _refuse_a_clash(self, manifest: Manifest, clone: Path) -> None:
+        """Refuse an install whose client file is a file ANOTHER module put there (lead, T262).
+
+        Setting the other module's file aside would chain: removing either would
+        then put the wrong file under the live name. So both modules are named, and
+        nothing of this one goes into the client or the server.
+        """
+        mine = {dest: step for step, dest in self._data_destinations(manifest, clone)}
+        if not mine:
+            return
+        clashes: dict[str, list[str]] = {}
+        for item, copy in self._receipts_by_item():
+            if item == manifest.id:
+                continue
+            path = self._here(copy.path)
+            if path in mine and os.path.lexists(path):
+                clashes.setdefault(item, []).append(path.name)
+        if not clashes:
+            return
+        said = "; ".join(
+            f"{', '.join(sorted(set(names)))}, which {item} put there"
+            for item, names in clashes.items()
+        )
+        raise ApplyRefusal(
+            f"{manifest.id} would put a file into your game client under a name another module "
+            f"already uses: {said}. Remove {' and '.join(sorted(clashes))} first, then install "
+            f"{manifest.id}. Nothing of {manifest.id} was put into your game client or deployed."
+        )
+
+    def _placer(self, step: str, log: _Log, claimed: set[Path]) -> Callable[[Path, Path], None]:
+        """`_copy_unshared()`, after setting aside a file of the player's at the name.
+
+        The owner's decision on the cold review of T262 ("set aside, put back"):
+        overwriting the player's `Data/patch-a.mpq` of another mod, then deleting it at
+        Remove because its hash was the one Yu'lon wrote, lost it. So a file there
+        whose bytes differ from the module's moves to a free `<name>` +
+        `ASIDE_SUFFIX` sibling first, whatever case brought the name here, exact
+        included, and a read-only one too: a rename clears no flag and needs none
+        cleared. Not set aside:
+
+        * the same bytes: that file is the module's patch already;
+        * a file this item put there itself, by its earlier receipt with the bytes
+          that receipt recorded: a reinstall replaces its own copy, and the
+          player's file set aside the first time stays recorded (carried over);
+        * a file shared through a hard link (a ready-to-play client's archive and
+          the player's own): replaced as before, its inode untouched;
+        * anything but a plain file, which is left to `_copy_unshared()` (T300).
+
+        A file written by this same step is overwritten, so two source names that
+        land on one name set nothing aside twice. Every receipt goes into
+        `log.current_copies`; one whose player's file is about to be moved is
+        written to the claim BEFORE the rename (`_set_aside()`), so a failure or a
+        crash after it never leaves the player's file moved and unrecorded.
+        """
+        ours = {self._here(copy.path): copy for copy in log.previous_copies}
+        fresh: set[Path] = set()
+
+        def place(src: Path, dest: Path) -> None:
+            previous = ours.get(dest)
+            before = log.current_copies.get(str(dest))
+            if before is None:
+                before = ClientCopy(
+                    step=step,
+                    path=str(dest),
+                    sha256=sha256_of(src),
+                    aside=previous.aside if previous is not None else "",
+                    kept=previous.kept if previous is not None else (),
+                    aside_unknown=previous.aside_unknown if previous is not None else False,
+                )
+                before = self._adopt_orphans(before, dest, claimed, log)
+            if dest not in fresh:
+                before = self._set_aside(src, dest, previous, before, log)
+            fresh.add(dest)
+            log.current_copies[str(dest)] = before
+            _copy_unshared(src, dest)
+            try:
+                landed = replace(before, sha256=sha256_of(dest))
+            except OSError as exc:
+                if not (before.aside or before.kept):
+                    logger.warning(
+                        f"could not hash {dest} after copying it, so it is not recorded: {exc}"
+                    )
+                    del log.current_copies[str(dest)]
+                return
+            log.current_copies[str(dest)] = landed
+
+        return place
 
     @staticmethod
-    def _receipts(step: str, src: Path, target: Path) -> list[ClientCopy]:
-        """Hash what a `dest: data` step just put in the client, for `remove()` to check.
+    def _adopt_orphans(copy: ClientCopy, dest: Path, claimed: set[Path], log: _Log) -> ClientCopy:
+        """Take on the asides of `dest` that no receipt records (belt), each in its own role.
 
-        Only `dest: data`. An addon folder is never taken back (the owner's
-        decision, T67: the player disables it in the game's AddOns menu), and
-        `dest: interface` copies INTO the shared `Interface/` folder, where this
-        app cannot tell its own files from the client's — so neither is worth a
-        receipt nobody would act on.
-
-        **WHICH files is read off the SOURCE in the clone, never off a listing of
-        the destination, and that distinction is a whole `Data/` folder.** Round 1
-        review, 2026-09-16: the first version listed `target` — and for a step
-        whose `src` is a DIRECTORY, `_client` copies its contents INTO
-        `<client>/Data`, so `target` IS the user's `Data/` folder. It recorded a
-        receipt for every archive the user's WoW install has ever had, each
-        matching its own hash at remove time, and removing the shipped Season of
-        Discovery keg (`kegs/sod.json`, `src: .../Client Files/data`, `dest:
-        data`) emptied `Data/`. The source names exactly the files this app
-        copied; nothing else can be ours by definition.
-
-        The HASH is still taken from the destination copy, which is a different
-        question from which files to hash: same bytes when all goes well, and
-        when it does not — a short copy, a full disk — the receipt describes the
-        file that is really in the user's game, which is the one `remove()` will
-        be comparing against.
-
-        A source file with nothing at its destination, or a copy that cannot be
-        hashed, yields no receipt — the same state as an older install's: the
-        file stays at remove time and is named. Never fatal: the install itself
-        succeeded.
+        Only `<name>.yulon-module-old` itself, and only while the live name is free or
+        holds this module's own bytes, is the player's file an earlier install moved
+        and never recorded: it becomes this receipt's aside, put back at Remove. Every
+        other one -- a numbered copy, which is a changed copy an earlier Remove named
+        as kept (m910q live check, D2), or one beside a file of the player's -- is
+        recorded as kept: named at Remove, never moved over the live name.
         """
-        if src.is_dir():
-            pairs = [(target / p.relative_to(src)) for p in sorted(src.rglob("*")) if p.is_file()]
+        orphans = [path for path in _aside_names(dest) if path not in claimed]
+        if not orphans:
+            return copy
+        claimed.update(orphans)
+        primary = dest.name.casefold() + ASIDE_SUFFIX
+        live_is_ours = not os.path.lexists(dest) or _same_hash(dest, copy.sha256)
+        aside = copy.aside
+        kept = list(copy.kept)
+        for orphan in orphans:
+            if not aside and orphan.name.casefold() == primary and live_is_ours:
+                aside = str(orphan)
+                log.done.append(
+                    f"found your own {dest.name} set aside as {orphan.name} in {dest.parent} "
+                    "by an earlier install that left no record of it; removing this module "
+                    "puts it back"
+                )
+                continue
+            kept.append(str(orphan))
+            log.done.append(
+                f"found {orphan.name} beside {dest.name} in {dest.parent}, a copy of yours "
+                "Yu'lon kept earlier; it stays as it is, and removing this module names it"
+            )
+        return replace(copy, aside=aside, kept=tuple(kept))
+
+    def _set_aside(
+        self,
+        src: Path,
+        dest: Path,
+        previous: ClientCopy | None,
+        copy: ClientCopy,
+        log: _Log,
+    ) -> ClientCopy:
+        """Move the player's `dest` to a free aside name when `_placer()`'s rule says so.
+
+        The receipt naming the aside is written to the claim FIRST (`log.persist`),
+        then the file is renamed: a crash between the two leaves a record of an
+        aside that is not there yet, which Remove passes over, and never a moved
+        file with no record. No claim to write to refuses the move instead, with
+        the player's file untouched.
+        """
+        try:
+            st = os.lstat(dest)
+        except FileNotFoundError:
+            return copy
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return copy
+        here = sha256_of(dest)
+        if here == sha256_of(src):
+            return copy
+        if previous is not None and here == previous.sha256:
+            return copy  # this item's own copy from an earlier install
+        aside = dest.with_name(dest.name + ASIDE_SUFFIX)
+        number = 0
+        while os.path.lexists(aside):
+            number += 1
+            aside = dest.with_name(f"{dest.name}{ASIDE_SUFFIX}.{number}")
+        if copy.aside:
+            # An aside is already recorded for this name (a reinstall over a file the
+            # player changed since): that one is the player's original and stays the one
+            # Remove puts back. This one is kept and recorded too, and named.
+            planned = replace(copy, kept=(*copy.kept, str(aside)))
+            said = (
+                f"kept your changed {dest.name} as {aside.name} in {dest.parent}; "
+                "Yu'lon will not delete it"
+            )
         else:
-            pairs = [target / src.name]
-        out: list[ClientCopy] = []
-        for path in pairs:
+            planned = replace(copy, aside=str(aside))
+            said = f"set your own {dest.name} aside as {aside.name} in {dest.parent}"
+        if log.persist is None:
+            raise ApplyError(
+                f"{dest} is a file of yours that this module's {dest.name} would replace, and "
+                "Yu'lon has no record of this install to note where it would move yours, so it "
+                "was not moved and nothing was copied over it."
+            )
+        key = str(dest)
+        prior = log.current_copies.get(key)
+        log.current_copies[key] = planned
+        try:
+            log.persist(self._claim_copies(log))
+            os.rename(dest, aside)
+        except BaseException:
+            # Nothing moved (the record could not be written, or the rename was
+            # refused): the receipt as it was, so no claim holds an aside that is
+            # not there (second scoped re-review of T262).
+            self._unplan(log, key, prior)
+            raise
+        log.new_asides[key] = str(aside)  # the primary aside, or one more kept copy
+        log.done.append(said)
+        return planned
+
+    def _unplan(self, log: _Log, key: str, prior: ClientCopy | None) -> None:
+        """The receipt for `key` back as it was before a move that did not happen; rewritten."""
+        if prior is None:
+            log.current_copies.pop(key, None)
+        else:
+            log.current_copies[key] = prior
+        if log.persist is None:
+            return
+        try:
+            log.persist(self._claim_copies(log))
+        except OSError as exc:
+            # The write that failed was atomic, so the claim on disk is still the
+            # one before the plan; only a rename refused AFTER a written plan can
+            # leave that plan behind, and the next write replaces it.
+            logger.warning(f"the client-file record could not be rewritten: {exc}")
+
+    def _claim_copies(self, log: _Log) -> list[ClientCopy]:
+        """The receipts the claim holds mid-install: the earlier ones this run has not replaced."""
+        now = {self._here(path) for path in log.current_copies}
+        kept = [copy for copy in log.previous_copies if self._here(copy.path) not in now]
+        return [*kept, *log.current_copies.values()]
+
+    def _put_asides_back(self, log: _Log) -> list[str]:
+        """After a failed install: each player's file THIS run set aside, back under its name.
+
+        The module's copy at that name is deleted first when it is still byte for byte
+        what was copied (or never landed). What could not be put back stays recorded in
+        the claim, so Remove names or restores it; the sentences say which.
+        """
+        left: list[str] = []
+        for path, moved in sorted(log.new_asides.items()):
+            copy = log.current_copies.get(path)
+            if copy is None:
+                continue
+            undo = _Log()
+            take_back_file(Path(path), copy.sha256, undo, Path(moved))
+            if os.path.lexists(moved):
+                left.extend(undo.client_left_behind)
+                continue
+            # Back as before this run: the claim's earlier receipt for the name, if any,
+            # holds again (`_claim_copies()`), with its own aside and no kept copy.
+            del log.current_copies[path]
+        log.new_asides.clear()
+        if log.persist is not None:
             try:
-                out.append(ClientCopy(step=step, path=str(path), sha256=sha256_of(path)))
+                log.persist(self._claim_copies(log))
             except OSError as exc:
                 logger.warning(
-                    f"could not hash {path} after copying it, so it is not recorded: {exc}"
+                    f"the client-file record could not be rewritten after a failure: {exc}"
                 )
-        return out
+        return left
 
     def _unclient(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         """Take back the client patches this app can PROVE it put there; name the rest (T67).
@@ -4357,6 +4896,46 @@ class Applier:
                 continue
             for copy in mine:
                 self._take_back(copy, log)
+        if self.client_dir is not None:
+            dests = {self._here(copy.path) for copy in copies}
+            if clone.is_dir():
+                dests.update(dest for _step, dest in self._data_destinations(manifest, clone))
+            self._orphans_back(dests, log)
+
+    def _orphans_back(self, dests: Iterable[Path], log: _Log) -> None:
+        """Asides of `dests` no receipt records (belt): put back where the name is free, else named.
+
+        An aside only a crash or an unreadable record could leave, found by its name
+        beside each file this module writes or wrote.
+        """
+        claimed = self._claimed_asides(_Log())
+        for dest in sorted(dests):
+            primary = dest.name.casefold() + ASIDE_SUFFIX
+            for orphan in _aside_names(dest):
+                if orphan in claimed:
+                    continue
+                # Only the un-numbered aside is ever the player's file moved by an
+                # install; a numbered one is a kept copy, named and never put back (D2).
+                if orphan.name.casefold() == primary and not os.path.lexists(dest):
+                    _put_back(orphan, dest, log)
+                else:
+                    _aside_kept(orphan, dest, f"{dest.name} is there again", log)
+
+    def take_back_everything(self) -> tuple[list[str], list[str]]:
+        """Every module's client files taken back, and the player's files put back (Uninstall).
+
+        Each receipt of every clone of this server, by `_take_back()`'s rule, then
+        the belt for asides no receipt records. Answers what was done, and what was
+        left and why: an aside that could not be put back is named, never deleted.
+        """
+        log = _Log()
+        dests: set[Path] = set()
+        for _item, copy in self._receipts_by_item():
+            self._take_back(copy, log)
+            dests.add(self._here(copy.path))
+        if self.client_dir is not None or dests:
+            self._orphans_back(dests, log)
+        return log.done, [*log.skipped, *log.client_left_behind]
 
     def _take_back(self, copy: ClientCopy, log: _Log) -> None:
         """One recorded file: delete it if it is still ours byte-for-byte, else say why not.
@@ -4369,8 +4948,11 @@ class Applier:
         the original's copy as left out of it (T181a).
         """
         path = Path(copy.path)
+        aside = Path(copy.aside) if copy.aside else None
         if self.client_dir is not None:
             path = rebased(path, self.client_dir, self.client_origins)
+            if aside is not None:
+                aside = rebased(aside, self.client_dir, self.client_origins)
             if path != Path(copy.path) and path.is_relative_to(self.client_dir):
                 _record_taken_back(
                     self.client_dir,
@@ -4378,7 +4960,14 @@ class Applier:
                     game=self.client_game,
                     server_dir=self.server_dir,
                 )
-        take_back_file(path, copy.sha256, log)
+        take_back_file(
+            path,
+            copy.sha256,
+            log,
+            aside,
+            kept=[self._here(k) for k in copy.kept],
+            aside_unknown=copy.aside_unknown,
+        )
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:

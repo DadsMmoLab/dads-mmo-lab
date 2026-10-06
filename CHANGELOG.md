@@ -48,7 +48,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Restore** on the Maintenance tab works with the server stopped, and leaves it stopped.
 - **Re-extract map data** on Centurion works again, and a failed run keeps your old map data.
 - Centurion's pathfinding line says how far a stopped run got and what the next press will do.
-- On Linux and the Steam Deck, lower-case game file names are accepted on every game (a lower-case Data folder not yet).
+- On Linux and the Steam Deck, lower-case game file names are accepted on every game, a lower-case Data folder too.
+- On Linux and the Steam Deck, a lower-case Interface folder is your client's Interface folder for addons.
+- A module's client file replaces your file of that name in any case, and **Remove** puts your file back.
+- An install that fails part way puts back any file of yours it had moved aside.
+- A failed **Re-extract map data** says when part-made pathfinding tiles were kept and will be continued.
+- Progress-bar marks from the map tools no longer clutter the install log.
 - A fresh WoW TBC or Vanilla install gets the latest dungeon and raid updates.
 - WoW WotLK's bots read a real settings file, so My Party, the Bots tab and Tuning see your bot settings.
 - **Install** again after a failed build is no longer refused for space its own build cache already uses.
@@ -77,6 +82,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - An "&" in a label or a server folder's name shows as written.
 
 ### Changed
+- **Uninstall** now takes every module's files out of your client and puts your own files back.
+- A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.
 - A command you must type yourself stands on its own line, so it is easy to copy.
 - When Docker is not answering, the Server tab shows one box that says what to do on your computer.

@@ -74,6 +74,7 @@ from yulon import (
     channel_setup,
     client_config,
     client_exe,
+    client_names,
     client_packs,
     commands,
     dbreads,
@@ -2240,11 +2241,12 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return factory(entry, server_dir, client_dir, wsl_distro)
+            return _with_take_back(factory(entry, server_dir, client_dir, wsl_distro))
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
+        services = _with_take_back(services)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
@@ -2269,6 +2271,18 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_take_back(services: ControllerServices) -> ControllerServices:
+    """Uninstall takes the module client files back through the module applier (T262).
+
+    The applier knows which folder is the ready-to-play client and which the
+    player's own, so a receipt from before the switch is acted on where Remove
+    would act on it.
+    """
+    if isinstance(services.uninstall, purge.Uninstaller) and services.applier is not None:
+        services.uninstall.take_back_client_files = services.applier.take_back_everything
+    return services
 
 
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
@@ -3680,6 +3694,12 @@ WoW client does not refuse a `client` step: it GAINS an
 """
 
 
+def _has_interface(client_dir: Path) -> bool:
+    """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
+    found = client_names.find(client_dir, ADDONS_PARENT)
+    return found is not None and found.is_dir()
+
+
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """This install's client folder if a manifest may write an addon into it, else None.
 
@@ -3705,7 +3725,7 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """
     if client_dir is None:
         return None
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         logger.info(
             f"{client_dir} has no {ADDONS_PARENT}/ folder, so no client addon is written "
             "into it; start the game once, or point this install at the client you play"
@@ -3728,7 +3748,7 @@ def _client_dir_row_text(client_dir: Path | None) -> str:
         return "Client folder: none — addons and Play need one"
     if not client_dir.is_dir():
         return f"Client folder: {client_dir} — the folder is missing"
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         return (
             f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
             "once before installing addons"
@@ -9936,7 +9956,7 @@ class ControllerView(QWidget):
                 )
                 if not said_yes(answer):
                     return
-        elif not (chosen / clientdir.DATA_DIR).is_dir():
+        elif not play_client.data_folder(chosen).is_dir():  # `data/` too (T261)
             self._client_dir_refused(
                 f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
                 "Nothing was changed."
