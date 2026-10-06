@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
+- Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
 - Centurion can be installed from the Catalog on Windows and Linux: level-60 PvP WoW on the 3.3.5a client, with bots.
 - Each server has its own game launcher: press **▶** on its tab or **Play** to see who is online and press **PLAY**.
 - **Make a ready-to-play client…** makes a copy of your client for one server, sharing the big game files to save space.
@@ -28,6 +30,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
+- **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
+- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
+- Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
+- The Server tab no longer says "restart loop" after Docker itself was stopped and started.
+- Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
+- On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.
+- Long questions such as **Rebuild the server…** scroll inside a dialog that fits the screen; the buttons always show.
 - A fresh Centurion server no longer restarts over and over at the end of its install.
 - A fresh Centurion server no longer crashes on its first start while it makes its bots.
 - On Windows, Centurion no longer stalls at start-up; older installs need **Repair server files…**, then **Recreate containers…**.
@@ -44,7 +54,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Restore** on the Maintenance tab works with the server stopped, and leaves it stopped.
 - **Re-extract map data** on Centurion works again, and a failed run keeps your old map data.
 - Centurion's pathfinding line says how far a stopped run got and what the next press will do.
-- On Linux and the Steam Deck, lower-case game file names are accepted on every game (a lower-case Data folder not yet).
+- On Linux and the Steam Deck, lower-case game file names are accepted on every game, a lower-case Data folder too.
+- On Linux and the Steam Deck, a lower-case Interface folder is your client's Interface folder for addons.
+- A module's client file replaces your file of that name in any case, and **Remove** puts your file back.
+- An install that fails part way puts back any file of yours it had moved aside.
+- A failed **Re-extract map data** says when part-made pathfinding tiles were kept and will be continued.
+- Progress-bar marks from the map tools no longer clutter the install log.
 - A fresh WoW TBC or Vanilla install gets the latest dungeon and raid updates.
 - WoW WotLK's bots read a real settings file, so My Party, the Bots tab and Tuning see your bot settings.
 - **Install** again after a failed build is no longer refused for space its own build cache already uses.
@@ -74,6 +89,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Windows, a WotLK rebuild with nothing changed no longer re-sends gigabytes of server files to Docker first.
 
 ### Changed
+- **Uninstall** now takes every module's files out of your client and puts your own files back.
+- A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.
 - A command you must type yourself stands on its own line, so it is easy to copy.
 - When Docker is not answering, the Server tab shows one box that says what to do on your computer.

@@ -376,6 +376,52 @@ def test_no_bound_is_invented_where_the_catalog_states_none() -> None:
         tuning.check(_key(type="int", min=0), "-1")
 
 
+NOT_PLAIN_DIGITS = ("１２", "١٢", "1_0", " 5", "5 ", "+5", "0x10")
+"""Whole numbers a core reads differently from Python's `int()`, or not at all.
+
+Each one but `0x10` is inside 0..100 once Python parses it (`int("١٢") == 12`,
+`int("1_0") == 10`, `int(" 5") == 5`, `int("+5") == 5`), so only the spelling
+rule refuses it. AzerothCore reads an int key with `std::from_chars` over the
+whole value (`StringConvert.h:70` at its pin), which takes ASCII digits and a
+leading minus and nothing else; mangos-tbc reads it with `std::stoi`
+(`Config.cpp:127-131`), which stops at `_` or `x` and throws on a value with no
+digit at the front.
+"""
+
+
+@pytest.mark.parametrize("value", NOT_PLAIN_DIGITS)
+def test_an_int_key_refuses_any_spelling_but_plain_digits(tmp_path: Path, value: str) -> None:
+    from tests.support_player_text import command_faults, text_faults
+
+    path = _write(tmp_path, CONF, CLEAN)
+    spec = {"BeastMaster.MinLevel": _key(type="int", min=0, max=100)}
+    # `_key()` names its key `K`; the refusal names the key it is about.
+    with pytest.raises(tuning.TuningError, match="^K: ") as refusal:
+        tuning.write(path, {"BeastMaster.MinLevel": value}, spec=spec)
+    assert "whole number" in str(refusal.value)
+    assert ("space" in str(refusal.value)) == (value != value.strip()), str(refusal.value)
+    assert command_faults(str(refusal.value)) == [], str(refusal.value)
+    assert text_faults(str(refusal.value)) == [], str(refusal.value)
+    assert path.read_text(encoding="utf-8") == CLEAN
+    assert tuning.backups_of(path) == ()
+
+
+def test_an_int_key_still_takes_plain_digits_and_a_leading_minus() -> None:
+    for value in ("0", "5", "100", "007", "-5", "2147483647", "-2147483648"):
+        tuning.check(_key(type="int"), value)
+
+
+@pytest.mark.parametrize("value", ["2147483648", "-2147483649", "99999999999999999999"])
+def test_an_int_key_refuses_a_number_past_what_the_servers_int_holds(value: str) -> None:
+    """mangos-tbc's `std::stoi` throws past int32 at world start; AzerothCore falls back."""
+    from tests.support_player_text import command_faults
+
+    with pytest.raises(tuning.TuningError, match="^K: ") as refusal:
+        tuning.check(_key(type="int"), value)
+    assert command_faults(str(refusal.value)) == [], str(refusal.value)
+    assert "2147483647" in str(refusal.value)
+
+
 def test_a_key_with_no_type_accepts_anything_because_it_is_a_text_box() -> None:
     """T43's safety rule: a refusal the catalog never declared is a refusal we invented."""
     for value in ("anything at all", "", "3.5", "0,1,2"):

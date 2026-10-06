@@ -74,6 +74,7 @@ from yulon import (
     channel_setup,
     client_config,
     client_exe,
+    client_names,
     client_packs,
     commands,
     dbreads,
@@ -90,6 +91,7 @@ from yulon import (
     reset_defaults,
     resources,
     server_build_presses,
+    server_rates,
     server_time_zone,
     serverlock,
     tuning,
@@ -160,7 +162,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -421,6 +423,10 @@ class AccountAdmin(Protocol):
     def set_password(self, account: str, password: str) -> object: ...
 
     def set_gm_level(self, account: str, level: int) -> object: ...
+
+    def delete_plan(self, account: str) -> object: ...
+
+    def delete_account(self, confirmed: useraccounts.DeletePlan) -> object: ...
 
 
 class BotDashboardSeam(Protocol):
@@ -723,7 +729,8 @@ class PromptAsker(Protocol):
     is what gets applied now (T100 review). `remembered` is what this install
     last answered (T104, `Applier.remembered_answers()`), filled in over the
     manifest's defaults. `removing` is True for a Remove, which asks only what
-    the record cannot answer (`apply.must_ask()`).
+    the record cannot answer (`apply.must_ask()`). `notes` are sentences shown
+    above the questions (T302: an answer that replaces a Server rates value).
     """
 
     def __call__(
@@ -735,6 +742,7 @@ class PromptAsker(Protocol):
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
+        notes: Sequence[str] = (),
     ) -> Mapping[str, str] | None: ...
 
 
@@ -2240,11 +2248,12 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return factory(entry, server_dir, client_dir, wsl_distro)
+            return _with_take_back(factory(entry, server_dir, client_dir, wsl_distro))
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
+        services = _with_take_back(services)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
@@ -2269,6 +2278,18 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_take_back(services: ControllerServices) -> ControllerServices:
+    """Uninstall takes the module client files back through the module applier (T262).
+
+    The applier knows which folder is the ready-to-play client and which the
+    player's own, so a receipt from before the switch is acted on where Remove
+    would act on it.
+    """
+    if isinstance(services.uninstall, purge.Uninstaller) and services.applier is not None:
+        services.uninstall.take_back_client_files = services.applier.take_back_everything
+    return services
 
 
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
@@ -2873,6 +2894,24 @@ def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
     return keys
 
 
+def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
+    """The store's settings-only mods, read once on first use (T380).
+
+    `apply.settings_only()` over the `mod` family: Experience Rates and its kin,
+    which leave no folder. `apply.installed_modules()` is handed them so an
+    install made before their receipt existed still reads Installed. Lazy and
+    cached for `_record_backed_keys()`'s reasons.
+    """
+    cached: list[tuple[Manifest, ...]] = []
+
+    def mods() -> tuple[Manifest, ...]:
+        if not cached:
+            cached.append(tuple(m for m in store.load_all("mod") if apply_module.settings_only(m)))
+        return cached[0]
+
+    return mods
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2882,6 +2921,7 @@ def _for_wotlk(
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
+    settings_mods = _settings_mods(wotlk_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -2927,6 +2967,7 @@ def _for_wotlk(
             pw,
             gm_level=level,
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
@@ -3109,6 +3150,7 @@ def _for_wotlk(
             # The tab disables its button for an entry that declares no scheme;
             # this is the seam under it refusing rather than guessing (T12).
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         store=wotlk_modules.store() if entry.has_manifests else None,
         applier=module_applier,
@@ -3149,7 +3191,7 @@ def _for_wotlk(
         # mob multipliers leave no folder and read Not installed for ever
         # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            (lambda: apply_module.installed_modules(server_dir, record_backed(), settings_mods()))
             if entry.has_manifests
             else None
         ),
@@ -3258,6 +3300,7 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
+    tbc_settings_mods = _settings_mods(tbc_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3337,6 +3380,14 @@ def _for_tbc(
         ),
         create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
         store=tbc_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=tbc_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # `sql=sql`, the SAME runner the console and the account tile use, and
         # that is the point of `tbc_modules.applier()` requiring it: it carries
         # this install's generated password (read once, above) and this game's
@@ -3395,6 +3446,7 @@ def _for_vanilla(
     binding rather than a `del` a future manifest would have to come back and
     undo — the same call the TBC factory makes.
     """
+    vanilla_settings_mods = _settings_mods(vanilla_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3509,6 +3561,14 @@ def _for_vanilla(
         # `cross-faction` is ten keys here, because mangos-classic has
         # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
         store=vanilla_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=vanilla_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # The same two 8.7a seams as TBC and for the same reasons (T7), over
         # this tree's own containers.
         applier=(
@@ -3680,6 +3740,12 @@ WoW client does not refuse a `client` step: it GAINS an
 """
 
 
+def _has_interface(client_dir: Path) -> bool:
+    """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
+    found = client_names.find(client_dir, ADDONS_PARENT)
+    return found is not None and found.is_dir()
+
+
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """This install's client folder if a manifest may write an addon into it, else None.
 
@@ -3705,7 +3771,7 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     """
     if client_dir is None:
         return None
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         logger.info(
             f"{client_dir} has no {ADDONS_PARENT}/ folder, so no client addon is written "
             "into it; start the game once, or point this install at the client you play"
@@ -3728,7 +3794,7 @@ def _client_dir_row_text(client_dir: Path | None) -> str:
         return "Client folder: none — addons and Play need one"
     if not client_dir.is_dir():
         return f"Client folder: {client_dir} — the folder is missing"
-    if not (client_dir / ADDONS_PARENT).is_dir():
+    if not _has_interface(client_dir):
         return (
             f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
             "once before installing addons"
@@ -3777,6 +3843,7 @@ def _for_tortoise(
     has no manifests that want it, but the Steam client entry is a path to that
     folder's own executable and there is nowhere else to get it.
     """
+    tortoise_settings_mods = _settings_mods(tortoise_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3885,8 +3952,12 @@ def _for_tortoise(
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # T380: the folders AND the settings-only mods (Experience Rates, Message
+        # of the Day, Performance Stats), which leave no folder.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, manifests=tortoise_settings_mods()))
+            if entry.has_manifests
+            else None
         ),
         # T121's seam rides with `installed_modules`. Tortoise ships no relative
         # (record-backed) mod, so nothing here writes a pending mark and this
@@ -4469,6 +4540,25 @@ RESTORE_WAITS_FOR_DISTRO = (
 )
 
 ACCOUNT_NEEDS_CHOICE = "Choose an account first."
+DELETE_ACCOUNT_LABEL = "Delete account…"
+"""The Accounts tab's delete press (T301), and its context-menu entry."""
+
+
+def delete_account_question(account: str, characters: tuple[str, ...]) -> str:
+    """What the delete press asks, naming everything the server will remove (T301)."""
+    if not characters:
+        what = f"{account} has no characters."
+    elif len(characters) == 1:
+        what = f"Its character {characters[0]} is deleted with it."
+    else:
+        names = f"{', '.join(characters[:-1])} and {characters[-1]}"
+        what = f"Its {len(characters)} characters are deleted with it: {names}."
+    return (
+        f"Delete the account {account}? {what} This cannot be undone from Yu'lon; only a "
+        "backup made before now can bring it back."
+    )
+
+
 CHARACTER_NEEDS_CHOICE = "Choose a character in the list first."
 CHARACTERS_EMPTY = (
     "There are no characters on this server yet. Make one in the game, logged in with an "
@@ -4730,6 +4820,64 @@ FORGET_RECORD_QUESTION = (
     "creature values are already at their normal values, for example after restoring a backup."
 )
 """What the Forget question says, word for word (T121 fix wave)."""
+
+FORGET_INSTALL_QUESTION = (
+    "Yu'lon forgets that {name} is installed. The database is not changed. Use this only if the "
+    "stack sizes are already back to normal, for example after restoring a backup."
+)
+"""The Forget question for Bigger Stacks, whose record says it is installed (T385): its
+Remove restores from a backup table, which a restored database does not have."""
+
+SETTINGS_REMOVE_TAIL = (
+    ", including any value you set since {name} was installed.\n\n"
+    "Restart the server for this to take effect."
+)
+"""The end of a settings-only mod's Remove question (T380 cold review): a rate changed
+since the install goes back too, and the world reads its conf only at start."""
+
+SETTINGS_REMOVE_UNNAMED = "Every setting {name} changed goes back to the value the server came with"
+"""The Remove question's change line for a mod whose settings have no names to list."""
+
+SETTINGS_REMOVE_NOTHING = (
+    "Its settings already read the values the server came with, so nothing in them changes. "
+    "Yu'lon stops listing {name} as installed."
+)
+"""The Remove question when the remove steps would change no value."""
+
+
+def _and_join(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def remove_question(
+    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+) -> tuple[str, str]:
+    """The title and text of a settings-only mod's Remove question (T380 cold review).
+
+    Built from `apply.settings_removal()`, the manifest's remove patches over the
+    conf as it is: each setting by its name on the Tuning tab and the value it
+    goes back to, settings going to one value named together. A setting with no
+    name of its own is not listed by key; the line then says every setting the
+    mod changed goes back.
+    """
+    title = f"Remove {manifest.name}?"
+    if not changes:
+        return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
+    if any(change.label is None for change in changes):
+        said = SETTINGS_REMOVE_UNNAMED.format(name=manifest.name)
+    else:
+        groups: dict[str, list[str]] = {}
+        for change in changes:
+            groups.setdefault(change.after or "nothing", []).append(str(change.label))
+        said = "; ".join(
+            f"{_and_join(labels)} {'goes' if len(labels) == 1 else 'go'} back to {value}"
+            for value, labels in groups.items()
+        )
+    return title, said + SETTINGS_REMOVE_TAIL.format(name=manifest.name)
+
 
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
@@ -5844,6 +5992,9 @@ the file is one a person may also want to look at by hand.
 """
 
 TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
+
+TUNING_RATES_REFUSED = "Nothing was written. {why}"
+"""The Server rates card's refusal (T302): the sentence names the row, so no card id."""
 
 TUNING_REFUSED = "{module}: nothing was written — {why}"
 """A refusal that names the key, in the box every other answer on this tab is read in.
@@ -9936,7 +10087,7 @@ class ControllerView(QWidget):
                 )
                 if not said_yes(answer):
                     return
-        elif not (chosen / clientdir.DATA_DIR).is_dir():
+        elif not play_client.data_folder(chosen).is_dir():  # `data/` too (T261)
             self._client_dir_refused(
                 f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
                 "Nothing was changed."
@@ -11919,6 +12070,10 @@ class ControllerView(QWidget):
         change.addRow(self.set_password_button)
         change.addRow(_FieldLabel("GM level", self.selected_gm), self.selected_gm)
         change.addRow(self.set_gm_button)
+        # T301. Asks first, naming the characters that go with the account.
+        self.delete_account_button = QPushButton(DELETE_ACCOUNT_LABEL, existing)
+        self.delete_account_button.clicked.connect(self.delete_selected_account)
+        change.addRow(self.delete_account_button)
         # The list is what grows (T191 A16): the window's spare height is its.
         existing_box.addWidget(self.account_list, 1)
         existing_box.addWidget(self.refresh_accounts_button)
@@ -11929,11 +12084,17 @@ class ControllerView(QWidget):
             self.refresh_accounts_button,
             self.set_password_button,
             self.set_gm_button,
+            self.delete_account_button,
         ):
             control.setVisible(wired)
         # T195 (A23): why a press here is greyed, under both panels.
         self.account_reasons = ReasonLine(tab)
-        for press in (self.create_account_button, self.set_password_button, self.set_gm_button):
+        for press in (
+            self.create_account_button,
+            self.set_password_button,
+            self.set_gm_button,
+            self.delete_account_button,
+        ):
             self.account_reasons.watch(press)
         # Nothing is chosen yet, and a button that acts on "whichever row
         # happens to be first" is a trap rather than a convenience.
@@ -12605,9 +12766,9 @@ class ControllerView(QWidget):
         )
 
     def _account_chosen(self, row: int) -> None:
-        """Both changes act on the chosen account, so both wait for one."""
+        """Every change acts on the chosen account, so every one waits for one."""
         chosen = row >= 0 and self.account_list.item(row) is not None
-        for press in (self.set_password_button, self.set_gm_button):
+        for press in (self.set_password_button, self.set_gm_button, self.delete_account_button):
             set_enabled_why(press, None if chosen else ACCOUNT_NEEDS_CHOICE)
         if chosen:
             item = self.account_list.item(row)
@@ -12710,6 +12871,81 @@ class ControllerView(QWidget):
         # way; only the signal is withheld.
         if not getattr(outcome, "indeterminate", False):
             self.action_failed.emit(problem)
+
+    @Slot()
+    def delete_selected_account(self) -> None:
+        """T301: read what would go, ask, then have the server delete it.
+
+        The read comes first and off the GUI thread, so the question can name
+        the characters; a rule that keeps the account (the app's own, a bot's,
+        somebody in the game) is said instead of asking at all.
+        """
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is reading {account}.")
+        self.account_report.setText(f"Reading what deleting {account} would remove…")
+        self._run(
+            lambda: admin.delete_plan(account),
+            self._delete_planned,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _delete_planned(self, plan: object) -> None:
+        admin = self.services.accounts
+        account = str(getattr(plan, "account", ""))
+        problem = str(getattr(plan, "problem", ""))
+        if admin is None or not account:
+            self._account_chosen(self.account_list.currentRow())
+            return
+        if problem:
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(problem)
+            self.action_failed.emit(problem)
+            return
+        if not isinstance(plan, useraccounts.DeletePlan):
+            self._account_chosen(self.account_list.currentRow())
+            return
+        characters = plan.characters
+        if not self._confirm(f"Delete {account}?", delete_account_question(account, characters)):
+            self._account_chosen(self.account_list.currentRow())
+            self.account_report.setText(f"{account} was not deleted.")
+            return
+        self.account_report.setText(f"Deleting {account}…")
+        set_enabled_why(self.delete_account_button, f"Wait: Yu'lon is deleting {account}.")
+        self._run(
+            lambda: admin.delete_account(plan),
+            self._account_deleted,
+            self._delete_failed,
+        )
+
+    @Slot(object)
+    def _account_deleted(self, outcome: object) -> None:
+        """Say what came back and read the list again.
+
+        Read again after a delete that may have happened, too: the sentence
+        asks the person to check, and the list is where they check.
+        """
+        self._account_chosen(self.account_list.currentRow())
+        if getattr(outcome, "done", False):
+            self.account_report.setText(getattr(outcome, "text", "") or "Deleted.")
+            self.refresh_accounts()
+            return
+        problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
+        self.account_report.setText(problem)
+        if getattr(outcome, "indeterminate", False):
+            self.refresh_accounts()
+            return
+        self.action_failed.emit(problem)
+
+    @Slot(object)
+    def _delete_failed(self, exc: object) -> None:
+        self._account_chosen(self.account_list.currentRow())
+        problem = f"Could not delete the account: {exc}"
+        self.account_report.setText(problem)
+        self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:
@@ -15423,6 +15659,21 @@ class ControllerView(QWidget):
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
             return
+        if action == "remove" and apply_module.settings_only(manifest):
+            # T380 cold review: one press of Remove put every rate this mod
+            # touched back to stock, a rate set since included. Asked first, No
+            # by default, naming each setting and the value it goes back to, in
+            # the box that fits the screen (T243).
+            title, text = remove_question(
+                manifest,
+                apply_module.settings_removal(self.services.controller.server_dir, manifest),
+            )
+            if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
         relative = reapplies_on_top(manifest)
         if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
@@ -15451,6 +15702,16 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
+            return
+        # T302: an answer written to a Server rates key is held to that key's rule,
+        # because the world server stops at start on a rate it cannot read.
+        problem = server_rates.answer_problem(self.entry, manifest, values)
+        if problem is not None:
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+            )
+            self.action_failed.emit(problem)
             return
         run = {
             "install": applier.install,
@@ -15513,6 +15774,22 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
+        extra: dict[str, tuple[str, ...]] = {}
+        if action != "remove":
+            # T302 (cold review): an answer written to a key the Server rates card
+            # writes starts at what the card says now -- over the mod's default and
+            # over last install's answer -- and the dialog says it replaces it.
+            rates = server_rates.rows(self.entry, self.services.controller.server_dir)
+            now = server_rates.prompt_values(manifest, rates)
+            if now:
+                asked = tuple(
+                    p.model_copy(update={"default": now[p.key]}) if p.key in now else p
+                    for p in asked
+                )
+                remembered = {k: v for k, v in remembered.items() if k not in now}
+                note = server_rates.prompt_note(manifest, rates)
+                if note is not None:
+                    extra["notes"] = (note,)
         answers = self._prompt_asker(
             self,
             manifest,
@@ -15520,6 +15797,7 @@ class ControllerView(QWidget):
             again=again,
             remembered=remembered,
             removing=action == "remove",
+            **extra,
         )
         return (False, None) if answers is None else (True, answers)
 
@@ -16124,18 +16402,14 @@ class ControllerView(QWidget):
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
             QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Rebuild {self.entry.name}?",
-                rebuild_confirmation(
-                    self.entry,
-                    self.services.controller.server_dir,
-                    kept_build=self.services.kept_build is not None,
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Rebuild {self.entry.name}?",
+            rebuild_confirmation(
+                self.entry,
+                self.services.controller.server_dir,
+                kept_build=self.services.kept_build is not None,
+            ),
         ):
             logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
             return False
@@ -16478,14 +16752,10 @@ class ControllerView(QWidget):
             return False
         if self._update_route_busy():
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Put {self.entry.name} back on the tested commit?",
-                route.pin_confirmation(),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Put {self.entry.name} back on the tested commit?",
+            route.pin_confirmation(),
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
             return False
@@ -16552,14 +16822,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Apply database updates to {self.entry.name}?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Apply database updates to {self.entry.name}?",
+            text,
         ):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
@@ -16646,14 +16912,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Apply database corrections to {self.entry.name}?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Apply database corrections to {self.entry.name}?",
+            text,
         ):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
@@ -16721,14 +16983,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Adopt {self.entry.name}'s databases as a finished import?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Adopt {self.entry.name}'s databases as a finished import?",
+            text,
         ):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
@@ -17076,6 +17334,8 @@ class ControllerView(QWidget):
         # collision and the truer one -- this tab is the modules' settings.
         self._add_panel_tab(tab, "modules", "Tuning")
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        # T302: the built-in Server rates card's rows, read with the modules'.
+        self._rate_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -17115,6 +17375,8 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
+        # T302: the world conf's rates, read in the same pass -- one file, no job.
+        self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -17134,13 +17396,19 @@ class ControllerView(QWidget):
         self._look_up_time_zone()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
-        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+        """The Server rates card (T302), the modules' rows, then the server's own bot keys
+        (T99, CMaNGOS and Tortoise).
 
-        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
-        latter is what T94's reset reads as "keys an installed MODULE keeps",
-        and these are the server's own keys, which a reset puts back.
+        Kept apart in `_rate_rows` and `_bot_rows` rather than folded into
+        `_tuning_rows`: the latter is what T94's reset reads as "keys an installed
+        MODULE keeps", and these are the server's own keys, which a reset puts
+        back. For the same reason a module row the rates card also writes is
+        made read-only HERE, for the drawing only (`server_rates.yield_to_card`),
+        and `_tuning_rows` keeps it as the module declared it.
         """
-        return self._tuning_rows + self._bot_rows
+        modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
+        rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
+        return rates + modules + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -17164,22 +17432,11 @@ class ControllerView(QWidget):
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
     def _confirm(self, title: str, question: str, parent: QWidget | None = None) -> bool:
-        """One Yes/No dialog, defaulting to No, read through `said_yes()`.
+        """One Yes/No dialog, defaulting to No: `ask_yes_no()`'s, which fits the screen (T243).
 
-        `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
-        static `question()` returns a plain int on some builds, which is T33's
-        closed bug, and one helper is the one place that can be got right.
         `parent` is for a question the launcher window asked (T187); the tab otherwise.
         """
-        return said_yes(
-            QMessageBox.question(
-                parent if parent is not None else self,
-                title,
-                question,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-        )
+        return ask_yes_no(parent if parent is not None else self, title, question)
 
     def _note_tuning_owed(self, file: str, rule: tuning.ApplyRule | None = None) -> None:
         """Record that `file` has been written and the server has not picked it up.
@@ -18027,6 +18284,8 @@ class ControllerView(QWidget):
         """
         if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
+        if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
+            return server_rates.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -18069,7 +18328,9 @@ class ControllerView(QWidget):
                     tuning.check(specs[file].get(key), value)
                 except tuning.TuningError as exc:
                     self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                        TUNING_RATES_REFUSED.format(why=exc)
+                        if (family, module_id) == server_rates.CARD
+                        else TUNING_REFUSED.format(module=module_id, why=exc)
                     )
                     self.action_failed.emit(str(exc))
                     return
@@ -18438,6 +18699,10 @@ class ControllerView(QWidget):
         item = self.account_list.itemAt(pos)
         if item is None:
             return
+        # Every entry below acts on the chosen account, so the row clicked is
+        # made the chosen one: otherwise a right-click on CAROL could offer to
+        # delete whichever row was chosen before (Codex, T301).
+        self.account_list.setCurrentItem(item)
         username = str(item.data(Qt.ItemDataRole.UserRole) or "")
         menu = QMenu(self)
         copy_action = menu.addAction(f"Copy Username ({username})")
@@ -18449,6 +18714,9 @@ class ControllerView(QWidget):
         if self.set_gm_button.isEnabled():
             gm_action = menu.addAction("Set GM Level…")
             gm_action.triggered.connect(self.set_selected_gm_level)
+        if self.delete_account_button.isEnabled():
+            delete_action = menu.addAction(DELETE_ACCOUNT_LABEL)
+            delete_action.triggered.connect(self.delete_selected_account)
         menu.exec(self.account_list.mapToGlobal(pos))
 
     def _show_character_context_menu(self, pos: QPoint) -> None:
@@ -18533,7 +18801,8 @@ class ControllerView(QWidget):
 
         A relative manifest (the four mob multipliers) leaves no folder, so its
         row can only read installed from the record (T121). That is the row a
-        stale record can lie on, and the one Forget is for.
+        stale record can lie on, and the one Forget is for. So is Bigger Stacks
+        with no repository (`database_receipt()`, T385).
         """
         manifest = self.selected_manifest()
         row = self.modules_panel.selected_row()
@@ -18541,7 +18810,7 @@ class ControllerView(QWidget):
             manifest is not None
             and row is not None
             and row.data.installed
-            and reapplies_on_top(manifest)
+            and (reapplies_on_top(manifest) or apply_module.database_receipt(manifest))
         )
 
     @Slot()
@@ -18560,7 +18829,9 @@ class ControllerView(QWidget):
         answer = QMessageBox.question(
             self,
             "Forget Yu'lon's record?",
-            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            (
+                FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
+            ).format(name=manifest.name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

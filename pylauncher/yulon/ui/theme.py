@@ -132,6 +132,13 @@ TAB_BUTTONS = "tab-buttons"
 """objectName of the strip that holds a server tab's ▶ and × side by side (T187)."""
 
 
+QUESTION_PARAGRAPH = "question-paragraph"
+"""objectName of one paragraph of a long question (T243, `message_box.FittedMessageBox`).
+
+When the question is longer than the screen shows, each paragraph is a place the
+pad stops, and this ring is how a player sees which one it stopped on."""
+
+
 PLAY_MENU_BUTTON = "play-menu"
 """objectName of the Server tab's ▾ (T181): one arrow, as on `SERVER_BUILD_BUTTON` (T187)."""
 
@@ -543,6 +550,19 @@ QPushButton:pressed {{
 QPushButton:focus {{
     border: 1px solid {COLOR_GOLD_BRIGHT};
     color: {COLOR_GOLD_LIGHT};
+}}
+
+/* T243: the paragraph of a long question the pad has stopped on. The border is
+   always there, clear, so a focused paragraph does not re-wrap when it lights.
+   `border: 0px` first: with only `border-left` set, Qt sizes the border and
+   never draws it (measured offscreen, PySide6 6.11). */
+QLabel#{QUESTION_PARAGRAPH} {{
+    border: 0px solid transparent;
+    border-left: 2px solid transparent;
+    padding-left: 6px;
+}}
+QLabel#{QUESTION_PARAGRAPH}:focus {{
+    border-left: 2px solid {COLOR_GOLD_BRIGHT};
 }}
 
 QPushButton:disabled {{
