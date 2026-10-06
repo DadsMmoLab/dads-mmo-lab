@@ -32,7 +32,8 @@
           "note": "account id owning the bot character",
           "label": "Bot account id",
           "explain": "The account number (in realmd->account table) of the player you want to run as the auction bot.",
-          "type": "int"
+          "type": "int",
+          "unsigned": true
         },
         {
           "key": "AuctionHouseBot.GUID",
@@ -40,7 +41,8 @@
           "note": "singular on the original module",
           "label": "Bot character GUID",
           "explain": "The GUID (in characters->characters table) of the player you want to run as the auction bot.",
-          "type": "int"
+          "type": "int",
+          "unsigned": true
         },
         {
           "key": "AuctionHouseBot.EnableSeller",
@@ -65,6 +67,7 @@
       "key": "bot_guid",
       "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
       "kind": "int",
+      "unsigned": true,
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid}",
@@ -75,6 +78,7 @@
       "key": "bot_account",
       "question": "Account id of the AH bot character (the AHBOT account you created it on; Yu'lon checks the two name the same character)",
       "kind": "int",
+      "unsigned": true,
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid} AND account = {bot_account}",

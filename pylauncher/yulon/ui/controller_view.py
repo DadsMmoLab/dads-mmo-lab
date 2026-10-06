@@ -77,6 +77,7 @@ from yulon import (
     client_names,
     client_packs,
     commands,
+    database_presence,
     dbreads,
     docker,
     docker_advice,
@@ -122,7 +123,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
-from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -162,7 +163,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox, ask_yes_no
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -2073,6 +2074,14 @@ class ControllerServices:
     server inside a WSL distro (owner, D4). `None` means no banner and no check.
     """
 
+    repair_database: Callable[[threading.Event | None], Iterator[str]] | None = None
+    """T377's Repair for a server whose database Docker no longer has; None where not offered.
+
+    `install_wiring.repair_database_for_app()` answers: the install's own import
+    run again on a database that is missing or empty, then the server started.
+    Offered on the Server tab only after a Start or Rebuild refused for that reason.
+    """
+
     corrections: native.CorrectionRoute | None = None
     """T129's "Apply database corrections…" for this install; None where it is not offered.
 
@@ -2781,6 +2790,11 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T377. Here for the rebuild's reason: every native install can make its
+        # database again with its own stages, and the distro is the install's.
+        repair_database=install_wiring.repair_database_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # T224. Here for T106's reason: every native install can keep a build, and
         # the distro (D4) is a fact of the install, answered in `install_wiring`.
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
@@ -2969,6 +2983,8 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
         # exists, because silently changing an owner's password is worse than
@@ -3331,6 +3347,8 @@ def _for_tbc(
         # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
         # implementation here would write a row that looks right and can never
         # log in.
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3477,6 +3495,8 @@ def _for_vanilla(
         create=lambda name, pw, level: vanilla_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3649,6 +3669,8 @@ def _for_centurion(
         create=lambda name, pw, level: centurion_accounts.create_account(
             entry, sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3882,6 +3904,8 @@ def _for_tortoise(
         create=lambda name, pw, level: tortoise_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -4186,6 +4210,9 @@ def _channel_sentence(state: object) -> str:
         when = f" at {state.at}" if state.at else " (before this app recorded when)"
         return f"Command channel: verified as {state.account}{when}."
     if isinstance(state, channel_setup.Refused):
+        # A lost password (T386) is nobody refusing anything: its reason is the line.
+        if state.plain:
+            return f"Command channel: {state.reason}"
         return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
         return (
@@ -4498,6 +4525,29 @@ START_FAILED_DOCKER_MISSING = (
 
 START_FAILED_BROKE = "The server did not start. Details below says why."
 """A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+
+CORRECTIONS_ASKED_AGAIN_AFTER = (10.0, 20.0, 40.0, 80.0, 160.0, 320.0)
+"""Seconds before a corrections reading nobody answered is asked again, in turn (T381).
+
+The tab asks once each time the database comes up, and on a restart that is a
+few seconds after `compose up`, while MariaDB may still be starting: measured on
+yulon-ubuntu 2026-10-05, 6 s after it, `ERROR 2002 ... Can't connect`. That
+reading is `unreadable`, so it is asked again on a later poll -- six times, over
+about ten minutes, and then not until the database comes up again."""
+
+_corrections_clock = time.monotonic
+"""The clock the waits above are measured on; a test moves its own."""
+
+REPAIR_DATABASE_LABEL = "Repair the database…"
+RESTORE_BACKUP_LABEL = "Restore a backup…"
+REPAIR_DATABASE_CONFIRM = (
+    "Docker no longer has this server's database. Repair makes it again from the server files, "
+    "the way the install did, and then starts the server.\n\n"
+    "Your accounts and characters are not in the server files, so they do not come back. If you "
+    "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
+    "This can take several minutes. Repair now?"
+)
+"""What the Server tab's **Repair the database…** asks before it runs (T377)."""
 
 STOP_FAILED_BROKE = "The server did not stop. Details below says why."
 """A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
@@ -4849,6 +4899,18 @@ SETTINGS_REMOVE_NOTHING = (
 )
 """The Remove question when the remove steps would change no value."""
 
+SETTINGS_REMOVE_UNREADABLE = (
+    "Yu'lon could not read {files}, so it cannot tell which settings Remove would change. "
+    "If you go on, Remove tries to put them back and stops with nothing changed if it still "
+    "cannot read the file; {name} stays listed as installed."
+)
+"""The Remove question when a conf the remove steps patch cannot be read (T393)."""
+
+BIGGER_STACKS_REMOVE = (
+    "Every item's stack size goes back to what it was before {name} was installed."
+)
+"""The Remove question for a mod whose record is in the database (T398): Bigger Stacks."""
+
 
 def _and_join(items: Sequence[str]) -> str:
     """`a`, `a and b`, `a, b and c`."""
@@ -4858,7 +4920,9 @@ def _and_join(items: Sequence[str]) -> str:
 
 
 def remove_question(
-    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+    manifest: Manifest,
+    changes: Sequence[apply_module.SettingChange],
+    unreadable: Sequence[str] = (),
 ) -> tuple[str, str]:
     """The title and text of a settings-only mod's Remove question (T380 cold review).
 
@@ -4869,6 +4933,10 @@ def remove_question(
     mod changed goes back.
     """
     title = f"Remove {manifest.name}?"
+    if unreadable:
+        # T393: not "nothing changes" -- Yu'lon could not look.
+        files = _and_join([Path(file).name for file in unreadable])
+        return title, SETTINGS_REMOVE_UNREADABLE.format(files=files, name=manifest.name)
     if not changes:
         return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
     if any(change.label is None for change in changes):
@@ -7173,6 +7241,10 @@ class ControllerView(QWidget):
         # T129: what the last corrections check said. Taken once each time the
         # database comes up (`_ask_about_the_import`), dropped when it goes.
         self._corrections: native.CorrectionCheck | None = None
+        # T381: an `unreadable` reading is asked again while the database stays
+        # up -- when (on `_corrections_clock`), and how many times it has been.
+        self._corrections_again_at: float | None = None
+        self._corrections_asked_again = 0
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
@@ -7444,6 +7516,14 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T377: hidden until a Start or Rebuild is refused because Docker no
+        # longer has the database. Nothing is imported until Repair is pressed:
+        # the player may have meant to restore a backup instead.
+        self.repair_database_button = QPushButton(REPAIR_DATABASE_LABEL, tab)
+        self.repair_database_button.setProperty("primary", True)
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button = QPushButton(RESTORE_BACKUP_LABEL, tab)
+        self.restore_backup_button.setVisible(False)
         # T160. Hidden unless this is a Steam Deck whose `docker` command is
         # gone, which is what a SteamOS update leaves behind. The press runs the
         # upstream fix script's repair through the app's own questions; the
@@ -7567,6 +7647,8 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.repair_database_button.clicked.connect(self.repair_database)
+        self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
         # Start is the tab's gold press only where no Play is shown: Play is the
@@ -7617,6 +7699,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
+        realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)
@@ -8306,7 +8389,7 @@ class ControllerView(QWidget):
     ) -> bool:
         """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
         if self._upkeep_held():
-            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            show_information(self, "Something else is running", WORLD_UPKEEP_BUSY)
             return False
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
@@ -8490,6 +8573,10 @@ class ControllerView(QWidget):
         self._import_asked = False
         self.refresh_status()
         self.check_server_files()
+        # T386: and the channel. A check proves an account that waits to be
+        # proved, re-asks a saved credential, and finds this app's own account
+        # on a server this machine keeps no password for; it creates nothing.
+        self._check_the_channel()
         # T124: the day's cache answers this, so pressing Refresh repeatedly
         # costs no network.
         self._refresh_upstream_news()
@@ -8694,10 +8781,14 @@ class ControllerView(QWidget):
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
             self._forget_the_corrections_reading()
+            self._corrections_again_at = None
             return
         if self._import_asked:
+            self._ask_about_the_corrections_again()
             return
         self._import_asked = True
+        self._corrections_again_at = None
+        self._corrections_asked_again = 0
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
@@ -8720,6 +8811,20 @@ class ControllerView(QWidget):
                 self._corrections_checked,
                 self._corrections_check_failed,
             )
+
+    def _ask_about_the_corrections_again(self) -> None:
+        """T381: put the corrections question again once its wait is over, the database still up.
+
+        Only after a reading nobody could answer (`_corrections_checked()` sets
+        the wait), and never more than `CORRECTIONS_ASKED_AGAIN_AFTER` allows.
+        """
+        due = self._corrections_again_at
+        route = self.services.corrections
+        if due is None or route is None or _corrections_clock() < due:
+            return
+        self._corrections_again_at = None
+        self._corrections_asked_again += 1
+        self._run(route.check, self._corrections_checked, self._corrections_check_failed)
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
@@ -9133,6 +9238,7 @@ class ControllerView(QWidget):
         self._nothing_to_remove = False
         self._update_forget_visibility()
         self.problem_label.setText("")
+        self._withdraw_the_database_offer()
         self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
@@ -9152,9 +9258,14 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._withdraw_the_database_offer()
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        # T386: a Start's one ask lands while the world loads, as an install's
+        # does, so it gets the same second ask; `_resettle_if_pending` makes it
+        # only while the channel still waits to be proved.
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
         if self.play_label.text() == PLAY_START_FAILED:
             # A later Start (or "Stop the other server and start this one") worked.
             self._say_play("")
@@ -9190,9 +9301,11 @@ class ControllerView(QWidget):
 
         `check()` and not `settle()`: settle creates an account on an install
         that has none, and opening a tab is not permission to write a row into
-        the user's auth database. `check()` asks nothing at all unless there is
-        a saved credential or an account an earlier run created and did not
-        prove (T138) to ask about, and it never creates one.
+        the user's auth database. `check()` asks the server about a saved
+        credential or an account an earlier run created and did not prove
+        (T138); with neither, it only reads whether this app's own account is
+        in the auth database, to offer Repair for a lost password (T386). It
+        never creates one.
         """
         setup = self.services.channel_setup
         if setup is None:
@@ -9382,6 +9495,8 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
+        if isinstance(exc, DatabaseMissing):
+            self._offer_to_repair_the_database()
         raw = str(exc)
         msg = raw
         why = ""
@@ -9490,6 +9605,70 @@ class ControllerView(QWidget):
     def _hide_stop_other(self) -> None:
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
+
+    def _offer_to_repair_the_database(self) -> None:
+        """T377: Repair, and the backups when there are any, beside the refusal that names them.
+
+        The refusal's own sentence is the problem line; these are its two ways
+        out. A tab with no Repair route offers none, and the backups button is
+        shown only when the backups folder holds a dump to restore.
+        """
+        self.repair_database_button.setVisible(self.services.repair_database is not None)
+        self.repair_database_button.setEnabled(True)
+        self.restore_backup_button.setVisible(self._has_backups())
+
+    def _withdraw_the_database_offer(self) -> None:
+        """A Start that worked, or a new press, takes the T377 offer down."""
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button.setVisible(False)
+
+    def _has_backups(self) -> bool:
+        try:
+            return any(self.services.backups_dir().glob("*.sql"))
+        except OSError:
+            return False
+
+    @Slot()
+    def go_to_the_backups(self) -> None:
+        """The Maintenance tab's backup list, brought forward (T377)."""
+        self.refresh_backups()
+        self._show_page_of(self.backup_list)
+
+    @Slot()
+    def repair_database(self) -> bool:
+        """Ask, then make a missing database again from the server files, in the panel (T377).
+
+        The owner's rule for every repair: the player chooses when, and the
+        question says what comes back and what does not. False if nothing ran.
+        """
+        route = self.services.repair_database
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if not ask_yes_no(self, f"Repair {self.entry.name}'s database?", REPAIR_DATABASE_CONFIRM):
+            return False
+        self._withdraw_the_database_offer()
+        self.problem_label.setText("")
+        self.problem_details.set_text("")
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        self._rebuild_moves_sources = False
+        started = self.rebuild_log.run(
+            lambda: self._watch_for_load_wait(route(cancel)),
+            title=f"Repairing {self.entry.name}'s database",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            self._show_page_of(self.rebuild_log)
+        return started
 
     def _offer_docker_repair(self) -> bool:
         """Show the SteamOS Docker repair when this Deck's `docker` is gone; say if it is (T160).
@@ -10004,7 +10183,7 @@ class ControllerView(QWidget):
     def _client_dir_refused(self, message: str) -> None:
         """One place both refusal paths in `change_client_dir()` report through."""
         self.action_failed.emit(message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
 
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
@@ -10022,7 +10201,7 @@ class ControllerView(QWidget):
         """
         if not self._busy and not self._play_client_running:
             return False
-        QMessageBox.information(
+        show_information(
             self,
             "Something else is running",
             "This server is busy with another action — wait for it to finish on the "
@@ -10293,7 +10472,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self._play_parent(), self.entry.name, message)
+        show_warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -10323,7 +10502,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
+        show_information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -10331,7 +10510,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -10407,7 +10586,7 @@ class ControllerView(QWidget):
             return
         original = self.services.client_dir
         if original is None:
-            QMessageBox.information(
+            show_information(
                 self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
@@ -10699,7 +10878,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
+        show_information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -10775,7 +10954,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -11533,7 +11712,7 @@ class ControllerView(QWidget):
             said += " " + left_out_sentence(compared.left_out)
         if compared.flags_lost:  # T198: on the label and in front of the player
             said += " " + compared.flags_lost
-            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
+            show_warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -13241,7 +13420,7 @@ class ControllerView(QWidget):
             return False
         refusal = self._bot_rebuild_refusal()
         if refusal is not None:
-            QMessageBox.information(self, "Something else is running", refusal)
+            show_information(self, "Something else is running", refusal)
             return False
         choice = ask_backup_choice(
             self,
@@ -13303,7 +13482,7 @@ class ControllerView(QWidget):
         log = self.bot_rebuild_log
         if log is None or not log.running:
             return False
-        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        show_information(self, "Something else is running", BOT_REBUILD_RUNNING)
         self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
         return True
 
@@ -13345,7 +13524,7 @@ class ControllerView(QWidget):
 
     def _say_restart_owed(self) -> None:
         """The owed restart could not be made: never dropped silently."""
-        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        show_information(self, "Restart the server", RESTART_OWED_LEFT)
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
@@ -14057,7 +14236,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -14112,7 +14291,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -15690,8 +15869,23 @@ class ControllerView(QWidget):
             title, text = remove_question(
                 manifest,
                 apply_module.settings_removal(self.services.controller.server_dir, manifest),
+                apply_module.settings_removal_unreadable(
+                    self.services.controller.server_dir, manifest
+                ),
             )
             if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
+        if action == "remove" and apply_module.database_receipt(manifest):
+            # T398: Bigger Stacks' Remove put every item's stack size back at once,
+            # where a settings-only Remove has asked since T380. Asked first, No by
+            # default, in the box that fits the screen (T243).
+            if not self._confirm(
+                f"Remove {manifest.name}?", BIGGER_STACKS_REMOVE.format(name=manifest.name)
+            ):
                 self._module_pending = None
                 self.module_report.setPlainText(
                     f"remove {manifest.id}: cancelled — nothing on this machine was changed."
@@ -16016,7 +16210,7 @@ class ControllerView(QWidget):
         )
         if self.services.set_client_dir is None:
             # No write seam, so no button to offer: say it, and stop.
-            QMessageBox.information(
+            show_information(
                 self, f"{manifest.name} needs your game client", client_notice(manifest)
             )
             return True
@@ -16396,9 +16590,7 @@ class ControllerView(QWidget):
         if source is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
-                self, "Already rebuilding", "This server is already being rebuilt."
-            )
+            show_information(self, "Already rebuilding", "This server is already being rebuilt.")
             return False
         if self._busy:
             # A rebuild replaces the very containers the Server tab's actions
@@ -16407,7 +16599,7 @@ class ControllerView(QWidget):
             # Refused rather than queued: the honest outcome of two actions
             # wanting the same containers is that one of them waits, and the
             # user is the one who should choose which.
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16423,7 +16615,7 @@ class ControllerView(QWidget):
         refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
         if refused is not None:
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
-            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
+            show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
         if not ask_yes_no(
             self,
@@ -16574,7 +16766,7 @@ class ControllerView(QWidget):
         watching succeed.
         """
         if self._backup_before_update:
-            QMessageBox.information(
+            show_information(
                 self,
                 "A backup is running",
                 "This server is being backed up before an update. Wait for the backup to "
@@ -16582,14 +16774,14 @@ class ControllerView(QWidget):
             )
             return True
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return True
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16729,7 +16921,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
 
     def _start_update_to_latest(self) -> bool:
@@ -16824,14 +17016,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16843,7 +17035,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database updates for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -16872,7 +17064,23 @@ class ControllerView(QWidget):
         if result.state not in ("current", "stale"):
             # Nothing to press, and nothing the player did: said in the log.
             logger.info(f"{self.entry.id}: no database corrections offered: {result.why}")
+        self._ask_again_later_if_unanswered(result)
         self._refresh_corrections_banner()
+
+    def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
+        """T381: an `unreadable` reading, taken while the database is up, gets a later ask.
+
+        Asked on the poll once `CORRECTIONS_ASKED_AGAIN_AFTER`'s next wait is over
+        (`_ask_about_the_corrections_again()`), never once they are spent. Any
+        other answer is final until the database goes down and comes back.
+        """
+        asked = self._corrections_asked_again
+        if result.state != "unreadable" or not self._import_asked:
+            return
+        if asked >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
+            logger.info(f"{self.entry.id}: the corrections question is not asked again")
+            return
+        self._corrections_again_at = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[asked]
 
     @Slot(object)
     def _corrections_check_failed(self, exc: object) -> None:
@@ -16921,7 +17129,7 @@ class ControllerView(QWidget):
         if route is None or check is None or check.state != "stale":
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -16933,7 +17141,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database corrections for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -16985,14 +17193,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17004,7 +17212,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"adopting {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17188,6 +17396,12 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
+            if database_presence.MISSING in message:
+                # T377: a Rebuild refused because Docker no longer has the
+                # database. Its sentence is in the panel; its ways out go on
+                # the Server tab, where a refused Start puts them.
+                self.problem_label.setText(database_presence.MISSING)
+                self._offer_to_repair_the_database()
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
@@ -17694,7 +17908,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -17951,7 +18165,8 @@ class ControllerView(QWidget):
         And one lifecycle command (`docker.lifecycle()`, T216 review round 3), so a
         restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
+        # T179, T377: before the stop, so a refusal leaves it running.
+        controller.refuse_before_a_stop()
         with docker.lifecycle(controller.server_dir):
             stopped = controller.stop()
             controller.start()
@@ -17962,7 +18177,8 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
+        # T179, T377: before the removal, so a refusal leaves it as it was.
+        controller.refuse_before_a_stop()
         # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
         with docker.lifecycle(controller.server_dir):
             removed = controller.remove()
@@ -17993,6 +18209,7 @@ class ControllerView(QWidget):
             self.problem_label.setText("")  # what this tab said before the press is past
         self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
+        self._withdraw_the_database_offer()  # T377: the server started
         self.refresh_status()
 
     @Slot(object)
@@ -18009,6 +18226,10 @@ class ControllerView(QWidget):
         if self._tuning_from_banner:
             self.problem_label.setText(self.tuning_report.toPlainText())
         self._tuning_from_banner = False
+        if isinstance(exc, DatabaseMissing):
+            # T377: refused before the stop; its ways out are on the Server tab.
+            self.problem_label.setText(str(exc))
+            self._offer_to_repair_the_database()
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
@@ -18314,6 +18535,16 @@ class ControllerView(QWidget):
             return {}
         return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
 
+    def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
+        """Every key any catalog manifest declares for this file, first declaration winning."""
+        keys: dict[str, ConfKey] = {}
+        for manifest in self._manifests.values():
+            for conf in manifest.conf:
+                if conf.file == file:
+                    for key in conf.keys:
+                        keys.setdefault(key.key, key)
+        return keys
+
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
@@ -18564,6 +18795,10 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
+        if said is None:
+            # T371: an `int` key typed in the raw box is held to the card's own
+            # rule, as a warning on the same confirm and not a refusal.
+            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
         if said is not None:
             answer = QMessageBox.question(
                 self,

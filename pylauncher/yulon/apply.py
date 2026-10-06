@@ -21,6 +21,7 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import json
 import os
@@ -266,7 +267,7 @@ def installed_modules(
     A settings-only mod counts with a receipt (`module_answers.SETTINGS`), and
     without one when it is among `manifests` and its conf still reads what an
     install made before the receipt wrote (`settings_installed()`): one read of
-    each conf file those name.
+    each conf file those name, and the answers file for the removed marks (T392).
     """
     found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
     for family, ids in recorded_modules(server_dir, relative).items():
@@ -376,21 +377,23 @@ def _settings_still_written(
     """An install from before the receipt: its keys still read what it wrote, and Remove has
     something to undo.
 
-    Three things, all of them needed:
+    Four things, all of them needed:
 
+    0. A Remove has not marked it removed (`module_answers.SETTINGS_REMOVED`, T392).
     1. Every question a key's value is built from has an answer saved for this
        install. An install saves the answers it was given (T104) and nothing
        else does, so a value set by hand or on the Server rates card that
        happens to equal the mod's default is not taken for an install on a
        server where the mod was never installed. The answers outlive a Remove
-       (T104), so after one, keys set back by hand to exactly what the install
-       wrote do read as that install again (T392).
+       (T104), which is why item 0 exists.
     2. Every key reads exactly the value the install writes with those answers.
     3. The remove patches would change one of those keys' values: a conf already
        at what Remove leaves has nothing to remove, whatever was installed once.
 
     `texts` caches each conf file's text across the manifests of one reload.
     """
+    if module_answers.settings_removed(server_dir, manifest):
+        return False
     remembered = module_answers.read_answers(server_dir, manifest)
     confs = _key_written_confs(manifest)
     needed = {
@@ -450,6 +453,25 @@ def settings_removal(server_dir: Path, manifest: Manifest) -> tuple[SettingChang
         return _removal_changes(server_dir, manifest, vals, {})
     except ApplyError:
         return ()
+
+
+def settings_removal_unreadable(server_dir: Path, manifest: Manifest) -> tuple[str, ...]:
+    """The conf files Remove of the settings-only `manifest` would patch that cannot be read (T393).
+
+    Missing, no permission, or not UTF-8: `settings_removal()` can say nothing about
+    them and answers no changes, which is not the same as "nothing changes". Remove
+    itself stops on such a file with nothing changed (`Applier._patches()`).
+    """
+    if not settings_only(manifest):
+        return ()
+    files = {conf.file for conf in _key_written_confs(manifest)}
+    texts: dict[str, str | None] = {}
+    found: list[str] = []
+    for patch in manifest.patches:
+        if patch.when == "remove" and patch.file in files and patch.file not in found:
+            if _conf_text(server_dir, patch.file, texts) is None:
+                found.append(patch.file)
+    return tuple(found)
 
 
 def _removal_changes(
@@ -2355,6 +2377,10 @@ _STORED_INT = re.compile(r"\s*(?:\+?([0-9]+)|(-[0-9]+))\s*")
 """An `int` answer as a build before the digits rule stored it: spaces round it, or a `+`."""
 
 
+_STORED_FLOAT = re.compile(r"\s*\+?(-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?)\s*")
+"""A `float` answer as a build before the decimal rule stored it: spaces, a `+`, an exponent."""
+
+
 def stored_answer(prompt: Prompt, value: str) -> str:
     """A remembered or applied answer, in the spelling `check_answer()` takes today.
 
@@ -2365,6 +2391,16 @@ def stored_answer(prompt: Prompt, value: str) -> str:
     -- other scripts' digits, `1_0` -- is returned unchanged for `check_answer()`
     to refuse, because no server ever read it as the number Python does.
     """
+    if prompt.kind == "float":
+        # A build before T395 took `float()`'s spellings and the SQL it sent read
+        # spaces, a `+` and `2e0` as the number they say.
+        found = _STORED_FLOAT.fullmatch(value)
+        if found is None:
+            return value
+        try:
+            return format(decimal.Decimal(found.group(1)), "f")
+        except decimal.InvalidOperation:
+            return value
     old = _STORED_INT.fullmatch(value) if prompt.kind == "int" else None
     return value if old is None else (old.group(1) or old.group(2))
 
@@ -2564,16 +2600,27 @@ def check_answer(prompt: Prompt, value: str) -> str:
         if not _INT.fullmatch(value):
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
             return f"this must be a whole number, typed with the digits 0 to 9 only{spaces}"
-        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
-            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        smallest, largest = tuning.int_range(prompt.unsigned)
+        if not smallest <= int(value) <= largest:
+            return f"this must be a number from {smallest} to {largest}"
         return prompt.range_problem(text)
     if prompt.kind == "float":
-        try:
-            float(text)
-        except ValueError:
-            return "this must be a number"
+        # The answer is written as given, so it is held to the Tuning tab's decimal
+        # spelling (T395): `float("1_0")` is 10.0 here and 1 to the server.
+        fault = tuning.decimal_fault(value)
+        if fault == "spelling":
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            return (
+                f"this must be a number, typed with the digits 0 to 9 and one point at most{spaces}"
+            )
+        if fault == "decimals":
+            return f"this may have at most {tuning.DECIMAL_PLACES} digits after the point"
         # T122: the question's own range, finite; see `Prompt.range_problem()`.
-        return prompt.range_problem(text)
+        # Before the C `float` ceiling, so a question with a range names its range.
+        problem = prompt.range_problem(text)
+        if problem:
+            return problem
+        return "this is too large to be a number" if fault == "large" else ""
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
@@ -3597,8 +3644,9 @@ class Applier:
             self._record_database(manifest, vals, "remove", log)
         if settings_only(manifest):
             # T380: the settings are back, so the receipt that said they were
-            # changed goes. A legacy install has none, and its conf no longer
-            # reads as installed once the remove patches ran.
+            # changed goes, and a removed mark (T392) is left in its place so
+            # values set back by hand do not read as the install again. A legacy
+            # install has no receipt and gets the mark too.
             problem = module_answers.record_settings(self.server_dir, manifest, None)
             if problem:
                 log.skipped.append(
