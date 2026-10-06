@@ -358,7 +358,7 @@ class Controller:
         )
         if reading.refuses:
             logger.warning(f"start() refused: the database is {reading.presence} ({reading.why})")
-            raise DatabaseMissing(database_presence.MISSING)
+            raise DatabaseMissing(database_presence.sentence_for(reading.presence))
 
     def _before_the_servers_start(self) -> None:
         """What a game does once every refusal has passed and before its servers start.
