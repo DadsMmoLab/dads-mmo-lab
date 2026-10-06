@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **Where to get help…** on the Server tab links each game's server, bots and community, and Yu'lon's issues page.
 - If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
@@ -32,6 +33,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
+- A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
 - Stopping a Tortoise server with a hired companion online no longer crashes it or asks you to check your characters.
 - On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.

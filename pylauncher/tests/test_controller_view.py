@@ -8035,6 +8035,11 @@ def test_every_slot_the_controller_view_declares_takes_the_arguments_it_declares
     assert wrong == []
 
 
+def test_the_help_and_forget_buttons_land_on_declared_slots() -> None:
+    """T520: inserting `show_help` took the `@Slot()` that belonged to `forget_install`."""
+    assert {"show_help", "forget_install"} <= set(_declared(ControllerView, "Slot"))
+
+
 def test_the_rebuild_panels_finish_lands_on_a_slot_declared_with_its_own_signature() -> None:
     """T167: the receiver of `run_finished` is declared as the (bool, str) the panel sends."""
     sent = _declared(LogPanel, "Signal")["run_finished"]
@@ -18526,8 +18531,8 @@ def _server_with_the_plan_up(
     return view, window, view._tabs.currentWidget()
 
 
-SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Danger zone"]
-"""T189's Server tab, top to bottom, for a game with every part wired."""
+SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Help", "Danger zone"]
+"""T189's Server tab, top to bottom, for a game with every part wired; Help is T520's."""
 
 
 def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
@@ -18607,6 +18612,7 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
             view.enable_channel_button,
             view.repair_channel_button,
         ],
+        "Help": [view.help_button],
         "Danger zone": [
             view.remove_button,
             view.repair_button,

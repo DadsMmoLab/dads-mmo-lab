@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -244,13 +245,49 @@ def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
     return " OR ".join(arms)
 
 
-def population(sql: SqlReader, entry: CatalogEntry, marker: Marker) -> Population:
+# T437: a playerbots table is given this long after the world started to appear (T425).
+MISSING_TABLE_GRACE = timedelta(minutes=2)
+
+
+class MissingTableSaid:
+    """Which world run has already been told its playerbots table is missing (T437).
+
+    One per watcher, passed to `population()`: the tick repeats every few seconds and
+    the sentence must be said once per run, then again if the table returns and goes.
+    """
+
+    def __init__(self) -> None:
+        self.run: str | None = None
+
+    def should_say(self, run: str) -> bool:
+        if self.run == run:
+            return False
+        self.run = run
+        return True
+
+    def table_found(self) -> None:
+        self.run = None
+
+
+def population(
+    sql: SqlReader,
+    entry: CatalogEntry,
+    marker: Marker,
+    *,
+    world_up: timedelta | None = None,
+    said: MissingTableSaid | None = None,
+    run: str = "",
+) -> Population:
     """Online players, online bots, and the two totals behind the warning.
 
     One statement, not four. This runs on the same five-second tick as the
     status poll, and every `docker exec … mysql` costs about a third of a second
     of process startup before any SQL happens (`docker.py:1883-1893` records the
     same measurement for `docker inspect`).
+
+    `world_up` is how long the world has run and `said` remembers the warning (T437): a
+    playerbots table still missing after `MISSING_TABLE_GRACE` is warned about once per
+    `run`, not logged at info on every tick.
     """
     ops = entry.observability
     if ops is None:  # pragma: no cover - resolve_marker refuses first
@@ -273,10 +310,22 @@ def population(sql: SqlReader, entry: CatalogEntry, marker: Marker) -> Populatio
         # next tick asks again, so it is said at info; anything else is a warning.
         # T425: the world makes a playerbots table on its first start: ERROR 1146 is the early poll.
         text = str(exc)
-        early = "Unknown database" in text or ("1146" in text and "playerbots" in text)
+        missing_bots_table = "1146" in text and "playerbots" in text
+        early = "Unknown database" in text or missing_bots_table
+        if missing_bots_table and said is not None and world_up is not None:
+            if world_up > MISSING_TABLE_GRACE:
+                if said.should_say(run):
+                    logger.warning(
+                        "The bots' tables are still missing, so bots cannot be counted. "
+                        "Stop and Start the server once; if they are still missing, press "
+                        "Save logs for support… and ask for help."
+                    )
+                return Population(problem=f"could not read the server's characters: {exc}")
         say = logger.info if early else logger.warning
         say(f"could not count this server's population: {exc}")
         return Population(problem=f"could not read the server's characters: {exc}")
+    if said is not None:
+        said.table_found()
     numbers = _four_numbers(raw)
     if numbers is None:
         return Population(

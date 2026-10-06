@@ -323,6 +323,7 @@ class Dashboard:
         )
         self._banner = _ready_banner(entry)
         self._now = now or (lambda: datetime.now(UTC))
+        self._missing_table_said = dbreads.MissingTableSaid()
         self._last_restarts: int | None = None
         self._strikes = 0
         self._looping = False
@@ -508,7 +509,14 @@ class Dashboard:
                 after_a_loop=after_a_loop,
                 ready=ready,
             )
-        counts = dbreads.population(self.sql, self.entry, answer.marker)
+        counts = dbreads.population(
+            self.sql,
+            self.entry,
+            answer.marker,
+            world_up=uptime,
+            said=self._missing_table_said,
+            run=state.started_at,
+        )
         return Verdict(
             "up",
             state.restart_count,
