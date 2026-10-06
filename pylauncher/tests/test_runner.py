@@ -486,10 +486,10 @@ def test_end_streams_started_on_returns_before_the_reap_it_asked_for_finishes(
     release = threading.Event()
     real_end_child = runner._end_child
 
-    def blocking_end_child(proc: subprocess.Popen[str], job: object = None) -> None:
+    def blocking_end_child(proc: subprocess.Popen[str], job: object = None, **kw: bool) -> None:
         entered.set()
         release.wait(HANG_BOUND)
-        real_end_child(proc, job)  # type: ignore[arg-type]
+        real_end_child(proc, job, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(runner, "_end_child", blocking_end_child)
     blocked = _BlockedStream("test-end-streams-nonblocking")
@@ -1527,9 +1527,9 @@ def test_every_way_a_stream_is_stopped_ends_its_child_through_end_child(
     alive_when_asked: list[bool] = []
     real_end = runner._end_child
 
-    def note(proc: subprocess.Popen[str], job: object = None) -> None:
+    def note(proc: subprocess.Popen[str], job: object = None, **kw: bool) -> None:
         alive_when_asked.append(proc.poll() is None)
-        real_end(proc, job)  # type: ignore[arg-type]
+        real_end(proc, job, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(runner, "_end_child", note)
 
@@ -2260,3 +2260,171 @@ def test_off_windows_a_root_that_exits_0_after_a_stop_chose_it_is_still_a_succes
 
     assert runner.end_streams_started_on(threading.get_ident()) == 1
     assert list(lines) == []
+
+
+# ---------------------------------------------------------------------------
+# T365: a Stop whose own thread cannot start still ends the stream.
+#
+# `end_streams_started_on()` hands each ending to a thread, so the button that
+# called it never waits on a child. `Thread.start()` can refuse ("can't start new
+# thread") in a long-lived process that has run out of them; before T365 that
+# error left the Stop on the first child, every later child was never asked, and
+# `ended` claimed a Stop that never happened while the stream stayed blocked.
+
+
+def test_a_stop_whose_thread_cannot_start_still_ends_the_stream_a_worker_is_blocked_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stream's worker leaves its blocked read, and its exit reads as the Stop's.
+
+    Mutation this catches: no fallback (the `RuntimeError` escapes the Stop and
+    the worker stays inside the generator).
+    """
+    blocked = _BlockedStream("test-stop-thread-cannot-start")
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        try:
+            assert runner.end_streams_started_on(blocked.worker.ident) == 1
+        finally:
+            monkeypatch.undo()
+        blocked.worker.join(timeout=HANG_BOUND)
+        assert not blocked.worker.is_alive(), "still inside the generator: the child was not ended"
+        assert isinstance(blocked.outcome[0], runner.StreamEnded), blocked.outcome
+    finally:
+        blocked.close()
+
+
+def test_a_stop_whose_threads_cannot_start_ends_every_stream_not_only_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two streams this thread started: both children are ended when no thread will start.
+
+    Mutation this catches: the fallback ending the first child and then
+    stopping (a `break`, or the start's error raised again after it).
+    """
+    script = "print('first', flush=True); import time; time.sleep(60)"
+    streams = [stream(_python_cmd(script)), stream(_python_cmd(script))]
+    try:
+        for lines in streams:
+            assert next(lines) == "first"
+        procs = [runner._LIVE_STREAMS[lines].proc for lines in streams]
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        try:
+            assert runner.end_streams_started_on(threading.get_ident()) == 2
+        finally:
+            monkeypatch.undo()
+        for proc in procs:
+            assert proc is not None
+            assert proc.wait(timeout=HANG_BOUND) is not None
+    finally:
+        for lines in streams:
+            lines.close()
+
+
+class _RootThatOutlivesKill(_TreeRoot):
+    """A root that `kill()` does not end: the `proc.rs` case, where a wait after it never returns.
+
+    An unbounded `wait()` is recorded rather than blocked on, so the test can
+    say what the Stop would have done instead of hanging in it.
+    """
+
+    def kill(self) -> None:
+        self.events.append("kill")
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is None:
+            self.events.append("unbounded wait")
+            return 1
+        self.events.append("wait")
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+
+def _registered(child_proc: object) -> tuple[Generator[str, None, None], runner._Child]:
+    """A stream entry for `child_proc`, started on this thread; the caller unregisters it."""
+
+    def body() -> Generator[str, None, None]:
+        yield "never read"
+
+    generator = body()
+    child = runner._Child()
+    child.proc = child_proc  # type: ignore[assignment]
+    child.started_on = threading.get_ident()
+    runner._register(generator, child)
+    return generator, child
+
+
+def _unregister(*generators: Generator[str, None, None]) -> None:
+    with runner._LIVE_STREAMS_LOCK:
+        for generator in generators:
+            runner._LIVE_STREAMS.pop(generator, None)
+
+
+def test_a_stop_ended_on_its_own_thread_never_waits_without_a_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback runs on the thread that painted Stop, so its every wait is bounded.
+
+    Mutation this catches: the fallback calling the threaded ending as it is,
+    whose `kill()` is followed by an unbounded `wait()` (`proc.rs`: a 600 ms
+    call that returned after 605 seconds).
+    """
+    _as_windows(monkeypatch, "linux")
+    events: list[object] = []
+    root = _RootThatOutlivesKill(events, ignores_terminate=True)
+    generator, child = _registered(root)
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+    finally:
+        _unregister(generator)
+    assert events == ["terminate", "wait", "kill"], events
+    assert child.ended
+
+
+def test_a_stop_whose_inline_ending_fails_still_asks_every_other_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error ending one child on the Stop's own thread does not skip the next one.
+
+    Mutation this catches: the fallback's error escaping the loop.
+    """
+    _as_windows(monkeypatch, "linux")
+
+    class _RootThatCannotBeTerminated(_TreeRoot):
+        def terminate(self) -> None:
+            self.events.append("terminate")
+            raise OSError(1, "Operation not permitted")
+
+    first: list[object] = []
+    second: list[object] = []
+    entries = [_registered(_RootThatCannotBeTerminated(log)) for log in (first, second)]
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 2
+    finally:
+        _unregister(*(generator for generator, _ in entries))
+    assert first == ["terminate"] and second == ["terminate"], (first, second)
+
+
+def test_on_windows_a_stop_whose_thread_cannot_start_ends_the_job_on_its_own_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the same ending as the thread's: the job first, before the call returns.
+
+    Mutation this catches: the fallback ending the process alone, so the
+    job's reach (everything docker.exe started) is lost.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)"))
+    assert next(lines) == "first"
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        assert "end" in job.events, job.events
+        proc = spawned[0]["proc"]
+        assert isinstance(proc, _REAL_POPEN)
+        assert proc.wait(timeout=HANG_BOUND) is not None
+    finally:
+        lines.close()
+    assert job.events[-1] == "close", job.events

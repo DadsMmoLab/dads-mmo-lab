@@ -32,6 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - On Windows, **Stop** also ends the helper programs a build started on your PC.
+- **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.

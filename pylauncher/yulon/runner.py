@@ -142,7 +142,7 @@ def _register(generator: Generator[str, None, None], child: _Child) -> None:
         _LIVE_STREAMS[generator] = child
 
 
-def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
+def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool = False) -> None:
     """End `proc` if it is still running: on Windows its tree first, then terminate, then kill.
 
     **The tree is ended by `proc`'s Job object when it has one (T299)**, and by
@@ -166,6 +166,10 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
     taskkill that failed, timed out or could not start leaves in charge. Off
     Windows nothing changes; T298 is the follow-up that asks whether Linux and
     macOS need a process group.
+
+    `bounded` is for a caller that must not block for long (T365: a Stop on the
+    thread that pressed it): the `kill()` is not waited for. Nothing is lost by
+    that, because the stream's own `finally` reaps the child.
     """
     if proc.poll() is None:
         if sys.platform == "win32":
@@ -185,7 +189,8 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait()
+            if not bounded:
+                proc.wait()
 
 
 def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None) -> None:
@@ -439,7 +444,9 @@ def end_streams_started_on(ident: int) -> int:
     Measured 2026-08-03: a 600ms-bounded call returned after 605 SECONDS."
     `_end_child()` ends in an unbounded `proc.wait()` and the caller here is the
     thread that painted the button, so each ending goes to a thread nobody
-    joins — exactly `abandon()`'s shape.
+    joins — exactly `abandon()`'s shape. A thread that cannot start (`can't
+    start new thread`, T365) does not lose the Stop: that child is ended here
+    by `_stop_child_here()`, whose every wait is bounded, and the rest go on.
 
     **The status is still raised.** A terminated child exits non-zero (143 on
     the live box) and `stream()` goes on raising `CalledProcessError` for it:
@@ -479,12 +486,21 @@ def end_streams_started_on(ident: int) -> int:
     for child in children:
         proc = child.proc
         assert proc is not None  # both filters need a started child; narrows for mypy
-        threading.Thread(
-            target=_stop_child,
-            args=(child,),
-            daemon=True,
-            name=f"yulon-end-stream-{proc.pid}",
-        ).start()
+        try:
+            threading.Thread(
+                target=_stop_child,
+                args=(child,),
+                daemon=True,
+                name=f"yulon-end-stream-{proc.pid}",
+            ).start()
+        except Exception as exc:  # noqa: BLE001 - any refusal must not lose this Stop or the next
+            # T365: `RuntimeError: can't start new thread` in a process that has
+            # run out of them. The child is already marked as ended, so it is
+            # ended here instead, with every wait bounded, and the loop goes on.
+            logger.warning(
+                f"could not start a thread to end pid {proc.pid} ({exc!r}); ending it here"
+            )
+            _stop_child_here(child)
     if children:
         logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
     return len(children)
@@ -501,18 +517,35 @@ def _job_unsettled(child: _Child) -> bool:
     return child.proc is not None and child.job is not None and not child.settled
 
 
-def _stop_child(child: _Child) -> None:
+def _stop_child(child: _Child, *, bounded: bool = False) -> None:
     """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299).
 
     The choice in `end_streams_started_on()` already set `cut_short` for a
     child with a job, so whatever this ends, the stream reports a Stop.
+    `bounded` is passed on to `_end_child`.
     """
     proc, job = child.proc, child.job
     assert proc is not None  # chosen streams have started
     if proc.poll() is None:
-        _end_child(proc, job)
+        _end_child(proc, job, bounded=bounded)
     elif job is not None:
         job.end()
+
+
+def _stop_child_here(child: _Child) -> None:
+    """`_stop_child` on the Stop's own thread, for when no thread would start for it (T365).
+
+    Bounded, because that thread is the one that painted the button: each wait
+    in `_end_child` has `_SHUTDOWN_TIMEOUT_SECONDS`, and the kill's reap is left
+    to the stream's `finally`. It never raises, so one child that cannot be
+    ended does not keep the Stop from the next.
+    """
+    try:
+        _stop_child(child, bounded=True)
+    except Exception as exc:  # noqa: BLE001 - the Stop goes on to the other streams
+        proc = child.proc
+        pid = proc.pid if proc is not None else None
+        logger.warning(f"could not end the stream child pid {pid}: {exc!r}")
 
 
 def _answer(child: _Child) -> bool:
