@@ -255,7 +255,7 @@ def test_live_logs_name_each_container_and_say_why_one_is_missing(
         return None if container == f"id-{unread}" else f"log of {container}\n"
 
     monkeypatch.setattr(docker, "compose_container_id", container_id)
-    monkeypatch.setattr(docker, "log_tail", tail)
+    monkeypatch.setattr(docker, "last_lines", tail)
     got = {live.container: live for live in collect_live_logs(_tbc_install(tmp_path))}
     assert got[spec.world].text == f"log of id-{spec.service_for(spec.world)}\n"
     assert got[spec.auth].text is None and got[spec.auth].problem == "docker could not read its log"
@@ -266,7 +266,7 @@ def test_a_tail_that_took_the_whole_bound_is_reported_as_a_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(docker, "compose_container_id", lambda s, d, *, wsl_distro=None: "id")
-    monkeypatch.setattr(docker, "log_tail", lambda *a, **k: None)
+    monkeypatch.setattr(docker, "last_lines", lambda *a, **k: None)
     clock = itertools.cycle([0.0, 1.0, 0.0, 21.0])  # compose ps: 1 s; docker logs: 21 s
     got = collect_live_logs(_tbc_install(tmp_path), monotonic=lambda: next(clock))
     assert [live.problem for live in got] == ["timed out after 20 s"] + [SKIPPED] * 2
@@ -295,7 +295,7 @@ def test_a_wedged_docker_is_asked_once_per_target_across_every_install(
         return f"log of {container}\n"
 
     monkeypatch.setattr(docker, "compose_container_id", container_id)
-    monkeypatch.setattr(docker, "log_tail", tail)
+    monkeypatch.setattr(docker, "last_lines", tail)
     native = [_tbc_install(tmp_path / "a"), _tbc_install(tmp_path / "b")]
     in_wsl = InstallFacts("wow-tbc", "0badc0de", tmp_path / "w", "Ubuntu", TBC)
     silent: set[str | None] = set()

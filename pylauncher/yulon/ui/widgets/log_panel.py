@@ -539,7 +539,8 @@ class _StreamWorker(QObject):
         Called on the GUI thread while this object's own thread is blocked; it
         touches only `_stop` (a bool the worker re-reads) and `_ident` (written
         once, before the source was entered), and it returns without waiting for
-        any child to die.
+        any child to die, except when no thread will start to end one: then
+        each such child is ended here, with every wait bounded (T365).
         """
         self._stop = True
         if self._ident is not None:

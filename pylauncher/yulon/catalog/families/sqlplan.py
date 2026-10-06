@@ -245,6 +245,20 @@ class PhaseRun:
     """
 
 
+def step_name(run: PhaseRun) -> str:
+    """What a confirmation dialog calls this run (T424): a file by its path, a literal by its phase.
+
+    `rel` stays `statement N` -- the install log and the applied record key on it -- but
+    to a person "statement 1" says nothing; the phase's own name says what it does.
+    """
+    if run.path is not None or not run.rel.startswith("statement "):
+        return run.rel
+    total = len(run.phase.statements)
+    if total <= 1:
+        return run.phase.name
+    return f"{run.phase.name} (step {run.rel.removeprefix('statement ')} of {total})"
+
+
 def natural_key(name: str) -> tuple[object, ...]:
     """A sort key that orders names as GNU `ls -v` does (coreutils `filevercmp`).
 

@@ -21,6 +21,7 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import json
 import os
@@ -2020,7 +2021,9 @@ class ApplyReport:
     deleted because the game can be told to ignore it instead.
     """
     world_stopped: bool = False
-    """This run's running-world guard asked, and was told explicitly "not running" (T130).
+    """This run read the world and was told explicitly "not running" (T130; T397).
+
+    Read by the SQL guard, or, for a conf-only run that sent no SQL, once by the report.
 
     Only ever set from a reading, never from the manifest. `False` covers three
     things that are not the same: "running" and "could not ask" (both refuse,
@@ -2379,6 +2382,10 @@ _STORED_INT = re.compile(r"\s*(?:\+?([0-9]+)|(-[0-9]+))\s*")
 """An `int` answer as a build before the digits rule stored it: spaces round it, or a `+`."""
 
 
+_STORED_FLOAT = re.compile(r"\s*\+?(-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?)\s*")
+"""A `float` answer as a build before the decimal rule stored it: spaces, a `+`, an exponent."""
+
+
 def stored_answer(prompt: Prompt, value: str) -> str:
     """A remembered or applied answer, in the spelling `check_answer()` takes today.
 
@@ -2389,6 +2396,16 @@ def stored_answer(prompt: Prompt, value: str) -> str:
     -- other scripts' digits, `1_0` -- is returned unchanged for `check_answer()`
     to refuse, because no server ever read it as the number Python does.
     """
+    if prompt.kind == "float":
+        # A build before T395 took `float()`'s spellings and the SQL it sent read
+        # spaces, a `+` and `2e0` as the number they say.
+        found = _STORED_FLOAT.fullmatch(value)
+        if found is None:
+            return value
+        try:
+            return format(decimal.Decimal(found.group(1)), "f")
+        except decimal.InvalidOperation:
+            return value
     old = _STORED_INT.fullmatch(value) if prompt.kind == "int" else None
     return value if old is None else (old.group(1) or old.group(2))
 
@@ -2588,16 +2605,27 @@ def check_answer(prompt: Prompt, value: str) -> str:
         if not _INT.fullmatch(value):
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
             return f"this must be a whole number, typed with the digits 0 to 9 only{spaces}"
-        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
-            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        smallest, largest = tuning.int_range(prompt.unsigned)
+        if not smallest <= int(value) <= largest:
+            return f"this must be a number from {smallest} to {largest}"
         return prompt.range_problem(text)
     if prompt.kind == "float":
-        try:
-            float(text)
-        except ValueError:
-            return "this must be a number"
+        # The answer is written as given, so it is held to the Tuning tab's decimal
+        # spelling (T395): `float("1_0")` is 10.0 here and 1 to the server.
+        fault = tuning.decimal_fault(value)
+        if fault == "spelling":
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            return (
+                f"this must be a number, typed with the digits 0 to 9 and one point at most{spaces}"
+            )
+        if fault == "decimals":
+            return f"this may have at most {tuning.DECIMAL_PLACES} digits after the point"
         # T122: the question's own range, finite; see `Prompt.range_problem()`.
-        return prompt.range_problem(text)
+        # Before the C `float` ceiling, so a question with a range names its range.
+        problem = prompt.range_problem(text)
+        if problem:
+            return problem
+        return "this is too large to be a number" if fault == "large" else ""
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
@@ -4460,8 +4488,9 @@ class Applier:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
 
         Returns whether it ASKED and was told "not running" (T130), which is
-        `ApplyReport.world_stopped`'s only source. Every early return below is
-        `False`, because none of them read anything about the world.
+        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in
+        `_report`, T397). Every early return below is `False`, because none of them read
+        anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
         direct writes to `characters`/`world` while running; reads are fine* —
@@ -5645,6 +5674,22 @@ class Applier:
                 f"so the next Update of {manifest.id} will offer the defaults instead"
             )
 
+    def _world_read_stopped_for_a_conf_write(self, log: _Log) -> bool:
+        """Whether a conf write that asks for a restart found the world already stopped (T397).
+
+        A conf-only install sends no SQL, so the SQL guard never read the world and the
+        report said "Stop and then Start" to a player who had stopped it first. One read,
+        only when a conf write is what asks for the restart; only an explicit "not running"
+        counts, a running world or a seam that cannot answer leave the old line.
+        """
+        if log.world_stopped or not log.conf_restart or self._world_running is None:
+            return log.world_stopped
+        try:
+            return self._world_running() is False
+        except Exception as exc:  # noqa: BLE001 - could not ask is not "stopped"
+            logger.warning(f"could not tell whether the world is running: {exc}")
+            return False
+
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(
             action=action,
@@ -5679,7 +5724,7 @@ class Applier:
             left_behind=(
                 _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
             ),
-            world_stopped=log.world_stopped,
+            world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
