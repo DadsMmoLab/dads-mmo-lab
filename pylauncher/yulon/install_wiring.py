@@ -167,7 +167,9 @@ def import_gate_for(
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
-        return wotlk_repair.import_state(sql, mysql)
+        return wotlk_repair.import_state(
+            sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
+        )
 
     def reset() -> tuple[str, ...]:
         return wotlk_repair.reset_unfinished(sql, mysql)

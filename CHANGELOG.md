@@ -32,6 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Stopping a Tortoise server with a hired companion online no longer crashes it or asks you to check your characters.
+- On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.
 - Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
@@ -44,6 +45,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Forget Yu'lon's record…** asks in a box that fits small screens and defaults to No.
 - The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
 - A database that is a moment slow to answer after a start no longer logs a warning.
+- A brand-new database that is still doing its first setup no longer logs "Access denied", "Can't connect" or a missing-table warning.
+- **Refresh** keeps the sentence beside **Repair the database…** and **Restore a backup…** instead of clearing it.
 - The corrections dialog names each step by what it does instead of "statement 1".
 - After **Stop**, the missing-database sentence stays beside **Repair the database…** and **Restore a backup…**.
 - An empty server database now says it is empty, not that Docker's copy was removed.
@@ -62,6 +65,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Long error and warning messages scroll inside their box, so its OK button always stays on screen.
 - After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
 - After **Repair the database…**, the command channel offers **Repair** for its lost account, or turning on if it is off.
+- After the command channel gave up, **Refresh**, **Start** or turning it on checks it again without restarting Yu'lon.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.

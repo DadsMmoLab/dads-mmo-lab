@@ -829,3 +829,126 @@ def test_a_start_finds_a_waiting_row_whose_account_was_deleted(box: _Box) -> Non
 
     assert _line(box) == f"Command channel: {GONE_LINE}"
     assert _offers_repair(box)
+
+
+# -- after the channel gave up proving, in the same app run (T427, T497) ---------
+
+GAVE_UP = "three round trips did not prove it"
+
+
+def _gave_up(box: _Box) -> None:
+    """The live ground: a row that waits to be proved, and three asks the world never answered.
+
+    Seen on m910q and yulon-win11-gate (2026-10-06): a Start against a world
+    whose channel is off spends the three tries and the row stops at "not set
+    up … it is over to you" for the rest of the app run.
+    """
+    box.view._settle_the_channel()
+    box.wire.loading = True  # a world whose channel is off answers nobody
+    box.view.repair_channel_button.click()
+    assert "waiting to be proved" in _line(box), "the ground: a row that waits"
+    for _ in range(3):
+        box.view._settle_the_channel()
+    assert GAVE_UP in _line(box), "the ground: the setup gave up"
+
+
+def test_after_the_channel_gave_up_refresh_finds_its_account_deleted(box: _Box) -> None:
+    """T427: a Refresh read the account again only after a relaunch."""
+    _gave_up(box)
+    _drop_the_account(box)
+
+    box.view.recheck()
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+    box.wire.loading = False
+    box.view.repair_channel_button.click()
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    assert len([k for k in box.auth.rows() if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_after_the_channel_gave_up_a_database_repair_finds_its_account_gone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gave_up(box)
+    _drop_the_account(box)
+
+    _repair_the_database(box, monkeypatch)
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+
+
+def test_after_the_channel_gave_up_refresh_proves_a_world_that_answers_now(box: _Box) -> None:
+    _gave_up(box)
+    box.wire.loading = False
+
+    box.view.recheck()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+
+
+def test_after_the_channel_gave_up_a_refresh_that_learns_nothing_keeps_the_line(
+    box: _Box,
+) -> None:
+    """A look that is not answered is not news: the three tries already said what they found."""
+    _gave_up(box)
+    before = box.auth.rows()
+
+    box.view.recheck()
+
+    assert GAVE_UP in _line(box)
+    assert box.auth.rows() == before, "a Refresh wrote to the auth database"
+
+
+def test_turn_on_after_the_channel_gave_up_is_checked_at_the_next_start(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T497: the press said "it is checked the next time you start the server", and it was not."""
+    _gave_up(box)
+    pressed: list[bool] = []
+
+    def wrote(entry: object, server_dir: Path, *, world_running: bool, **_k: object) -> object:
+        pressed.append(world_running)
+        return channel_setup.Enabled(path=server_dir, changed=True)
+
+    monkeypatch.setattr(channel_setup, "enable", wrote)
+    assert not box.view.enable_channel_button.isHidden(), "Turn on is offered after giving up"
+    box.view.stop_button.setEnabled(False)  # the press is made with the server stopped
+
+    box.view.enable_channel_button.click()
+
+    assert pressed == [False]
+    assert "checked the next time you start the server" in box.view.problem_label.text()
+    assert "waiting to be proved" in _line(box), "the gave-up line outlived the press"
+    asked = len(box.wire.asked_as)
+    box.wire.loading = False
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert len(box.wire.asked_as) > asked, "the Start after Turn on asked nothing"
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    assert len([k for k in box.auth.rows() if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_a_start_after_the_channel_gave_up_asks_again(box: _Box) -> None:
+    """The setting was put right by hand, or the world was only slow: a Start is the next ask."""
+    _gave_up(box)
+    box.wire.loading = False
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+
+
+def test_a_start_after_the_channel_gave_up_finds_its_account_deleted(box: _Box) -> None:
+    _gave_up(box)
+    _drop_the_account(box)
+    before = box.auth.rows()
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert box.auth.rows() == before, "a Start made the row again unasked"

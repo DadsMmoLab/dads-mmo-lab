@@ -1444,7 +1444,9 @@
           "save_before_stop": {
             "command": "saveall",
             "queue_command": "server debug",
-            "queue_pattern": "CharacterDatabase queue size: (\\d+)"
+            "queue_pattern": "CharacterDatabase queue size: (\\d+)",
+            "first": ["playerbot population stop", "server plimit administrator"],
+            "if_given_up": ["server plimit reset", "playerbot population start"]
           },
           "trinitycore": {
             "checkout": "src/centurion",
