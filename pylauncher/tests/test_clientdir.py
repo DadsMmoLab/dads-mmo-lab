@@ -884,8 +884,9 @@ def test_a_tortoise_client_with_no_dbc_archive_is_refused_before_the_build(
     assert verdicts(checks)[clientdir.CLIENT_CHECK] == "pass"
     assert preflight.Report(checks=checks).message() == (
         f"The client's game data: Data/dbc.MPQ is missing from {folder}, so this is not the "
-        "client this server needs, or it is an incomplete copy of it. Repair or re-download "
-        "the client, or pick the folder of a complete one, then try again."
+        "client this server needs, or it is an incomplete copy of it. Pick the folder of a "
+        "complete client of the game this server runs, or repair or re-download it, then try "
+        "again."
     )
 
 

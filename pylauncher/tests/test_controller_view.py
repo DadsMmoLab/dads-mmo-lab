@@ -10189,7 +10189,7 @@ def test_a_tortoise_client_with_no_dbc_archive_is_refused_and_never_asked_about(
     assert fake.written == [], "a client with no DBC archive was recorded"
     assert asked == [], "a missing DBC archive was put as a warning"
     assert failures and f"Data/dbc.MPQ is missing from {no_dbc}" in failures[0]
-    assert "Repair or re-download the client" in failures[0]
+    assert "a complete client of the game this server runs, or repair" in failures[0]
 
 
 def test_the_server_folder_or_anything_inside_it_is_refused_before_validation(

@@ -134,8 +134,8 @@ def validate(
                     "refuse",
                     f"{spec.required_file} is missing from {client_dir}, so this is not the "
                     "client this server needs, or it is an incomplete copy of it",
-                    "Repair or re-download the client, or pick the folder of a complete one, "
-                    "then try again.",
+                    "Pick the folder of a complete client of the game this server runs, or "
+                    "repair or re-download it, then try again.",
                 )
             )
             return tuple(checks)

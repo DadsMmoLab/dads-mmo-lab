@@ -314,6 +314,13 @@ def _same_required_file(evidence: Evidence, expected: Evidence) -> bool:
     absent because a `stat()` failed carries `client_facts_complete` False and
     does not match here, so `run_plan()` replaces it rather than appending new
     tool records to a claim that can never license a skip.
+
+    What this allowance leaves open (2026-10-06, a known gap, behaviour kept as
+    it was): `run_plan()` keeps the old record as it is and does not add the
+    required file's facts to it. So for a Tortoise `data/` extracted before
+    T521, a `dbc.MPQ` repaired or swapped later in the same client folder is
+    not noticed, and its tools are skipped, as they were before T521. A record
+    written after T521 carries the facts and does notice it.
     """
     if (evidence.required_file_size, evidence.required_file_mtime) == (
         expected.required_file_size,

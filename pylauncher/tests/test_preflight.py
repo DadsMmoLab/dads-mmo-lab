@@ -1959,7 +1959,7 @@ def test_a_tortoise_client_with_no_dbc_archive_is_refused_by_the_installs_own_ga
         clientdir.REQUIRED_CHECK
     ]
     assert f"Data/dbc.MPQ is missing from {client}" in report.message()
-    assert "Repair or re-download the client" in report.message()
+    assert "a complete client of the game this server runs, or repair" in report.message()
     assert client not in probed, "a refused client is not probed"
 
     (data / "dbc.MPQ").write_bytes(b"MPQ")
