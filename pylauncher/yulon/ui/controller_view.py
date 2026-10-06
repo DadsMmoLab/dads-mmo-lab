@@ -4557,6 +4557,7 @@ class _AskAgain:
         self.count += 1
         return True
 
+
 REPAIR_DATABASE_LABEL = "Repair the database…"
 RESTORE_BACKUP_LABEL = "Restore a backup…"
 REPAIR_DATABASE_CONFIRM = (
