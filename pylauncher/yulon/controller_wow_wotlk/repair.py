@@ -159,7 +159,7 @@ def _is_not_up_yet(exc: MaintenanceError) -> bool:
 
 
 def _is_first_setup_refusal(exc: MaintenanceError) -> bool:
-    """`ERROR 1045` from a brand-new volume: the image's first-setup server is not the real one (T425)."""
+    """`ERROR 1045` from a brand-new volume: its first-setup server is not the real one (T425)."""
     return "1045" in exc.detail or "Access denied" in exc.detail
 
 

@@ -9925,7 +9925,7 @@ class ControllerView(QWidget):
         self.restore_backup_button.setVisible(self._has_backups())
 
     def _keep_the_database_sentence(self) -> None:
-        """Put the offer's sentence back when something cleared the line while the offer is shown (T426).
+        """Put the offer's sentence back when something cleared the line, offer shown (T426).
 
         Refresh and the status poll empty the problem line; Repair the database…
         and Restore a backup… stay, and without the sentence nothing says why.

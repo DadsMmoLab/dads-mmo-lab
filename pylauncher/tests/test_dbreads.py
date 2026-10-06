@@ -293,7 +293,7 @@ def test_a_schema_the_world_has_not_made_yet_is_not_a_warning(
 def test_a_playerbots_table_the_world_has_not_made_yet_is_not_a_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """T425: ERROR 1146 on a playerbots table, 2 s after the world started, is the same early poll."""
+    """T425: ERROR 1146 on a playerbots table just after the world started is the early poll."""
     answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
     assert answer.marker is not None
 
@@ -317,7 +317,7 @@ def test_a_missing_table_that_is_not_a_playerbots_one_is_still_a_warning(
 
     class _Broken:
         def query(self, db: str, statement: str) -> str:
-            raise RuntimeError("ERROR 1146 (42S02): Table 'acore_characters.characters' doesn't exist")
+            raise RuntimeError("ERROR 1146 (42S02): Table 'acore_characters.x' doesn't exist")
 
     with caplog.at_level("INFO"):
         dbreads.population(_Broken(), WOTLK, answer.marker)
