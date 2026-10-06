@@ -752,7 +752,9 @@ def build_window() -> object:
     # callers measure the unwrapped contents below the floor.
     from yulon.ui.window_fit import fit_to_screen, scroll_wrapped
 
-    window.setCentralWidget(scroll_wrapped(window.takeCentralWidget(), MINIMUM_WINDOW_SIZE))
+    contents = window.takeCentralWidget()
+    assert contents is not None  # build_catalog_tab just set it
+    window.setCentralWidget(scroll_wrapped(contents, MINIMUM_WINDOW_SIZE))
     # T93: directly under Catalog, the owner's placement. INSERTED rather than
     # added: every server tab is appended by `add_controller()` and found by
     # `indexOf()`, so index 1 is this tab's for the life of the window. The
