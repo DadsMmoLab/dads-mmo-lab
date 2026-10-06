@@ -147,7 +147,7 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
     """`text` with this install's passwords masked, as the support zip masks them (T352).
 
     The file stays on disk and is attached to bug reports, and since T350 it also
-    holds stderr (wsl.exe and docker CLI warnings). Never raises: if the known
+    holds stderr (wsl.exe and docker CLI warnings). Gathering never raises: if the known
     values cannot be gathered, the patterns alone still run, and a stop is never
     prevented over redaction.
     """
@@ -157,18 +157,28 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
 
     values: frozenset[str] = frozenset()
     try:
-        from yulon import purge
+        from yulon.catalog.catalog import load_catalog
 
+        catalog = load_catalog()
+        try:
+            entry = catalog.get(game)
+        except KeyError:
+            entry = None
         facts = sources.InstallFacts(
             game=game,
             install_id=composegen.install_id(server_dir),
             server_dir=server_dir,
             wsl_distro=wsl_distro,
-            entry=purge.catalog_entry(game),
+            entry=entry,
         )
         # `logs_dir` is `<config>/logs` (`support.runlog.logs_dir`).
         values = sources.gather_known(
-            sources.Sources(config_dir=logs_dir.parent, app_log=None, installs=(facts,))
+            sources.Sources(
+                config_dir=logs_dir.parent,
+                app_log=None,
+                installs=(facts,),
+                public_passwords=sources.public_passwords(catalog),
+            )
         ).values
     except Exception as exc:  # noqa: BLE001 - redaction must never stop a stop
         logger.warning(f"could not gather this install's passwords for the snapshot: {exc}")

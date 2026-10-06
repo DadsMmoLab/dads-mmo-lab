@@ -184,6 +184,15 @@ def _failed_installs(
     return found
 
 
+def public_passwords(catalog: Catalog) -> frozenset[str]:
+    """The catalog's fixed passwords: published, so never masked as secrets."""
+    return frozenset(
+        value
+        for entry in catalog.games
+        if entry.install.password.mode == "fixed" and (value := entry.install.password.value)
+    )
+
+
 def sources_for_app(
     installs: Sequence[KnownInstall],
     catalog: Catalog,
@@ -213,11 +222,7 @@ def sources_for_app(
             )
         )
     facts += _failed_installs(installs, catalog, home if home is not None else default_home())
-    public = frozenset(
-        value
-        for entry in catalog.games
-        if entry.install.password.mode == "fixed" and (value := entry.install.password.value)
-    )
+    public = public_passwords(catalog)
     config = platform.config_dir()
     return Sources(
         config_dir=config,

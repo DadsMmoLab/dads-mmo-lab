@@ -389,3 +389,21 @@ def test_a_failure_to_gather_passwords_still_saves_a_pattern_masked_snapshot(
 
     assert snap.path is not None
     assert minted not in snap.path.read_text(encoding="utf-8")
+
+
+def test_the_published_wotlk_password_is_not_masked_as_a_secret_in_the_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T352 review: WotLK's fixed password is the word `password`; MySQL 1045 lines keep it."""
+    conf_dir = tmp_path / "server" / "env" / "dist" / "etc"
+    conf_dir.mkdir(parents=True)
+    (conf_dir / "worldserver.conf").write_text(
+        'LoginDatabaseInfo = "ac-database;3306;root;password;acore_auth"\n', encoding="utf-8"
+    )
+    line = "Access denied for user 'root'@'x' (using password: YES)\n"
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text=line))
+
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    assert snap.path.read_text(encoding="utf-8") == line
