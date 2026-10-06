@@ -2356,9 +2356,7 @@ _STORED_INT = re.compile(r"\s*(?:\+?([0-9]+)|(-[0-9]+))\s*")
 """An `int` answer as a build before the digits rule stored it: spaces round it, or a `+`."""
 
 
-_STORED_FLOAT = re.compile(
-    r"\s*\+?(-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?)\s*"
-)
+_STORED_FLOAT = re.compile(r"\s*\+?(-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?)\s*")
 """A `float` answer as a build before the decimal rule stored it: spaces, a `+`, an exponent."""
 
 
