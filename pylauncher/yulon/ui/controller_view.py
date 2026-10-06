@@ -5727,6 +5727,17 @@ class _TabFit(QObject):
         return owed + box.spacing() * max(0, shown - 1)
 
 
+_FAILURE_FIT_EVENTS = (
+    QEvent.Type.Resize,
+    QEvent.Type.Show,
+    QEvent.Type.Hide,
+    QEvent.Type.FontChange,
+    QEvent.Type.StyleChange,
+)
+"""What changes the height a wrapped failure line needs (T450): its width, its font, and
+whether it shows at all."""
+
+
 class _IdleLogPanel(LogPanel):
     """A `LogPanel` that starts folded away and never takes more than its share.
 
@@ -5775,6 +5786,9 @@ class _IdleLogPanel(LogPanel):
         self.setVisible(False)
         self.collapse_toggled.connect(self._someone_used_the_handle)
         self.run_started.connect(self._give_it_the_room)
+        # T450: the failure line is held at its wrapped height (`_fit_the_failure`).
+        self.failure_label.installEventFilter(self)
+        self.run_finished.connect(lambda _ok, _message: self._fit_the_failure())
         self._watch_the_tab()
         self._apply()
 
@@ -5935,10 +5949,37 @@ class _IdleLogPanel(LogPanel):
             tab.installEventFilter(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        """The tab resized: the cap is a share of its height, so re-write it."""
-        if event.type() == QEvent.Type.Resize:
+        """The tab resized: the cap is a share of its height, so re-write it.
+
+        And the failure line was resized, restyled, shown or hidden (T450): the
+        height its wrapped text needs is a function of all four.
+        """
+        if watched is self.failure_label:
+            if event.type() in _FAILURE_FIT_EVENTS:
+                self._fit_the_failure()
+        elif event.type() == QEvent.Type.Resize:
             self._apply()
         return bool(super().eventFilter(watched, event))
+
+    def _fit_the_failure(self) -> None:
+        """Hold the failure line at the height its wrapped text needs at its width (T450).
+
+        A word-wrapped `QLabel`'s minimum is its height at its NARROWEST, and
+        both the panel's cap (`_share_of_the_tab()`, floored at the panel's own
+        minimum) and `_TabFit`'s sums are built from minimums, so a failure
+        that wraps to more lines than that guess was cut by the cap. Live on
+        m910q (2026-10-06): 119 px of the 153 a rollback's failure needed in a
+        maximised window, and its last sentence -- "Press Stop on the Server
+        tab" -- was not on screen. As a minimum, every one of those sums counts
+        the whole text, and the list above the panel is what pays.
+
+        Written only when it changes: `setMinimumHeight` asks for a layout, and
+        the layout's resize is one of the events that calls this.
+        """
+        label = self.failure_label
+        needed = label.heightForWidth(label.width()) if label.isVisible() else 0
+        if label.minimumHeight() != max(0, needed):
+            label.setMinimumHeight(max(0, needed))
 
     def event(self, event: QEvent) -> bool:
         handled = super().event(event)
