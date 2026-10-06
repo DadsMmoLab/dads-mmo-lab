@@ -1403,6 +1403,8 @@ class InstallChannel:
         reopens of the app would leave the Start that follows given up.
         """
         state = self._state
+        if isinstance(state, GaveUp):
+            return self._look_past(state)
         if isinstance(state, Verified | Pending) and self._account_is_gone(state.account):
             # T423: a database Repair re-imports the server and the app's row
             # goes with it, while the saved credential (or the pending record)
@@ -1435,6 +1437,41 @@ class InstallChannel:
             ),
         )
         return self._state
+
+    def _look_past(self, gave_up: GaveUp) -> State:
+        """A Refresh or a database Repair after the setup gave up: look again from the disk (T427).
+
+        `GaveUp` lives only in this run's memory, so until a relaunch read the
+        pending record again nothing asked the database: an account deleted
+        under a gave-up row kept the gave-up line, with no Repair, while a
+        relaunch said at once that the account was gone. The look is made from
+        what the disk keeps, as a relaunch makes it. A look that learns nothing
+        -- the row is there and the world still does not answer -- leaves the
+        gave-up line, which says more than "waiting" about three tries that
+        already went unanswered; a proof, a refusal, a gone or a lost account
+        is news, and is kept.
+        """
+        self._state = self._from_disk()
+        after = self._check()
+        if isinstance(after, Verified | Refused):
+            return after
+        # Only over the look's own answer and with no settle running: a Start's
+        # settle that moved the state meanwhile knows better than this look.
+        if self._state is after and not self._settles:
+            self._state = gave_up
+            return gave_up
+        return self._state
+
+    def _rearm(self, why: str) -> None:
+        """End a gave-up state on what the disk keeps, as a relaunch would (T427, T497).
+
+        The pending record holds the row's own password, so what follows
+        re-verifies that row and never makes another; with no record it is
+        `Idle`, whose `create` keeps an existing row's password and says so.
+        """
+        if isinstance(self._state, GaveUp):
+            self._state = self._from_disk()
+            logger.info(f"{self.entry.id}: the command channel is asked again after {why}")
 
     def _noted(self, state: State) -> State:
         """Remember, for the tab, whether a waiting row waits on a channel that is off (T423).
@@ -1537,10 +1574,11 @@ class InstallChannel:
         round trip, one that has a credential gets that credential checked, and
         one that has given up is left alone until a person acts.
         """
-        # Two arms and not three: a state that gave up needs no arm here,
-        # because `ensure()` is the latch and returns it untouched. A third one
-        # was written, and a mutation that deleted it changed no observable
-        # behaviour -- which is the definition of a guard that guards nothing.
+        # A Start is a person acting (T427, T497): the setting may have been
+        # turned on, or the world was only slow, so a state that gave up is
+        # asked again from the disk. `ensure()` is still the latch within the
+        # Start's own tries.
+        self._rearm("a Start")
         state = self._state
         if isinstance(state, Pending) and self._account_is_gone(state.account):
             # T423: a Start asks a waiting row whether its account is still in
@@ -1700,14 +1738,21 @@ class InstallChannel:
         return False if not any(present) else None
 
     def enable(self, *, world_running: bool) -> Enabled:
-        """Write the channel on. Refuses while the world is running."""
-        return enable(
+        """Write the channel on. Refuses while the world is running.
+
+        A press that wrote it ends a gave-up state (T497): the tab then says the
+        channel "is checked the next time you start the server", and a state
+        left at `GaveUp` was never checked again in the same app run.
+        """
+        done = enable(
             self.entry,
             self.server_dir,
             templates_root=self.templates_root,
             world_running=world_running,
             db_password=self._password(),
         )
+        self._rearm("Turn on")
+        return done
 
     def setup_state(self) -> State:
         """Where the setup has got to, without asking the server anything."""

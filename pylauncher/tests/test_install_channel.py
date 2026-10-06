@@ -356,11 +356,85 @@ def test_settle_on_a_working_channel_checks_it_rather_than_creating_again(
     assert answering.asked == 1
 
 
-def test_settle_leaves_a_channel_that_gave_up_alone(tmp_path: Path) -> None:
-    channel = _channel(tmp_path, answering=_Answering("yes"))
-    channel._state = setup.GaveUp(account="YULON_AB12CD34", reason="three tries")
+def _gave_up_over_a_waiting_row(tmp_path: Path, answering: _Answering) -> setup.InstallChannel:
+    """A row an earlier settle made (its record on disk) and three asks that went unanswered."""
+    channel = _channel(tmp_path, answering=answering)
+    setup.save_pending(
+        setup.Pending(setup.account_name(INSTALL), "row-password"),
+        game=WOTLK.id,
+        install_id=INSTALL,
+        config_dir=tmp_path / "config",
+    )
+    channel._state = setup.GaveUp(account=setup.account_name(INSTALL), reason="three tries")
+    return channel
 
-    assert isinstance(channel.settle(), setup.GaveUp)
+
+def test_a_settle_after_giving_up_asks_the_waiting_row_again_and_never_creates(
+    tmp_path: Path,
+) -> None:
+    """T427/T497: a Start is a person acting, so the gave-up latch ends there.
+
+    It ends on the row the disk keeps, as a relaunch would: the same account
+    and the same password, so `_channel()`'s create refuses and nothing is made.
+    """
+    answering = _Answering("yes")
+    channel = _gave_up_over_a_waiting_row(tmp_path, answering)
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Verified)
+    assert state.password == "row-password"
+    assert answering.asked == 1
+
+
+def test_a_settle_after_giving_up_that_is_not_answered_waits_with_fresh_tries(
+    tmp_path: Path,
+) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Pending) and state.tries == 1
+
+
+def test_a_check_after_giving_up_that_learns_nothing_keeps_the_gave_up_state(
+    tmp_path: Path,
+) -> None:
+    answering = _Answering("unknown")
+    channel = _gave_up_over_a_waiting_row(tmp_path, answering)
+    gave_up = channel.setup_state()
+
+    assert channel.check() is gave_up
+    assert channel.setup_state() is gave_up
+    assert answering.asked == 1, "the look did not ask the row on disk"
+
+
+def test_a_check_after_giving_up_proves_a_row_that_answers_now(tmp_path: Path) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("yes"))
+
+    assert isinstance(channel.check(), setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_turn_on_after_giving_up_puts_the_waiting_row_back(tmp_path: Path) -> None:
+    """T497: "it is checked the next time you start the server" has to be true."""
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+
+    channel.enable(world_running=False)
+
+    state = channel.setup_state()
+    assert isinstance(state, setup.Pending) and state.tries == 0
+    assert state.password == "row-password"
+
+
+def test_a_refused_turn_on_after_giving_up_changes_nothing(tmp_path: Path) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+    gave_up = channel.setup_state()
+
+    with pytest.raises(setup.EnableRefused):
+        channel.enable(world_running=True)
+
+    assert channel.setup_state() is gave_up
 
 
 class _Captures:
