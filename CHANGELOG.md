@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
 - A database that is a moment slow to answer after a start no longer logs a warning.
 - The corrections dialog names each step by what it does instead of "statement 1".
 - After **Stop**, the missing-database sentence stays beside **Repair the database…** and **Restore a backup…**.

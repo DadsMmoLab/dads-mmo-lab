@@ -7247,6 +7247,9 @@ class ControllerView(QWidget):
         # the last status poll's answer, so either one landing second can set the
         # badge. A crash-looping world is in `docker ps` between its restarts.
         self._world_loops = False
+        # T451: whether the last verdict shown said the world is up AND printed its
+        # ready marker. Until one does, all-containers-running reads STARTING.
+        self._world_ready = False
         self._last_polled: InstallStatus | None = None
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
@@ -8368,6 +8371,7 @@ class ControllerView(QWidget):
         self.verdict_label.setVisible(True)
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
+        self._world_ready = result.state == "up" and result.ready
         if self._last_polled is not None:
             # T391: a loop seen after the poll takes REALM ONLINE down now, and
             # the first verdict past it gives the badge back, not a poll later.
@@ -8383,7 +8387,14 @@ class ControllerView(QWidget):
         """
         if self._world_loops and status.world:
             return "loop"
-        return _realm_badge_status(status)
+        word = _realm_badge_status(status)
+        if word == "running" and not self._world_ready and self.services.dashboard is not None:
+            # T451: `docker ps` calls the world running seconds, or a whole map
+            # load, before its ready marker, and a crash loop's fresh run is
+            # running between two crashes. Without a verdict there is nothing
+            # to wait for, so an install with none keeps the poll's word.
+            return "starting"
+        return word
 
     def _clear_the_verdict(self) -> None:
         """No verdict line: the distro is not known to run, so no world to describe (T133).
@@ -8394,6 +8405,7 @@ class ControllerView(QWidget):
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
         self._world_loops = False
+        self._world_ready = False
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -8654,6 +8666,10 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
+        # T451: no reading of the world's log can come, so nothing to wait for.
+        self._world_ready = True
+        if self._last_polled is not None and self._badge_held is None:
+            self.realm_badge.set_status(self._badge_word(self._last_polled))
         if (
             not self.docker_banner.isHidden()
             or isinstance(exc, docker.DockerCliMissingError)
@@ -8873,6 +8889,8 @@ class ControllerView(QWidget):
             # STOPPING and OFFLINE (T188 fix round 1).
             self._badge_held = None
         self._last_polled = status
+        if not status.world:
+            self._world_ready = False  # whatever runs next is a new run (T451)
         if self._badge_held is None:
             self.realm_badge.set_status(self._badge_word(status))
         if not stale and status.any_running:
