@@ -123,7 +123,7 @@ def test_a_cmangos_repair_has_no_client_data_step(tmp_path: Path) -> None:
 
 def test_the_engine_asks_docker_by_default() -> None:
     """The real reading, not a stand-in, unless a test says otherwise."""
-    assert native.Seams().read_database is database_presence.read
+    assert native.Seams().read_database is database_presence.take_reading
     assert ENTRY.install.native is not None
 
 

@@ -2700,6 +2700,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
     ),
+    ("ui/controller_view.py", "_has_backups"): (
+        "T377: asks whether the backups directory holds any `*.sql`, to show or hide the "
+        "Restore a backup… offer beside a missing database; reads, decides no write"
+    ),
     ("module_source.py", "_conf_steps"): (
         "lists the top level of a derived module's conf/ to find the .conf.dist files the "
         "manifest will name; decides no write, and a conf it cannot see is simply one "

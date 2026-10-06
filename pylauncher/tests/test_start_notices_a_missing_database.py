@@ -41,6 +41,8 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerView
 from yulon.ui.widgets.job import run_inline
 
+pytestmark = pytest.mark.usefixtures("real_database_read")
+
 TBC = load_catalog().get("wow-tbc")
 VOLUME = "t-project_db-data"
 SPEC = WOTLK.container_spec()
@@ -187,7 +189,7 @@ def test_no_volume_is_named_when_the_database_files_are_not_in_a_volume(
 
 def test_a_missing_volume_reads_missing_and_starts_nothing(db: _DbDocker, tmp_path: Path) -> None:
     db.volumes.clear()
-    reading = database_presence.read(WOTLK, tmp_path)
+    reading = database_presence.take_reading(WOTLK, tmp_path)
     assert reading.presence == "missing"
     assert not [c for c in db.calls if c[:3] == ["docker", "compose", "up"]]
 
@@ -196,7 +198,7 @@ def test_a_database_with_no_account_table_reads_empty_and_is_put_back_down(
     db: _DbDocker, tmp_path: Path
 ) -> None:
     db.tables = {}
-    reading = database_presence.read(WOTLK, tmp_path)
+    reading = database_presence.take_reading(WOTLK, tmp_path)
     assert reading.presence == "empty"
     stops = [c for c in db.calls if c[:2] == ["docker", "stop"]]
     assert [c[-1] for c in stops] == [SPEC.db], "the database it started is stopped again"
@@ -206,26 +208,26 @@ def test_a_database_with_no_account_table_reads_empty_and_is_put_back_down(
 def test_a_database_that_was_already_up_is_left_up(db: _DbDocker, tmp_path: Path) -> None:
     db.tables = {}
     db.names = f"{SPEC.db}\n"
-    assert database_presence.read(WOTLK, tmp_path).presence == "empty"
+    assert database_presence.take_reading(WOTLK, tmp_path).presence == "empty"
     assert not [c for c in db.calls if c[:2] == ["docker", "stop"]]
 
 
 def test_a_database_with_its_account_table_reads_present(db: _DbDocker, tmp_path: Path) -> None:
-    assert database_presence.read(WOTLK, tmp_path).presence == "present"
+    assert database_presence.take_reading(WOTLK, tmp_path).presence == "present"
 
 
 def test_a_slow_database_is_never_called_empty(db: _DbDocker, tmp_path: Path) -> None:
     """Not healthy in time: nothing is concluded, and no query is asked of it."""
     db.tables = {}
     db.healthy = False
-    reading = database_presence.read(WOTLK, tmp_path)
+    reading = database_presence.take_reading(WOTLK, tmp_path)
     assert reading.presence == "unknown"
     assert db.queries == []
 
 
 def test_a_query_that_fails_is_not_an_empty_database(db: _DbDocker, tmp_path: Path) -> None:
     db.query_fails = True
-    assert database_presence.read(WOTLK, tmp_path).presence == "unknown"
+    assert database_presence.take_reading(WOTLK, tmp_path).presence == "unknown"
 
 
 def test_a_cmangos_server_is_asked_about_its_own_login_database(
@@ -239,10 +241,10 @@ def test_a_cmangos_server_is_asked_about_its_own_login_database(
     assert plan.file is not None
     (tmp_path / plan.file).parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / plan.file).write_text("tbc0123456789abcd\n", encoding="utf-8")
-    assert database_presence.read(TBC, tmp_path).presence == "present"
+    assert database_presence.take_reading(TBC, tmp_path).presence == "present"
     assert any("'realmd'" in q for q in fake.queries)
     fake.tables = {}
-    assert database_presence.read(TBC, tmp_path).presence == "empty"
+    assert database_presence.take_reading(TBC, tmp_path).presence == "empty"
 
 
 # -- the real Start ------------------------------------------------------------------------

@@ -5505,11 +5505,11 @@ class Seams:
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
     read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
-        database_presence.read
+        database_presence.take_reading
     )
     """Is this install's database there at all (T377)? Asked by Rebuild and by Repair.
 
-    `database_presence.read()`: `missing` (no volume), `empty` (no login
+    `database_presence.take_reading()`: `missing` (no volume), `empty` (no login
     database), `present`, or `unknown` when Docker could not say. A Rebuild
     refuses the first two before it compiles; Repair runs only on them.
     """
@@ -5710,9 +5710,7 @@ class Seams:
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
             volume_exists=on(docker.volume_exists, wsl_distro=distro),
-            read_database=lambda entry, server_dir: database_presence.read(
-                entry, server_dir, distro
-            ),
+            read_database=on(database_presence.take_reading, wsl_distro=distro),
             world_running=on(docker.world_running, wsl_distro=distro),
             db_running=on(docker.world_running, wsl_distro=distro),
             stop_db=on(docker.stop_containers, wsl_distro=distro),

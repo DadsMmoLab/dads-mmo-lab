@@ -79,7 +79,7 @@ def _account_table_query(auth: str) -> str:
     )
 
 
-def read(
+def take_reading(
     entry: CatalogEntry,
     server_dir: Path,
     wsl_distro: str | None = None,

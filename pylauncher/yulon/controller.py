@@ -345,7 +345,7 @@ class Controller:
 
         After the port check and before anything starts: the volume is asked of
         Docker first, and only a volume that is there gets its database started
-        to be asked whether it holds a login database (`database_presence.read()`).
+        to be asked whether it holds a login database (`database_presence.take_reading()`).
         A reading Docker could not give is `unknown` and starts the server as
         before -- a slow database is not an empty one. A game this catalogue does
         not know is not asked.
@@ -353,7 +353,7 @@ class Controller:
         entry = self.entry or _entry_for(self.spec)
         if entry is None:
             return
-        reading = database_presence.read(
+        reading = database_presence.take_reading(
             entry, self.server_dir, self.wsl_distro, keep_running=True, spec=self.spec
         )
         if reading.refuses:
