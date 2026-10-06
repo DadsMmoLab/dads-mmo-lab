@@ -515,6 +515,49 @@ def test_after_a_stop_the_database_sentence_stays_beside_the_offer(
     assert view.problem_label.text().count(database_presence.MISSING) == 1
 
 
+def test_pressing_refresh_keeps_the_database_sentence_beside_the_offer(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    """T426: Refresh cleared the sentence and left Repair and Restore with no reason."""
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    assert view.repair_database_button.isVisibleTo(view)
+    view.recheck()
+    assert view.repair_database_button.isVisibleTo(view)
+    assert database_presence.MISSING in view.problem_label.text()
+
+
+def test_a_status_answer_puts_the_sentence_back_when_something_cleared_the_line(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    view.problem_label.setText("")
+    view._keep_the_database_sentence()
+    assert database_presence.MISSING in view.problem_label.text()
+
+
+def test_a_newer_line_is_not_overwritten_by_the_kept_sentence(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    view.problem_label.setText("something newer")
+    view._keep_the_database_sentence()
+    assert view.problem_label.text() == "something newer"
+
+
+def test_refresh_with_no_offer_shown_leaves_the_line_empty(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    view = _view(db, tmp_path, [])
+    view.recheck()
+    assert view.problem_label.text() == ""
+
+
 def test_after_a_stop_the_empty_sentence_is_the_one_kept(
     qapp: object, db: _DbDocker, tmp_path: Path
 ) -> None:

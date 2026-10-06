@@ -62,6 +62,7 @@ Nothing here writes. The seam is deliberately the read-only half of
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from yulon import docker
@@ -157,24 +158,61 @@ def _is_not_up_yet(exc: MaintenanceError) -> bool:
     return "2002" in exc.detail or "Can't connect" in exc.detail
 
 
-def _databases_when_up(mysql: MysqlDocker) -> tuple[str, ...]:
-    """`mysql.databases()`, asked again quietly while the database is not accepting connections.
+def _is_first_setup_refusal(exc: MaintenanceError) -> bool:
+    """`ERROR 1045` from a brand-new volume: the image's first-setup server is not the real one (T425)."""
+    return "1045" in exc.detail or "Access denied" in exc.detail
 
-    Only an answer that says so (`ERROR 2002`) is waited out, a few times; any other
+
+_HEALTH_POLL = 2.0
+_HEALTH_POLLS = 45
+"""How long the database's own healthcheck is waited on: 45 looks, 2 s apart (T425).
+
+A brand-new volume runs the image's first setup (a temporary server that refuses
+`root` with ERROR 1045 or has no socket at all, 2002) for 10-20 s; the container
+reports `starting` until it is done. The wait follows that, not a guessed count of seconds.
+"""
+
+
+def _databases_when_up(
+    mysql: MysqlDocker, db_health: Callable[[], str] | None = None
+) -> tuple[str, ...]:
+    """`mysql.databases()`, asked again quietly while the database is not ready yet.
+
+    While `db_health()` says `starting`, a refusal that belongs to first setup
+    (`ERROR 2002`, `ERROR 1045`) is waited out at the database's own pace. Without a
+    health answer only `ERROR 2002` is waited out, a few fixed times. Any other
     failure, and the last of these, is raised for the caller to warn about.
     """
-    for wait in _NOT_UP_YET_WAITS:
+    waits = iter(_NOT_UP_YET_WAITS)
+    polls = 0
+    while True:
         try:
             return mysql.databases()
         except MaintenanceError as exc:
-            if not _is_not_up_yet(exc):
+            starting = (
+                db_health is not None
+                and (_is_not_up_yet(exc) or _is_first_setup_refusal(exc))
+                and polls < _HEALTH_POLLS
+                and db_health() == "starting"
+            )
+            if starting:
+                polls += 1
+                if polls == 1:
+                    logger.info("the database is still doing its first setup; waiting for it")
+                _sleep(_HEALTH_POLL)
+                continue
+            if not _is_not_up_yet(exc) or polls:
+                raise
+            wait = next(waits, None)
+            if wait is None:
                 raise
             logger.info(f"the database is not accepting connections yet; asking in {wait:g} s")
             _sleep(wait)
-    return mysql.databases()
 
 
-def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
+def import_state(
+    sql: SqlQuery, mysql: MysqlDocker, db_health: Callable[[], str] | None = None
+) -> docker.ImportState:
     """What state this install's `acore_*` schemas are in. Never raises.
 
     Every failure — no docker CLI, a database container that is not running, a
@@ -188,7 +226,7 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         # `docker exec ... SHOW DATABASES` round trips instead of one, which
         # quietly made this probe five execs while its own docstring, its test,
         # and `phase6-decisions.md` §5 all said three (review, 2026-08-23).
-        existing = _databases_when_up(mysql)
+        existing = _databases_when_up(mysql, db_health)
     except MaintenanceError as exc:
         logger.warning(f"the databases could not be listed: {_reason(exc)}")
         return docker.ImportState("unreadable", _reason(exc))

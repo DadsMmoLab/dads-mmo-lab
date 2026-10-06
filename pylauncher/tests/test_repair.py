@@ -400,6 +400,68 @@ def test_a_database_that_never_comes_up_is_unreadable_after_a_bounded_wait(
     assert any(r.levelname == "WARNING" for r in caplog.records)
 
 
+class _FirstSetup(_Mysql):
+    """A brand-new volume: refuses with `error` until `ready_after` looks have been made."""
+
+    def __init__(self, error: str, ready_after: int) -> None:
+        super().__init__(AUTH, CHARACTERS, WORLD)
+        self.error = error
+        self.ready_after = ready_after
+
+    def databases(self) -> tuple[str, ...]:
+        self.asked += 1
+        if self.asked <= self.ready_after:
+            raise MaintenanceError("could not list", detail=self.error)
+        return ("information_schema", *self.schemas)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "ERROR 1045 (28000): Access denied for user root@localhost (using password: YES)",
+        "ERROR 2002 (HY000): Can't connect to local MySQL server through socket",
+    ],
+)
+def test_first_setup_is_waited_out_on_the_databases_own_health(
+    error: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T425: 10-20 s of first setup is longer than the 1/2/4 s waits; `starting` is the cue."""
+    waited: list[float] = []
+    monkeypatch.setattr(repair, "_sleep", waited.append)
+    mysql = _FirstSetup(error, ready_after=8)
+    with caplog.at_level("INFO"):
+        state = repair.import_state(_Sql({AUTH: ["account"]}), mysql, lambda: "starting")
+    assert state.state != "unreadable"
+    assert mysql.asked == 9
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_an_access_denied_from_a_healthy_database_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repair, "_sleep", lambda s: pytest.fail("waited on a real refusal"))
+    mysql = _FirstSetup("ERROR 1045 (28000): Access denied", ready_after=99)
+    assert repair.import_state(_Sql(), mysql, lambda: "healthy").state == "unreadable"
+    assert mysql.asked == 1
+
+
+def test_access_denied_without_a_health_answer_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repair, "_sleep", lambda s: pytest.fail("waited on a real refusal"))
+    mysql = _FirstSetup("ERROR 1045 (28000): Access denied", ready_after=99)
+    assert repair.import_state(_Sql(), mysql).state == "unreadable"
+
+
+def test_a_database_that_stays_starting_is_given_up_on_after_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repair, "_sleep", lambda s: None)
+    mysql = _FirstSetup("ERROR 2002 (HY000): Can't connect", ready_after=10**6)
+    assert repair.import_state(_Sql(), mysql, lambda: "starting").state == "unreadable"
+    assert mysql.asked == repair._HEALTH_POLLS + 1
+
+
 def test_any_other_listing_failure_is_not_waited_for(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repair, "_sleep", lambda s: pytest.fail("waited on a real failure"))
     mysql = _Mysql(fails="Access denied")

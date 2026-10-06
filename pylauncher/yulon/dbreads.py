@@ -271,7 +271,9 @@ def population(sql: SqlReader, entry: CatalogEntry, marker: Marker) -> Populatio
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         # A schema the world has not created yet is the poll arriving early (T424): the
         # next tick asks again, so it is said at info; anything else is a warning.
-        early = "Unknown database" in str(exc)
+        # T425: a playerbots table is made by the world's own first start, so ERROR 1146 on one is the same early poll.
+        text = str(exc)
+        early = "Unknown database" in text or ("1146" in text and "playerbots" in text)
         say = logger.info if early else logger.warning
         say(f"could not count this server's population: {exc}")
         return Population(problem=f"could not read the server's characters: {exc}")
