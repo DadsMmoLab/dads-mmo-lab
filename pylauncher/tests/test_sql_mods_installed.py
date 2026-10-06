@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
+from tests.support_player_text import command_faults, text_faults
 from tests.test_controller_view import CMANGOS_SQL_GAMES, _cmangos_stack
 from yulon import apply as apply_module
 from yulon import module_answers
@@ -41,6 +42,7 @@ from yulon.manifest import Manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerView
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.widgets.job import run_inline
 from yulon.ui.widgets.modules_panel import BADGE_INSTALLED, BADGE_NOT_INSTALLED
 
@@ -263,6 +265,7 @@ def test_bigger_stacks_installs_shows_installed_and_removes_through_the_row_butt
     assert row.data.installed and row.data.badge == BADGE_INSTALLED
     assert row.remove_button is not None and row.install_button is None
     assert KEY in _applied(server_dir)
+    _answer_questions(monkeypatch, QMessageBox.StandardButton.Yes)
 
     row.remove_button.click()
 
@@ -271,6 +274,65 @@ def test_bigger_stacks_installs_shows_installed_and_removes_through_the_row_butt
     row = view.modules_panel.row("all-stackables")
     assert not row.data.installed and row.data.badge == BADGE_NOT_INSTALLED
     assert row.install_button is not None
+
+
+def _answer_questions(
+    monkeypatch: pytest.MonkeyPatch, answer: QMessageBox.StandardButton
+) -> list[tuple[str, str]]:
+    """Answer each fitted Yes/No box `answer`, keeping each (title, text) it was asked.
+
+    Only a fitted box with No as its default is kept and answered (T243's `ask_yes_no()`);
+    anything else is answered No and not counted.
+    """
+    asked: list[tuple[str, str]] = []
+
+    def record(box: QMessageBox) -> int:
+        no = QMessageBox.StandardButton.No
+        if not isinstance(box, FittedMessageBox) or box.standardButton(box.defaultButton()) != no:
+            return int(no.value)
+        asked.append((box.windowTitle(), box.text()))
+        return int(answer.value)
+
+    monkeypatch.setattr(QMessageBox, "exec", record)
+    return asked
+
+
+@pytest.mark.usefixtures("_inline_jobs")
+@pytest.mark.parametrize("answer", [QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes])
+def test_remove_of_bigger_stacks_asks_first_and_no_changes_nothing(
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: QMessageBox.StandardButton,
+) -> None:
+    """One press of Remove put every item's stack size back with no question (T398); a
+    settings-only mod's Remove has asked since T380. Asked in the fitted box, No by
+    default, naming what goes back; No sends no SQL and the row stays Installed.
+
+    Mutation: drop the question and a No still restores (five statements, Not installed).
+    """
+    view, sent, server_dir = _tab("wow-tortoise", tmp_path, monkeypatch)
+    view.modules_panel.row("all-stackables").install_button.click()
+    questions = _answer_questions(monkeypatch, answer)
+
+    view.modules_panel.row("all-stackables").remove_button.click()
+
+    ((title, text),) = questions
+    assert title == "Remove Bigger Stacks?"
+    assert text == (
+        "Every item's stack size goes back to what it was before Bigger Stacks was installed."
+    )
+    assert text_faults(title + text) == [] and command_faults(title + text) == []
+    if answer == QMessageBox.StandardButton.No:
+        assert len(sent) == 3, "No sent no SQL"
+        assert KEY in _applied(server_dir)
+        assert view.modules_panel.row("all-stackables").data.badge == BADGE_INSTALLED
+        assert view.module_report.toPlainText() == (
+            "remove all-stackables: cancelled — nothing on this machine was changed."
+        )
+    else:
+        assert len(sent) == 5, "Yes restores"
+        assert view.modules_panel.row("all-stackables").data.badge == BADGE_NOT_INSTALLED
 
 
 FORGET_ACTION = "Forget Yu'lon's record…"

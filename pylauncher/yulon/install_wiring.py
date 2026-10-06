@@ -459,6 +459,36 @@ def rebuild_for_app(
     return rebuild
 
 
+def repair_database_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> RebuildSource | None:
+    """T377's Repair for a server whose database Docker no longer has, or None where none.
+
+    Every native install: the press is the install's own database stages run
+    again (`StagedInstaller.repair_database()`), which every family has. A server
+    inside a WSL distro is repaired there, on `rebuild_for_app()`'s terms -- the
+    folder checked to be in that distro, the engine on `Seams.in_wsl()`. The
+    engine is built per press, for `rebuild_for_app()`'s reason.
+    """
+    if entry.install.native is None:
+        return None
+
+    def repair(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        if not isinstance(engine, StagedInstaller):
+            raise InstallerError(
+                f"{entry.name} has no way to make its database again here. Nothing was started."
+            )
+        yield from engine.repair_database(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    return repair
+
+
 def rebuild_refusal_for_app(
     entry: CatalogEntry,
     server_dir: Path,

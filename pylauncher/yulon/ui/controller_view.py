@@ -77,6 +77,7 @@ from yulon import (
     client_names,
     client_packs,
     commands,
+    database_presence,
     dbreads,
     docker,
     docker_advice,
@@ -122,7 +123,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
-from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -156,7 +157,7 @@ from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
-from yulon.said import SaidByYulon
+from yulon.said import SaidByYulon, split_details
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -2073,6 +2074,14 @@ class ControllerServices:
     server inside a WSL distro (owner, D4). `None` means no banner and no check.
     """
 
+    repair_database: Callable[[threading.Event | None], Iterator[str]] | None = None
+    """T377's Repair for a server whose database Docker no longer has; None where not offered.
+
+    `install_wiring.repair_database_for_app()` answers: the install's own import
+    run again on a database that is missing or empty, then the server started.
+    Offered on the Server tab only after a Start or Rebuild refused for that reason.
+    """
+
     corrections: native.CorrectionRoute | None = None
     """T129's "Apply database corrections…" for this install; None where it is not offered.
 
@@ -2781,6 +2790,11 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T377. Here for the rebuild's reason: every native install can make its
+        # database again with its own stages, and the distro is the install's.
+        repair_database=install_wiring.repair_database_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # T224. Here for T106's reason: every native install can keep a build, and
         # the distro (D4) is a fact of the install, answered in `install_wiring`.
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
@@ -4499,6 +4513,29 @@ START_FAILED_DOCKER_MISSING = (
 START_FAILED_BROKE = "The server did not start. Details below says why."
 """A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
 
+CORRECTIONS_ASKED_AGAIN_AFTER = (10.0, 20.0, 40.0, 80.0, 160.0, 320.0)
+"""Seconds before a corrections reading nobody answered is asked again, in turn (T381).
+
+The tab asks once each time the database comes up, and on a restart that is a
+few seconds after `compose up`, while MariaDB may still be starting: measured on
+yulon-ubuntu 2026-10-05, 6 s after it, `ERROR 2002 ... Can't connect`. That
+reading is `unreadable`, so it is asked again on a later poll -- six times, over
+about ten minutes, and then not until the database comes up again."""
+
+_corrections_clock = time.monotonic
+"""The clock the waits above are measured on; a test moves its own."""
+
+REPAIR_DATABASE_LABEL = "Repair the database…"
+RESTORE_BACKUP_LABEL = "Restore a backup…"
+REPAIR_DATABASE_CONFIRM = (
+    "Docker no longer has this server's database. Repair makes it again from the server files, "
+    "the way the install did, and then starts the server.\n\n"
+    "Your accounts and characters are not in the server files, so they do not come back. If you "
+    "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
+    "This can take several minutes. Repair now?"
+)
+"""What the Server tab's **Repair the database…** asks before it runs (T377)."""
+
 STOP_FAILED_BROKE = "The server did not stop. Details below says why."
 """A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
 
@@ -4567,6 +4604,11 @@ CHARACTERS_EMPTY = (
 
 CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log, and Stop ends it."
 CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
+CONSOLE_SHUTDOWN_REFUSED = (
+    "Not sent: a shutdown typed here closes the world server, and Docker starts it again at "
+    "once. To stop the server and keep it stopped, press Stop on the Server tab."
+)
+"""Said instead of sending a shutdown (`commands.ends_the_world`, T412)."""
 
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
@@ -4844,6 +4886,18 @@ SETTINGS_REMOVE_NOTHING = (
 )
 """The Remove question when the remove steps would change no value."""
 
+SETTINGS_REMOVE_UNREADABLE = (
+    "Yu'lon could not read {files}, so it cannot tell which settings Remove would change. "
+    "If you go on, Remove tries to put them back and stops with nothing changed if it still "
+    "cannot read the file; {name} stays listed as installed."
+)
+"""The Remove question when a conf the remove steps patch cannot be read (T393)."""
+
+BIGGER_STACKS_REMOVE = (
+    "Every item's stack size goes back to what it was before {name} was installed."
+)
+"""The Remove question for a mod whose record is in the database (T398): Bigger Stacks."""
+
 
 def _and_join(items: Sequence[str]) -> str:
     """`a`, `a and b`, `a, b and c`."""
@@ -4853,7 +4907,9 @@ def _and_join(items: Sequence[str]) -> str:
 
 
 def remove_question(
-    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+    manifest: Manifest,
+    changes: Sequence[apply_module.SettingChange],
+    unreadable: Sequence[str] = (),
 ) -> tuple[str, str]:
     """The title and text of a settings-only mod's Remove question (T380 cold review).
 
@@ -4864,6 +4920,10 @@ def remove_question(
     mod changed goes back.
     """
     title = f"Remove {manifest.name}?"
+    if unreadable:
+        # T393: not "nothing changes" -- Yu'lon could not look.
+        files = _and_join([Path(file).name for file in unreadable])
+        return title, SETTINGS_REMOVE_UNREADABLE.format(files=files, name=manifest.name)
     if not changes:
         return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
     if any(change.label is None for change in changes):
@@ -7139,6 +7199,7 @@ class ControllerView(QWidget):
         # may have been force-stopped. And whether the problem label is showing
         # a stop's words at all, so the end of ANY job can take them down.
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._stop_words_shown = False
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
@@ -7167,6 +7228,10 @@ class ControllerView(QWidget):
         # T129: what the last corrections check said. Taken once each time the
         # database comes up (`_ask_about_the_import`), dropped when it goes.
         self._corrections: native.CorrectionCheck | None = None
+        # T381: an `unreadable` reading is asked again while the database stays
+        # up -- when (on `_corrections_clock`), and how many times it has been.
+        self._corrections_again_at: float | None = None
+        self._corrections_asked_again = 0
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
@@ -7438,6 +7503,14 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T377: hidden until a Start or Rebuild is refused because Docker no
+        # longer has the database. Nothing is imported until Repair is pressed:
+        # the player may have meant to restore a backup instead.
+        self.repair_database_button = QPushButton(REPAIR_DATABASE_LABEL, tab)
+        self.repair_database_button.setProperty("primary", True)
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button = QPushButton(RESTORE_BACKUP_LABEL, tab)
+        self.restore_backup_button.setVisible(False)
         # T160. Hidden unless this is a Steam Deck whose `docker` command is
         # gone, which is what a SteamOS update leaves behind. The press runs the
         # upstream fix script's repair through the app's own questions; the
@@ -7561,6 +7634,8 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.repair_database_button.clicked.connect(self.repair_database)
+        self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
         # Start is the tab's gold press only where no Play is shown: Play is the
@@ -7611,6 +7686,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
+        realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)
@@ -8688,10 +8764,14 @@ class ControllerView(QWidget):
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
             self._forget_the_corrections_reading()
+            self._corrections_again_at = None
             return
         if self._import_asked:
+            self._ask_about_the_corrections_again()
             return
         self._import_asked = True
+        self._corrections_again_at = None
+        self._corrections_asked_again = 0
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
@@ -8714,6 +8794,20 @@ class ControllerView(QWidget):
                 self._corrections_checked,
                 self._corrections_check_failed,
             )
+
+    def _ask_about_the_corrections_again(self) -> None:
+        """T381: put the corrections question again once its wait is over, the database still up.
+
+        Only after a reading nobody could answer (`_corrections_checked()` sets
+        the wait), and never more than `CORRECTIONS_ASKED_AGAIN_AFTER` allows.
+        """
+        due = self._corrections_again_at
+        route = self.services.corrections
+        if due is None or route is None or _corrections_clock() < due:
+            return
+        self._corrections_again_at = None
+        self._corrections_asked_again += 1
+        self._run(route.check, self._corrections_checked, self._corrections_check_failed)
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
@@ -9127,6 +9221,7 @@ class ControllerView(QWidget):
         self._nothing_to_remove = False
         self._update_forget_visibility()
         self.problem_label.setText("")
+        self._withdraw_the_database_offer()
         self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
@@ -9137,6 +9232,7 @@ class ControllerView(QWidget):
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
@@ -9145,6 +9241,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._withdraw_the_database_offer()
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
@@ -9289,7 +9386,7 @@ class ControllerView(QWidget):
         # (T158) left "stopping it now" in this label, which is false once the
         # stop is over. Only the forced-stop warning is carried past it.
         self.problem_label.setText(self._after_the_stop(said))
-        self.problem_details.set_text(why)
+        self.problem_details.set_text(self._after_the_stop_details(why))
         self.refresh_status()
         self.refresh_verdict()
 
@@ -9322,14 +9419,17 @@ class ControllerView(QWidget):
         removal use it: the status line does not wrap, and "the world is
         finishing its load before it can stop" needs its second sentence.
         """
-        self.problem_label.setText(text)
+        sentence, details = split_details(text)
+        self.problem_label.setText(sentence)
+        # T414: a crash's last lines go in the fold, never into the line.
+        self.problem_details.set_text(details)
         self._stop_words_shown = True
         self._heard_from_a_stop(text)
 
     @Slot(str)
     def _uninstall_stop_notice(self, text: str) -> None:
         """The same, for the uninstall's own removal of the containers, in its own label."""
-        self.uninstall_label.setText(text)
+        self.uninstall_label.setText(split_details(text)[0])
         self._heard_from_a_stop(text)
 
     def _heard_from_a_stop(self, text: str) -> None:
@@ -9339,8 +9439,8 @@ class ControllerView(QWidget):
             self.stop_anyway_button.setVisible(True)
         else:
             self.stop_anyway_button.setVisible(False)
-        if text in docker.FORCE_STOP_WARNINGS:
-            self._stop_forced = text
+        if docker.outlives_the_stop(text):
+            self._stop_forced, self._stop_forced_details = split_details(text)
 
     @Slot()
     def stop_now_anyway(self) -> None:
@@ -9357,6 +9457,11 @@ class ControllerView(QWidget):
         forced, self._stop_forced = self._stop_forced, ""
         return "\n\n".join(part for part in (forced, said) if part)
 
+    def _after_the_stop_details(self, why: str) -> str:
+        """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
+        forced, self._stop_forced_details = self._stop_forced_details, ""
+        return "\n\n".join(part for part in (forced, why) if part)
+
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
         self._set_busy(False)
@@ -9367,6 +9472,8 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
+        if isinstance(exc, DatabaseMissing):
+            self._offer_to_repair_the_database()
         raw = str(exc)
         msg = raw
         why = ""
@@ -9475,6 +9582,70 @@ class ControllerView(QWidget):
     def _hide_stop_other(self) -> None:
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
+
+    def _offer_to_repair_the_database(self) -> None:
+        """T377: Repair, and the backups when there are any, beside the refusal that names them.
+
+        The refusal's own sentence is the problem line; these are its two ways
+        out. A tab with no Repair route offers none, and the backups button is
+        shown only when the backups folder holds a dump to restore.
+        """
+        self.repair_database_button.setVisible(self.services.repair_database is not None)
+        self.repair_database_button.setEnabled(True)
+        self.restore_backup_button.setVisible(self._has_backups())
+
+    def _withdraw_the_database_offer(self) -> None:
+        """A Start that worked, or a new press, takes the T377 offer down."""
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button.setVisible(False)
+
+    def _has_backups(self) -> bool:
+        try:
+            return any(self.services.backups_dir().glob("*.sql"))
+        except OSError:
+            return False
+
+    @Slot()
+    def go_to_the_backups(self) -> None:
+        """The Maintenance tab's backup list, brought forward (T377)."""
+        self.refresh_backups()
+        self._show_page_of(self.backup_list)
+
+    @Slot()
+    def repair_database(self) -> bool:
+        """Ask, then make a missing database again from the server files, in the panel (T377).
+
+        The owner's rule for every repair: the player chooses when, and the
+        question says what comes back and what does not. False if nothing ran.
+        """
+        route = self.services.repair_database
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if not ask_yes_no(self, f"Repair {self.entry.name}'s database?", REPAIR_DATABASE_CONFIRM):
+            return False
+        self._withdraw_the_database_offer()
+        self.problem_label.setText("")
+        self.problem_details.set_text("")
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        self._rebuild_moves_sources = False
+        started = self.rebuild_log.run(
+            lambda: self._watch_for_load_wait(route(cancel)),
+            title=f"Repairing {self.entry.name}'s database",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            self._show_page_of(self.rebuild_log)
+        return started
 
     def _offer_docker_repair(self) -> bool:
         """Show the SteamOS Docker repair when this Deck's `docker` is gone; say if it is (T160).
@@ -9869,6 +10040,7 @@ class ControllerView(QWidget):
             self.uninstall_label.setText(PLAY_PENDING)
             return
         self._stop_forced = ""
+        self._stop_forced_details = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
             self.action_failed.emit(UNINSTALL_NO_PLAN)
@@ -11654,6 +11826,7 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._set_busy(True, "Remove containers")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self.problem_label.setText("")
         self._say_under_the_presses("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
@@ -11927,6 +12100,12 @@ class ControllerView(QWidget):
     @Slot()
     def send_console_command(self) -> None:
         command = self.command_edit.text().strip()
+        if command and commands.ends_the_world(command):
+            # T412: the world would close and Docker would start it again at once.
+            self.console_log.append(f"> {command}")
+            self.console_log.append(CONSOLE_SHUTDOWN_REFUSED)
+            self.command_edit.clear()
+            return
         if command:
             self._send(command)
             self.command_edit.clear()
@@ -15667,8 +15846,23 @@ class ControllerView(QWidget):
             title, text = remove_question(
                 manifest,
                 apply_module.settings_removal(self.services.controller.server_dir, manifest),
+                apply_module.settings_removal_unreadable(
+                    self.services.controller.server_dir, manifest
+                ),
             )
             if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
+        if action == "remove" and apply_module.database_receipt(manifest):
+            # T398: Bigger Stacks' Remove put every item's stack size back at once,
+            # where a settings-only Remove has asked since T380. Asked first, No by
+            # default, in the box that fits the screen (T243).
+            if not self._confirm(
+                f"Remove {manifest.name}?", BIGGER_STACKS_REMOVE.format(name=manifest.name)
+            ):
                 self._module_pending = None
                 self.module_report.setPlainText(
                     f"remove {manifest.id}: cancelled — nothing on this machine was changed."
@@ -16847,7 +17041,23 @@ class ControllerView(QWidget):
         if result.state not in ("current", "stale"):
             # Nothing to press, and nothing the player did: said in the log.
             logger.info(f"{self.entry.id}: no database corrections offered: {result.why}")
+        self._ask_again_later_if_unanswered(result)
         self._refresh_corrections_banner()
+
+    def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
+        """T381: an `unreadable` reading, taken while the database is up, gets a later ask.
+
+        Asked on the poll once `CORRECTIONS_ASKED_AGAIN_AFTER`'s next wait is over
+        (`_ask_about_the_corrections_again()`), never once they are spent. Any
+        other answer is final until the database goes down and comes back.
+        """
+        asked = self._corrections_asked_again
+        if result.state != "unreadable" or not self._import_asked:
+            return
+        if asked >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
+            logger.info(f"{self.entry.id}: the corrections question is not asked again")
+            return
+        self._corrections_again_at = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[asked]
 
     @Slot(object)
     def _corrections_check_failed(self, exc: object) -> None:
@@ -17163,6 +17373,12 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
+            if database_presence.MISSING in message:
+                # T377: a Rebuild refused because Docker no longer has the
+                # database. Its sentence is in the panel; its ways out go on
+                # the Server tab, where a refused Start puts them.
+                self.problem_label.setText(database_presence.MISSING)
+                self._offer_to_repair_the_database()
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
@@ -17926,7 +18142,8 @@ class ControllerView(QWidget):
         And one lifecycle command (`docker.lifecycle()`, T216 review round 3), so a
         restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
+        # T179, T377: before the stop, so a refusal leaves it running.
+        controller.refuse_before_a_stop()
         with docker.lifecycle(controller.server_dir):
             stopped = controller.stop()
             controller.start()
@@ -17937,7 +18154,8 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
+        # T179, T377: before the removal, so a refusal leaves it as it was.
+        controller.refuse_before_a_stop()
         # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
         with docker.lifecycle(controller.server_dir):
             removed = controller.remove()
@@ -17968,6 +18186,7 @@ class ControllerView(QWidget):
             self.problem_label.setText("")  # what this tab said before the press is past
         self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
+        self._withdraw_the_database_offer()  # T377: the server started
         self.refresh_status()
 
     @Slot(object)
@@ -17984,6 +18203,10 @@ class ControllerView(QWidget):
         if self._tuning_from_banner:
             self.problem_label.setText(self.tuning_report.toPlainText())
         self._tuning_from_banner = False
+        if isinstance(exc, DatabaseMissing):
+            # T377: refused before the stop; its ways out are on the Server tab.
+            self.problem_label.setText(str(exc))
+            self._offer_to_repair_the_database()
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
