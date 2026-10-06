@@ -3903,7 +3903,7 @@ def _check_sentence(check: preflight.Check) -> str:
     for a single check `change_client_dir()` shows outside a refusal (a warning, or the
     zero-archive case `preflight.Report.message()` never sees because it is not a refusal).
     """
-    return f"{check.name}: {check.detail} {check.remedy}".rstrip()
+    return check.sentence()
 
 
 _MPQ_COUNT_RE = re.compile(r"^(\d+) ")
@@ -7601,6 +7601,8 @@ class ControllerView(QWidget):
         # stays Idle until the next Start proves it, so the state alone would
         # keep offering a press that has already been made.
         self._channel_written = False
+        # T423: set while "Repair the database…" runs, so its finish asks the channel again.
+        self._database_repair_running = False
         self.enable_channel_button.clicked.connect(self.enable_channel)
         # Hidden until the server has actually refused the saved credential.
         # This is the one control on the tab that can break a channel that
@@ -8798,8 +8800,21 @@ class ControllerView(QWidget):
                         channel_setup.Verified | channel_setup.Pending | channel_setup.Refused,
                     )
                 )
+                # T423: a row that waits to be proved while the setting is off
+                # never will be, so the press that writes it is the way out.
+                or (
+                    not self._channel_written
+                    and isinstance(state, channel_setup.Pending)
+                    and self._channel_is_off()
+                )
             )
         )
+
+    def _channel_is_off(self) -> bool:
+        """True only when this install's files plainly do not switch the channel on (T423)."""
+        # Noted by the setup's own worker-side calls; reading files here would be
+        # a read on the GUI thread, of a distro that may be stopped.
+        return getattr(self.services.channel_setup, "channel_is_off", False) is True
 
     @Slot()
     def repair_channel(self) -> None:
@@ -9957,6 +9972,7 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
         self._rebuild_moves_sources = False
+        self._database_repair_running = True
         started = self.rebuild_log.run(
             lambda: self._watch_for_load_wait(route(cancel)),
             title=f"Repairing {self.entry.name}'s database",
@@ -9965,6 +9981,8 @@ class ControllerView(QWidget):
         )
         if started:
             self._show_page_of(self.rebuild_log)
+        else:
+            self._database_repair_running = False
         return started
 
     def _offer_docker_repair(self) -> bool:
@@ -17619,6 +17637,14 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        if self._database_repair_running:
+            self._database_repair_running = False
+            # T423: the import puts the database back as the server files have
+            # it, which has no row for this app's own account, and one that
+            # stopped half way left the database in a state nobody has read. The
+            # channel row still says what it said before, so it asks again,
+            # whatever the import's own outcome (a read, and it writes nothing).
+            self._check_the_channel()
         # T224: any press of this panel may have kept a build, used one or removed one.
         self.check_kept_build()
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
@@ -19457,16 +19483,13 @@ class ControllerView(QWidget):
         applier = self.services.applier
         if manifest is None or applier is None:
             return
-        answer = QMessageBox.question(
+        if not ask_yes_no(
             self,
             "Forget Yu'lon's record?",
             (
                 FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
             ).format(name=manifest.name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if not said_yes(answer):
+        ):
             self.module_report.setPlainText(
                 f"forget {manifest.id}: cancelled — nothing on this machine was changed."
             )
@@ -19495,8 +19518,11 @@ class ControllerView(QWidget):
         elif self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
-            rem_act = menu.addAction("Remove Selected Module")
-            rem_act.triggered.connect(lambda: self._module_action("remove"))
+            row = self.modules_panel.selected_row()
+            if row is not None and row.data.installed:
+                # T399: the row's own button is Install or Remove by whether it is here.
+                rem_act = menu.addAction("Remove Selected Module")
+                rem_act.triggered.connect(lambda: self._module_action("remove"))
             if self._selected_row_is_record_backed():
                 forget_act = menu.addAction(FORGET_RECORD_ACTION)
                 forget_act.triggered.connect(self._forget_module_record)
@@ -19672,7 +19698,7 @@ def _format_report(report: ApplyReport) -> str:
                 "inert."
             )
     elif report.restart_recommended and report.world_stopped:
-        # T130: this run read the world as stopped immediately before its SQL,
+        # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
         # took down the database the run had started alone -- but it was a step
         # nobody needed, told to a player who had just been asked to press Stop.
