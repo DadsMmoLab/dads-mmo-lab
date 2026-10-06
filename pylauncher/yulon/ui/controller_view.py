@@ -163,7 +163,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox, ask_yes_no
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -1865,6 +1865,15 @@ class ControllerServices:
     the read and the two writes share a fact -- which account is the app's own
     -- and splitting them would be three places to remember it.
     """
+    ready_after_start: Callable[..., native.StartAnswer] | None = None
+    """Wait for the world after a start by the install's ready rule, and say what it did (T382).
+
+    What the Tuning tab's Restart and Recreate wait on before they say done:
+    `native.ready_after_start()` with this game's entry and world container,
+    wired once for every game in `for_entry()`. None (a test's fake services)
+    makes the press say only that the server was started, never that it is up.
+    Called with `cancel=`, an event any Server action of the tab sets.
+    """
     module_sql: ModuleSqlRoute | None = None
     """Run this install's importer over the modules on disk, or None if it has none.
 
@@ -2257,12 +2266,14 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return _with_take_back(factory(entry, server_dir, client_dir, wsl_distro))
+            return _with_the_ready_wait(
+                _with_take_back(factory(entry, server_dir, client_dir, wsl_distro)), entry
+            )
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
-        services = _with_take_back(services)
+        services = _with_the_ready_wait(_with_take_back(services), entry)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
@@ -2287,6 +2298,63 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_the_ready_wait(services: ControllerServices, entry: CatalogEntry) -> ControllerServices:
+    """`services` with `ready_after_start` aimed at its own controller's world (T382).
+
+    In `for_entry()` rather than in each game's factory, so no game can be left
+    without it: every factory hands back a controller, and its spec and distro
+    are the container the start just started and the daemon it runs on.
+    """
+    controller = services.controller
+    return replace(
+        services,
+        ready_after_start=partial(
+            native.ready_after_start,
+            entry,
+            controller.spec,
+            wsl_distro=controller.wsl_distro,
+        ),
+    )
+
+
+def _what_the_start_did(
+    job: str, world: native.StartAnswer | None, controller: Controller
+) -> tuple[str, str]:
+    """The Tuning report's line and its Details after a Restart's or Recreate's start (T382).
+
+    `done` only for a world that reported ready and stayed up; no answer at all
+    (no wait was handed to the tab) says the start and nothing more. Every other
+    answer is one plain sentence, and what the server printed plus the command
+    that prints the rest go under Details, never on the line (T248).
+    """
+    if world is None:
+        return TUNING_STARTED_UNASKED.format(job=job), ""
+    if world.ready:
+        return TUNING_STARTED_UP.format(job=job), ""
+    said = TUNING_WORLD_SAID[world.verdict].format(
+        job=job, grace=f"{round(native.READY_GRACE_SECONDS)} seconds"
+    )
+    spec = controller.spec
+    read_it = docker.logs_command(spec.service_for(spec.world), controller.server_dir)
+    details = "\n\n".join(part for part in (world.words.strip(), read_it) if part)
+    return said, details
+
+
+def _waited_for_the_world(
+    number: int, job: str, wait: Callable[..., native.StartAnswer], cancel: threading.Event
+) -> tuple[int, str, native.StartAnswer | Exception]:
+    """The Tuning restart's world wait, on the worker, with its number on every answer (T382).
+
+    An Exception is returned rather than raised so the answer still carries the
+    number, and an old wait that broke never writes over a newer press's report.
+    """
+    try:
+        return number, job, wait(cancel=cancel)
+    except Exception as exc:  # noqa: BLE001 - reported by the slot, as the wait broke
+        logger.warning(f"the wait for the world after a {job} broke: {exc}")
+        return number, job, exc
 
 
 def _with_take_back(services: ControllerServices) -> ControllerServices:
@@ -3829,7 +3897,7 @@ def _check_sentence(check: preflight.Check) -> str:
     for a single check `change_client_dir()` shows outside a refusal (a warning, or the
     zero-archive case `preflight.Report.message()` never sees because it is not a refusal).
     """
-    return f"{check.name}: {check.detail} {check.remedy}".rstrip()
+    return check.sentence()
 
 
 _MPQ_COUNT_RE = re.compile(r"^(\d+) ")
@@ -4537,6 +4605,39 @@ about ten minutes, and then not until the database comes up again."""
 
 _corrections_clock = time.monotonic
 """The clock the waits above are measured on; a test moves its own."""
+
+
+class _AskAgain:
+    """One reading's ask-again schedule (T381, T420): when it is due, and how often it was asked.
+
+    The corrections check, the import probe and the adopt reading each keep one,
+    all on `CORRECTIONS_ASKED_AGAIN_AFTER` and `_corrections_clock`.
+    """
+
+    def __init__(self) -> None:
+        self.due: float | None = None
+        self.count = 0
+
+    def forget(self) -> None:
+        """The database went down or came back: nothing is owed, nothing was asked."""
+        self.due = None
+        self.count = 0
+
+    def arm(self) -> bool:
+        """Arm the next wait after an unreadable answer. False once the waits are spent."""
+        if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
+            return False
+        self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
+        return True
+
+    def is_due(self) -> bool:
+        """True once, when the wait is over; the ask it permits is counted."""
+        if self.due is None or _corrections_clock() < self.due:
+            return False
+        self.due = None
+        self.count += 1
+        return True
+
 
 REPAIR_DATABASE_LABEL = "Repair the database…"
 RESTORE_BACKUP_LABEL = "Restore a backup…"
@@ -5832,6 +5933,17 @@ class _TabFit(QObject):
         return owed + box.spacing() * max(0, shown - 1)
 
 
+_FAILURE_FIT_EVENTS = (
+    QEvent.Type.Resize,
+    QEvent.Type.Show,
+    QEvent.Type.Hide,
+    QEvent.Type.FontChange,
+    QEvent.Type.StyleChange,
+)
+"""What changes the height a wrapped failure line needs (T450): its width, its font, and
+whether it shows at all."""
+
+
 class _IdleLogPanel(LogPanel):
     """A `LogPanel` that starts folded away and never takes more than its share.
 
@@ -5880,6 +5992,9 @@ class _IdleLogPanel(LogPanel):
         self.setVisible(False)
         self.collapse_toggled.connect(self._someone_used_the_handle)
         self.run_started.connect(self._give_it_the_room)
+        # T450: the failure line is held at its wrapped height (`_fit_the_failure`).
+        self.failure_label.installEventFilter(self)
+        self.run_finished.connect(lambda _ok, _message: self._fit_the_failure())
         self._watch_the_tab()
         self._apply()
 
@@ -6040,10 +6155,37 @@ class _IdleLogPanel(LogPanel):
             tab.installEventFilter(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        """The tab resized: the cap is a share of its height, so re-write it."""
-        if event.type() == QEvent.Type.Resize:
+        """The tab resized: the cap is a share of its height, so re-write it.
+
+        And the failure line was resized, restyled, shown or hidden (T450): the
+        height its wrapped text needs is a function of all four.
+        """
+        if watched is self.failure_label:
+            if event.type() in _FAILURE_FIT_EVENTS:
+                self._fit_the_failure()
+        elif event.type() == QEvent.Type.Resize:
             self._apply()
         return bool(super().eventFilter(watched, event))
+
+    def _fit_the_failure(self) -> None:
+        """Hold the failure line at the height its wrapped text needs at its width (T450).
+
+        A word-wrapped `QLabel`'s minimum is its height at its NARROWEST, and
+        both the panel's cap (`_share_of_the_tab()`, floored at the panel's own
+        minimum) and `_TabFit`'s sums are built from minimums, so a failure
+        that wraps to more lines than that guess was cut by the cap. Live on
+        m910q (2026-10-06): 119 px of the 153 a rollback's failure needed in a
+        maximised window, and its last sentence -- "Press Stop on the Server
+        tab" -- was not on screen. As a minimum, every one of those sums counts
+        the whole text, and the list above the panel is what pays.
+
+        Written only when it changes: `setMinimumHeight` asks for a layout, and
+        the layout's resize is one of the events that calls this.
+        """
+        label = self.failure_label
+        needed = label.heightForWidth(label.width()) if label.isVisible() else 0
+        if label.minimumHeight() != max(0, needed):
+            label.setMinimumHeight(max(0, needed))
 
     def event(self, event: QEvent) -> bool:
         handled = super().event(event)
@@ -6158,6 +6300,66 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 """The Tuning tab's banner (T44 item 8), naming the DEAREST job owed and its files."""
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
+
+TUNING_RESTARTING = (
+    "restarting the server… then waiting for the world server to report ready and stay up."
+)
+TUNING_RECREATING = (
+    "recreating the containers… then waiting for the world server to report ready and stay up."
+)
+"""What the Tuning tab says while its Restart or Recreate runs (T382): the press now
+waits for the world, which can take minutes on a big load, and says so."""
+
+TUNING_STARTED_UP = "{job}: done. The world server reported ready and stayed up."
+TUNING_WAITING_FOR_THE_WORLD = (
+    "{job}: the server was started. Waiting for the world server to report ready and stay "
+    "up; the Server tab's buttons work meanwhile."
+)
+TUNING_WORLD_WAIT_BROKE = (
+    "The server was started, but Yu'lon could not wait for the world server. Details below "
+    "says why; the Server tab shows whether it is up."
+)
+TUNING_STARTED_UNASKED = "{job}: the server was started."
+"""No ready wait was handed to the tab, so whether the world came up was not asked."""
+
+_SEE_DETAILS = " What it printed is under Details."
+TUNING_WORLD_SAID: dict[str, str] = {
+    "loop": (
+        "{job}: the containers were started, but the world server is crash-looping: it stops "
+        "and Docker starts it again, over and over. It is not up." + _SEE_DETAILS
+    ),
+    "stopped": (
+        "{job}: the world server said ready and then stopped again within "
+        "{grace}, so it is not up." + _SEE_DETAILS
+    ),
+    "gone": (
+        "{job}: the containers were started, but the world server is not running any more, so "
+        "it is not up." + _SEE_DETAILS
+    ),
+    "fatal": (
+        "{job}: the containers were started, but the world server printed an error that means "
+        "it will not come up." + _SEE_DETAILS
+    ),
+    "quiet": (
+        "{job}: the containers were started, but the world server stopped printing anything "
+        "before it reported ready, so it looks stuck rather than slow." + _SEE_DETAILS
+    ),
+    "unreadable": (
+        "{job}: the containers were started, but Docker stopped answering while Yu'lon waited, "
+        "so whether the world server came up is not known. Check that Docker is running."
+    ),
+    "ceiling": (
+        "{job}: the containers were started, but the world server was still loading when "
+        "Yu'lon stopped waiting. The Server tab shows when it is up."
+    ),
+    "cancelled": (
+        "{job}: the containers were started; the wait for the world server was stopped, so "
+        "whether it came up is not known. The Server tab shows when it is up."
+    ),
+}
+"""T382: one plain sentence per way a start can end that is not `ready`
+(`native.StartVerdict`). The server's own lines and the command that prints the
+rest go under Details, never on the line (T248)."""
 
 DISTRO_STOPPED = (
     "This server's WSL distro {distro} is stopped. Yu'lon reads nothing inside it while it is, "
@@ -7041,6 +7243,20 @@ class ControllerView(QWidget):
         # stop's own read answered made it "stale", and STOPPING stayed on the
         # badge for the whole rebuild (T188 final review).
         self._hold_ends_at: int | None = None
+        # T391: whether the last verdict shown called the world a crash loop, and
+        # the last status poll's answer, so either one landing second can set the
+        # badge. A crash-looping world is in `docker ps` between its restarts.
+        self._world_loops = False
+        # T451: whether the last verdict shown said the world is up AND printed its
+        # ready marker. Until one does, all-containers-running reads STARTING.
+        self._world_ready = False
+        self._last_polled: InstallStatus | None = None
+        # T382: the Tuning restart's wait for the world, which no button waits on.
+        self._world_wait: threading.Event | None = None
+        self._world_wait_number = 0
+        self._world_wait_job = "restart"
+        self._world_wait_from_banner = False
+        self._world_wait_zone: str | None = None
         # How many status reads were asked, and which one is out.
         self._status_asks = 0
         self._status_ask_out = 0
@@ -7243,8 +7459,12 @@ class ControllerView(QWidget):
         self._corrections: native.CorrectionCheck | None = None
         # T381: an `unreadable` reading is asked again while the database stays
         # up -- when (on `_corrections_clock`), and how many times it has been.
-        self._corrections_again_at: float | None = None
-        self._corrections_asked_again = 0
+        # T420: the import probe and the adopt reading get the same schedule.
+        # T422: the sentence beside the Repair/Restore offer while it is shown.
+        self._database_sentence = ""
+        self._ask_again_corrections = _AskAgain()
+        self._ask_again_import = _AskAgain()
+        self._ask_again_adopt = _AskAgain()
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
@@ -7940,6 +8160,9 @@ class ControllerView(QWidget):
         # look and sends nothing, so the joins below are not held by a load
         # and the world is left running rather than signalled mid-load.
         self._stop_abandon.set()
+        # T382: the Tuning restart's wait for the world ends at its next look,
+        # so the join below is not held for a world's whole load.
+        self._end_the_world_wait()
         self._timer.stop()
         if self._docker_repair_cancel is not None:
             # T160: a repair waiting on a question stops rather than holding
@@ -8149,11 +8372,42 @@ class ControllerView(QWidget):
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
+        self._world_loops = result.state == "restart_loop"
+        self._world_ready = result.state == "up" and result.ready
+        if self._last_polled is not None:
+            # T391: a loop seen after the poll takes REALM ONLINE down now, and
+            # the first verdict past it gives the badge back, not a poll later.
+            self.realm_badge.set_status(self._badge_word(self._last_polled))
+
+    def _badge_word(self, status: InstallStatus) -> str:
+        """The realm badge's word for a status poll, with the verdict's word on the world (T391).
+
+        A crash-looping world is in `docker ps` between its restarts, so the
+        poll alone reads all up and the badge said REALM ONLINE over it (m910q
+        sitting, 2026-10-06, after a failed rollback). The verdict line already
+        said restart loop; the badge now says CRASH LOOP with it.
+        """
+        if self._world_loops and status.world:
+            return "loop"
+        word = _realm_badge_status(status)
+        if word == "running" and not self._world_ready and self.services.dashboard is not None:
+            # T451: `docker ps` calls the world running seconds, or a whole map
+            # load, before its ready marker, and a crash loop's fresh run is
+            # running between two crashes. Without a verdict there is nothing
+            # to wait for, so an install with none keeps the poll's word.
+            return "starting"
+        return word
 
     def _clear_the_verdict(self) -> None:
-        """No verdict line: the distro is not known to run, so no world to describe (T133)."""
+        """No verdict line: the distro is not known to run, so no world to describe (T133).
+
+        Its loop goes with it (T391): a held badge, a stopped distro or Docker's
+        banner leaves no verdict that could still be about this world.
+        """
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
+        self._world_loops = False
+        self._world_ready = False
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -8391,7 +8645,7 @@ class ControllerView(QWidget):
     ) -> bool:
         """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
         if self._upkeep_held():
-            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            show_information(self, "Something else is running", WORLD_UPKEEP_BUSY)
             return False
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
@@ -8414,6 +8668,10 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
+        # T451: no reading of the world's log can come, so nothing to wait for.
+        self._world_ready = True
+        if self._last_polled is not None and self._badge_held is None:
+            self.realm_badge.set_status(self._badge_word(self._last_polled))
         if (
             not self.docker_banner.isHidden()
             or isinstance(exc, docker.DockerCliMissingError)
@@ -8645,8 +8903,11 @@ class ControllerView(QWidget):
             # to the reading from before the press flashed REALM ONLINE between
             # STOPPING and OFFLINE (T188 fix round 1).
             self._badge_held = None
+        self._last_polled = status
+        if not status.world:
+            self._world_ready = False  # whatever runs next is a new run (T451)
         if self._badge_held is None:
-            self.realm_badge.set_status(_realm_badge_status(status))
+            self.realm_badge.set_status(self._badge_word(status))
         if not stale and status.any_running:
             # T95: something brought the server back without Start, so "nothing
             # to remove" is no longer true, and a lit "Remove from Yu'lon…" beside
@@ -8796,14 +9057,13 @@ class ControllerView(QWidget):
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
             self._forget_the_corrections_reading()
-            self._corrections_again_at = None
+            self._reset_ask_again()
             return
         if self._import_asked:
-            self._ask_about_the_corrections_again()
+            self._ask_about_the_unanswered_again()
             return
         self._import_asked = True
-        self._corrections_again_at = None
-        self._corrections_asked_again = 0
+        self._reset_ask_again()
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
@@ -8827,25 +9087,46 @@ class ControllerView(QWidget):
                 self._corrections_check_failed,
             )
 
-    def _ask_about_the_corrections_again(self) -> None:
-        """T381: put the corrections question again once its wait is over, the database still up.
+    def _reset_ask_again(self) -> None:
+        for schedule in (
+            self._ask_again_corrections,
+            self._ask_again_import,
+            self._ask_again_adopt,
+        ):
+            schedule.forget()
 
-        Only after a reading nobody could answer (`_corrections_checked()` sets
+    def _ask_about_the_unanswered_again(self) -> None:
+        """T381, T420: put a question again once its wait is over, the database still up.
+
+        Only after a reading nobody could answer (each `..._ready` method sets
         the wait), and never more than `CORRECTIONS_ASKED_AGAIN_AFTER` allows.
         """
-        due = self._corrections_again_at
+        if self._ask_again_import.is_due():
+            self._run(
+                self.services.controller.import_state,
+                self._import_state_ready,
+                self._import_failed,
+            )
+        adopt = self.services.adopt
+        if adopt is not None and self._ask_again_adopt.is_due():
+            self._run(adopt.state, self._adopt_state_ready, self._adopt_state_failed)
         route = self.services.corrections
-        if due is None or route is None or _corrections_clock() < due:
+        if route is not None and self._ask_again_corrections.is_due():
+            self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+
+    def _arm_ask_again(self, schedule: _AskAgain, unreadable: bool, what: str) -> None:
+        """An `unreadable` reading, taken while the database is up, gets a later ask."""
+        if not unreadable or not self._import_asked:
             return
-        self._corrections_again_at = None
-        self._corrections_asked_again += 1
-        self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+        if not schedule.arm():
+            logger.info(f"{self.entry.id}: the {what} question is not asked again")
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
         if not isinstance(result, docker.ImportState):
             return
         self._import_state = result
+        self._arm_ask_again(self._ask_again_import, result.state == "unreadable", "import")
         self._show_repair()
 
     @Slot(object)
@@ -8853,6 +9134,7 @@ class ControllerView(QWidget):
         if not isinstance(result, docker.ImportState):
             return
         self._adopt_state = result
+        self._arm_ask_again(self._ask_again_adopt, result.state == "unreadable", "adopt")
         self._set_adopt_button()
 
     @Slot(object)
@@ -9056,6 +9338,8 @@ class ControllerView(QWidget):
         not have its greyed button handed back by a job ending.
         """
         waited = wait_for(self._busy_job) if self._busy else None
+        if busy:
+            self._end_the_world_wait()  # T382: the press that starts now owns the server
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -9493,7 +9777,10 @@ class ControllerView(QWidget):
     def _after_the_stop(self, said: str) -> str:
         """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
         forced, self._stop_forced = self._stop_forced, ""
-        return "\n\n".join(part for part in (forced, said) if part)
+        # T422: Repair and Restore stay shown after a Stop, so the sentence that
+        # explains them does too.
+        kept = self._database_sentence
+        return "\n\n".join(part for part in (forced, kept, said) if part)
 
     def _after_the_stop_details(self, why: str) -> str:
         """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
@@ -9511,7 +9798,7 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         if isinstance(exc, DatabaseMissing):
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         raw = str(exc)
         msg = raw
         why = ""
@@ -9621,19 +9908,23 @@ class ControllerView(QWidget):
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
 
-    def _offer_to_repair_the_database(self) -> None:
+    def _offer_to_repair_the_database(self, sentence: str = "") -> None:
         """T377: Repair, and the backups when there are any, beside the refusal that names them.
 
         The refusal's own sentence is the problem line; these are its two ways
         out. A tab with no Repair route offers none, and the backups button is
-        shown only when the backups folder holds a dump to restore.
+        shown only when the backups folder holds a dump to restore. `sentence` is
+        kept for as long as the offer is shown, so a later line that replaces the
+        problem line (a Stop's) carries it (T422).
         """
+        self._database_sentence = sentence
         self.repair_database_button.setVisible(self.services.repair_database is not None)
         self.repair_database_button.setEnabled(True)
         self.restore_backup_button.setVisible(self._has_backups())
 
     def _withdraw_the_database_offer(self) -> None:
         """A Start that worked, or a new press, takes the T377 offer down."""
+        self._database_sentence = ""
         self.repair_database_button.setVisible(False)
         self.restore_backup_button.setVisible(False)
 
@@ -9660,7 +9951,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -10201,7 +10492,7 @@ class ControllerView(QWidget):
     def _client_dir_refused(self, message: str) -> None:
         """One place both refusal paths in `change_client_dir()` report through."""
         self.action_failed.emit(message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
 
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
@@ -10219,7 +10510,7 @@ class ControllerView(QWidget):
         """
         if not self._busy and not self._play_client_running:
             return False
-        QMessageBox.information(
+        show_information(
             self,
             "Something else is running",
             "This server is busy with another action — wait for it to finish on the "
@@ -10490,7 +10781,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self._play_parent(), self.entry.name, message)
+        show_warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -10520,7 +10811,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
+        show_information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -10528,7 +10819,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -10604,7 +10895,7 @@ class ControllerView(QWidget):
             return
         original = self.services.client_dir
         if original is None:
-            QMessageBox.information(
+            show_information(
                 self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
@@ -10896,7 +11187,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
+        show_information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -10972,7 +11263,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -11730,7 +12021,7 @@ class ControllerView(QWidget):
             said += " " + left_out_sentence(compared.left_out)
         if compared.flags_lost:  # T198: on the label and in front of the player
             said += " " + compared.flags_lost
-            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
+            show_warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -13438,7 +13729,7 @@ class ControllerView(QWidget):
             return False
         refusal = self._bot_rebuild_refusal()
         if refusal is not None:
-            QMessageBox.information(self, "Something else is running", refusal)
+            show_information(self, "Something else is running", refusal)
             return False
         choice = ask_backup_choice(
             self,
@@ -13500,7 +13791,7 @@ class ControllerView(QWidget):
         log = self.bot_rebuild_log
         if log is None or not log.running:
             return False
-        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        show_information(self, "Something else is running", BOT_REBUILD_RUNNING)
         self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
         return True
 
@@ -13542,7 +13833,7 @@ class ControllerView(QWidget):
 
     def _say_restart_owed(self) -> None:
         """The owed restart could not be made: never dropped silently."""
-        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        show_information(self, "Restart the server", RESTART_OWED_LEFT)
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
@@ -14254,7 +14545,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -14309,7 +14600,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -16228,7 +16519,7 @@ class ControllerView(QWidget):
         )
         if self.services.set_client_dir is None:
             # No write seam, so no button to offer: say it, and stop.
-            QMessageBox.information(
+            show_information(
                 self, f"{manifest.name} needs your game client", client_notice(manifest)
             )
             return True
@@ -16608,9 +16899,7 @@ class ControllerView(QWidget):
         if source is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
-                self, "Already rebuilding", "This server is already being rebuilt."
-            )
+            show_information(self, "Already rebuilding", "This server is already being rebuilt.")
             return False
         if self._busy:
             # A rebuild replaces the very containers the Server tab's actions
@@ -16619,7 +16908,7 @@ class ControllerView(QWidget):
             # Refused rather than queued: the honest outcome of two actions
             # wanting the same containers is that one of them waits, and the
             # user is the one who should choose which.
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16635,7 +16924,7 @@ class ControllerView(QWidget):
         refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
         if refused is not None:
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
-            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
+            show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
         if not ask_yes_no(
             self,
@@ -16786,7 +17075,7 @@ class ControllerView(QWidget):
         watching succeed.
         """
         if self._backup_before_update:
-            QMessageBox.information(
+            show_information(
                 self,
                 "A backup is running",
                 "This server is being backed up before an update. Wait for the backup to "
@@ -16794,14 +17083,14 @@ class ControllerView(QWidget):
             )
             return True
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return True
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16941,7 +17230,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
 
     def _start_update_to_latest(self) -> bool:
@@ -17036,14 +17325,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17055,7 +17344,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database updates for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17088,19 +17377,10 @@ class ControllerView(QWidget):
         self._refresh_corrections_banner()
 
     def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
-        """T381: an `unreadable` reading, taken while the database is up, gets a later ask.
-
-        Asked on the poll once `CORRECTIONS_ASKED_AGAIN_AFTER`'s next wait is over
-        (`_ask_about_the_corrections_again()`), never once they are spent. Any
-        other answer is final until the database goes down and comes back.
-        """
-        asked = self._corrections_asked_again
-        if result.state != "unreadable" or not self._import_asked:
-            return
-        if asked >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
-            logger.info(f"{self.entry.id}: the corrections question is not asked again")
-            return
-        self._corrections_again_at = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[asked]
+        """T381: an `unreadable` corrections reading is asked again (`_arm_ask_again`)."""
+        self._arm_ask_again(
+            self._ask_again_corrections, result.state == "unreadable", "corrections"
+        )
 
     @Slot(object)
     def _corrections_check_failed(self, exc: object) -> None:
@@ -17149,7 +17429,7 @@ class ControllerView(QWidget):
         if route is None or check is None or check.state != "stale":
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -17161,7 +17441,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database corrections for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17213,14 +17493,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17232,7 +17512,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"adopting {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17424,12 +17704,13 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
-            if database_presence.MISSING in message:
+            sentence = database_presence.sentence_in(message)
+            if sentence is not None:
                 # T377: a Rebuild refused because Docker no longer has the
                 # database. Its sentence is in the panel; its ways out go on
                 # the Server tab, where a refused Start puts them.
-                self.problem_label.setText(database_presence.MISSING)
-                self._offer_to_repair_the_database()
+                self.problem_label.setText(sentence)
+                self._offer_to_repair_the_database(sentence)
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
@@ -17936,7 +18217,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -18156,9 +18437,11 @@ class ControllerView(QWidget):
             return
         self._set_busy(True, "Restart")
         self._hold_badge("restarting")
-        self.tuning_report.setPlainText("restarting the server…")
+        self.tuning_report.setPlainText(TUNING_RESTARTING)
         self._run(
-            lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
+            lambda: ("restart", self._do_restart()),
+            self._tuning_job_done,
+            self._tuning_job_failed,
         )
 
     @Slot()
@@ -18179,7 +18462,7 @@ class ControllerView(QWidget):
             return
         self._set_busy(True, "Recreate containers")
         self._hold_badge("restarting")
-        self.tuning_report.setPlainText("recreating the containers…")
+        self.tuning_report.setPlainText(TUNING_RECREATING)
         self._run(
             lambda: ("recreate", self._do_recreate()),
             self._tuning_job_done,
@@ -18225,6 +18508,10 @@ class ControllerView(QWidget):
         (T97): the closure was a plain callable, so the runner delivered it on
         the worker thread, and this wrote the report and started the status
         read from there.
+
+        T382: then the world is waited on by the install's ready rule, in a job
+        of its own that holds no Server button (`_wait_for_the_world()`), and
+        the report says done only once it is up.
         """
         job = cast(tuple[str, object], answer)[0]
         self._set_busy(False)
@@ -18235,10 +18522,88 @@ class ControllerView(QWidget):
         zone = self._say_zone_problem()
         if self._tuning_from_banner and zone is None:
             self.problem_label.setText("")  # what this tab said before the press is past
+        self._world_wait_from_banner = self._tuning_from_banner
         self._tuning_from_banner = False
-        self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
+        self._world_wait_zone = zone
         self._withdraw_the_database_offer()  # T377: the server started
+        if self.services.ready_after_start is None:
+            self._say_what_the_start_did(job, None)
+        else:
+            self._wait_for_the_world(job)
         self.refresh_status()
+
+    def _wait_for_the_world(self, job: str) -> None:
+        """Wait for the world after a Restart's or Recreate's start, holding no button (T382).
+
+        Not in the press's busy job: a world's load can take an hour on a big
+        first boot, and Stop, Start and Play must not be held for it (cold
+        review). Any job of this tab that locks the Server buttons
+        (`_set_busy(True)`) ends the wait, as any of them may stop, restart or
+        replace the containers it watches: the report then says the wait was
+        stopped, at once, and the wait's own late answer is dropped. The
+        number says which wait answered, on the error path too.
+        """
+        wait = self.services.ready_after_start
+        assert wait is not None
+        self._end_the_world_wait()
+        self._world_wait_number += 1
+        number, cancel = self._world_wait_number, threading.Event()
+        self._world_wait = cancel
+        self._world_wait_job = job
+        zone = self._world_wait_zone
+        self.tuning_report.setPlainText(
+            TUNING_WAITING_FOR_THE_WORLD.format(job=job) + (f"\n{zone}" if zone else "")
+        )
+        self._run(
+            partial(_waited_for_the_world, number, job, wait, cancel),
+            self._tuning_world_answered,
+            self._tuning_world_failed,
+        )
+
+    def _end_the_world_wait(self) -> None:
+        """End a world wait still out (T382), and say so now rather than when it notices.
+
+        The number moves on, so the cancelled wait's own answer -- which can land
+        before or after a newer press's -- never writes over what that press says.
+        """
+        if self._world_wait is None:
+            return
+        self._world_wait.set()
+        self._world_wait = None
+        self._world_wait_number += 1
+        if not getattr(self, "_closed", False):
+            self._say_what_the_start_did(self._world_wait_job, native.StartAnswer("cancelled"))
+
+    @Slot(object)
+    def _tuning_world_answered(self, answer: object) -> None:
+        number, job, world = cast(tuple[int, str, "native.StartAnswer | Exception"], answer)
+        if getattr(self, "_closed", False) or number != self._world_wait_number:
+            return  # ended, or a newer press's wait owns the report
+        self._world_wait = None
+        if isinstance(world, Exception):
+            # The wait itself broke, not the world: said as that, never as done.
+            self.tuning_report.setPlainText(TUNING_WORLD_WAIT_BROKE)
+            self.tuning_details.set_text(_detail_of(world) if _said_by_yulon(world) else str(world))
+            self.action_failed.emit(_for_the_log(world))
+            return
+        self._say_what_the_start_did(job, world)
+
+    @Slot(object)
+    def _tuning_world_failed(self, exc: object) -> None:
+        """Only a BaseException `_waited_for_the_world()` let through reaches here: logged."""
+        logger.warning(f"the wait for the world after a restart broke: {exc!r}")
+
+    def _say_what_the_start_did(self, job: str, world: native.StartAnswer | None) -> None:
+        said, details = _what_the_start_did(job, world, self.services.controller)
+        zone = self._world_wait_zone
+        failed = world is not None and world.verdict not in ("ready", "cancelled")
+        if self._world_wait_from_banner and failed:
+            self.problem_label.setText(said)
+        self._world_wait_from_banner = False
+        self.tuning_report.setPlainText(said + (f"\n{zone}" if zone else ""))
+        self.tuning_details.set_text(details)  # after the report: a new report clears it
+        if failed:
+            self.action_failed.emit(said)
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:
@@ -18257,7 +18622,7 @@ class ControllerView(QWidget):
         if isinstance(exc, DatabaseMissing):
             # T377: refused before the stop; its ways out are on the Server tab.
             self.problem_label.setText(str(exc))
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
@@ -18563,6 +18928,16 @@ class ControllerView(QWidget):
             return {}
         return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
 
+    def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
+        """Every key any catalog manifest declares for this file, first declaration winning."""
+        keys: dict[str, ConfKey] = {}
+        for manifest in self._manifests.values():
+            for conf in manifest.conf:
+                if conf.file == file:
+                    for key in conf.keys:
+                        keys.setdefault(key.key, key)
+        return keys
+
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
@@ -18813,6 +19188,10 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
+        if said is None:
+            # T371: an `int` key typed in the raw box is held to the card's own
+            # rule, as a warning on the same confirm and not a refusal.
+            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
         if said is not None:
             answer = QMessageBox.question(
                 self,
@@ -19098,16 +19477,13 @@ class ControllerView(QWidget):
         applier = self.services.applier
         if manifest is None or applier is None:
             return
-        answer = QMessageBox.question(
+        if not ask_yes_no(
             self,
             "Forget Yu'lon's record?",
             (
                 FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
             ).format(name=manifest.name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if not said_yes(answer):
+        ):
             self.module_report.setPlainText(
                 f"forget {manifest.id}: cancelled — nothing on this machine was changed."
             )
@@ -19136,8 +19512,11 @@ class ControllerView(QWidget):
         elif self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
-            rem_act = menu.addAction("Remove Selected Module")
-            rem_act.triggered.connect(lambda: self._module_action("remove"))
+            row = self.modules_panel.selected_row()
+            if row is not None and row.data.installed:
+                # T399: the row's own button is Install or Remove by whether it is here.
+                rem_act = menu.addAction("Remove Selected Module")
+                rem_act.triggered.connect(lambda: self._module_action("remove"))
             if self._selected_row_is_record_backed():
                 forget_act = menu.addAction(FORGET_RECORD_ACTION)
                 forget_act.triggered.connect(self._forget_module_record)
@@ -19313,7 +19692,7 @@ def _format_report(report: ApplyReport) -> str:
                 "inert."
             )
     elif report.restart_recommended and report.world_stopped:
-        # T130: this run read the world as stopped immediately before its SQL,
+        # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
         # took down the database the run had started alone -- but it was a step
         # nobody needed, told to a player who had just been asked to press Stop.

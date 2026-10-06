@@ -358,3 +358,50 @@ def test_reset_unfinished_says_so_when_a_drop_did_not_take() -> None:
     )
     with pytest.raises(MaintenanceError, match="could not be dropped"):
         repair.reset_unfinished(sql, stubborn)
+
+
+def test_a_database_that_is_not_up_yet_is_asked_again_without_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T424: `ERROR 2002` 3-5 s after start-db is the socket not being there yet."""
+    waited: list[float] = []
+    monkeypatch.setattr(repair, "_sleep", waited.append)
+
+    class _Late(_Mysql):
+        def databases(self) -> tuple[str, ...]:
+            self.asked += 1
+            if self.asked < 3:
+                raise MaintenanceError("could not list", detail="ERROR 2002 (HY000): Can't connect")
+            return ("information_schema", *self.schemas)
+
+    mysql = _Late(AUTH, CHARACTERS, WORLD)
+    with caplog.at_level("INFO"):
+        state = repair.import_state(_Sql({AUTH: ["account"]}), mysql)
+    assert state.state != "unreadable"
+    assert mysql.asked == 3 and len(waited) == 2
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_database_that_never_comes_up_is_unreadable_after_a_bounded_wait(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    waited: list[float] = []
+    monkeypatch.setattr(repair, "_sleep", waited.append)
+
+    class _Dead(_Mysql):
+        def databases(self) -> tuple[str, ...]:
+            self.asked += 1
+            raise MaintenanceError("could not list", detail="ERROR 2002 (HY000): Can't connect")
+
+    mysql = _Dead()
+    state = repair.import_state(_Sql(), mysql)
+    assert state.state == "unreadable"
+    assert mysql.asked == len(repair._NOT_UP_YET_WAITS) + 1
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_any_other_listing_failure_is_not_waited_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repair, "_sleep", lambda s: pytest.fail("waited on a real failure"))
+    mysql = _Mysql(fails="Access denied")
+    assert repair.import_state(_Sql(), mysql).state == "unreadable"
+    assert mysql.asked == 1
