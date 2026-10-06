@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The worldserver log saved when you stop a server has passwords masked, as the support file does.
+- A failed install is listed once in the support file, however its folder is spelled.
 - After a module install on a stopped server, the report says to press **Start** rather than **Stop** then **Start**.
 - Refusing a client folder now reads as two plain sentences instead of one run-on line.
 - A module's right-click **Remove** is offered only when the module is installed.

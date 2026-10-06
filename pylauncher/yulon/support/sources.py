@@ -125,6 +125,19 @@ def default_home() -> Path:
     return Path.home()
 
 
+STATE_CAP = 1024 * 1024
+"""The most of a failed install's state file that is read; a bigger one is not that file (T353)."""
+
+
+def _folder_key(folder: Path) -> str:
+    """One spelling of a folder: resolved through links and, on Windows, case-folded (T353)."""
+    try:
+        resolved = folder.resolve()
+    except (OSError, RuntimeError):
+        resolved = folder
+    return os.path.normcase(str(resolved))
+
+
 def _failed_installs(
     remembered: Sequence[KnownInstall], catalog: Catalog, home: Path
 ) -> list[InstallFacts]:
@@ -139,14 +152,18 @@ def _failed_installs(
     from yulon.catalog.installer import default_server_dir
     from yulon.catalog.native import ERROR_RUN_INSTALL, STATE_FILE
 
-    held = {known.server_dir for known in remembered}
+    held = {_folder_key(known.server_dir) for known in remembered}
     found: list[InstallFacts] = []
     for entry in catalog.games:
         try:
             folder = default_server_dir(entry, home)
-            if folder in held:
+            if _folder_key(folder) in held:
                 continue
-            parsed = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+            with (folder / STATE_FILE).open("rb") as handle:
+                raw = handle.read(STATE_CAP + 1)
+            if len(raw) > STATE_CAP:
+                continue
+            parsed = json.loads(raw.decode("utf-8"))
         except (OSError, ValueError):
             continue
         if (
@@ -165,6 +182,15 @@ def _failed_installs(
                 )
             )
     return found
+
+
+def public_passwords(catalog: Catalog) -> frozenset[str]:
+    """The catalog's fixed passwords: published, so never masked as secrets."""
+    return frozenset(
+        value
+        for entry in catalog.games
+        if entry.install.password.mode == "fixed" and (value := entry.install.password.value)
+    )
 
 
 def sources_for_app(
@@ -196,11 +222,7 @@ def sources_for_app(
             )
         )
     facts += _failed_installs(installs, catalog, home if home is not None else default_home())
-    public = frozenset(
-        value
-        for entry in catalog.games
-        if entry.install.password.mode == "fixed" and (value := entry.install.password.value)
-    )
+    public = public_passwords(catalog)
     config = platform.config_dir()
     return Sources(
         config_dir=config,
