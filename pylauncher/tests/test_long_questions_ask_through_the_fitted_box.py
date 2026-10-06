@@ -24,12 +24,12 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from tests.test_controller_view import (
     WOTLK,
+    _adopt_services,
     _forget_action,
     _mob_tab,
-    _select_module,
-    _adopt_services,
     _Ps,
     _rebuild_services,
+    _select_module,
     _server_cloned_view,
     _services,
     _updates_services,
