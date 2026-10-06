@@ -1,4 +1,4 @@
-"""The support file reads every stream of a container, and a failed install's containers (T350, T351).
+"""The support file reads every stream of a container, and a failed install's servers (T350, T351).
 
 T350: `docker logs` hands a container's stderr back on its own stderr, and
 `docker.log_tail()` kept stdout alone. A container without a tty (Tortoise's
@@ -111,7 +111,8 @@ def test_only_a_failed_install_run_makes_a_folder_count(tmp_path: Path) -> None:
 def test_a_remembered_install_is_not_listed_twice(tmp_path: Path) -> None:
     folder = _failed_folder(tmp_path)
 
-    sources = sources_for_app([KnownInstall(game="wow-tortoise", server_dir=folder)], CATALOG, home=tmp_path)
+    remembered = [KnownInstall(game="wow-tortoise", server_dir=folder)]
+    sources = sources_for_app(remembered, CATALOG, home=tmp_path)
 
     assert len(sources.installs) == 1
 
