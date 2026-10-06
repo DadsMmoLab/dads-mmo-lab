@@ -2017,7 +2017,9 @@ class ApplyReport:
     deleted because the game can be told to ignore it instead.
     """
     world_stopped: bool = False
-    """This run's running-world guard asked, and was told explicitly "not running" (T130).
+    """This run read the world and was told explicitly "not running" (T130; T397).
+
+    Read by the SQL guard, or, for a conf-only run that sent no SQL, once by the report.
 
     Only ever set from a reading, never from the manifest. `False` covers three
     things that are not the same: "running" and "could not ask" (both refuse,
@@ -4432,7 +4434,7 @@ class Applier:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
 
         Returns whether it ASKED and was told "not running" (T130), which is
-        `ApplyReport.world_stopped`'s only source. Every early return below is
+        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in `_report`, T397). Every early return below is
         `False`, because none of them read anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no

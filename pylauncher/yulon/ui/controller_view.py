@@ -19287,7 +19287,7 @@ def _format_report(report: ApplyReport) -> str:
                 "inert."
             )
     elif report.restart_recommended and report.world_stopped:
-        # T130: this run read the world as stopped immediately before its SQL,
+        # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
         # took down the database the run had started alone -- but it was a step
         # nobody needed, told to a player who had just been asked to press Stop.
