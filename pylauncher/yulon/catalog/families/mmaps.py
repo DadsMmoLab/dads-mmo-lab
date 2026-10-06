@@ -1231,6 +1231,142 @@ def _file_facts(folder: Path, prefix: str) -> list[str]:
     return facts
 
 
+def _resumable(job: Job, before: Record | None) -> bool:
+    """A readable record of a failed run that kept tiles, for an entry that can tell a whole one."""
+    return (
+        before is not None
+        and not before.unreadable
+        and before.state == "failed"
+        and before.resumable
+        and job.block.mmaps.tile_header is not None
+    )
+
+
+def continues_from(
+    server_dir: Path,
+    entry: CatalogEntry,
+    *,
+    platform_id: Callable[[], str] | None = None,
+    install_id: str | None = None,
+) -> int:
+    """How many finished tiles the next run would continue from; 0 when it would start over (T263).
+
+    Asked of the record and the map data as they are now, by the same rule a
+    start applies (`_resume_or_clear()`): a readable record of a failed run that
+    kept tiles, made from the map data `data/` holds now (`_evidence()`), and of
+    those tiles the ones that are whole now (`_whole_tiles()`). For a sentence
+    that promises the continuation, so it is said only when a start would keep
+    it. Never raises: a record or map data that cannot be read answers 0, which
+    says nothing.
+    """
+    if background_block(entry) is None:
+        return 0
+    before = read_record(server_dir)
+    if before is None:
+        return 0
+    job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
+    kept, begins_again_because = _continuation(job, before)
+    return 0 if begins_again_because else kept
+
+
+def _continuation(job: Job, record: Record, *, polled: bool = False) -> tuple[int, str]:
+    """`(tiles, why)`: the whole tiles a start keeps now, and why it would not (T245, T263).
+
+    The ONE rule the Server tab's line (`_failed_status()`) and a failed Re-extract's
+    sentence (`continues_from()`) both read, so the two can never disagree: the
+    record must be a readable, resumable one of a failed run on an entry that can
+    tell a whole tile (`_resumable()`, as `_resume_or_clear()` demands), the count is
+    of the tiles that are whole now (`_whole_tiles()`, not the record's `kept`, which
+    a tile removed or cut off since makes stale), and `why` is
+    `_why_it_begins_again()`'s map-data answer, empty when the start continues.
+    `(0, "")` when nothing would be kept at all. `polled` (the Server tab's 5 s line)
+    counts through `_whole_tiles_polled()`, which opens no tile while the folder is
+    unchanged; Re-extract's one sentence counts fresh.
+    """
+    if not _resumable(job, record):
+        return 0, ""
+    tiles = _whole_tiles_polled(job) if polled else _whole_tiles(job)
+    if not tiles:
+        return 0, ""
+    return tiles, _why_it_begins_again(job, record)
+
+
+_TILE_COUNTS: dict[tuple[Path, str], tuple[tuple[tuple[str, int, int], ...], int]] = {}
+"""`_whole_tiles_polled()`'s cache: per tiles folder and header, its fingerprint and count."""
+
+
+def _tile_fingerprint(out: Path) -> tuple[tuple[str, int, int], ...] | None:
+    """Every `.mmtile`'s name, size and modification time, from one `os.scandir`; no file opened.
+
+    None when the folder cannot be listed or a tile cannot be stat'ed: no cache then.
+    """
+    try:
+        with os.scandir(out) as entries:
+            return tuple(
+                sorted(
+                    (entry.name, info.st_size, info.st_mtime_ns)
+                    for entry in entries
+                    if entry.name.endswith(TILE_SUFFIX)
+                    for info in (entry.stat(follow_symlinks=False),)
+                )
+            )
+    except OSError:
+        return None
+
+
+def _whole_tiles_polled(job: Job) -> int:
+    """`_whole_tiles()` for the Server tab's poll: tiles opened only when the folder changed.
+
+    A full Centurion set is thousands of tiles (about 2.7 GB), and the line is asked
+    every 5 s while a failed run is shown. So the count is kept beside a fingerprint
+    of the folder (`_tile_fingerprint()`: names, sizes and dates, from the listing
+    alone), and the headers are read again only when that fingerprint differs. A
+    tile rewritten to the same size within the same nanosecond would not be seen;
+    the start (`_keep_finished()`) checks every header again regardless.
+    """
+    header = job.block.mmaps.tile_header
+    out = job.data_dir / MMAPS_DIR
+    if header is None or out.is_symlink():
+        return 0
+    fingerprint = _tile_fingerprint(out)
+    if fingerprint is None:
+        return _whole_tiles(job)
+    key = (out, header.model_dump_json())  # a header the catalog changed is a recount
+    cached = _TILE_COUNTS.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    try:
+        tiles = [path for path in out.iterdir() if path.name.endswith(TILE_SUFFIX)]
+    except OSError:
+        return 0
+    states = [_tile_state(path, header) for path in tiles]
+    count = sum(1 for state in states if state is True)
+    if None not in states:  # a tile that could not be opened is asked again next poll
+        _TILE_COUNTS[key] = (fingerprint, count)
+    else:
+        _TILE_COUNTS.pop(key, None)
+    return count
+
+
+def _whole_tiles(job: Job) -> int:
+    """How many `.mmtile` in `data/mmaps` are whole now (`_whole_tile()`); nothing removed.
+
+    The count a start's `_keep_finished()` would keep, without its removals: the
+    record's `kept` is the count at the failure, and a tile removed or cut off since
+    is not one the next run continues from (Codex review of T263). 0 when the folder
+    cannot be read or the entry cannot tell a whole tile.
+    """
+    header = job.block.mmaps.tile_header
+    out = job.data_dir / MMAPS_DIR
+    if header is None or out.is_symlink():
+        return 0
+    try:
+        tiles = [path for path in out.iterdir() if path.name.endswith(TILE_SUFFIX)]
+    except OSError:
+        return 0
+    return sum(1 for path in tiles if _whole_tile(path, header))
+
+
 def _why_it_begins_again(job: Job, record: Record) -> str:
     """Why a start would throw away the tiles `record` kept, in words; "" when it continues.
 
@@ -1254,7 +1390,8 @@ def _failed_status(job: Job, record: Record) -> MmapsStatus:
     status = _status_of(record, pathfinding_on=_pathfinding_on(job))
     if not status.kept:
         return status
-    return replace(status, begins_again_because=_why_it_begins_again(job, record))
+    kept, why = _continuation(job, record, polled=True)  # Re-extract's rule too (T263)
+    return replace(status, kept=kept, begins_again_because=why)
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
@@ -1265,13 +1402,7 @@ def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
     says how to tell a whole tile (`tile_header`). The tiles are checked again
     here, because files can change between the failure and the start.
     """
-    resumable = (
-        before is not None
-        and not before.unreadable
-        and before.state == "failed"
-        and before.resumable
-        and job.block.mmaps.tile_header is not None
-    )
+    resumable = _resumable(job, before)
     if resumable and before is not None and (not before.evidence or before.evidence != evidence):
         logger.warning(
             f"the map data in {job.data_dir} changed since the pathfinding run that stopped "
@@ -1332,6 +1463,11 @@ def _keep_finished(job: Job) -> int:
 
 def _whole_tile(path: Path, header: MmapTileHeader) -> bool:
     """Does `path` start with the magic and run to exactly the header plus its `size`?"""
+    return _tile_state(path, header) is True
+
+
+def _tile_state(path: Path, header: MmapTileHeader) -> bool | None:
+    """Is `path` whole (magic, and exactly the header plus its `size`); None: unreadable."""
     try:
         if not path.is_file() or path.is_symlink():
             return False
@@ -1339,7 +1475,7 @@ def _whole_tile(path: Path, header: MmapTileHeader) -> bool:
         with path.open("rb") as tile:
             head = tile.read(header.length)
     except OSError:
-        return False
+        return None  # could not be read: neither whole nor known cut off
     if len(head) < header.length:
         return False
     if int.from_bytes(head[:4], "little") != header.magic:
