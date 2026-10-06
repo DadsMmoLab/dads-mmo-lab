@@ -31,8 +31,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
-- The worldserver log saved when you stop a server has passwords masked, as the support file does.
 - A failed install is listed once in the support file, however its folder is spelled.
+- The worldserver log saved when you stop a server has passwords masked, as the support file does.
+- The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
+- A database that is a moment slow to answer after a start no longer logs a warning.
+- The corrections dialog names each step by what it does instead of "statement 1".
+- After **Stop**, the missing-database sentence stays beside **Repair the database…** and **Restore a backup…**.
+- An empty server database now says it is empty, not that Docker's copy was removed.
+- **Repair the database…** and the adopt button appear even when the database was still starting at the first look.
 - **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
 - Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
 - The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.

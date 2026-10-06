@@ -1460,8 +1460,8 @@ def corrections_confirmation(
 ) -> str:
     """What the user agrees to before a corrections press (T129). Pure, for Qt-free assertions.
 
-    The step list is the `expand()` output the press streams, named as the
-    run's own log names each step, for `updates_confirmation()`'s reason. The
+    The step list is the `expand()` output the press streams: a file by its path
+    as the run's log names it, a literal statement by its phase's name. The
     withheld phases are named too: the person is told what this version changed
     that a press will NOT put on their server, and why, rather than finding out
     from a log.
@@ -6807,7 +6807,8 @@ class StagedInstaller:
         )
 
     def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
-        """The steps `phases` would stream into this install, named as the run's log names them.
+        """The steps `phases` would stream into this install, named as the confirmation names them
+        (a file by its path, a literal statement by its phase).
 
         Empty on the spine, `update_files()`'s reason; the CMaNGOS family expands
         its plan the same way its press does.
@@ -7753,8 +7754,10 @@ class StagedInstaller:
         # T377: a rebuild ends in a start, and a start on a database Docker no
         # longer has puts the server on a new, empty one. Asked before an hour of
         # compiling; `unknown` goes on, as a Start does.
-        if self._seams.read_database(self.entry, server_dir).refuses:
-            raise InstallerError(f"{database_presence.MISSING} Nothing was changed.")
+        reading = self._seams.read_database(self.entry, server_dir)
+        if reading.refuses:
+            sentence = database_presence.sentence_for(reading.presence)
+            raise InstallerError(f"{sentence} Nothing was changed.")
         # T217 (B): a plain Rebuild compiles the folder as it is, so a source that is
         # not on the commit the running build was made from would compile a mix of
         # two versions. The update route moves them together and passes its work.

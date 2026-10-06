@@ -170,6 +170,15 @@ class Verdict:
     settle rule always asked for, measured against the run that is actually
     going (adversarial review, 2026-09-07).
     """
+    ready: bool = True
+    """Whether this run's own log has printed the world's ready marker (T451).
+
+    `docker ps` calls a world running seconds, or a whole map load, before it
+    can take a login, and the header read REALM ONLINE all that time. False
+    says the run is up and not yet ready: the line says "starting" and the
+    badge follows it. True when the install has no marker to look for, since
+    nothing could ever say otherwise.
+    """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
 
@@ -237,7 +246,8 @@ def line(verdict: Verdict) -> str:
             if verdict.players is not None and verdict.bots is not None
             else verdict.problem
         )
-        parts.append(f"up — {counts}" if counts else "up")
+        word = "up" if verdict.ready else "starting — the world server has not reported ready"
+        parts.append(f"{word} — {counts}" if counts and verdict.ready else word)
         if verdict.uptime is not None:
             parts[-1] += f", {uptime_text(verdict.uptime)}"
         if verdict.after_a_loop:
@@ -405,15 +415,25 @@ class Dashboard:
         timed from this watcher's clock, not the log's, so a marker printed
         before the first look is given the whole watch again, never less.
         """
+        if not self._saw_ready(run):
+            return False
+        seen_at = self._ready_seen_at
+        return seen_at is not None and self._now() - seen_at >= RECOVERED_AFTER
+
+    def _saw_ready(self, run: str) -> bool:
+        """Whether run `run`'s own log has printed the ready marker; read until it has (T390, T451).
+
+        No marker to look for reads False here, so a loop is ended by the settle
+        rule as before; `tick()` treats that case as ready for the header.
+        """
         if self._banner is None:
             return False
-        now = self._now()
         if self._ready_run != run:
             if not self._banner.search(self._log_of(self.spec.world, run)):
                 return False
             self._ready_run = run
-            self._ready_seen_at = now
-        return self._ready_seen_at is not None and now - self._ready_seen_at >= RECOVERED_AFTER
+            self._ready_seen_at = self._now()
+        return True
 
     def _docker_is_restoring(self, new_run: bool) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker restarted (T306).
@@ -471,6 +491,13 @@ class Dashboard:
     ) -> Verdict:
         """The two counts, or the reason there are none. Never a wrong number."""
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
+        # A run past SETTLED_AFTER is called ready without its marker: a rotated or
+        # unreadable log must not hold the header at STARTING for good (review).
+        ready = (
+            self._banner is None
+            or (uptime is not None and uptime >= SETTLED_AFTER)
+            or self._saw_ready(state.started_at)
+        )
         if answer.marker is None:
             return Verdict(
                 "up",
@@ -479,6 +506,7 @@ class Dashboard:
                 uptime,
                 problem=answer.problem,
                 after_a_loop=after_a_loop,
+                ready=ready,
             )
         counts = dbreads.population(self.sql, self.entry, answer.marker)
         return Verdict(
@@ -492,6 +520,7 @@ class Dashboard:
             warning=counts.warning,
             database_unreachable=bool(counts.problem),
             after_a_loop=after_a_loop,
+            ready=ready,
         )
 
     def _uptime(self, started_at: str) -> timedelta | None:
