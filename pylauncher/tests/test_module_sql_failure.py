@@ -119,7 +119,11 @@ def _importer(monkeypatch: pytest.MonkeyPatch, said: list[str], exit_code: int) 
     monkeypatch.setattr(docker, "start_database", lambda *a, **k: None)
 
     def stream(
-        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        merge_stderr: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Iterator[str]:
         assert cmd[:3] == ["docker", "compose", "run"], cmd
         yield from said
