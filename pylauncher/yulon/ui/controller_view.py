@@ -7247,6 +7247,8 @@ class ControllerView(QWidget):
         # T381: an `unreadable` reading is asked again while the database stays
         # up -- when (on `_corrections_clock`), and how many times it has been.
         # T420: the import probe and the adopt reading get the same schedule.
+        # T422: the sentence beside the Repair/Restore offer while it is shown.
+        self._database_sentence = ""
         self._ask_again_corrections = _AskAgain()
         self._ask_again_import = _AskAgain()
         self._ask_again_adopt = _AskAgain()
@@ -9494,7 +9496,10 @@ class ControllerView(QWidget):
     def _after_the_stop(self, said: str) -> str:
         """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
         forced, self._stop_forced = self._stop_forced, ""
-        return "\n\n".join(part for part in (forced, said) if part)
+        # T422: Repair and Restore stay shown after a Stop, so the sentence that
+        # explains them does too.
+        kept = self._database_sentence
+        return "\n\n".join(part for part in (forced, kept, said) if part)
 
     def _after_the_stop_details(self, why: str) -> str:
         """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
@@ -9512,7 +9517,7 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         if isinstance(exc, DatabaseMissing):
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         raw = str(exc)
         msg = raw
         why = ""
@@ -9622,19 +9627,23 @@ class ControllerView(QWidget):
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
 
-    def _offer_to_repair_the_database(self) -> None:
+    def _offer_to_repair_the_database(self, sentence: str = "") -> None:
         """T377: Repair, and the backups when there are any, beside the refusal that names them.
 
         The refusal's own sentence is the problem line; these are its two ways
         out. A tab with no Repair route offers none, and the backups button is
-        shown only when the backups folder holds a dump to restore.
+        shown only when the backups folder holds a dump to restore. `sentence` is
+        kept for as long as the offer is shown, so a later line that replaces the
+        problem line (a Stop's) carries it (T422).
         """
+        self._database_sentence = sentence
         self.repair_database_button.setVisible(self.services.repair_database is not None)
         self.repair_database_button.setEnabled(True)
         self.restore_backup_button.setVisible(self._has_backups())
 
     def _withdraw_the_database_offer(self) -> None:
         """A Start that worked, or a new press, takes the T377 offer down."""
+        self._database_sentence = ""
         self.repair_database_button.setVisible(False)
         self.restore_backup_button.setVisible(False)
 
@@ -17390,12 +17399,13 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
-            if database_presence.MISSING in message:
+            sentence = database_presence.sentence_in(message)
+            if sentence is not None:
                 # T377: a Rebuild refused because Docker no longer has the
                 # database. Its sentence is in the panel; its ways out go on
                 # the Server tab, where a refused Start puts them.
-                self.problem_label.setText(database_presence.MISSING)
-                self._offer_to_repair_the_database()
+                self.problem_label.setText(sentence)
+                self._offer_to_repair_the_database(sentence)
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
@@ -18223,7 +18233,7 @@ class ControllerView(QWidget):
         if isinstance(exc, DatabaseMissing):
             # T377: refused before the stop; its ways out are on the Server tab.
             self.problem_label.setText(str(exc))
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

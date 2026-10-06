@@ -50,7 +50,23 @@ MISSING = (
     "The server's database is missing (Docker's copy was removed). Repair rebuilds it from "
     "the server files; your characters cannot come back unless you have a backup."
 )
-"""The sentence a refused Start or Rebuild says, for `missing` and `empty` alike."""
+"""The sentence a refused Start or Rebuild says when Docker has no volume (T377)."""
+
+EMPTY = (
+    "The server's database is empty: Docker still has its copy, but nothing is in it. Repair "
+    "rebuilds it from the server files; your characters cannot come back unless you have a backup."
+)
+"""The sentence for a volume that is there with no login database in it (T421)."""
+
+
+def sentence_for(presence: str) -> str:
+    """The refusal's sentence for a `missing` or an `empty` reading; `missing`'s for anything else."""
+    return EMPTY if presence == "empty" else MISSING
+
+
+def sentence_in(message: str) -> str | None:
+    """Whichever of the two refusal sentences `message` carries, or None."""
+    return next((s for s in (MISSING, EMPTY) if s in message), None)
 
 
 @dataclass(frozen=True)

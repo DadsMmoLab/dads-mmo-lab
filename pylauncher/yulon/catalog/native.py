@@ -7591,8 +7591,10 @@ class StagedInstaller:
         # T377: a rebuild ends in a start, and a start on a database Docker no
         # longer has puts the server on a new, empty one. Asked before an hour of
         # compiling; `unknown` goes on, as a Start does.
-        if self._seams.read_database(self.entry, server_dir).refuses:
-            raise InstallerError(f"{database_presence.MISSING} Nothing was changed.")
+        reading = self._seams.read_database(self.entry, server_dir)
+        if reading.refuses:
+            sentence = database_presence.sentence_for(reading.presence)
+            raise InstallerError(f"{sentence} Nothing was changed.")
         # T217 (B): a plain Rebuild compiles the folder as it is, so a source that is
         # not on the commit the running build was made from would compile a mix of
         # two versions. The update route moves them together and passes its work.
