@@ -323,6 +323,20 @@ class ConfKey(_Strict):
     max: int | None = Field(
         default=None, description="`int` and `float` keys only; no bound is invented."
     )
+    unsigned: bool = Field(
+        default=False,
+        description=(
+            "`int` keys only: the module reads this key as `uint32` (T370), so 0 to "
+            "4294967295 is accepted and a negative is refused. Absent, the key is read "
+            "as a C++ `int` (-2147483648 to 2147483647)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _unsigned_belongs_to_an_int(self) -> ConfKey:
+        if self.unsigned and self.type != "int":
+            raise ValueError(f"{self.key}: `unsigned` is for an `int` key; this one is {self.type}")
+        return self
 
     @model_validator(mode="after")
     def _bounds_belong_to_an_int(self) -> ConfKey:
@@ -468,6 +482,20 @@ class Prompt(_Strict):
             "multipliers declare 100: at 1e39 the FLOAT column overflows."
         ),
     )
+
+    unsigned: bool = Field(
+        default=False,
+        description=(
+            "int only: the module reads this answer as `uint32` (T370): 0 to 4294967295 "
+            "is accepted, a negative is refused."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _unsigned_needs_an_int(self) -> Prompt:
+        if self.unsigned and self.kind != "int":
+            raise ValueError("`unsigned` only valid with kind='int'")
+        return self
 
     @model_validator(mode="after")
     def _choice_needs_choices(self) -> Prompt:

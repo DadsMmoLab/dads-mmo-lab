@@ -199,6 +199,12 @@
           "default": null,
           "description": "Which control edits this key. Absent means a text box.",
           "title": "Type"
+        },
+        "unsigned": {
+          "default": false,
+          "description": "`int` keys only: the module reads this key as `uint32` (T370), so 0 to 4294967295 is accepted and a negative is refused. Absent, the key is read as a C++ `int` (-2147483648 to 2147483647).",
+          "title": "Unsigned",
+          "type": "boolean"
         }
       },
       "required": [
@@ -503,6 +509,12 @@
           "minLength": 1,
           "title": "Question",
           "type": "string"
+        },
+        "unsigned": {
+          "default": false,
+          "description": "int only: the module reads this answer as `uint32` (T370): 0 to 4294967295 is accepted, a negative is refused.",
+          "title": "Unsigned",
+          "type": "boolean"
         }
       },
       "required": [
