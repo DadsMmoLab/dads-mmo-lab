@@ -21,6 +21,7 @@ import pytest
 
 from yulon import dashboard, docker
 from yulon.catalog import catalog as catalog_module
+from yulon.catalog import native
 
 WOTLK = catalog_module.load_catalog().get("wow-wotlk")
 SPEC = WOTLK.container_spec()
@@ -56,6 +57,7 @@ def _watch(
         sql=sql if sql is not None else _FakeSql(),
         state_of=lambda _container: remaining.pop(0),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, _since: "",
         now=lambda: NOW,
     )
 
@@ -231,6 +233,7 @@ def test_a_marker_that_cannot_be_resolved_refuses_the_counts_without_hiding_the_
         sql=sql,
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -269,6 +272,7 @@ def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_contain
         sql=_FakeSql(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -360,6 +364,7 @@ def test_a_world_whose_database_is_gone_is_not_stable_even_though_it_is_up(
         sql=_Dead(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -387,6 +392,7 @@ def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path
         sql=_FakeSql(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -570,11 +576,13 @@ def _clocked(
     script: list[tuple[timedelta, docker.ContainerState]],
     sql: _FakeSql | None = None,
     daemons: Callable[[timedelta], str] = lambda _at: "bridge-before",
+    logs: Callable[[timedelta, str], str] = lambda _at, _since: "",
 ) -> tuple[dashboard.Dashboard, list[str]]:
     """A dashboard ticked at the given offsets from NOW, one container state per tick.
 
     `daemons` gives the daemon's identity at each moment (offset from NOW); returns
-    the dashboard and the list of identities it was handed.
+    the dashboard and the list of identities it was handed. `logs` gives what the run
+    that started at `since` has printed by each moment (T390).
     """
     clock = [NOW]
     remaining = list(script)
@@ -596,6 +604,7 @@ def _clocked(
         sql=sql if sql is not None else _FakeSql(),
         state_of=state_of,
         daemon_of=daemon_of,
+        log_of=lambda _container, since: logs(clock[0] - NOW, since),
         now=lambda: clock[0],
     )
     return watch, handed
@@ -934,6 +943,8 @@ def test_the_real_readers_ask_docker_for_the_daemons_identity(
     def run(
         cmd: list[str], cwd: object = None, timeout: object = None
     ) -> subprocess.CompletedProcess[str]:
+        if "logs" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, BANNER, "")
         if "network" in cmd:
             asked.append(cmd[cmd.index("network") :])
             return subprocess.CompletedProcess(cmd, 0, bridges.pop(0), "")
@@ -1091,3 +1102,325 @@ def test_a_clean_docker_restart_is_noticed_by_the_new_run_not_by_a_later_crash(
     verdicts = [watch.tick() for _ in range(6)]
 
     assert verdicts[-1].state == "restart_loop"
+
+
+# ------------------------------------------- T390: a loop that was fixed reads up again
+
+BANNER = "AzerothCore rev. 1 ready..."
+
+
+def _said_ready_from(at: timedelta, run: str) -> Callable[[timedelta, str], str]:
+    """The log of run `run`: loading, then the ready banner from `at` on (offset from NOW)."""
+
+    def log(now: timedelta, since: str) -> str:
+        if since != run:
+            return "Loading maps..."
+        return "Loading maps...\n" + (BANNER if now >= at else "")
+
+    return log
+
+
+def _a_loop_then(
+    *after: tuple[timedelta, docker.ContainerState],
+) -> list[tuple[timedelta, docker.ContainerState]]:
+    """Three new restarts in the first two ticks -- a loop -- and then `after`."""
+    long_ago = _stamp(NOW - timedelta(hours=2))
+    return [
+        (timedelta(0), _running(long_ago, 10)),
+        (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 13)),
+        *after,
+    ]
+
+
+GRACE = timedelta(seconds=native.READY_GRACE_SECONDS)
+
+
+def test_a_loop_that_was_fixed_reads_up_once_its_world_said_ready_and_stayed_up(
+    tmp_path: Path,
+) -> None:
+    """T390, from the T306 live check on m910q (2026-10-05).
+
+    The loop was fixed and the world ran with 500 bots, and the line still read
+    "restart loop — 13 restarts, this run up 9m" until the run reached ten
+    minutes. The count did not go back (the run that survived was one more of
+    the policy's restarts), so nothing ended the loop but the settle rule.
+
+    Now the start rule ends it: the run's own log says ready, and the same run
+    is still up `READY_GRACE_SECONDS` later. It reads up, with the crash-loop
+    note, and is not called steady until `SETTLED_AFTER` as before.
+
+    Mutation: drop the ready check from `tick()`, and the last tick reads
+    `restart_loop`.
+    """
+    fixed = _stamp(NOW + timedelta(seconds=9))
+    said_ready = timedelta(seconds=40)
+    watch, _ = _clocked(
+        tmp_path,
+        _a_loop_then(
+            (timedelta(seconds=10), _running(fixed, 14)),
+            (said_ready, _running(fixed, 14)),
+            (said_ready + GRACE - timedelta(seconds=5), _running(fixed, 14)),
+            (said_ready + GRACE, _running(fixed, 14)),
+        ),
+        logs=_said_ready_from(said_ready, fixed),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert [v.state for v in verdicts[1:5]] == ["restart_loop"] * 4, "up only after the watch"
+    last = verdicts[-1]
+    assert last.state == "up"
+    assert last.after_a_loop is True and last.stable is False
+    said = dashboard.line(last)
+    assert "restart loop" not in said and "crash loop" in said, said
+
+
+def test_a_run_that_said_ready_and_then_died_does_not_end_the_loop(tmp_path: Path) -> None:
+    """The banner is not the verdict (T71): the next run starting is a crash, not a recovery."""
+    first = _stamp(NOW + timedelta(seconds=9))
+    again = _stamp(NOW + timedelta(seconds=60))
+    watch, _ = _clocked(
+        tmp_path,
+        _a_loop_then(
+            (timedelta(seconds=10), _running(first, 14)),
+            (timedelta(seconds=40), _running(first, 14)),
+            (timedelta(seconds=65), _running(again, 15)),
+            (GRACE + timedelta(seconds=45), _running(again, 15)),
+        ),
+        logs=_said_ready_from(timedelta(seconds=40), first),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
+    tmp_path: Path,
+) -> None:
+    """A tick is one inspect and one SQL read; the log is read only until a run says ready."""
+    fixed = _stamp(NOW + timedelta(seconds=9))
+    reads: list[timedelta] = []
+    ready = _said_ready_from(timedelta(seconds=10), fixed)
+
+    def logs(at: timedelta, since: str) -> str:
+        reads.append(at)
+        return ready(at, since)
+
+    healthy, _ = _clocked(
+        tmp_path,
+        [(timedelta(seconds=n), _running(restarts=0)) for n in (0, 5, 10)],
+        logs=logs,
+    )
+    for _ in range(3):
+        healthy.tick()
+    assert reads == [], "a settled server's log was read"
+
+    looping, _ = _clocked(
+        tmp_path,
+        _a_loop_then(
+            *[(timedelta(seconds=n), _running(fixed, 14)) for n in (10, 20, 30, 40)],
+        ),
+        logs=logs,
+    )
+    for _ in range(6):
+        looping.tick()
+    # 5 s: the loop's own run, still loading. 10 s: the fixed run, ready. Then no more.
+    assert reads == [timedelta(seconds=5), timedelta(seconds=10)], "read again after ready"
+
+
+def test_a_loop_caught_inside_the_docker_restore_window_gets_the_note_once_fixed(
+    tmp_path: Path,
+) -> None:
+    """T390 item 2, from the T306 live check: no "restarted after a crash loop" note.
+
+    A world that crashes after Docker came back is `starting` inside the window
+    and `restart_loop` (by its `restarting` status) after it, but its restarts
+    inside the window are never strikes, so the loop was never recorded and the
+    run that was fixed read steady at once. Docker still backing off the same
+    dead run a tick later is a loop on Docker's own word.
+
+    Mutation: drop the two-`restarting`-ticks rule, and the last tick's
+    `after_a_loop` is False (and `stable` True).
+    """
+    # The window opens at the 10 s tick, the first new run after Docker came back.
+    closed = timedelta(seconds=10) + dashboard.DOCKER_RESTORE_GRACE
+    dead = _stamp(NOW + closed)
+    fixed = _stamp(NOW + closed + timedelta(seconds=14))
+    said_ready = closed + timedelta(seconds=30)
+    watch, _ = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            # Its restarts all inside the window: none of them is a strike.
+            (timedelta(seconds=10), docker.ContainerState("restarting", _stamp(NOW), 8)),
+            (closed + timedelta(seconds=5), docker.ContainerState("restarting", dead, 8)),
+            (closed + timedelta(seconds=10), docker.ContainerState("restarting", dead, 8)),
+            (closed + timedelta(seconds=15), _running(fixed, 9)),
+            (said_ready, _running(fixed, 9)),
+            (said_ready + GRACE, _running(fixed, 9)),
+        ],
+        daemons=RESTARTED,
+        logs=_said_ready_from(said_ready, fixed),
+    )
+
+    verdicts = [watch.tick() for _ in range(8)]
+
+    assert verdicts[2].state == "starting"
+    assert verdicts[3].state == verdicts[4].state == "restart_loop"
+    last = verdicts[-1]
+    assert last.state == "up"
+    assert last.after_a_loop is True and last.stable is False
+
+
+def test_one_restarting_tick_outside_the_window_is_not_yet_a_recorded_loop(
+    tmp_path: Path,
+) -> None:
+    """One back-off seen once is one crash: the run after it is up and steady."""
+    long_ago = _stamp(NOW - timedelta(hours=2))
+    back = _stamp(NOW + timedelta(seconds=6))
+    watch, _ = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(long_ago, 0)),
+            (timedelta(seconds=5), docker.ContainerState("restarting", long_ago, 1)),
+            (timedelta(seconds=10), _running(back, 1)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(3)]
+
+    assert verdicts[1].state == "restart_loop"
+    assert verdicts[-1].state == "up" and verdicts[-1].after_a_loop is False
+
+
+@pytest.mark.parametrize("entry", catalog_module.load_catalog().games, ids=lambda e: e.id)
+def test_every_game_s_dashboard_knows_its_own_ready_marker(
+    tmp_path: Path, entry: catalog_module.CatalogEntry
+) -> None:
+    """Without it a fixed loop ends only at `SETTLED_AFTER` again, silently (T390)."""
+    block = entry.install.native
+    assert block is not None
+    banner = dashboard._ready_banner(entry)
+    assert banner is not None
+    assert banner.pattern == native.ready_spec_for(entry, block.ready).world
+
+
+def test_docker_backing_off_inside_the_restore_window_is_not_recorded_as_a_loop(
+    tmp_path: Path,
+) -> None:
+    """T306's race, seen twice on one dead run: Docker's restore, not a crash loop (T390).
+
+    Mutation: take `not restoring` off the two-`restarting`-ticks rule, and the
+    healthy run after it carries the crash-loop note and is not steady.
+    """
+    dead = _stamp(NOW + timedelta(seconds=9))
+    back = _stamp(NOW + timedelta(seconds=19))
+    watch, _ = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), docker.ContainerState("restarting", dead, 4)),
+            (timedelta(seconds=15), docker.ContainerState("restarting", dead, 4)),
+            (timedelta(seconds=20), _running(back, 5)),
+        ],
+        daemons=RESTARTED,
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
+    assert [v.state for v in verdicts[2:4]] == ["starting", "starting"]
+    assert verdicts[-1].state == "up"
+    assert verdicts[-1].after_a_loop is False and verdicts[-1].stable is True
+
+
+def test_a_world_that_crashes_again_after_it_recovered_is_a_loop_again_at_once(
+    tmp_path: Path,
+) -> None:
+    """Cold review: ending the loop zeroed the strikes, so the next crash read up.
+
+    A world that dies a couple of minutes after ready (bot spawn, a first login)
+    loads past Docker's back-off reset, so only the strikes can catch it, and three
+    fresh ones took three more cycles while the badge said REALM ONLINE.
+
+    Mutation: zero `_strikes` where the ready rule ends the loop, and the tick
+    after the crash reads `up`.
+    """
+    fixed = _stamp(NOW + timedelta(seconds=9))
+    again = _stamp(NOW + timedelta(seconds=204))
+    said_ready = timedelta(seconds=40)
+    watch, _ = _clocked(
+        tmp_path,
+        _a_loop_then(
+            (timedelta(seconds=10), _running(fixed, 14)),
+            (said_ready, _running(fixed, 14)),
+            (said_ready + GRACE, _running(fixed, 14)),
+            (timedelta(seconds=205), _running(again, 15)),
+        ),
+        logs=_said_ready_from(said_ready, fixed),
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[4].state == "up", "recovered"
+    assert verdicts[5].state == "restart_loop", "crashed again: a loop, not up"
+
+
+def test_a_running_world_is_not_ready_until_its_log_says_so(tmp_path: Path) -> None:
+    """T451: `docker ps` says the world runs seconds before it can take a login.
+
+    The first tick of a run reads up with `ready` False and says "starting", and
+    the tick after the run's own log printed the ready marker reads ready.
+
+    Mutation: leave `ready` at its default in `_with_population()`, and the first
+    tick reads ready.
+    """
+    run = _stamp(NOW - timedelta(seconds=3))
+    watch, _ = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(run)),
+            (timedelta(seconds=30), _running(run)),
+        ],
+        logs=_said_ready_from(timedelta(seconds=20), run),
+    )
+
+    loading, loaded = watch.tick(), watch.tick()
+
+    assert loading.state == "up" and loading.ready is False
+    assert dashboard.line(loading).startswith("starting")
+    assert loaded.ready is True and dashboard.line(loaded).startswith("up")
+
+
+def test_a_run_that_said_ready_is_not_asked_again(tmp_path: Path) -> None:
+    """The log is read until the marker is seen, and not on the healthy ticks after."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    watch = dashboard.Dashboard(
+        SPEC,
+        WOTLK,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or BANNER,
+        now=lambda: NOW,
+    )
+
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1
+
+
+def test_a_run_past_the_settle_time_is_ready_without_its_marker(tmp_path: Path) -> None:
+    """A rotated or unreadable log must not hold the header at STARTING for good.
+
+    Mutation: drop the `SETTLED_AFTER` clause in `_with_population()`, and this reads not ready.
+    """
+    run = _stamp(NOW - dashboard.SETTLED_AFTER - timedelta(seconds=1))
+    watch, _ = _clocked(
+        tmp_path, [(timedelta(0), _running(run))], logs=lambda _now, _since: "no marker here"
+    )
+
+    assert watch.tick().ready is True

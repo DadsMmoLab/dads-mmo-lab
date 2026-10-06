@@ -13565,7 +13565,8 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     )
     view.tuning_recreate_button.click()
     pump_until(
-        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+        lambda: view.tuning_report.toPlainText() == "recreate: the server was started.",
+        "the recreate's report",
     )
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
@@ -23328,7 +23329,11 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
         assert after.applier.client_origins == before.applier.client_origins == ()
     assert after.steam is not None and before.steam is not None
     assert after.steam.client_dir == before.steam.client_dir == original
+    # T382: `for_entry()` adds the world wait for every game; no factory does.
+    assert after.ready_after_start is not None and before.ready_after_start is None
     for name in ControllerServices.__dataclass_fields__:
+        if name == "ready_after_start":
+            continue
         a, b = getattr(after, name), getattr(before, name)
         assert (a is None) == (b is None), f"{name} is wired differently"
         assert type(a) is type(b), f"{name} is a different kind of seam"
@@ -27270,7 +27275,10 @@ def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
     assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
     _drain_polls(view, jobs)
 
-    assert view.realm_badge.status == reading, "the hold outlived the failed job"
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == (
+        "starting" if reading == "running" else reading
+    ), "the hold outlived the failed job"
     assert view._badge_held is None
 
 
@@ -27292,7 +27300,8 @@ def test_every_hold_lets_go_when_the_job_is_done(
     _drain_polls(view, jobs)
 
     assert view._badge_held is None
-    assert view.realm_badge.status == ("running" if press in _AFTER else "stopped")
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == ("starting" if press in _AFTER else "stopped")
 
 
 def test_a_stop_goes_from_stopping_to_stopped_and_never_through_running(

@@ -33,6 +33,17 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - On Windows, **Stop** also ends the helper programs a build started on your PC.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
+- The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
+- A database that is a moment slow to answer after a start no longer logs a warning.
+- The corrections dialog names each step by what it does instead of "statement 1".
+- After **Stop**, the missing-database sentence stays beside **Repair the database…** and **Restore a backup…**.
+- An empty server database now says it is empty, not that Docker's copy was removed.
+- **Repair the database…** and the adopt button appear even when the database was still starting at the first look.
+- **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
+- Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
+- The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
+- A rebuild whose rollback did not come up says its containers are still running and to press Stop.
+- A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
 - The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
 - The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
 - A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".
@@ -103,6 +114,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Questions with long button labels show the whole label, also on a Steam Deck screen.
 - Removing a server while its **Modules** tab is still loading no longer prints an error.
 - An "&" in a label or a server folder's name shows as written.
+- A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
