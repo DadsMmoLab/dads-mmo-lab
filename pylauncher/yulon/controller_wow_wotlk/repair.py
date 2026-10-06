@@ -61,6 +61,7 @@ Nothing here writes. The seam is deliberately the read-only half of
 
 from __future__ import annotations
 
+import time
 from typing import Protocol
 
 from yulon import docker
@@ -141,6 +142,38 @@ def _databases(mysql: MysqlDocker) -> tuple[str, ...]:
         raise MaintenanceError(_reason(exc), detail=exc.detail) from exc
 
 
+_NOT_UP_YET_WAITS = (1.0, 2.0, 4.0)
+"""Seconds waited between looks when the database's socket is not there yet (T424).
+
+Seen live 2026-10-06: `ERROR 2002 Can't connect ... mysqld.sock` 3-5 s after
+`start-db`, before the database was ready to be asked. A moment later it answered.
+"""
+
+_sleep = time.sleep
+"""The wait above; a test passes its own."""
+
+
+def _is_not_up_yet(exc: MaintenanceError) -> bool:
+    return "2002" in exc.detail or "Can't connect" in exc.detail
+
+
+def _databases_when_up(mysql: MysqlDocker) -> tuple[str, ...]:
+    """`mysql.databases()`, asked again quietly while the database is not accepting connections.
+
+    Only an answer that says so (`ERROR 2002`) is waited out, a few times; any other
+    failure, and the last of these, is raised for the caller to warn about.
+    """
+    for wait in _NOT_UP_YET_WAITS:
+        try:
+            return mysql.databases()
+        except MaintenanceError as exc:
+            if not _is_not_up_yet(exc):
+                raise
+            logger.info(f"the database is not accepting connections yet; asking again in {wait:g} s")
+            _sleep(wait)
+    return mysql.databases()
+
+
 def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
     """What state this install's `acore_*` schemas are in. Never raises.
 
@@ -155,7 +188,7 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         # `docker exec ... SHOW DATABASES` round trips instead of one, which
         # quietly made this probe five execs while its own docstring, its test,
         # and `phase6-decisions.md` §5 all said three (review, 2026-08-23).
-        existing = mysql.databases()
+        existing = _databases_when_up(mysql)
     except MaintenanceError as exc:
         logger.warning(f"the databases could not be listed: {_reason(exc)}")
         return docker.ImportState("unreadable", _reason(exc))

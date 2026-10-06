@@ -4537,7 +4537,7 @@ class _AskAgain:
         self.due: float | None = None
         self.count = 0
 
-    def reset(self) -> None:
+    def forget(self) -> None:
         """The database went down or came back: nothing is owed, nothing was asked."""
         self.due = None
         self.count = 0
@@ -8820,7 +8820,7 @@ class ControllerView(QWidget):
             self._ask_again_import,
             self._ask_again_adopt,
         ):
-            schedule.reset()
+            schedule.forget()
 
     def _ask_about_the_unanswered_again(self) -> None:
         """T381, T420: put a question again once its wait is over, the database still up.
