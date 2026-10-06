@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from tests.support_player_text import command_faults, text_faults
 from yulon import apply as apply_module
-from yulon import module_answers, runner
+from yulon import module_answers, runner, server_rates
 from yulon.apply import Applier
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller_wow_tbc import modules as tbc_modules
@@ -197,6 +197,28 @@ def test_the_tuning_tab_lists_an_installed_settings_mods_keys(qapp: object, tmp_
 
     keys = {(row.module_id, row.key, row.current) for row in view._tuning_rows}
     assert ("xp-rates", "Rate.XP.Kill", "3") in keys, keys
+
+
+def test_the_rates_card_says_an_installed_experience_rates_shares_its_xp_rows(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T380 meets T302: after a real install through the row, the Server rates card's XP
+    row says Experience Rates also sets it, and the mod's own row yields to the card.
+
+    Mutation: wire Tortoise's `installed_modules` back to `installed_clones` and
+    neither sentence appears.
+    """
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    view, _asked = _view(TORTOISE, server_dir, {"xp_rate": "3"})
+    _row(view, "xp-rates").install_button.click()  # type: ignore[attr-defined]
+
+    view.reload_tuning()
+
+    name = _manifest(tortoise_modules.store()).name
+    shown = {(row.module_id, row.key): row for row in view._all_tuning_rows()}
+    card = shown[("server-rates", "Rate.XP.Kill")]
+    assert server_rates.SHARED_WITH.format(module=name) in (card.explain or ""), card
+    assert shown[("xp-rates", "Rate.XP.Kill")].read_only_reason == server_rates.ON_THE_RATES_CARD
 
 
 # ------------------------------------------------------------ the receipt
