@@ -7559,6 +7559,24 @@ def test_stop_now_anyway_on_the_tab_sends_the_stop_and_keeps_the_warning_once(
     assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
 
 
+def test_a_world_that_crashed_while_it_saved_is_said_after_the_stop_with_its_last_lines(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T414: the sentence goes on the label and outlives the stop; the world's last lines go
+    under Details, never into the line."""
+    from yulon.said import details_below
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    crashed = details_below(docker.world_save_failed(139), "Cant begin transaction.")
+    view._stop_notice(crashed)
+    assert view.problem_label.text() == docker.world_save_failed(139)
+    assert "Cant begin transaction." in view.problem_details.text()
+    view._stop_done(True)
+    assert docker.world_save_failed(139) in view.problem_label.text()
+    assert "Details:" not in view.problem_label.text()
+    assert "Cant begin transaction." in view.problem_details.text()
+
+
 def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_stop(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

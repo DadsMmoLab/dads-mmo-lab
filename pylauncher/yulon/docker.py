@@ -36,7 +36,7 @@ from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 from yulon import ansi, platform, runner, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
-from yulon.said import SaidByYulon
+from yulon.said import SaidByYulon, details_below
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -3123,6 +3123,63 @@ WORLD_SAVING = (
 WORLD_SAVED = "The world server saved every character and closed."
 """Said when a world that `WORLD_SAVING` was said of has exited by itself (T384)."""
 
+_WORLD_SAVE_FAILED_START = "The world server stopped with an error"
+
+
+def world_save_failed(code: int) -> str:
+    """Said when a world that was asked to stop exited with a code other than 0 (T414).
+
+    Live, 2026-10-06 (Tortoise): "Cant begin transaction." and exit 139 after "Halting
+    process...", while the tab said `WORLD_SAVED`. The world's last lines go under Details
+    (`said.details_below()`), never into this sentence. Outlives the stop.
+    """
+    return (
+        f"{_WORLD_SAVE_FAILED_START} (exit code {code}) while it was saving characters, so some "
+        "saves may not have been written. Check your characters before you play; the world "
+        "server's last lines are under Details."
+    )
+
+
+WORLD_SAVE_UNREAD = (
+    "The world server closed, but Yu'lon could not read whether it finished saving cleanly. "
+    "Check your characters before you play."
+)
+"""Said when a world that was asked to stop is gone and its exit code cannot be read (T414)."""
+
+_EXIT_LINES = 20
+"""How many of the world's last log lines go under Details when it exits with an error (T414)."""
+
+
+def outlives_the_stop(text: str) -> bool:
+    """Is this stop sentence one the tab keeps after the stop (`FORCE_STOP_WARNINGS`, T414)?
+
+    Read on the sentence alone: a crash's line carries its exit code, and Details under it.
+    """
+    sentence = text.split("\n\nDetails:\n", 1)[0]
+    return (
+        sentence in FORCE_STOP_WARNINGS
+        or sentence == WORLD_SAVE_UNREAD
+        or sentence.startswith(_WORLD_SAVE_FAILED_START)
+    )
+
+
+def _how_the_world_ended(world: str, wsl_distro: str | None) -> tuple[str, bool]:
+    """The sentence for a world that exited after its signal, and whether it is a warning (T414)."""
+    proc = _docker(
+        ["inspect", world, "--format", "{{.State.ExitCode}}"],
+        timeout=_LOAD_LOOK_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    code = proc.stdout.strip()
+    if proc.returncode != 0 or not code.lstrip("-").isdigit():
+        logger.warning(f"could not read how {world} exited: {proc.stderr.strip()}")
+        return WORLD_SAVE_UNREAD, True
+    if int(code) == 0:
+        return WORLD_SAVED, False
+    tail = log_tail(world, _EXIT_LINES, wsl_distro=wsl_distro) or ""
+    return details_below(world_save_failed(int(code)), ansi.strip(tail).strip()), True
+
+
 WORLD_SAVE_STALLED = (
     f"The world server wrote nothing to its database for {WORLD_SAVE_STALL_SECONDS // 60} minutes "
     "while it was saving, so Yu'lon force-stopped it. Characters may be missing what happened "
@@ -3142,11 +3199,16 @@ WORLD_SAVE_ABANDONED = (
 )
 """The `SaveAbandoned` of a give-up during the save (T384): nothing is killed."""
 
-SAVE_FIRST_ASKED = (
-    "Saving characters: Yu'lon asked the world server to save every character before it is "
-    "stopped."
+SAVE_FIRST_ASKING = (
+    "Saving characters: Yu'lon is asking the world server to save every character before it "
+    "is stopped. This can take a minute."
 )
-"""Said once a world whose own close loses saves was told to save everyone (T410, T411)."""
+"""Said as the save a world whose own close loses saves is asked for BEGINS (T410, T411, T415).
+
+Before the console is typed at, not after: `saveall` and the queue look took 10-15 s live, and
+a line said at their end was replaced in the same second. It stands until the next step's line
+(the queue's count, the save written, or `SAVE_FIRST_NOT_ASKED` when the console did not
+answer)."""
 
 SAVE_FIRST_QUEUED = (
     "The world server has {count} saves to write to its database before it can be stopped "
@@ -3406,10 +3468,12 @@ def _save_everyone_first(
     """
     save = spec.save_first
     assert save is not None
+    say(SAVE_FIRST_ASKING)
     reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
-        say(SAVE_FIRST_ASKED if answered else SAVE_FIRST_NOT_ASKED, warn=not answered)
+        if not answered:
+            say(SAVE_FIRST_NOT_ASKED, warn=True)
         return
     started = _save_clock()
     last_shrunk = started
@@ -3428,11 +3492,11 @@ def _save_everyone_first(
             if length is None:
                 # No queue to read, so nothing proves the console answered or what to
                 # wait for: said by the reply alone, and the stop goes on.
-                say(SAVE_FIRST_ASKED if answered else SAVE_FIRST_NOT_ASKED, warn=not answered)
                 if answered:
                     logger.info(f"{spec.world}'s save queue could not be read; not waited on")
+                else:
+                    say(SAVE_FIRST_NOT_ASKED, warn=True)
                 return
-            say(SAVE_FIRST_ASKED)
             if length > 0:
                 say(SAVE_FIRST_QUEUED.format(count=length))
         if length == 0:
@@ -3539,8 +3603,13 @@ def save_then_stop_the_world(
             raise SaveAbandoned(WORLD_SAVE_ABANDONED)
         state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         if state.missing or (state.status and not state.settled):
-            if saying:
-                say(WORLD_SAVED)
+            # T414: "saved" only for a clean exit; a crash on the way out is said, whether or
+            # not the save was said to have begun.
+            ended, warn = _how_the_world_ended(world, wsl_distro)
+            if saying or (warn and ended != WORLD_SAVE_UNREAD):
+                # Before the first look nothing was claimed, so an exit that cannot be
+                # read claims nothing either; a known crash is said either way.
+                say(ended, warn=warn)
             return
         now = _save_clock()
         if not state.settled:

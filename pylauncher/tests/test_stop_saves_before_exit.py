@@ -85,6 +85,9 @@ class _Docker:
         """Looks at which `docker inspect` does not answer."""
         self.termed_at: float | None = None
         """The clock when the world was signalled."""
+        self.exit_code: str = "0"
+        """What `docker inspect --format {{.State.ExitCode}}` answers once the world exited."""
+        self.log_tail = "Halting process...\n"
 
     def _world_look(self) -> subprocess.CompletedProcess:
         world = self.spec.world
@@ -146,6 +149,13 @@ class _Docker:
             return _done()
         if verb[:1] == ["ps"]:
             return _done("".join(f"{n}\n" for n in sorted(self.running)))
+        if verb[:1] == ["inspect"] and verb[-1] == "{{.State.ExitCode}}":
+            assert timeout is not None, "a look at the world must be bounded"
+            if not self.exit_code:
+                return _done(returncode=1, stderr="Error: No such object")
+            return _done(f"{self.exit_code}\n")
+        if verb[:2] == ["logs", "--tail"]:
+            return _done(self.log_tail)
         if verb[:1] == ["inspect"]:
             if docker.PROJECT_LABEL in verb[-1]:
                 return _done("t384-server\n")
@@ -577,7 +587,7 @@ def test_centurion_saves_everyone_and_waits_for_the_queue_before_the_signal(
     assert fake.events[-2:] == ["world exited by itself", "compose stop (world down)"]
     assert console.looks == 5
     assert said == [
-        docker.SAVE_FIRST_ASKED,
+        docker.SAVE_FIRST_ASKING,
         docker.SAVE_FIRST_QUEUED.format(count=2137),
         docker.SAVE_FIRST_WRITTEN,
         docker.WORLD_SAVING,
@@ -606,7 +616,7 @@ def test_a_queue_already_empty_is_not_waited_on(
     _with_console(monkeypatch, fake, [0])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
-    assert said[:2] == [docker.SAVE_FIRST_ASKED, docker.SAVE_FIRST_WRITTEN]
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_WRITTEN]
 
 
 def test_a_queue_that_stops_shrinking_is_given_up_on_and_the_stop_goes_on_said_plainly(
@@ -666,7 +676,7 @@ def test_a_queue_length_that_cannot_be_read_at_all_is_not_waited_on(
     _with_console(monkeypatch, fake, [None])
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
-    assert said[:2] == [docker.SAVE_FIRST_ASKED, docker.WORLD_SAVING]
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING]
 
 
 def test_a_console_with_no_prompt_and_no_queue_line_is_not_said_to_have_saved(
@@ -678,8 +688,8 @@ def test_a_console_with_no_prompt_and_no_queue_line_is_not_said_to_have_saved(
     console = _with_console(monkeypatch, fake, [None])
     console.prompted = False
     _, said, _ = _stop(fake, tmp_path)
-    assert said[0] == docker.SAVE_FIRST_NOT_ASKED
-    assert docker.SAVE_FIRST_ASKED not in said
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
+    assert docker.SAVE_FIRST_WRITTEN not in said
 
 
 def test_a_queue_line_proves_the_console_answered_even_without_a_prompt(
@@ -690,7 +700,7 @@ def test_a_queue_line_proves_the_console_answered_even_without_a_prompt(
     console.prompted = False
     _, said, _ = _stop(fake, tmp_path)
     assert said[:3] == [
-        docker.SAVE_FIRST_ASKED,
+        docker.SAVE_FIRST_ASKING,
         docker.SAVE_FIRST_QUEUED.format(count=40),
         docker.SAVE_FIRST_WRITTEN,
     ]
@@ -712,7 +722,7 @@ def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
         "world exited by itself",
         "compose stop (world down)",
     ]
-    assert said == [docker.SAVE_FIRST_ASKED, docker.WORLD_SAVING, docker.WORLD_SAVED]
+    assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
 
 
 def test_a_tortoise_console_with_no_prompt_is_said_as_not_asked(
@@ -723,7 +733,7 @@ def test_a_tortoise_console_with_no_prompt_is_said_as_not_asked(
     console = _with_console(monkeypatch, fake)
     console.prompted = False
     _, said, _ = _stop(fake, tmp_path)
-    assert said[0] == docker.SAVE_FIRST_NOT_ASKED
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
     assert docker.SAVE_FIRST_NOT_ASKED in docker.FORCE_STOP_WARNINGS
 
 
@@ -744,8 +754,8 @@ def test_a_console_that_cannot_be_reached_is_said_and_the_stop_goes_on(
     console.refuse = "no pty on this computer"
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events[0] == "SIGTERM"
-    assert said[0] == docker.SAVE_FIRST_NOT_ASKED
-    assert said[1:] == [docker.WORLD_SAVING, docker.WORLD_SAVED]
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
+    assert said[2:] == [docker.WORLD_SAVING, docker.WORLD_SAVED]
 
 
 def test_a_world_that_is_not_running_is_not_asked_to_save(
@@ -843,3 +853,79 @@ def test_the_load_wait_says_whether_the_world_can_hear_the_stop(
     assert docker.wait_for_the_world_to_load(spec, docker.StopControl()) is True
     monkeypatch.setattr(docker, "world_load_steps", lambda *a, **k: iter([]))
     assert docker.wait_for_the_world_to_load(spec, docker.StopControl()) is True
+
+
+# -- T414: "saved every character" only for a world that exited cleanly -----------------------
+
+
+def test_a_world_that_crashes_on_its_way_out_is_not_said_to_have_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live, 2026-10-06 (Tortoise): "Cant begin transaction." and exit 139 after "Halting
+    process...", and the tab said "The world server saved every character and closed."."""
+    from yulon.said import split_details
+
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    fake.exit_code = "139"
+    fake.log_tail = "Halting process...\nCant begin transaction.\n"
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.WORLD_SAVED not in said
+    sentence, details = split_details(said[-1])
+    assert "139" in sentence and "error" in sentence and "characters" in sentence
+    assert "Cant begin transaction." in details
+    assert docker.outlives_the_stop(said[-1])
+
+
+def test_a_crash_before_the_first_look_is_said_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-wotlk", [])
+    fake.exit_code = "134"
+    _, said, _ = _stop(fake, tmp_path)
+    assert len(said) == 1 and "134" in said[0]
+
+
+def test_an_exit_code_that_cannot_be_read_claims_neither(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-wotlk", _rising(10))
+    fake.exit_code = ""
+    _, said, _ = _stop(fake, tmp_path)
+    assert said == [docker.WORLD_SAVING, docker.WORLD_SAVE_UNREAD]
+    assert docker.outlives_the_stop(docker.WORLD_SAVE_UNREAD)
+
+
+def test_a_clean_exit_says_saved_and_does_not_outlive_the_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-wotlk", _rising(10))
+    _, said, _ = _stop(fake, tmp_path)
+    assert said[-1] == docker.WORLD_SAVED
+    assert not docker.outlives_the_stop(docker.WORLD_SAVED)
+
+
+# -- T415: the save-first line is said when the save starts, not after it --------------------
+
+
+def test_the_save_first_line_is_heard_before_the_save_is_typed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live: `saveall` and `server debug` took 10-15 s and the line came only after, replaced in
+    the same second."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [40, 0])
+    heard: list[tuple[str, list[str]]] = []
+    control = docker.StopControl(say=lambda text: heard.append((text, list(fake.events))))
+    docker.save_then_stop_the_world(fake.spec, control)
+    assert heard[0] == (docker.SAVE_FIRST_ASKING, [])
+
+
+def test_a_save_that_could_not_be_asked_takes_back_the_line_said_before_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake)
+    console.refuse = "no pty on this computer"
+    _, said, _ = _stop(fake, tmp_path)
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
