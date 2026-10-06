@@ -2428,3 +2428,23 @@ def test_on_windows_a_stop_whose_thread_cannot_start_ends_the_job_on_its_own_thr
     finally:
         lines.close()
     assert job.events[-1] == "close", job.events
+
+
+def test_on_windows_a_stream_started_in_a_job_still_gets_the_environment_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stream(env=...)` (T376) reaches the child through the job's spawn too.
+
+    Guards the merge of T299's suspended spawn with T376's `env`: the two met
+    in the same `Popen` call. Mutation this catches: `child_env()` without the
+    caller's `env` inside `_spawn`'s lambda.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    env = {**os.environ, "YULON_T299_ENV_PROBE": "given"}
+
+    lines = list(
+        stream(_python_cmd("import os; print(os.environ['YULON_T299_ENV_PROBE'])"), env=env)
+    )
+
+    assert lines == ["given"]
