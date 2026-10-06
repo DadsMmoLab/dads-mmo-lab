@@ -712,7 +712,8 @@ def test_the_confirmation_names_the_phase_its_steps_and_the_stopped_server(tmp_p
         engine.correction_check(folder(tmp_path)), folder(tmp_path)
     )
     assert "hotfix" in text
-    assert "statement 1" in text, "the steps the press streams are not listed"
+    assert "\n    hotfix\n" in text, "the steps the press streams are not listed by name"
+    assert "statement 1" not in text, "a step is named by what it does (T424)"
     assert "STOPS" in text, "the dialog does not say the press stops the world (T159)"
     assert "marker" in text
 

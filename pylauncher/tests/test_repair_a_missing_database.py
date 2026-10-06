@@ -57,7 +57,7 @@ def test_a_rebuild_refuses_a_missing_database_before_it_builds_anything(
                 InstallOptions(server_dir=server_dir)
             )
         )
-    assert database_presence.MISSING in str(refused.value)
+    assert database_presence.sentence_for(presence) in str(refused.value)
     assert "build" not in rec.calls and "recreate" not in rec.calls, rec.calls
 
 

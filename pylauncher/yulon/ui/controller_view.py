@@ -4606,6 +4606,39 @@ about ten minutes, and then not until the database comes up again."""
 _corrections_clock = time.monotonic
 """The clock the waits above are measured on; a test moves its own."""
 
+
+class _AskAgain:
+    """One reading's ask-again schedule (T381, T420): when it is due, and how often it was asked.
+
+    The corrections check, the import probe and the adopt reading each keep one,
+    all on `CORRECTIONS_ASKED_AGAIN_AFTER` and `_corrections_clock`.
+    """
+
+    def __init__(self) -> None:
+        self.due: float | None = None
+        self.count = 0
+
+    def forget(self) -> None:
+        """The database went down or came back: nothing is owed, nothing was asked."""
+        self.due = None
+        self.count = 0
+
+    def arm(self) -> bool:
+        """Arm the next wait after an unreadable answer. False once the waits are spent."""
+        if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
+            return False
+        self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
+        return True
+
+    def is_due(self) -> bool:
+        """True once, when the wait is over; the ask it permits is counted."""
+        if self.due is None or _corrections_clock() < self.due:
+            return False
+        self.due = None
+        self.count += 1
+        return True
+
+
 REPAIR_DATABASE_LABEL = "Repair the database…"
 RESTORE_BACKUP_LABEL = "Restore a backup…"
 REPAIR_DATABASE_CONFIRM = (
@@ -7423,8 +7456,12 @@ class ControllerView(QWidget):
         self._corrections: native.CorrectionCheck | None = None
         # T381: an `unreadable` reading is asked again while the database stays
         # up -- when (on `_corrections_clock`), and how many times it has been.
-        self._corrections_again_at: float | None = None
-        self._corrections_asked_again = 0
+        # T420: the import probe and the adopt reading get the same schedule.
+        # T422: the sentence beside the Repair/Restore offer while it is shown.
+        self._database_sentence = ""
+        self._ask_again_corrections = _AskAgain()
+        self._ask_again_import = _AskAgain()
+        self._ask_again_adopt = _AskAgain()
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
@@ -8987,14 +9024,13 @@ class ControllerView(QWidget):
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
             self._forget_the_corrections_reading()
-            self._corrections_again_at = None
+            self._reset_ask_again()
             return
         if self._import_asked:
-            self._ask_about_the_corrections_again()
+            self._ask_about_the_unanswered_again()
             return
         self._import_asked = True
-        self._corrections_again_at = None
-        self._corrections_asked_again = 0
+        self._reset_ask_again()
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
@@ -9018,25 +9054,46 @@ class ControllerView(QWidget):
                 self._corrections_check_failed,
             )
 
-    def _ask_about_the_corrections_again(self) -> None:
-        """T381: put the corrections question again once its wait is over, the database still up.
+    def _reset_ask_again(self) -> None:
+        for schedule in (
+            self._ask_again_corrections,
+            self._ask_again_import,
+            self._ask_again_adopt,
+        ):
+            schedule.forget()
 
-        Only after a reading nobody could answer (`_corrections_checked()` sets
+    def _ask_about_the_unanswered_again(self) -> None:
+        """T381, T420: put a question again once its wait is over, the database still up.
+
+        Only after a reading nobody could answer (each `..._ready` method sets
         the wait), and never more than `CORRECTIONS_ASKED_AGAIN_AFTER` allows.
         """
-        due = self._corrections_again_at
+        if self._ask_again_import.is_due():
+            self._run(
+                self.services.controller.import_state,
+                self._import_state_ready,
+                self._import_failed,
+            )
+        adopt = self.services.adopt
+        if adopt is not None and self._ask_again_adopt.is_due():
+            self._run(adopt.state, self._adopt_state_ready, self._adopt_state_failed)
         route = self.services.corrections
-        if due is None or route is None or _corrections_clock() < due:
+        if route is not None and self._ask_again_corrections.is_due():
+            self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+
+    def _arm_ask_again(self, schedule: _AskAgain, unreadable: bool, what: str) -> None:
+        """An `unreadable` reading, taken while the database is up, gets a later ask."""
+        if not unreadable or not self._import_asked:
             return
-        self._corrections_again_at = None
-        self._corrections_asked_again += 1
-        self._run(route.check, self._corrections_checked, self._corrections_check_failed)
+        if not schedule.arm():
+            logger.info(f"{self.entry.id}: the {what} question is not asked again")
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
         if not isinstance(result, docker.ImportState):
             return
         self._import_state = result
+        self._arm_ask_again(self._ask_again_import, result.state == "unreadable", "import")
         self._show_repair()
 
     @Slot(object)
@@ -9044,6 +9101,7 @@ class ControllerView(QWidget):
         if not isinstance(result, docker.ImportState):
             return
         self._adopt_state = result
+        self._arm_ask_again(self._ask_again_adopt, result.state == "unreadable", "adopt")
         self._set_adopt_button()
 
     @Slot(object)
@@ -9686,7 +9744,10 @@ class ControllerView(QWidget):
     def _after_the_stop(self, said: str) -> str:
         """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
         forced, self._stop_forced = self._stop_forced, ""
-        return "\n\n".join(part for part in (forced, said) if part)
+        # T422: Repair and Restore stay shown after a Stop, so the sentence that
+        # explains them does too.
+        kept = self._database_sentence
+        return "\n\n".join(part for part in (forced, kept, said) if part)
 
     def _after_the_stop_details(self, why: str) -> str:
         """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
@@ -9704,7 +9765,7 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         if isinstance(exc, DatabaseMissing):
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         raw = str(exc)
         msg = raw
         why = ""
@@ -9814,19 +9875,23 @@ class ControllerView(QWidget):
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
 
-    def _offer_to_repair_the_database(self) -> None:
+    def _offer_to_repair_the_database(self, sentence: str = "") -> None:
         """T377: Repair, and the backups when there are any, beside the refusal that names them.
 
         The refusal's own sentence is the problem line; these are its two ways
         out. A tab with no Repair route offers none, and the backups button is
-        shown only when the backups folder holds a dump to restore.
+        shown only when the backups folder holds a dump to restore. `sentence` is
+        kept for as long as the offer is shown, so a later line that replaces the
+        problem line (a Stop's) carries it (T422).
         """
+        self._database_sentence = sentence
         self.repair_database_button.setVisible(self.services.repair_database is not None)
         self.repair_database_button.setEnabled(True)
         self.restore_backup_button.setVisible(self._has_backups())
 
     def _withdraw_the_database_offer(self) -> None:
         """A Start that worked, or a new press, takes the T377 offer down."""
+        self._database_sentence = ""
         self.repair_database_button.setVisible(False)
         self.restore_backup_button.setVisible(False)
 
@@ -17276,19 +17341,10 @@ class ControllerView(QWidget):
         self._refresh_corrections_banner()
 
     def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
-        """T381: an `unreadable` reading, taken while the database is up, gets a later ask.
-
-        Asked on the poll once `CORRECTIONS_ASKED_AGAIN_AFTER`'s next wait is over
-        (`_ask_about_the_corrections_again()`), never once they are spent. Any
-        other answer is final until the database goes down and comes back.
-        """
-        asked = self._corrections_asked_again
-        if result.state != "unreadable" or not self._import_asked:
-            return
-        if asked >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
-            logger.info(f"{self.entry.id}: the corrections question is not asked again")
-            return
-        self._corrections_again_at = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[asked]
+        """T381: an `unreadable` corrections reading is asked again (`_arm_ask_again`)."""
+        self._arm_ask_again(
+            self._ask_again_corrections, result.state == "unreadable", "corrections"
+        )
 
     @Slot(object)
     def _corrections_check_failed(self, exc: object) -> None:
@@ -17604,12 +17660,13 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
-            if database_presence.MISSING in message:
+            sentence = database_presence.sentence_in(message)
+            if sentence is not None:
                 # T377: a Rebuild refused because Docker no longer has the
                 # database. Its sentence is in the panel; its ways out go on
                 # the Server tab, where a refused Start puts them.
-                self.problem_label.setText(database_presence.MISSING)
-                self._offer_to_repair_the_database()
+                self.problem_label.setText(sentence)
+                self._offer_to_repair_the_database(sentence)
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
@@ -18521,7 +18578,7 @@ class ControllerView(QWidget):
         if isinstance(exc, DatabaseMissing):
             # T377: refused before the stop; its ways out are on the Server tab.
             self.problem_label.setText(str(exc))
-            self._offer_to_repair_the_database()
+            self._offer_to_repair_the_database(str(exc))
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
