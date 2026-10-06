@@ -733,7 +733,7 @@ def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(
 
 
 def test_an_override_that_reads_differently_is_not_called_off(box: _Box) -> None:
-    """A file written by an older render is not 'off': Enable would be refused on a running world."""
+    """A file from an older render is not 'off': Enable is refused on a running world."""
     setup = box.view.services.channel_setup
     assert setup is not None
     (setup.server_dir / composegen.OVERRIDE_FILE).write_text(
