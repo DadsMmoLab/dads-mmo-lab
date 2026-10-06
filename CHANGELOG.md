@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
+- **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
+- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
