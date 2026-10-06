@@ -492,6 +492,21 @@ def _the_users_own_log_is_out_of_reach(
 
 
 @pytest.fixture(autouse=True)
+def _the_support_file_does_not_look_in_the_real_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sources_for_app()` looks for failed installs under an empty folder, not `~` (T351).
+
+    Without this, any test that builds `Sources` without `home=` reads the
+    developer's own `~/yulon-*` folders and passes or fails with their machine.
+    """
+    from yulon.support import sources
+
+    empty = tmp_path_factory.mktemp("no-home")
+    monkeypatch.setattr(sources, "default_home", lambda: empty)
+
+
+@pytest.fixture(autouse=True)
 def _this_computer_is_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every render answers the same on any box: this computer's time zone is UTC (T171).
 

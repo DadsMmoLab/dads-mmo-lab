@@ -155,3 +155,13 @@ def src_known(sources: Sources) -> frozenset[str]:
     from yulon.support.sources import gather_known
 
     return gather_known(sources).values
+
+
+def test_a_test_that_names_no_home_never_reads_the_real_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conftest default: a failed install under `Path.home()` is invisible to the suite."""
+    _failed_folder(tmp_path)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert sources_for_app([], CATALOG).installs == ()

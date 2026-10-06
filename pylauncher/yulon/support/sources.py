@@ -120,6 +120,11 @@ class Viewable:
     path: Path
 
 
+def default_home() -> Path:
+    """Where failed installs are looked for when no `home` is given. A seam: tests point it away."""
+    return Path.home()
+
+
 def _failed_installs(
     remembered: Sequence[KnownInstall], catalog: Catalog, home: Path
 ) -> list[InstallFacts]:
@@ -190,7 +195,7 @@ def sources_for_app(
                 entry=entry,
             )
         )
-    facts += _failed_installs(installs, catalog, home if home is not None else Path.home())
+    facts += _failed_installs(installs, catalog, home if home is not None else default_home())
     public = frozenset(
         value
         for entry in catalog.games
