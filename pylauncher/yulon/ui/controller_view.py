@@ -18535,6 +18535,16 @@ class ControllerView(QWidget):
             return {}
         return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
 
+    def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
+        """Every key any catalog manifest declares for this file, first declaration winning."""
+        keys: dict[str, ConfKey] = {}
+        for manifest in self._manifests.values():
+            for conf in manifest.conf:
+                if conf.file == file:
+                    for key in conf.keys:
+                        keys.setdefault(key.key, key)
+        return keys
+
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
@@ -18785,6 +18795,10 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
+        if said is None:
+            # T371: an `int` key typed in the raw box is held to the card's own
+            # rule, as a warning on the same confirm and not a refusal.
+            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
         if said is not None:
             answer = QMessageBox.question(
                 self,

@@ -31,6 +31,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
+- The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
+- A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".
 - **Save logs for support…** also reads the servers of an install that failed, even though it was never added to the list.
 - **Save logs for support…** keeps what database and Tortoise login containers wrote as errors, not only their normal output.
 - The main window fits a Steam Deck or a small screen instead of hanging off its edges, and scrolls when it is cramped.
