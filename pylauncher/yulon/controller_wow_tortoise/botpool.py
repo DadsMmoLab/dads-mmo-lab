@@ -324,7 +324,7 @@ def restart_world(controller: Controller) -> None:
         StartRefused: no start may run here; nothing was stopped.
         StopFailed: the stop raised; nothing was started.
     """
-    controller.refuse_start()
+    controller.refuse_before_a_stop()  # T377: the database too, before the stop
     # One lifecycle command from the stop to the start (T216 review round 3), so a
     # restore cannot take its hold in between and leave the world stopped. A
     # server already held refuses before the stop: nothing was stopped or
