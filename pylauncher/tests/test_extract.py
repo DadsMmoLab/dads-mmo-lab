@@ -3771,3 +3771,124 @@ def test_a_lowercase_required_file_still_identifies_the_client(tmp_path: Path) -
     assert expected.client_facts_complete is True
     assert expected.required_file_size == 231
     assert expected.required_file_mtime == int((folder / "Data" / "expansion.mpq").stat().st_mtime)
+
+
+# -- T263: a progress bar's residue never reaches the run log or the last words --------
+
+VMAP4_TAIL = (
+    # As vmap4extractor wrote them on yulon-ubuntu2 (2026-10-05): a bar drawn with no
+    # newline, so its `#` runs glue onto the next line or stand alone.
+    "Processing Map 13",
+    "[################################################################]",
+    "[###############################Extracting WORLD\\WMO\\PVP\\DWARFSTRONGHOLD.WMO",
+    "#Extracting WORLD\\WMO\\AZEROTH\\PVP_BRIDGE01.WMO",
+    "Extracting WORLD\\WMO\\KHAZMODAN\\DWARVEN_PVPSNOWTOWER.WMO",
+    "################################]",
+    "Extracting WORLD\\WMO\\KALIMDOR\\1000NEEDLESBRIDGE.WMO",
+    "#",
+)
+VMAP4_SAID = [
+    "Processing Map 13",
+    "Extracting WORLD\\WMO\\PVP\\DWARFSTRONGHOLD.WMO",
+    "Extracting WORLD\\WMO\\AZEROTH\\PVP_BRIDGE01.WMO",
+    "Extracting WORLD\\WMO\\KHAZMODAN\\DWARVEN_PVPSNOWTOWER.WMO",
+    "Extracting WORLD\\WMO\\KALIMDOR\\1000NEEDLESBRIDGE.WMO",
+]
+
+
+class _Talks(Runner):
+    """`Runner`, except that `program` writes `lines` to the sink and its tail, then exits 137."""
+
+    def __init__(self, program: str, lines: Sequence[str]) -> None:
+        super().__init__(FULL)
+        self.program = program
+        self.lines = tuple(lines)
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        if tool_program(spec) != self.program:
+            return super().__call__(spec, sink=sink, cancel=cancel)
+        self.specs.append(spec)
+        for line in self.lines:
+            sink(line)
+        return docker.AttachedRun(137, self.lines)
+
+
+def test_a_tools_progress_bar_is_kept_out_of_the_run_log_and_its_last_words(
+    tmp_path: Path,
+) -> None:
+    """T263: a lone `#` sat between the tool's last words and the put-back sentence."""
+    logged: list[str] = []
+    runner = _Talks("/opt/bin/vmap_extractor", VMAP4_TAIL)
+
+    with pytest.raises(InstallerError) as failed:
+        list(
+            extract.run_plan(
+                PLAN,
+                image_ref="yulon.local/x-server:1",
+                client_dir=client(tmp_path),
+                data_dir=tmp_path / "server" / "data",
+                run_container=runner,
+                user_args=("--user", "1000:1000"),
+                sink=logged.append,
+                cancel=None,
+                required_file=REQUIRED,
+                client_build=8606,
+                selinux_enforcing=lambda: None,
+            )
+        )
+
+    assert logged[logged.index("Processing Map 13") :] == VMAP4_SAID
+    assert str(failed.value).endswith("Its last words were: " + " / ".join(VMAP4_SAID))
+
+
+@pytest.mark.parametrize(
+    ("line", "said"),
+    [
+        ("[####]", None),
+        ("#", None),
+        ("###]", None),
+        ("[", None),
+        ("[##Extracting a.wmo", "Extracting a.wmo"),
+        ("#Extracting a.wmo", "Extracting a.wmo"),
+        ("Extracting 40%\rExtracting 80%\r", "Extracting 80%"),
+        ("\r[#####   ]\rdone", "done"),
+        ("", ""),
+        ("# not a bar: a sentence after a hash", "# not a bar: a sentence after a hash"),
+        ("Extracting a.wmo", "Extracting a.wmo"),
+        ("ERROR: Can't open a#b.wmo", "ERROR: Can't open a#b.wmo"),
+        # Cold review of T263: a real leading `#` is kept; only bar residue goes.
+        ("#1 error", "#1 error"),
+        ("#define X", "#define X"),
+        ("[#1] x", "[#1] x"),
+        ("##Extracting a.wmo", "Extracting a.wmo"),
+        ("[#Extracting a.wmo", "Extracting a.wmo"),
+        ("####1 tile", "1 tile"),
+    ],
+)
+def test_what_is_progress_residue_and_what_is_said(line: str, said: str | None) -> None:
+    assert extract.without_progress(line) == said
+
+
+def test_the_movement_map_generator_s_progress_bar_is_kept_out_too(tmp_path: Path) -> None:
+    """T263: `run_mmaps()` streams through the same filter as the extraction tools."""
+    run(PLAN, Runner(FULL), tmp_path)
+    logged: list[str] = []
+    runner = _Talks("/opt/bin/MoveMapGen", VMAP4_TAIL)
+
+    with pytest.raises(InstallerError) as failed:
+        list(
+            extract.run_mmaps(
+                MMAPS,
+                image_ref="yulon.local/x-server:1",
+                data_dir=tmp_path / "server" / "data",
+                run_container=runner,
+                user_args=("--user", "1000:1000"),
+                sink=logged.append,
+                cancel=None,
+            )
+        )
+
+    assert logged == VMAP4_SAID
+    assert str(failed.value).endswith("Its last words were: " + " / ".join(VMAP4_SAID))

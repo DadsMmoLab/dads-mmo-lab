@@ -19,12 +19,13 @@ level store has not been measured refuses rather than guessing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from yulon import commands, passwordcheck
-from yulon.actions import Outcome
+from yulon.actions import Outcome, outcome_of
 from yulon.actions import send as _send
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
@@ -173,6 +174,7 @@ def set_password(
     account: str,
     password: str,
     app_account: str,
+    digits_are_ids: bool,
     password_is_in_force: Callable[[str, str], bool | None] | None = None,
 ) -> Outcome:
     """`account set password <user> <pass> <pass>`, through the server itself.
@@ -225,7 +227,7 @@ def set_password(
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_password(account, password)
+        line = commands.account_set_password(account, password, digits_are_ids=digits_are_ids)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     outcome = _send(channel, line)
@@ -277,7 +279,14 @@ def _in_force(
 
 
 def set_gm_level(
-    channel: object, *, account: str, level: int, app_account: str, realms: bool, highest: int
+    channel: object,
+    *,
+    account: str,
+    level: int,
+    app_account: str,
+    realms: bool,
+    highest: int,
+    digits_are_ids: bool,
 ) -> Outcome:
     """`account set gmlevel <user> <n>`, with the realm argument where there are realms.
 
@@ -290,7 +299,9 @@ def set_gm_level(
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_gm_level(account, level, realms=realms, highest=highest)
+        line = commands.account_set_gm_level(
+            account, level, realms=realms, highest=highest, digits_are_ids=digits_are_ids
+        )
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     return _send(channel, line)
@@ -323,6 +334,255 @@ def _not_our_own(account: str, app_account: str, what: str) -> Outcome | None:
     )
 
 
+# -- deleting one (T301) ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeletePlan:
+    """What deleting one account would remove, or why it will not be deleted.
+
+    `characters` is what the person is asked about, read from the characters
+    database: the server deletes them with the account
+    (`AccountMgr::DeleteAccount` on every tree), so a question that named only
+    the account would be asking about less than the press does.
+    """
+
+    account: str
+    characters: tuple[str, ...] = ()
+    problem: str = ""
+    account_id: int = 0
+    """The row the person was asked about. The name and the characters are not
+    enough to know it is still that account: one deleted elsewhere and made
+    again under the same name can have the same characters, or none (Codex,
+    T301's two reviews)."""
+    character_ids: tuple[int, ...] = ()
+    """The characters' own rows (`guid`), beside `characters`, for the same
+    reason: a character deleted and made again under its old name is not the
+    one the person was asked about (Codex, T301's second normal review)."""
+
+
+def deletion_plan(
+    sql: SqlReader, entry: CatalogEntry, marker: Marker, *, account: str, app_account: str
+) -> DeletePlan:
+    """The account's characters, or the rule that keeps it.
+
+    The rules, in the order they are asked: a name the server would refuse;
+    this app's own command-channel accounts; the auction-house account; an
+    account that is not there; the bot module's accounts (by registry where
+    there is one, and by prefix); and an account with a character in the game.
+    The last is a refusal rather than a log-out (lead decision, T301): taking
+    somebody out of the game is a second thing the press would do without
+    saying so.
+
+    "In the game" is the characters table's `online` column: a character in
+    the world. Somebody logged in and sitting at the character list has no
+    character online and is not refused. The server's delete kicks only a
+    player in the world (AzerothCore `AccountMgr.cpp:131-137`); a session at
+    the character list stays where it is, with its characters gone, and the
+    next login fails.
+
+    An all-digit name is refused on the trees that read digits as an account
+    id (`commands.digits_read_as_an_id()`), before anything is read.
+    """
+    refusal = _not_ours_to_delete(account, app_account, digits_are_ids=digits_are_ids(entry))
+    if refusal:
+        return DeletePlan(account, problem=refusal)
+    ops = entry.observability
+    if ops is None:
+        return DeletePlan(
+            account,
+            problem=(
+                f"Yu'lon cannot yet tell whose characters are whose on {entry.name}, so it "
+                "does not delete accounts there"
+            ),
+        )
+    schemas = entry.schema_map()
+    bots = _bot_accounts_clause(entry, marker)
+    try:
+        raw = sql.query(
+            "auth",
+            f"SELECT a.id, CASE WHEN ({bots}) THEN 1 ELSE 0 END FROM {schemas['auth']}.account a "
+            f"WHERE a.username = {_text_literal(account)};",
+        )
+    except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+        logger.warning(f"could not read the account {account}: {exc}")
+        return DeletePlan(account, problem=f"Could not read the account {account}: {exc}")
+    rows = [line.split("\t") for line in raw.splitlines() if line.strip()]
+    if not rows:
+        return DeletePlan(
+            account,
+            problem=(
+                f"There is no account named {account} on this server now. "
+                "Press Refresh the list."
+            ),
+        )
+    if len(rows) != 1 or len(rows[0]) != 2 or not rows[0][0].strip().isdigit():
+        return DeletePlan(account, problem=f"the account {account} came back as {raw.strip()!r}")
+    if rows[0][1].strip() != "0":
+        return DeletePlan(
+            account,
+            problem=(
+                f"{account} belongs to this server's bots: the bot module made it and runs it, "
+                "so Yu'lon does not delete it."
+            ),
+        )
+    account_id = int(rows[0][0])
+    table = ops.characters
+    try:
+        raw = sql.query(
+            "characters",
+            f"SELECT guid, name, {table.online} FROM {schemas['characters']}.{table.table} "
+            f"WHERE {table.account} = {account_id} ORDER BY name, guid;",
+        )
+    except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+        logger.warning(f"could not read {account}'s characters: {exc}")
+        return DeletePlan(
+            account,
+            problem=(
+                f"Could not read {account}'s characters, so Yu'lon cannot say what deleting "
+                f"it would remove: {exc}"
+            ),
+        )
+    ids: list[int] = []
+    names: list[str] = []
+    online: list[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0].strip().isdigit() or not fields[2].strip().isdigit():
+            return DeletePlan(
+                account, problem=f"one of {account}'s characters came back as {line.strip()!r}"
+            )
+        ids.append(int(fields[0]))
+        names.append(fields[1].strip())
+        if fields[2].strip() != "0":
+            online.append(fields[1].strip())
+    if online:
+        who = _names(online)
+        verb = "is" if len(online) == 1 else "are"
+        whom = online[0] if len(online) == 1 else "them"
+        return DeletePlan(
+            account,
+            characters=tuple(names),
+            account_id=account_id,
+            problem=(
+                f"{who} {verb} in the game right now on {account}. Log {whom} out first, then "
+                "delete the account."
+            ),
+        )
+    return DeletePlan(
+        account, characters=tuple(names), account_id=account_id, character_ids=tuple(ids)
+    )
+
+
+def delete_account(
+    channel: object,
+    *,
+    account: str,
+    app_account: str,
+    characters: tuple[str, ...],
+    digits_are_ids: bool,
+) -> Outcome:
+    """`account delete <user>` through the server, and its answer read truthfully.
+
+    A result -- even an empty one, which is a command that ran and printed
+    nothing (T226) -- is done. A fault is the server refusing, said in its own
+    words. Anything else is `outcome_of()`'s, which keeps "could not ask" and
+    "may have run" apart from both.
+
+    The own-account and auction-house rules are asked here too, where the line
+    is built; the rules that need a read are `InstallAccounts.delete_account`'s,
+    which asks them again right before it calls this.
+    """
+    refusal = _not_ours_to_delete(account, app_account, digits_are_ids=digits_are_ids)
+    if refusal:
+        return Outcome(False, problem=refusal)
+    try:
+        line = commands.account_delete(account, digits_are_ids=digits_are_ids)
+    except commands.CommandError as exc:
+        return Outcome(False, problem=str(exc))
+    answer = channel.send(line)  # type: ignore[attr-defined]
+    outcome = getattr(answer, "outcome", "")
+    if outcome == "yes":
+        logger.info(f"the server deleted the account {account}")
+        if not characters:
+            return Outcome(True, text=f"Deleted the account {account}. It had no characters.")
+        if len(characters) == 1:
+            return Outcome(
+                True, text=f"Deleted the account {account} and its character {characters[0]}."
+            )
+        return Outcome(
+            True,
+            text=(
+                f"Deleted the account {account} and its {len(characters)} characters, "
+                f"{_names(characters)}."
+            ),
+        )
+    if outcome == "no":
+        said = str(getattr(answer, "text", "")).strip()
+        if not said:
+            return Outcome(
+                False, problem=f"The server did not delete {account}, and did not say why."
+            )
+        return Outcome(False, problem=f"The server did not delete {account}: {said}")
+    return outcome_of(answer)
+
+
+def digits_are_ids(entry: CatalogEntry) -> bool:
+    """Does this tree read an all-digit account argument as an account id?
+
+    True unless the tree is one measured to look names up by name alone, so a
+    tree added later starts on the safe side (T301's cold review). It holds for
+    `account delete` and `account set gmlevel`; `account set password` has its
+    own answer, `password_digits_are_ids()`.
+    """
+    return entry.id not in _NAMES_ARE_NAMES
+
+
+def password_digits_are_ids(entry: CatalogEntry) -> bool:
+    """`digits_are_ids()` for `account set password`, which the tortoise fork reads by name.
+
+    mangos-classic and mangos-tbc resolve it with `ExtractAccountId`
+    (`Level3.cpp:1097`, `:1136`); tortoise-wow 187af788 calls
+    `sAccountMgr.GetId(szAccountName)` (`src/game/Commands/Commands.cpp:338`) (T340).
+    """
+    return entry.id not in _NAMES_ARE_NAMES | {"wow-tortoise"}
+
+
+_NAMES_ARE_NAMES = commands.NAME_LOOKUP_TREES
+
+
+def _not_ours_to_delete(account: str, app_account: str, *, digits_are_ids: bool) -> str:
+    """The rules that need no read: the name, the channel accounts, the auction house.
+
+    The auction-house account is refused by that exact name, `AHBOT`, the one
+    its manifest asks for; one made under another name is an ordinary account.
+    """
+    if not commands.valid_account_name(account):
+        return f"{account!r} is not a name this server would accept"
+    if digits_are_ids:
+        refusal = commands.digits_read_as_an_id(account)
+        if refusal:
+            return refusal
+    own = _not_our_own(account, app_account, "be deleted")
+    if own is not None:
+        return own.problem
+    if account.strip().upper() == AHBOT_ACCOUNT:
+        return (
+            f"{AHBOT_ACCOUNT} is the account the auction house runs as. Deleting it stops the "
+            "auction house, so Yu'lon does not delete it."
+        )
+    return ""
+
+
+def _names(names: list[str] | tuple[str, ...]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _text_literal(text: str) -> str:
     """A hex blob, as every other statement in this project writes a string."""
     return "_utf8mb4 X'" + text.encode("utf-8").hex().upper() + "'"
@@ -351,12 +611,14 @@ class InstallAccounts:
         sql: SqlReader,
         channel_for_saved: Callable[[], object | None],
         app_account: str,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
         self._sql = sql
         self._channel_for_saved = channel_for_saved
         self.app_account = app_account
+        self._sleep = sleep
 
     @property
     def sql(self) -> SqlReader:
@@ -379,6 +641,7 @@ class InstallAccounts:
             account=account,
             password=password,
             app_account=self.app_account,
+            digits_are_ids=password_digits_are_ids(self.entry),
             password_is_in_force=self._password_is_in_force,
         )
 
@@ -437,10 +700,121 @@ class InstallAccounts:
             app_account=self.app_account,
             realms=level_block is not None and level_block.table is not None,
             highest=level_block.max_level if level_block is not None else 3,
+            digits_are_ids=digits_are_ids(self.entry),
         )
+
+    def delete_plan(self, account: str) -> DeletePlan:
+        """What deleting `account` would remove, read now, or why it will not be deleted."""
+        refusal = _not_ours_to_delete(
+            account, self.app_account, digits_are_ids=digits_are_ids(self.entry)
+        )
+        if refusal:
+            return DeletePlan(account, problem=refusal)
+        if self._channel() is None:
+            # Said before the question rather than after it: a person who has
+            # just said yes should not then be told nothing could be asked.
+            return DeletePlan(account, problem=_NO_CHANNEL)
+        answer = resolve_marker(self.entry, self.server_dir)
+        if answer.marker is None:
+            return DeletePlan(
+                account, problem=answer.problem or "this install's bot marker could not be read"
+            )
+        return deletion_plan(
+            self._sql, self.entry, answer.marker, account=account, app_account=self.app_account
+        )
+
+    def delete_account(self, confirmed: DeletePlan) -> Outcome:
+        """Delete the account the person confirmed, if it is still that account.
+
+        Every rule is asked again here, right before the line is sent: the
+        question may have been open for a minute, and somebody can log in, or
+        make a character, in that minute. `confirmed` is the plan they were
+        shown; if the row is another one now, or has other characters, nothing
+        is deleted.
+
+        What is left is the moment between this read and the server running
+        the command, and nothing on any of the five trees closes it: `account
+        delete` takes a name, checks nothing of ours, and kicks whoever is on
+        the account (`AccountMgr::DeleteAccount`). So a login inside that
+        moment is kicked and its characters -- the ones the person was asked
+        about -- are deleted with the account.
+        """
+        account = confirmed.account
+        plan = self.delete_plan(account)
+        if plan.problem:
+            return Outcome(False, problem=plan.problem)
+        channel = self._channel()
+        if channel is None:
+            return Outcome(False, problem=_NO_CHANNEL)
+        if plan.account_id != confirmed.account_id:
+            return Outcome(
+                False,
+                problem=(
+                    f"{account} is not the account you were asked about: it was deleted and made "
+                    "again while you were being asked. Nothing was deleted."
+                ),
+            )
+        if (plan.characters, plan.character_ids) != (
+            tuple(confirmed.characters),
+            tuple(confirmed.character_ids),
+        ):
+            now = _names(plan.characters) if plan.characters else "none"
+            return Outcome(
+                False,
+                problem=(
+                    f"{account}'s characters changed while you were being asked; it now has "
+                    f"{now}. Nothing was deleted. Press delete again to be asked about these."
+                ),
+            )
+        outcome = delete_account(
+            channel,
+            account=account,
+            app_account=self.app_account,
+            characters=plan.characters,
+            digits_are_ids=digits_are_ids(self.entry),
+        )
+        if not outcome.done or self._gone(plan.account_id):
+            return outcome
+        logger.info(f"the server said {account} was deleted and its row is still there")
+        return Outcome(
+            True,
+            text=(
+                f"{outcome.text} The server is still removing it, so it may stay in the list "
+                "for a moment; Refresh the list will show it gone."
+            ),
+        )
+
+    def _gone(self, account_id: int) -> bool:
+        """Wait, about ten seconds at most, for a deleted account's row to go.
+
+        AzerothCore answers "deleted" before the row is: `AccountMgr::DeleteAccount`
+        queues its deletes on the database's asynchronous queue
+        (`AccountMgr.cpp:139,178`), so a list read at once still showed the account
+        until Refresh (T301's live test on yulon-ubuntu, 2026-10-05). Runs on the
+        tab's worker thread, never the GUI one. A read that fails ends the wait:
+        the server's own answer stands, and nothing more is claimed.
+        """
+        auth = self.entry.schema_map()["auth"]
+        statement = f"SELECT COUNT(*) FROM {auth}.account WHERE id = {account_id};"
+        for step in range(_GONE_READS):
+            if step:
+                self._sleep(_GONE_STEP_SECONDS)
+            try:
+                left = self._sql.query("auth", statement).strip()
+            except Exception as exc:  # noqa: BLE001 - a failed read only ends the wait
+                logger.info(f"could not read whether account {account_id} is gone: {exc}")
+                return True
+            if left == "0":
+                return True
+        return False
 
     def _channel(self) -> object | None:
         return self._channel_for_saved()
+
+
+_GONE_STEP_SECONDS = 0.5
+_GONE_READS = 21
+"""Twenty-one reads half a second apart: about ten seconds, the bound the live test asked for."""
 
 
 _NO_CHANNEL = (
