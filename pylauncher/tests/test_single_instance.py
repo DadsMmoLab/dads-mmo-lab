@@ -52,6 +52,10 @@ def say_instead_of_a_box(_parent, title, text, *a, **k):
 
 QMessageBox.warning = say_instead_of_a_box
 QMessageBox.information = say_instead_of_a_box
+from yulon.ui import message_box
+
+message_box.show_warning = say_instead_of_a_box
+message_box.show_information = say_instead_of_a_box
 
 
 class Window(QMainWindow):

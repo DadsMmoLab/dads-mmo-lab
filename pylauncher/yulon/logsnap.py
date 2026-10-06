@@ -78,6 +78,10 @@ class Snapshot:
     problem: str = ""
 
 
+SNAPSHOT_READ_TIMEOUT = 30.0
+"""Seconds the stop-time read of the world container may take."""
+
+
 def capture(
     spec: docker.ContainerSpec,
     server_dir: Path,
@@ -102,7 +106,10 @@ def capture(
         return Snapshot(problem=f"Docker did not say which container is {spec.world}: {said}")
     if not container:
         return Snapshot(problem=f"could not find {spec.world} in the compose project here")
-    raw = docker.log_tail(container, wsl_distro=wsl_distro)
+    # Both streams (T350): a container without a tty writes its errors to stderr.
+    raw = docker.last_lines(
+        container, docker.LOG_TAIL_LINES, wsl_distro=wsl_distro, timeout=SNAPSHOT_READ_TIMEOUT
+    )
     if raw is None:
         # The clause this box was ticked on: "a snapshot that fails or hangs is
         # reported and the stop still happens". The fail arm was gated live; the

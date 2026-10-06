@@ -37,6 +37,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
 - A rebuild whose rollback did not come up says its containers are still running and to press Stop.
 - A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
+- The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
+- The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
+- A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".
+- **Save logs for support…** also reads the servers of an install that failed, even though it was never added to the list.
+- **Save logs for support…** keeps what database and Tortoise login containers wrote as errors, not only their normal output.
+- The main window fits a Steam Deck or a small screen instead of hanging off its edges, and scrolls when it is cramped.
+- Long error and warning messages scroll inside their box, so its OK button always stays on screen.
+- After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.

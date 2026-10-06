@@ -163,7 +163,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox, ask_yes_no
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -3051,6 +3051,8 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
         # exists, because silently changing an owner's password is worse than
@@ -3413,6 +3415,8 @@ def _for_tbc(
         # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
         # implementation here would write a row that looks right and can never
         # log in.
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3559,6 +3563,8 @@ def _for_vanilla(
         create=lambda name, pw, level: vanilla_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3731,6 +3737,8 @@ def _for_centurion(
         create=lambda name, pw, level: centurion_accounts.create_account(
             entry, sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3964,6 +3972,8 @@ def _for_tortoise(
         create=lambda name, pw, level: tortoise_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -4268,6 +4278,9 @@ def _channel_sentence(state: object) -> str:
         when = f" at {state.at}" if state.at else " (before this app recorded when)"
         return f"Command channel: verified as {state.account}{when}."
     if isinstance(state, channel_setup.Refused):
+        # A lost password (T386) is nobody refusing anything: its reason is the line.
+        if state.plain:
+            return f"Command channel: {state.reason}"
         return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
         return (
@@ -8597,7 +8610,7 @@ class ControllerView(QWidget):
     ) -> bool:
         """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
         if self._upkeep_held():
-            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            show_information(self, "Something else is running", WORLD_UPKEEP_BUSY)
             return False
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
@@ -8781,6 +8794,10 @@ class ControllerView(QWidget):
         self._import_asked = False
         self.refresh_status()
         self.check_server_files()
+        # T386: and the channel. A check proves an account that waits to be
+        # proved, re-asks a saved credential, and finds this app's own account
+        # on a server this machine keeps no password for; it creates nothing.
+        self._check_the_channel()
         # T124: the day's cache answers this, so pressing Refresh repeatedly
         # costs no network.
         self._refresh_upstream_news()
@@ -9471,6 +9488,10 @@ class ControllerView(QWidget):
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        # T386: a Start's one ask lands while the world loads, as an install's
+        # does, so it gets the same second ask; `_resettle_if_pending` makes it
+        # only while the channel still waits to be proved.
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
         if self.play_label.text() == PLAY_START_FAILED:
             # A later Start (or "Stop the other server and start this one") worked.
             self._say_play("")
@@ -9506,9 +9527,11 @@ class ControllerView(QWidget):
 
         `check()` and not `settle()`: settle creates an account on an install
         that has none, and opening a tab is not permission to write a row into
-        the user's auth database. `check()` asks nothing at all unless there is
-        a saved credential or an account an earlier run created and did not
-        prove (T138) to ask about, and it never creates one.
+        the user's auth database. `check()` asks the server about a saved
+        credential or an account an earlier run created and did not prove
+        (T138); with neither, it only reads whether this app's own account is
+        in the auth database, to offer Repair for a lost password (T386). It
+        never creates one.
         """
         setup = self.services.channel_setup
         if setup is None:
@@ -9848,7 +9871,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -10386,7 +10409,7 @@ class ControllerView(QWidget):
     def _client_dir_refused(self, message: str) -> None:
         """One place both refusal paths in `change_client_dir()` report through."""
         self.action_failed.emit(message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
 
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
@@ -10404,7 +10427,7 @@ class ControllerView(QWidget):
         """
         if not self._busy and not self._play_client_running:
             return False
-        QMessageBox.information(
+        show_information(
             self,
             "Something else is running",
             "This server is busy with another action — wait for it to finish on the "
@@ -10675,7 +10698,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self._play_parent(), self.entry.name, message)
+        show_warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -10705,7 +10728,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
+        show_information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -10713,7 +10736,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -10789,7 +10812,7 @@ class ControllerView(QWidget):
             return
         original = self.services.client_dir
         if original is None:
-            QMessageBox.information(
+            show_information(
                 self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
@@ -11081,7 +11104,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
+        show_information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -11157,7 +11180,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
+        show_information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -11915,7 +11938,7 @@ class ControllerView(QWidget):
             said += " " + left_out_sentence(compared.left_out)
         if compared.flags_lost:  # T198: on the label and in front of the player
             said += " " + compared.flags_lost
-            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
+            show_warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -13623,7 +13646,7 @@ class ControllerView(QWidget):
             return False
         refusal = self._bot_rebuild_refusal()
         if refusal is not None:
-            QMessageBox.information(self, "Something else is running", refusal)
+            show_information(self, "Something else is running", refusal)
             return False
         choice = ask_backup_choice(
             self,
@@ -13685,7 +13708,7 @@ class ControllerView(QWidget):
         log = self.bot_rebuild_log
         if log is None or not log.running:
             return False
-        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        show_information(self, "Something else is running", BOT_REBUILD_RUNNING)
         self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
         return True
 
@@ -13727,7 +13750,7 @@ class ControllerView(QWidget):
 
     def _say_restart_owed(self) -> None:
         """The owed restart could not be made: never dropped silently."""
-        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        show_information(self, "Restart the server", RESTART_OWED_LEFT)
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
@@ -14439,7 +14462,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -14494,7 +14517,7 @@ class ControllerView(QWidget):
         if seam is None or log is None:
             return False
         if log.running or self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action. Wait for it to finish, then press "
@@ -16413,7 +16436,7 @@ class ControllerView(QWidget):
         )
         if self.services.set_client_dir is None:
             # No write seam, so no button to offer: say it, and stop.
-            QMessageBox.information(
+            show_information(
                 self, f"{manifest.name} needs your game client", client_notice(manifest)
             )
             return True
@@ -16793,9 +16816,7 @@ class ControllerView(QWidget):
         if source is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
-                self, "Already rebuilding", "This server is already being rebuilt."
-            )
+            show_information(self, "Already rebuilding", "This server is already being rebuilt.")
             return False
         if self._busy:
             # A rebuild replaces the very containers the Server tab's actions
@@ -16804,7 +16825,7 @@ class ControllerView(QWidget):
             # Refused rather than queued: the honest outcome of two actions
             # wanting the same containers is that one of them waits, and the
             # user is the one who should choose which.
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -16820,7 +16841,7 @@ class ControllerView(QWidget):
         refused = self.services.rebuild_refusal() if self.services.rebuild_refusal else None
         if refused is not None:
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
-            QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
+            show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
         if not ask_yes_no(
             self,
@@ -16971,7 +16992,7 @@ class ControllerView(QWidget):
         watching succeed.
         """
         if self._backup_before_update:
-            QMessageBox.information(
+            show_information(
                 self,
                 "A backup is running",
                 "This server is being backed up before an update. Wait for the backup to "
@@ -16979,14 +17000,14 @@ class ControllerView(QWidget):
             )
             return True
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return True
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17126,7 +17147,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
-        QMessageBox.warning(self, f"{self.entry.name}", message)
+        show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
 
     def _start_update_to_latest(self) -> bool:
@@ -17221,14 +17242,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17240,7 +17261,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database updates for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17334,7 +17355,7 @@ class ControllerView(QWidget):
         if route is None or check is None or check.state != "stale":
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -17346,7 +17367,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"database corrections for {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -17398,14 +17419,14 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Already running",
                 "This server already has a job running on this tab. Wait for it to finish.",
             )
             return False
         if self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
@@ -17417,7 +17438,7 @@ class ControllerView(QWidget):
         except InstallerError as exc:
             logger.info(f"adopting {self.entry.id} could not be described: {exc}")
             self.action_failed.emit(str(exc))
-            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            show_warning(self, f"{self.entry.name}", str(exc))
             return False
         if not ask_yes_no(
             self,
@@ -18113,7 +18134,7 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self.rebuild_log.running or self._busy:
-            QMessageBox.information(
+            show_information(
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish, then press "
@@ -18824,6 +18845,16 @@ class ControllerView(QWidget):
             return {}
         return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
 
+    def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
+        """Every key any catalog manifest declares for this file, first declaration winning."""
+        keys: dict[str, ConfKey] = {}
+        for manifest in self._manifests.values():
+            for conf in manifest.conf:
+                if conf.file == file:
+                    for key in conf.keys:
+                        keys.setdefault(key.key, key)
+        return keys
+
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
@@ -19074,6 +19105,10 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
+        if said is None:
+            # T371: an `int` key typed in the raw box is held to the card's own
+            # rule, as a warning on the same confirm and not a refusal.
+            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
         if said is not None:
             answer = QMessageBox.question(
                 self,
