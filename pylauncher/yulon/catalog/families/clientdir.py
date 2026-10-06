@@ -33,7 +33,7 @@ DATA_DIR = "Data"
 """Where every WoW client keeps its archives; its absence means "not a client"."""
 
 CLIENT_CHECK = "the client folder"
-REQUIRED_CHECK = "the client's expansion data"
+REQUIRED_CHECK = "the client's game data"
 MPQ_CHECK = "the client's archives"
 LOCALE_CHECK = "the client's locale"
 REPACK_CHECK = "the client's origin"
@@ -132,10 +132,10 @@ def validate(
                 Check(
                     REQUIRED_CHECK,
                     "refuse",
-                    f"{spec.required_file} is missing from {client_dir}, so this is either not "
-                    "the expansion this server needs or an incomplete copy of it",
-                    "Point the install at a complete client of the expansion this server runs, "
-                    "then try again.",
+                    f"{spec.required_file} is missing from {client_dir}, so this is not the "
+                    "client this server needs, or it is an incomplete copy of it",
+                    "Pick the folder of a complete client of the game this server runs, or "
+                    "repair or re-download it, then try again.",
                 )
             )
             return tuple(checks)

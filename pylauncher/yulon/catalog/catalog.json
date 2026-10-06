@@ -1125,7 +1125,7 @@
           "save_before_stop": { "command": "saveall" },
           "cmangos": {
             "client": {
-              "required_file": null,
+              "required_file": "Data/dbc.MPQ",
               "archives_any_case": true,
               "min_mpq": 5,
               "mpq_depth": 2,

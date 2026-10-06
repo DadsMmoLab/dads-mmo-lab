@@ -73,6 +73,7 @@ from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
+    ClientSpec,
     ConfigWtf,
     ExePatch,
     Operations,
@@ -136,7 +137,8 @@ WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
 """8.5b's tree: one bot signal, the account prefix, and no registry table."""
 TORTOISE = load_catalog().get("wow-tortoise")
-"""T36's client-folder tests: `required_file=None`, so a bare `Data/` warns rather than refuses."""
+"""T36's client-folder tests. Since T521 its rule names `Data/dbc.MPQ`, so a `Data/` holding
+that and too few other archives is the folder that warns rather than refuses."""
 
 
 @pytest.fixture(autouse=True)
@@ -9957,7 +9959,8 @@ def test_a_warned_client_folder_writes_only_after_yes(
     warn_client = tmp_path / "TurtleWoW"
     data = warn_client / "Data"
     data.mkdir(parents=True)
-    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: too few is a WARN, zero is a refusal
+    (data / "dbc.MPQ").write_bytes(b"")  # the archive Tortoise's rule requires (T521)
+    (data / "patch.MPQ").write_bytes(b"")  # 2 of 5: too few is a WARN, zero is a refusal
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
@@ -9982,7 +9985,8 @@ def test_a_warned_client_folder_answered_no_writes_nothing(
     warn_client = tmp_path / "TurtleWoW"
     data = warn_client / "Data"
     data.mkdir(parents=True)
-    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: a WARN this press still has to ASK about
+    (data / "dbc.MPQ").write_bytes(b"")  # the archive Tortoise's rule requires (T521)
+    (data / "patch.MPQ").write_bytes(b"")  # 2 of 5: a WARN this press still has to ASK about
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
@@ -10128,11 +10132,20 @@ def test_a_busy_press_writes_nothing_on_either_handler(
 def test_zero_archives_is_refused_even_after_yes(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 2 review fix 2: an empty `Data/` is not "a few too few", it is nothing to extract."""
+    """Round 2 review fix 2: an empty `Data/` is not "a few too few", it is nothing to extract.
+
+    Under a rule naming no required file, which Tortoise's was until T521: every shipped rule
+    now names an archive, and that archive is itself counted, so its refusal fires first.
+    """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
         lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "client_spec_for",
+        lambda _entry: ClientSpec(required_file=None, min_mpq=5, mpq_depth=2),
     )
     empty_client = tmp_path / "TurtleWoW"
     (empty_client / "Data").mkdir(parents=True)
@@ -10149,6 +10162,39 @@ def test_zero_archives_is_refused_even_after_yes(
     # Mutation: in `_mpq_archive_count()`, `return None` unconditionally --
     # the zero-archive refusal never fires, and this folder is written after
     # Yes exactly like `test_a_warned_client_folder_writes_only_after_yes`.
+
+
+def test_a_tortoise_client_with_no_dbc_archive_is_refused_and_never_asked_about(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T521: "Set client folder…" refuses a Turtle client missing `Data/dbc.MPQ`, by name.
+
+    Fifteen archives, so the count rule passes and the zero-archive refusal cannot fire; only
+    the DBC rule can refuse it. A refusal, not "Use it anyway?": the question is never put.
+    """
+    asked: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a)
+        or int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", lambda *a, **k: None)
+    no_dbc = tmp_path / "TurtleWoW"
+    data = no_dbc / "Data"
+    data.mkdir(parents=True)
+    for number in range(15):
+        (data / f"patch-{number}.MPQ").write_bytes(b"")
+    view, fake = _client_dir_view(TORTOISE, tmp_path / "server", pick_client_dir=lambda *_: no_dbc)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a client with no DBC archive was recorded"
+    assert asked == [], "a missing DBC archive was put as a warning"
+    assert failures and f"Data/dbc.MPQ is missing from {no_dbc}" in failures[0]
+    assert "a complete client of the game this server runs, or repair" in failures[0]
 
 
 def test_the_server_folder_or_anything_inside_it_is_refused_before_validation(
