@@ -156,7 +156,7 @@ from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
-from yulon.said import SaidByYulon
+from yulon.said import SaidByYulon, split_details
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -4567,6 +4567,11 @@ CHARACTERS_EMPTY = (
 
 CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log, and Stop ends it."
 CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
+CONSOLE_SHUTDOWN_REFUSED = (
+    "Not sent: a shutdown typed here closes the world server, and Docker starts it again at "
+    "once. To stop the server and keep it stopped, press Stop on the Server tab."
+)
+"""Said instead of sending a shutdown (`commands.ends_the_world`, T412)."""
 
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
@@ -7139,6 +7144,7 @@ class ControllerView(QWidget):
         # may have been force-stopped. And whether the problem label is showing
         # a stop's words at all, so the end of ANY job can take them down.
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._stop_words_shown = False
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
@@ -9137,6 +9143,7 @@ class ControllerView(QWidget):
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
@@ -9289,7 +9296,7 @@ class ControllerView(QWidget):
         # (T158) left "stopping it now" in this label, which is false once the
         # stop is over. Only the forced-stop warning is carried past it.
         self.problem_label.setText(self._after_the_stop(said))
-        self.problem_details.set_text(why)
+        self.problem_details.set_text(self._after_the_stop_details(why))
         self.refresh_status()
         self.refresh_verdict()
 
@@ -9322,14 +9329,17 @@ class ControllerView(QWidget):
         removal use it: the status line does not wrap, and "the world is
         finishing its load before it can stop" needs its second sentence.
         """
-        self.problem_label.setText(text)
+        sentence, details = split_details(text)
+        self.problem_label.setText(sentence)
+        # T414: a crash's last lines go in the fold, never into the line.
+        self.problem_details.set_text(details)
         self._stop_words_shown = True
         self._heard_from_a_stop(text)
 
     @Slot(str)
     def _uninstall_stop_notice(self, text: str) -> None:
         """The same, for the uninstall's own removal of the containers, in its own label."""
-        self.uninstall_label.setText(text)
+        self.uninstall_label.setText(split_details(text)[0])
         self._heard_from_a_stop(text)
 
     def _heard_from_a_stop(self, text: str) -> None:
@@ -9339,8 +9349,8 @@ class ControllerView(QWidget):
             self.stop_anyway_button.setVisible(True)
         else:
             self.stop_anyway_button.setVisible(False)
-        if text in docker.FORCE_STOP_WARNINGS:
-            self._stop_forced = text
+        if docker.outlives_the_stop(text):
+            self._stop_forced, self._stop_forced_details = split_details(text)
 
     @Slot()
     def stop_now_anyway(self) -> None:
@@ -9356,6 +9366,11 @@ class ControllerView(QWidget):
         """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
         forced, self._stop_forced = self._stop_forced, ""
         return "\n\n".join(part for part in (forced, said) if part)
+
+    def _after_the_stop_details(self, why: str) -> str:
+        """`why`, under the Details of the warning `_after_the_stop()` just used (T414)."""
+        forced, self._stop_forced_details = self._stop_forced_details, ""
+        return "\n\n".join(part for part in (forced, why) if part)
 
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
@@ -9869,6 +9884,7 @@ class ControllerView(QWidget):
             self.uninstall_label.setText(PLAY_PENDING)
             return
         self._stop_forced = ""
+        self._stop_forced_details = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
             self.action_failed.emit(UNINSTALL_NO_PLAN)
@@ -11654,6 +11670,7 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._set_busy(True, "Remove containers")
         self._stop_forced = ""
+        self._stop_forced_details = ""
         self.problem_label.setText("")
         self._say_under_the_presses("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
@@ -11927,6 +11944,12 @@ class ControllerView(QWidget):
     @Slot()
     def send_console_command(self) -> None:
         command = self.command_edit.text().strip()
+        if command and commands.ends_the_world(command):
+            # T412: the world would close and Docker would start it again at once.
+            self.console_log.append(f"> {command}")
+            self.console_log.append(CONSOLE_SHUTDOWN_REFUSED)
+            self.command_edit.clear()
+            return
         if command:
             self._send(command)
             self.command_edit.clear()

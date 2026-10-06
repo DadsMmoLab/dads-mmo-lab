@@ -35,9 +35,9 @@ from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
 from yulon import ansi, platform, runner, wsl
-from yulon.after_stop import StopTookEffect
+from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
-from yulon.said import SaidByYulon
+from yulon.said import SaidByYulon, details_below
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -153,6 +153,28 @@ class SourceUnreadableError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SaveFirst:
+    """How a world whose own close loses saves is asked to save everyone first (T410, T411).
+
+    Built by `CatalogEntry.container_spec()` from the entry's `save_before_stop` and
+    its console's prompt; `save_then_stop_the_world()` types it before the signal.
+    """
+
+    command: str
+    queue_command: str = ""
+    queue_pattern: str = ""
+    prompt: str = "AC>"
+    prompt_precedes_answer: bool = True
+
+    def queue_length(self, text: str) -> int | None:
+        """The character save queue's length in a `queue_command` answer, or None."""
+        if not self.queue_pattern:
+            return None
+        found = re.findall(self.queue_pattern, text)
+        return int(found[-1]) if found and str(found[-1]).isdigit() else None
+
+
+@dataclass(frozen=True)
 class ContainerSpec:
     """How one server install is addressed: its containers, services and ports.
 
@@ -190,6 +212,14 @@ class ContainerSpec:
     container's PID 1 and installs its SIGTERM handler only once the world has
     loaded. Every stop of such a world first goes through
     `wait_for_the_world_to_load()`.
+    """
+
+    save_first: SaveFirst | None = None
+    """How this world is asked to save everyone before its signal, or None (T410, T411).
+
+    Set by `CatalogEntry.container_spec()` from the entry's `save_before_stop`:
+    Centurion and Tortoise, whose own close loses saves. See
+    `save_then_stop_the_world()`.
     """
 
     def compose_services(self) -> tuple[str, ...]:
@@ -1179,13 +1209,18 @@ def stop_servers_staged(
 
     A world still loading is waited for before the stop
     (`wait_for_the_world_to_load()`); `before_signal` is called after that
-    wait and immediately before the command, so a caller can tell "nothing was
-    signalled" from "something may have been". Compose's stop of services that
+    wait, after any save the world is asked for first (T410), and immediately
+    before the world's own signal (`save_then_stop_the_world()`), so a caller
+    can tell "nothing was signalled" from "something may have been". Compose's stop of services that
     are not running is a no-op, and so is the wait of a world that is down.
     """
-    wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
-    if before_signal is not None:
-        before_signal()
+    heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+    # T384: the world saves before the grace below can reach it. `before_signal` is
+    # called inside, right before the world's own signal (after any save it is asked
+    # for first, which a give-up can still end with nothing sent).
+    save_then_stop_the_world(
+        spec, control, wsl_distro=wsl_distro, before_signal=before_signal, heard=heard
+    )
     _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
 
 
@@ -1783,7 +1818,9 @@ def remove_staged(
     # SIGTERM, so it is waited for first (T158). It is always this install's
     # container here -- the census above refused anything else.
     if spec.world in before:
-        wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        # T384: and saves, watched, before `down` and its fixed grace reach it.
+        save_then_stop_the_world(spec, control, wsl_distro=wsl_distro, heard=heard)
     proc = _docker(
         ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"],
         cwd=server_dir,
@@ -1835,6 +1872,12 @@ STATUS_TIMEOUT_SECONDS = 30.0
 
 STOP_GRACE_SECONDS = 300
 """Seconds a container gets between SIGTERM and the SIGKILL that follows it.
+
+Since T384 the world server is no longer stopped by this number on any path that knows its
+spec: `save_then_stop_the_world()` signals it first and waits for it while it is still
+saving, and this grace reaches it only when that could not happen (a signal Docker refused, a
+world that restarted). 300 s was not enough on 2026-10-05: a save of 2294 queued characters on
+a slow disk was SIGKILLed at its end (exit 137). It still stops everything else.
 
 Docker's own default is 10, and 10 was measured killing a live save: a plain
 `docker compose stop` against the populated worldserver on yulon-ubuntu came
@@ -3102,7 +3145,178 @@ the load has ended -- ready, crashed or out of time. A member of
 LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED, STOP_WAITS_FOR_THE_LOAD})
 """The sentences said while a stop is WAITING: the ones "Stop now anyway" is offered beside."""
 
-FORCE_STOP_WARNINGS = frozenset({WORLD_STOPPED_ANYWAY})
+WORLD_SAVE_STALL_SECONDS = 300
+"""How long a world that was asked to stop may write NOTHING before it is killed (T384).
+
+Silence, not total time. Measured on yulon-ubuntu (WotLK, 500 bots): after a SIGTERM
+AzerothCore logs out every bot and then drains its character save queue
+(`DatabaseWorkerPool::Close()` -> `_queue->Shutdown()`; the worker finishes the queue before
+the join). The same ~2200 queued saves took 9-165 s across ten clean stops in the world's own
+log, 150 s on a `server shutdown 1` on 2026-10-05, 34 s on a plain SIGTERM and 37 s on a
+`compose stop` the same night -- and more than 300 s on the T301 gate, where `compose stop -t
+300` SIGKILLed it mid-save (exit 137, the box's disk at its slowest: InnoDB took 70 s to start
+that run against 1.7 s on a good one). During the slowest live drain watched, the world still
+sent its database 2-3 KB every two seconds. So the clock restarts at every byte, and a world
+is given the whole of the old fixed grace in silence before it is taken for hung -- never
+less than the stop it replaces allowed.
+"""
+
+WORLD_SAVE_CEILING_SECONDS = 1800
+"""The longest a stop waits for a world that keeps writing (T384): the bound on the bound.
+
+Six times the old grace and the worst save seen (more than 300 s). At the slowest rate ever
+seen (under 8 saves a second, the killed run) it covers some 14000 queued saves, nearly twice
+the deepest queue measured (7400-7700, 1980 characters online, `STOP_GRACE_SECONDS`). It
+exists for a world that sends something now and then and never finishes -- and for a world
+whose traffic cannot be read at all, which is never taken for silence.
+"""
+
+_SAVE_POLL_SECONDS = 2.0
+"""How long a stop pauses between two looks at a world that is saving (T384)."""
+
+WORLD_SAVING = (
+    "Saving characters: the world server is writing every character to its database before it "
+    "closes. That usually takes under a minute and can take several on a busy disk. Yu'lon "
+    "waits for it."
+)
+"""Said once the world was asked to stop and is still running at the first look (T384)."""
+
+WORLD_SAVED = "The world server saved every character and closed."
+"""Said when a world that `WORLD_SAVING` was said of has exited by itself (T384)."""
+
+_WORLD_SAVE_FAILED_START = "The world server stopped with an error"
+
+
+def world_save_failed(code: int) -> str:
+    """Said when a world that was asked to stop exited with a code other than 0 (T414).
+
+    Live, 2026-10-06 (Tortoise): "Cant begin transaction." and exit 139 after "Halting
+    process...", while the tab said `WORLD_SAVED`. The world's last lines go under Details
+    (`said.details_below()`), never into this sentence. Outlives the stop.
+    """
+    return (
+        f"{_WORLD_SAVE_FAILED_START} (exit code {code}) while it was saving characters, so some "
+        "saves may not have been written. Check your characters before you play; the world "
+        "server's last lines are under Details."
+    )
+
+
+WORLD_SAVE_UNREAD = (
+    "The world server closed, but Yu'lon could not read whether it finished saving cleanly. "
+    "Check your characters before you play."
+)
+"""Said when a world that was asked to stop is gone and its exit code cannot be read (T414)."""
+
+_EXIT_LINES = 20
+"""How many of the world's last log lines go under Details when it exits with an error (T414)."""
+
+
+def outlives_the_stop(text: str) -> bool:
+    """Is this stop sentence one the tab keeps after the stop (`FORCE_STOP_WARNINGS`, T414)?
+
+    Read on the sentence alone: a crash's line carries its exit code, and Details under it.
+    """
+    sentence = text.split("\n\nDetails:\n", 1)[0]
+    return (
+        sentence in FORCE_STOP_WARNINGS
+        or sentence == WORLD_SAVE_UNREAD
+        or sentence.startswith(_WORLD_SAVE_FAILED_START)
+    )
+
+
+def _how_the_world_ended(world: str, wsl_distro: str | None) -> tuple[str, bool]:
+    """The sentence for a world that exited after its signal, and whether it is a warning (T414)."""
+    proc = _docker(
+        ["inspect", world, "--format", "{{.State.ExitCode}}"],
+        timeout=_LOAD_LOOK_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    code = proc.stdout.strip()
+    if proc.returncode != 0 or not code.lstrip("-").isdigit():
+        logger.warning(f"could not read how {world} exited: {proc.stderr.strip()}")
+        return WORLD_SAVE_UNREAD, True
+    if int(code) == 0:
+        return WORLD_SAVED, False
+    tail = log_tail(world, _EXIT_LINES, wsl_distro=wsl_distro) or ""
+    return details_below(world_save_failed(int(code)), ansi.strip(tail).strip()), True
+
+
+WORLD_SAVE_STALLED = (
+    f"The world server wrote nothing to its database for {WORLD_SAVE_STALL_SECONDS // 60} minutes "
+    "while it was saving, so Yu'lon force-stopped it. Characters may be missing what happened "
+    "since their last save."
+)
+"""Said when a saving world was killed for its silence (T384). Outlives the stop."""
+
+WORLD_SAVE_TOO_LONG = (
+    f"The world server was still saving after {WORLD_SAVE_CEILING_SECONDS // 60} minutes, so "
+    "Yu'lon force-stopped it. Characters may be missing what happened since their last save."
+)
+"""Said when a saving world was killed at `WORLD_SAVE_CEILING_SECONDS` (T384). Outlives the stop."""
+
+WORLD_SAVE_ABANDONED = (
+    "Yu'lon stopped watching while the world server was saving characters. The world goes on "
+    "saving and closes by itself; the rest of the server was left running so the save can finish."
+)
+"""The `SaveAbandoned` of a give-up during the save (T384): nothing is killed."""
+
+SAVE_FIRST_ASKING = (
+    "Saving characters: Yu'lon is asking the world server to save every character before it "
+    "is stopped. This can take a minute."
+)
+"""Said as the save a world whose own close loses saves is asked for BEGINS (T410, T411, T415).
+
+Before the console is typed at, not after: `saveall` and the queue look took 10-15 s live, and
+a line said at their end was replaced in the same second. It stands until the next step's line
+(the queue's count, the save written, or `SAVE_FIRST_NOT_ASKED` when the console did not
+answer)."""
+
+SAVE_FIRST_QUEUED = (
+    "The world server has {count} saves to write to its database before it can be stopped "
+    "safely. Yu'lon waits for them; on a busy disk that can take several minutes."
+)
+"""Said once, with the queue's length, when saves are still queued at the first look (T410)."""
+
+SAVE_FIRST_WRITTEN = "Every character's save is written. Stopping the world server."
+"""Said when the save queue is seen empty after the save (T410)."""
+
+SAVE_FIRST_UNFINISHED = (
+    f"The world server's saves were not all written: its save queue did not get shorter for "
+    f"{WORLD_SAVE_STALL_SECONDS // 60} minutes, or the wait reached "
+    f"{WORLD_SAVE_CEILING_SECONDS // 60} minutes. Yu'lon stopped it anyway, so characters may "
+    "be missing what happened since their last save."
+)
+"""Said when the wait for the save queue ran out and the stop went on (T410). Outlives the stop."""
+
+SAVE_FIRST_NOT_ASKED = (
+    "Yu'lon could not ask the world server to save every character before stopping it (its "
+    "console did not answer), so characters may be missing what happened since their last "
+    "automatic save."
+)
+"""Said when the console the save is typed at could not be reached (T410, T411); outlives it."""
+
+_SAVE_COMMAND_WINDOW_SECONDS = 10.0
+"""How long the console is listened to after `saveall` (T410, T411).
+
+The command saves every player on the world thread before it answers; the answer
+itself is not needed, only that it was typed. A window too short for it reads as
+an unprompted reply and changes nothing: the queue looks that follow see the saves."""
+
+_QUEUE_LOOK_WINDOW_SECONDS = 4.0
+"""How long the console is listened to for one `server debug` answer (T410).
+
+The console's 3 s default plus a second: the command sums the size of the map
+folders before it prints the queue lines, which are its last."""
+
+FORCE_STOP_WARNINGS = frozenset(
+    {
+        WORLD_STOPPED_ANYWAY,
+        WORLD_SAVE_STALLED,
+        WORLD_SAVE_TOO_LONG,
+        SAVE_FIRST_UNFINISHED,
+        SAVE_FIRST_NOT_ASKED,
+    }
+)
 """The sentences that must outlive the stop they were said in: it may have been forced."""
 
 _SIGTERM = 15
@@ -3127,6 +3341,28 @@ class StopAbandoned(DockerCommandError, SaidByYulon, StopTookEffect):
     running rather than signalled mid-load. Its own type so a caller that owns
     the abandon can tell it from a stop that failed, and `StopTookEffect`
     (T250) so the log panel reads it as the job's Stop.
+    """
+
+
+class SaveFirstAbandoned(StopAbandoned):
+    """A `StopAbandoned` from the save a world is asked for BEFORE its signal (T410, T411).
+
+    Nothing was sent and the world is still running, so every `StopAbandoned`
+    handler is right about that; its own type so a handler that names the load
+    ("while the world was still loading") can say "saving" instead.
+    """
+
+
+class SaveAbandoned(DockerCommandError, SaidByYulon, TrueAfterStop):
+    """The stop was given up while the world SAVED: it was signalled and is closing (T384).
+
+    Not a `StopAbandoned`, on purpose: every handler of that one says the world was left
+    running, and after the signal it is not -- it goes on saving and closes by itself. Nothing
+    was killed, and the rest of the server was left up so the save can finish.
+
+    `TrueAfterStop` (T228): after a job's Stop, that sentence says what the press
+    left -- a world closing on its own and a database still up -- so the log panel
+    shows it rather than folding it into "cancelled".
     """
 
 
@@ -3197,6 +3433,286 @@ def _sigterm_caught(status: str) -> bool | None:
     return None
 
 
+_save_clock = time.monotonic
+"""The clock a save wait measures silence and its ceiling by; a seam for the tests."""
+
+
+def _bytes_moved(net_dev: str) -> int | None:
+    """Bytes received plus sent on every interface but loopback, from a `/proc/net/dev`."""
+    total = 0
+    seen = False
+    for line in net_dev.splitlines():
+        name, colon, counters = line.partition(":")
+        fields = counters.split()
+        if not colon or name.strip() == "lo" or len(fields) < 9:
+            continue
+        if not (fields[0].isdigit() and fields[8].isdigit()):
+            continue
+        total += int(fields[0]) + int(fields[8])
+        seen = True
+    return total if seen else None
+
+
+def _console_send(command: str, **kwargs: Any) -> Any:
+    """Type one line at a world's console: the shared transport (T410, T411); a seam for tests.
+
+    Imported here rather than at the top because the console package imports this
+    module. Raises whatever the transport raises when it cannot type (`ConsoleError`).
+    """
+    from yulon.controller_wow_wotlk import console
+
+    return console.send_command(command, **kwargs)
+
+
+def _type_at_the_world(
+    spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
+) -> Any | None:
+    """One console line to this world; its `ConsoleReply`, or None when it could not be typed."""
+    save = spec.save_first
+    assert save is not None
+    try:
+        return _console_send(
+            command,
+            container=spec.world,
+            wsl_distro=wsl_distro,
+            window=window,
+            prompt=save.prompt,
+            prompt_precedes_answer=save.prompt_precedes_answer,
+        )
+    except Exception as exc:  # noqa: BLE001 - every console failure means "not typed" here
+        logger.warning(f"could not type {command!r} at {spec.world}'s console: {exc}")
+        return None
+
+
+def _queue_length(spec: ContainerSpec, wsl_distro: str | None) -> int | None:
+    """The world's character save queue as its `queue_command` reports it, or None (T410)."""
+    save = spec.save_first
+    assert save is not None
+    reply = _type_at_the_world(spec, save.queue_command, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro)
+    if reply is None:
+        return None
+    return save.queue_length("\n".join(getattr(reply, "lines", ())))
+
+
+def _save_everyone_first(
+    spec: ContainerSpec, control: StopControl, say: Callable[..., None], wsl_distro: str | None
+) -> None:
+    """Have a running world whose own close loses saves save everyone, and wait for it (T410, T411).
+
+    Before the signal, while the world still runs and its database is up. Typed at
+    the console (`SaveFirst.command`, `saveall`), which needs no credential. For a
+    core that drops what is still queued when it closes (Centurion), the save
+    queue's length is then read every few seconds until it is EMPTY: one worker
+    thread writes that queue in order, so a queue seen empty after the command
+    holds nothing the command queued (an operation the worker is in the middle of
+    is finished before it stops). Not "back to its level from before": with older
+    items queued, that level is reached while the command's own saves are all
+    still behind them (T384 cold review).
+
+    The console's answer is not trusted on its own: a reply with no prompt in it is
+    also what an attach that never reached the console looks like. For a queue
+    core a readable queue length is the proof the console answered; without one,
+    and for a core with no queue to read, an unprompted reply counts as not asked.
+
+    The stop goes on -- the caller signals the world next -- when:
+
+    * the console did not answer (`SAVE_FIRST_NOT_ASKED`): the close then loses
+      what it always lost;
+    * the queue has not got shorter, or could not be read, for
+      `WORLD_SAVE_STALL_SECONDS`, or the wait reaches `WORLD_SAVE_CEILING_SECONDS`
+      (`SAVE_FIRST_UNFINISHED`). Unlike the wait after the signal, an unreadable
+      look is not given the benefit of the doubt: the world is RUNNING here, and
+      a wait that cannot see anything would hold a live server for half an hour.
+
+    `control.abandon` raises `StopAbandoned`: nothing has been sent, the world is
+    still running, which is what every handler of that type says.
+    """
+    save = spec.save_first
+    assert save is not None
+    say(SAVE_FIRST_ASKING)
+    reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
+    answered = reply is not None and bool(getattr(reply, "prompted", False))
+    if not save.queue_command:
+        if not answered:
+            say(SAVE_FIRST_NOT_ASKED, warn=True)
+        return
+    started = _save_clock()
+    last_shrunk = started
+    lowest: int | None = None
+    looked = False
+    while True:
+        if control.abandon.is_set():
+            raise SaveFirstAbandoned(
+                f"The stop was not sent: it was given up while {spec.world} was writing its "
+                "saves, so the world was left running."
+            )
+        length = _queue_length(spec, wsl_distro) if reply is not None else None
+        now = _save_clock()
+        if not looked:
+            looked = True
+            if length is None:
+                # No queue to read, so nothing proves the console answered or what to
+                # wait for: said by the reply alone, and the stop goes on.
+                if answered:
+                    logger.info(f"{spec.world}'s save queue could not be read; not waited on")
+                else:
+                    say(SAVE_FIRST_NOT_ASKED, warn=True)
+                return
+            if length > 0:
+                say(SAVE_FIRST_QUEUED.format(count=length))
+        if length == 0:
+            say(SAVE_FIRST_WRITTEN)
+            return
+        if length is not None and (lowest is None or length < lowest):
+            lowest = length
+            last_shrunk = now
+        if (
+            now - started >= WORLD_SAVE_CEILING_SECONDS
+            or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
+        ):
+            say(SAVE_FIRST_UNFINISHED, warn=True)
+            return
+        control.abandon.wait(_SAVE_POLL_SECONDS)
+
+
+def save_then_stop_the_world(
+    spec: ContainerSpec,
+    control: StopControl | None = None,
+    *,
+    wsl_distro: str | None = None,
+    before_signal: Callable[[], None] | None = None,
+    heard: bool = True,
+) -> None:
+    """Ask the world server alone to stop, and wait while it saves; kill it only if it hangs (T384).
+
+    Called by every stop path right before the command that stops the rest of the server, and
+    after `wait_for_the_world_to_load()`. The world gets a SIGTERM of its own (`docker kill -s
+    TERM`): AzerothCore, CMaNGOS and Tortoise all save every player and bot on it and drain
+    their save queue before they exit (`WORLD_SAVE_STALL_SECONDS` has the measurements). No
+    Docker timer runs on that signal, so how long the save may take is decided here, by
+    looking, rather than by a number chosen in advance -- the fixed 300 s grace is what
+    SIGKILLed a world mid-save on the T301 gate. Measured on the box, a `docker kill -s TERM`
+    counts as a stop for `restart: unless-stopped` (Docker 29.1.3: a busybox stand-in and the
+    real worldserver both stayed down, where a signal sent from inside restarted it), and a
+    `server shutdown` through the command channel does NOT: the world exited 0 and Docker
+    started it again.
+
+    `heard` is what `wait_for_the_world_to_load()` returned: False after "Stop now
+    anyway" on a world that may still be deaf, which is left to the caller's stop
+    as before (no save asked for, no signal, no watch). `before_signal` is called
+    exactly once, right before the world's own signal -- after the save it may be
+    asked for first, whose give-up sends nothing.
+
+    A world whose own close loses saves (`spec.save_first`: Centurion drops what is still
+    queued, Tortoise fails the owned bots' last save) is first told to save everyone at its
+    console while it still runs, and for Centurion waited for until that save queue is
+    written (`_save_everyone_first()`, T410/T411). Only then is it signalled.
+
+    Each look is a bounded `docker inspect`, then -- while it runs -- a bounded read of its
+    `/proc/net/dev`. Once the players are gone the world's only traffic is its database, so
+    bytes still moving mean it is still saving. It ends on the first of:
+
+    * the world is no longer running: it exited by itself (`WORLD_SAVED`, if `WORLD_SAVING`
+      was said), or it restarted (a new `StartedAt`), which is left to the ordinary stop that
+      follows -- as is a signal Docker refused;
+    * nothing moved for `WORLD_SAVE_STALL_SECONDS` -- killed, `WORLD_SAVE_STALLED`;
+    * `WORLD_SAVE_CEILING_SECONDS` since the signal -- killed, `WORLD_SAVE_TOO_LONG`;
+    * `control.abandon` -- raises `SaveAbandoned` and kills NOTHING: the world goes on saving
+      by itself, and the database it writes to is left up because the caller's stop of the rest
+      never runs.
+
+    A look that cannot be read is not silence (fail closed for the saves): only the ceiling
+    bounds a world whose traffic Docker will not show. "Stop now anyway" is NOT read: it was
+    pressed for a world that could not hear the stop, and is no leave to kill one that heard it.
+    """
+    control = control or StopControl()
+    world = spec.world
+
+    def say(text: str, *, warn: bool = False) -> None:
+        (logger.warning if warn else logger.info)(text)
+        if control.say is not None:
+            control.say(text)
+
+    if heard is False:
+        # "Stop now anyway" ended a load wait on a world that may still be deaf (T158):
+        # it can neither save nor hear the signal, and its loading traffic is not a
+        # save. The caller's stop does what it always did, with its grace.
+        logger.info(f"{world} was stopped anyway while it loaded; left to the ordinary stop")
+        if before_signal is not None:
+            before_signal()
+        return
+    if spec.save_first is not None:
+        state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+        if state.settled:
+            _save_everyone_first(spec, control, say, wsl_distro)
+    if before_signal is not None:
+        before_signal()
+    proc = _docker(["kill", "-s", "TERM", world], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        # Not running, gone, or Docker would not: the caller's stop does what it always did.
+        logger.info(f"{world} was not sent a stop of its own ({proc.stderr.strip()})")
+        return
+    started = _save_clock()
+    last_moved = started
+    moved: int | None = None
+    run = ""
+    saying = False
+
+    while True:
+        if control.abandon.is_set():
+            logger.warning(f"gave up watching {world} while it saved; it was not killed")
+            raise SaveAbandoned(WORLD_SAVE_ABANDONED)
+        state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+        if state.missing or (state.status and not state.settled):
+            # T414: "saved" only for a clean exit; a crash on the way out is said, whether or
+            # not the save was said to have begun.
+            ended, warn = _how_the_world_ended(world, wsl_distro)
+            if saying or (warn and ended != WORLD_SAVE_UNREAD):
+                # Before the first look nothing was claimed, so an exit that cannot be
+                # read claims nothing either; a known crash is said either way.
+                say(ended, warn=warn)
+            return
+        now = _save_clock()
+        if not state.settled:
+            if not run:
+                # Never seen running since the signal, and Docker will not say: the caller's
+                # stop goes on as it always did, with its grace.
+                logger.info(f"could not see whether {world} is saving; leaving it to the stop")
+                return
+            # Docker did not answer this time: that is not silence either.
+            last_moved = now
+        else:
+            if run and state.started_at != run:
+                logger.warning(f"{world} restarted while it saved; leaving it to the stop")
+                return
+            run = state.started_at
+            if not saying:
+                saying = True
+                say(WORLD_SAVING)
+            look = exec_output(
+                world, ["cat", "/proc/net/dev"], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro
+            )
+            count = _bytes_moved(look.stdout) if look.returncode == 0 else None
+            if count is None or count != moved:
+                # Moved, or could not be read: neither is silence.
+                last_moved = now
+                moved = count if count is not None else moved
+        verdict = ""
+        if now - started >= WORLD_SAVE_CEILING_SECONDS:
+            verdict = WORLD_SAVE_TOO_LONG
+        elif now - last_moved >= WORLD_SAVE_STALL_SECONDS:
+            verdict = WORLD_SAVE_STALLED
+        if verdict:
+            say(verdict, warn=True)
+            try:
+                kill_container(world, wsl_distro=wsl_distro)
+            except DockerCommandError as exc:
+                # Gone in the meantime, or Docker would not: the caller's stop follows.
+                logger.warning(f"could not kill {world}: {exc}")
+            return
+        control.abandon.wait(_SAVE_POLL_SECONDS)
+
+
 def _pause(control: StopControl, seconds: float) -> None:
     """Sleep between looks, but wake within a quarter of a second for the caller's events."""
     deadline = time.monotonic() + seconds
@@ -3212,7 +3728,7 @@ def wait_for_the_world_to_load(
     control: StopControl | None = None,
     *,
     wsl_distro: str | None = None,
-) -> None:
+) -> bool:
     """Before a stop: wait until the world server can hear it (T158).
 
     The ONE wait every stop path goes through -- `stop_staged()`,
@@ -3269,10 +3785,19 @@ def wait_for_the_world_to_load(
     number, the very signal this exists to hold back -- and a measured valid
     first boot (TBC, 46 minutes on a 9p share) outlasts any cap short enough
     to matter. Only the person decides to force it.
+
+    Returns False when it ended on `WORLD_STOPPED_ANYWAY`: the world may still be
+    deaf to the stop, so `save_then_stop_the_world()` neither signals it nor reads
+    its traffic as saving -- the load's own database traffic would hold a forced
+    stop for half an hour (T384 cold review). True otherwise.
     """
+    heard = True
     for text in world_load_steps(spec, control, wsl_distro=wsl_distro):
+        if text == WORLD_STOPPED_ANYWAY:
+            heard = False
         if control is not None and control.say is not None:
             control.say(text)
+    return heard
 
 
 def world_load_steps(
@@ -3384,7 +3909,8 @@ def stop_containers(
     for name in sorted(containers, key=rank):
         for spec in known:
             if spec.world == name:
-                wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+                heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+                save_then_stop_the_world(spec, control, wsl_distro=wsl_distro, heard=heard)
                 break
         _run_docker_stop(name, wsl_distro=wsl_distro, deadline=deadline)
 
@@ -3436,6 +3962,11 @@ def stop_staged(
     CMaNGOS load takes the rest of the load plus the ~22 s shutdown rather
     than the full grace and a SIGKILL. `control` is how the caller hears that
     wait and steers it (`StopControl`).
+
+    Then the world is stopped on its own and waited for while it saves
+    (`save_then_stop_the_world()`, T384) -- the grace SIGKILLed one mid-save --
+    and only then does `compose stop` take the rest down. A give-up during that
+    save raises `SaveAbandoned` and leaves the database up.
 
     Either way the result is verified rather than assumed. A zero exit from
     `compose stop` only means compose had nothing to complain about — it says
@@ -3519,7 +4050,10 @@ def stop_staged(
     # the command, because a CMaNGOS world signalled mid-load drops the SIGTERM
     # and sits out the whole grace to a SIGKILL (T158).
     if spec.world in before.ours:
-        wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        # T384: the world alone first, waited for while it saves. The fixed grace below
+        # SIGKILLed a world mid-save on a slow disk; it now reaches only the rest.
+        save_then_stop_the_world(spec, control, wsl_distro=wsl_distro, heard=heard)
     proc = _docker(
         ["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir, wsl_distro=wsl_distro
     )
