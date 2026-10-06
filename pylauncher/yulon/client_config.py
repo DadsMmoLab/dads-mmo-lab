@@ -245,7 +245,7 @@ def remove_locale_realmlists(play_dir: Path) -> tuple[Path, ...]:
     naming it, the ones already removed, and what to do next.
     """
     _require_marker(play_dir, "its realmlist.wtf files")
-    data = play_dir / "Data"
+    data = play_client.data_folder(play_dir)  # `data/` too (T261)
     if play_client._is_link(data):
         logger.warning("ready-to-play client: %s is a link, so it was not looked into", data)
         return ()

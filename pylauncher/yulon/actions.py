@@ -36,7 +36,15 @@ class Outcome:
 
 
 def send(channel: object, line: str) -> Outcome:
-    answer = channel.send(line)  # type: ignore[attr-defined]
+    return outcome_of(channel.send(line))  # type: ignore[attr-defined]
+
+
+def outcome_of(answer: object) -> Outcome:
+    """One channel answer, as the three shapes above.
+
+    Apart from `send()` for a caller that has to read the answer's own outcome
+    first (T301: a refused delete is said in its own words).
+    """
     outcome = getattr(answer, "outcome", "")
     if outcome == "yes":
         return Outcome(True, text=getattr(answer, "text", ""))
