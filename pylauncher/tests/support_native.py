@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
-from yulon import docker, git, platform, resources
+from yulon import database_presence, docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch
@@ -830,6 +830,9 @@ class Recorder:
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=self.wait_ready,
             world_output=lambda spec: self.world_output,
+            # T249: a failed `ready` reads the servers' last lines. Bound for the
+            # T64 reason: the default is the real `docker logs`. Unread, here.
+            container_tail=lambda container: None,
             # No test may sleep for real. T71's watch after the ready banner is
             # the engine's only self-timed poll, and at the shipped grace that
             # is thirty two-second sleeps -- a minute of wall clock added to
@@ -853,6 +856,9 @@ class Recorder:
             exec_stdin=self.exec_stdin,
             sql_query=self.sql_query,
             volume_exists=self.volume_exists,
+            # T377: a Rebuild and a Repair ask whether the database is there at all.
+            # Bound for the T64 reason above; a test about the answer states its own.
+            read_database=lambda entry, server_dir: database_presence.Reading("present"),
             # T159: the corrections press stops a running world by name. Bound
             # for the T64 reason above -- the default is the real `docker stop`.
             stop_world=lambda containers, **_kw: self.calls.append(

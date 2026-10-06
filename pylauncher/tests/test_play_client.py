@@ -2592,3 +2592,101 @@ def test_a_lowercase_client_s_archives_are_shared_under_their_own_names(tmp_path
     play_client.remove_folder(target, original=orig)
     assert not target.exists()
     assert (orig / "Data" / "lichking.mpq").stat().st_mode & 0o777 == 0o444
+
+
+# -- T261: a client whose Data folder itself is named in lower case --------------------
+
+
+def lowercase_data_client(root: Path) -> Path:
+    """`fake_client()` with `Data/` named `data/`, its archives read-only (T196/T198)."""
+    orig = fake_client(root)
+    (orig / "Data").rename(orig / "data")
+    for archive in (orig / "data" / "common.MPQ", orig / "data" / "enUS" / "locale-enUS.MPQ"):
+        archive.chmod(0o444)
+    return orig
+
+
+@needs_case_sensitive_disk
+def test_a_ready_to_play_client_is_made_from_a_lowercase_data_folder(tmp_path: Path) -> None:
+    """T261: refused as "has no Data folder, so it does not look like a WoW client"."""
+    orig = lowercase_data_client(tmp_path)
+    target = tmp_path / "WoW (Yu'lon)"
+
+    build(orig, target, tmp_path)
+
+    for rel in ("data/common.MPQ", "data/enUS/locale-enUS.MPQ"):
+        assert os.path.samefile(orig / rel, target / rel), rel
+    assert not (target / "Data").exists(), "the copy keeps the client's own names"
+    names = {p.name for p in orig.iterdir()}
+    assert "data" in names and "Data" not in names, "the player's folder is not renamed"
+    play_client.remove_folder(target, original=orig)
+    assert (orig / "data" / "common.MPQ").stat().st_mode & 0o777 == 0o444
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_data_folder_that_is_a_link_is_refused_as_a_link(tmp_path: Path) -> None:
+    orig = lowercase_data_client(tmp_path)
+    (orig / "data").rename(tmp_path / "elsewhere")
+    os.symlink(tmp_path / "elsewhere", orig / "data")
+
+    with pytest.raises(play_client.PlayClientError, match="is a link to another folder"):
+        play_client.plan(orig, tmp_path / "t")
+
+
+def test_a_client_with_no_data_folder_in_any_case_is_still_refused(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    (orig / "Data").rename(orig / "Dat")
+
+    with pytest.raises(play_client.PlayClientError, match="has no Data folder"):
+        play_client.plan(orig, tmp_path / "t")
+
+
+@needs_case_sensitive_disk
+def test_stale_refresh_and_left_out_read_an_original_with_a_lowercase_data_folder(
+    tmp_path: Path,
+) -> None:
+    """Play compares, Refresh shares again and both name new archives, as for `Data/`."""
+    orig = lowercase_data_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    (orig / "data" / "common.MPQ").chmod(0o644)
+    replace_file(orig / "data" / "common.MPQ", b"patched" * 100)
+    (orig / "data" / "patch-5.MPQ").write_bytes(b"new in the original")
+
+    assert play_client.stale(play, orig) == (Path("data/common.MPQ"),)
+    assert play_client.left_out_archives(play, orig) == (Path("data") / "patch-5.MPQ",)
+    assert refresh(play, orig, tmp_path) == (Path("data/common.MPQ"),)
+    assert os.path.samefile(orig / "data/common.MPQ", play / "data/common.MPQ")
+    assert not (play / "Data").exists()
+
+
+@needs_case_sensitive_disk
+def test_a_flag_is_put_back_on_the_players_file_after_the_copy_renamed_its_folder(
+    tmp_path: Path,
+) -> None:
+    """T261: Centurion's extraction copy renames `data/` to `Data/` (and T227 its archives).
+
+    The player's file is then at another relative path in another case, and a
+    delete that had to clear the shared flag (Windows' rule) still puts it back
+    on the player's own name, found whatever its case.
+    """
+    orig = lowercase_data_client(tmp_path)
+    target = tmp_path / "copy"
+    build(orig, target, tmp_path)
+    (target / "data").rename(target / "Data")
+    (target / "Data" / "common.MPQ").rename(target / "Data" / "common.mpq")
+    blocked: list[str] = []
+
+    def windows_like_unlink(path: Path) -> None:
+        if not os.lstat(path).st_mode & 0o200:
+            blocked.append(path.name)
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        os.unlink(path)
+
+    lost: list[play_client.LostFlag] = []
+    play_client.remove_folder(target, original=orig, unlink=windows_like_unlink, flags_lost=lost)
+
+    assert "common.mpq" in blocked, "the read-only path was not reached"
+    assert (orig / "data" / "common.MPQ").stat().st_mode & 0o777 == 0o444
+    assert (orig / "data" / "enUS" / "locale-enUS.MPQ").stat().st_mode & 0o777 == 0o444
+    assert lost == []

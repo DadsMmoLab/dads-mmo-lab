@@ -29,6 +29,7 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import docker as docker_module
 from yulon import log as log_module
 from yulon import platform
 from yulon.catalog import upstream
@@ -824,7 +825,7 @@ def _no_forced_exit(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_modal_dialogs() -> Iterator[None]:
     """Never let a test block on a modal dialog.
 
     `QMessageBox.warning()` and friends are modal: called from a slot in an
@@ -846,11 +847,48 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     `exec` answers `No` for the same reason `question` does: it is the reply
     that takes no action, so a test that did not opt in cannot be walked through
     a destructive path by the guard itself.
+
+    **Its own `MonkeyPatch`, not the test's (T243).** A test that calls
+    `monkeypatch.undo()` -- to put back an `os` function it broke, say -- undid
+    this guard too, and the next modal it reached was real. Under the static
+    `question()` that had not yet mattered, because each such test patched
+    `question` again; once Rebuild and `_confirm()` asked through an instance
+    and `exec()`, `test_an_older_press_failing_leaves_the_current_press_waiting`
+    sat in a real modal loop until it was killed. The test's own patches still
+    win -- they are made later -- and its `undo()` now puts back this guard
+    rather than Qt.
     """
     try:
         from PySide6.QtWidgets import QMessageBox
     except ImportError:  # pragma: no cover - Qt-less environments skip UI tests anyway
+        yield
         return
+    with pytest.MonkeyPatch.context() as guard:
+        _disarm_modals(guard, QMessageBox)
+        yield
+
+
+def _qts_own_question() -> object:
+    """Qt's own static `QMessageBox.question`, read once, when this module is imported.
+
+    Before any test or this guard has patched it -- and it has to be then. A test's
+    `monkeypatch` is set up before the guard (`_no_forced_exit` asks for it first),
+    so it is undone after the guard has put Qt's back, and leaves the guard's fake
+    on `QMessageBox` for good. Read at each test's start, "Qt's own" was that fake
+    from the second test on (cold review, T243: `tests/guard_order_probe.py`).
+    """
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:  # pragma: no cover - Qt-less environments skip UI tests anyway
+        return None
+    return QMessageBox.question
+
+
+QT_QUESTION = _qts_own_question()
+"""Qt's own static `question()`; see `_qts_own_question`."""
+
+
+def _disarm_modals(monkeypatch: pytest.MonkeyPatch, QMessageBox: Any) -> None:  # noqa: N803
     for name in ("warning", "information", "critical", "about"):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
@@ -861,7 +899,60 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     # asker onto `box.exec()` and a run that reached it hung the suite for hours.
     # Disarm the slot too, so NO `QMessageBox` modal can block an offscreen run
     # (verified: the class-level `exec` patch takes effect on Shiboken 6.11.2).
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(QMessageBox, "exec", _answer_like_the_static_question)
+
+
+def three_way_only(answer: Callable[[Any], object]) -> Callable[[Any], object]:
+    """An `exec` fake for a test that answers the three-way boxes; a Yes/No box still goes
+    to `question`, as it does under the guard (`_answer_like_the_static_question`).
+
+    For the tests that patch `exec` to answer `ask_update_choice()` or
+    `ask_backup_choice()` and `question` to answer the Yes/No questions around
+    them: since T243 those Yes/No questions are boxes too, and a bare `exec`
+    fake would answer them with the three-way answer.
+    """
+
+    def exec_(box: Any) -> object:
+        from PySide6.QtWidgets import QMessageBox
+
+        if box.standardButtons() == QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No:
+            return _answer_like_the_static_question(box)
+        return answer(box)
+
+    return exec_
+
+
+def _answer_like_the_static_question(box: Any) -> object:
+    """`exec()` under the guard: a Yes/No box is answered by whatever `question` is now.
+
+    T243 moved the long Yes/No questions (Rebuild, Return to the tested pin,
+    `_confirm()`'s and the rest) from the static `QMessageBox.question()` to
+    `message_box.ask_yes_no()`, an instance and `exec()`, so that the box can
+    fit the screen. Every test that says Yes to one of them says it by patching
+    `question`, and the static call's box and this one are the same question:
+    the same parent, title, text, buttons and default. So a Yes/No box is handed
+    to `question` -- the guard's own No above, or a test's patch -- with exactly
+    the arguments the static call took.
+
+    ONLY Yes/No. A three-way box (`ask_backup_choice()`, the install folder
+    asker) is not something the static call could ask, so a test that said Yes
+    to a Rebuild has not said "back up first" to one of those; they still answer
+    `No`, which each of them reads as Cancel.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    if box.standardButtons() != yes_no or QMessageBox.question is QT_QUESTION:
+        # Not the static call's shape, or a test has put Qt's own `question()` back:
+        # handing the box to that would open a real modal, the one thing this guards.
+        return QMessageBox.StandardButton.No
+    return QMessageBox.question(
+        box.parentWidget(),
+        box.windowTitle(),
+        box.text(),
+        box.standardButtons(),
+        box.standardButton(box.defaultButton()),
+    )
 
 
 def _the_running_qapplication() -> object | None:
@@ -1080,6 +1171,30 @@ def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
 
 
+REAL_DATABASE_VOLUME = docker_module.database_volume
+"""The real `docker.database_volume`, for the tests that ask Docker's double about the database."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_whether_the_database_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks Docker whether the database is there (T377); a unit test hears nothing.
+
+    `docker.database_volume()` is the first question `database_presence.take_reading()`
+    asks, and None -- no volume named -- makes the reading `unknown` before
+    anything else is asked. `unknown` changes nothing: the Start goes on as it
+    did before T377, so every test written about something else keeps testing
+    that, through doubles that never answered `compose config`. The tests
+    about the question itself put the real one back with `real_database_read`.
+    """
+    monkeypatch.setattr(docker_module, "database_volume", lambda *_a, **_k: None)
+
+
+@pytest.fixture
+def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_whether_the_database_is_there` for a test about the question."""
+    monkeypatch.setattr(docker_module, "database_volume", REAL_DATABASE_VOLUME)
+
+
 @pytest.fixture(autouse=True)
 def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the client probe without touching the seam the tests assert on.
@@ -1292,3 +1407,40 @@ def the_compose_project_is_not_pinned(monkeypatch: pytest.MonkeyPatch) -> list[P
         docker, "pin_project_name", lambda server_dir, **_kw: pinned.append(server_dir)
     )
     return pinned
+
+
+@pytest.fixture(autouse=True)
+def _no_save_wait_runs_on_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop's wait for a saving world never sleeps, and its clock moves 2 s a look (T384).
+
+    `docker.save_then_stop_the_world()` waits up to `WORLD_SAVE_CEILING_SECONDS` (30 minutes)
+    for a world it has seen running and cannot read the traffic of. A test's fake docker that
+    answers "running" to every inspect and nothing to every exec is exactly that world, and on
+    the real clock it would hold the run for half an hour instead of failing on its argv. The
+    tests of the wait itself (`test_stop_saves_before_exit.py`) set their own clock.
+    """
+    from yulon import docker
+
+    ticks = iter(range(0, 10**9, 2))
+    monkeypatch.setattr(docker, "_save_clock", lambda: float(next(ticks)))
+    monkeypatch.setattr(docker, "_SAVE_POLL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop of a world that saves first never runs a real `docker attach` (T410, T411).
+
+    `docker.save_then_stop_the_world()` types `saveall` at a Centurion or Tortoise
+    console through the console transport, which opens a pty and starts the docker
+    CLI with `subprocess.Popen` -- outside the `runner.run` every stop test fakes.
+    Here it fails as a console this host cannot reach does, so such a stop says
+    `SAVE_FIRST_NOT_ASKED` and goes on. The tests of the save itself
+    (`test_stop_saves_before_exit.py`) put their own console in its place.
+    """
+    from yulon import docker
+    from yulon.controller_wow_wotlk.console import ConsoleError
+
+    def unreachable(command: str, **_kw: object) -> object:
+        raise ConsoleError(f"no console in the test suite ({command!r} was not typed)")
+
+    monkeypatch.setattr(docker, "_console_send", unreachable)

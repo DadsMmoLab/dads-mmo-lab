@@ -82,7 +82,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.catalog.native import (
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
@@ -1609,8 +1609,8 @@ class CmangosInstaller(StagedInstaller):
 
         try:
             yield from _speaking(stop_it, control.abandon)
-        except docker.StopAbandoned as exc:
-            raise InstallerError(
+        except (docker.StopAbandoned, docker.SaveAbandoned) as exc:
+            raise InstallStopped(
                 f"This was stopped while {self.entry.name}'s world server was being stopped, so "
                 "nothing was imported. Press Install again to go on."
             ) from exc

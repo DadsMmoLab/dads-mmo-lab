@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from yulon import commands
 from yulon.apply import DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller_wow_wotlk import accounts as writer
@@ -99,6 +100,7 @@ def create_account(
         gm_level=gm_level,
         scheme=_scheme(entry),
         max_gm_level=level.max_level if level is not None else MAX_GM_LEVEL,
+        names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
     )
 
 

@@ -97,6 +97,78 @@ def test_no_previous_changelog_means_everything_is_new() -> None:
     )
 
 
+GROUPED = """# Changelog
+
+<!--
+How to add a line: under "## Unreleased" use "### New", "### Fixed" and "### Changed".
+New: Example line.
+-->
+
+## Unreleased
+
+### New
+- Epsilon is new.
+
+### Fixed
+- Zeta no longer breaks.
+
+### Changed
+- Eta looks different.
+
+## v0.8.90-Public — 2026-09-26
+
+### New
+- Alpha can now do one, in fewer words.
+
+### Fixed
+- Beta no longer breaks, said shorter.
+
+## v0.6.59Public — 2026-08-29
+"""
+
+
+def test_a_section_the_previous_release_covers_is_never_announced_again() -> None:
+    """T360 rewrote bullets v0.8.90 had already published, under their release's heading.
+
+    Their new wording is in no older changelog, so the bullet diff alone calls
+    them new; the release heading at or below the previous tag is what says
+    they are history.
+    """
+    assert rn.new_entries(OLD, GROUPED, "v0.8.90-Public") == (
+        "### New\n- Epsilon is new.\n\n"
+        "### Fixed\n- Zeta no longer breaks.\n\n"
+        "### Changed\n- Eta looks different.\n"
+    )
+
+
+def test_a_release_heading_above_the_previous_tag_still_counts() -> None:
+    """A section titled for the release being cut is that release's news."""
+    retitled = GROUPED.replace("## Unreleased", "## v0.9.0-Public — 2026-10-10")
+    notes = rn.new_entries(OLD, retitled, "v0.8.90-Public")
+    assert notes.startswith("### New\n- Epsilon is new.")
+    assert "Alpha" not in notes
+
+
+def test_without_a_previous_tag_every_section_counts() -> None:
+    notes = rn.new_entries("", GROUPED)
+    assert "Epsilon" in notes and "Alpha can now do one, in fewer words." in notes
+
+
+def test_the_how_to_comment_is_not_an_entry() -> None:
+    assert all(section for section, _, _ in rn.parse_sections(GROUPED))
+    assert "Example line" not in rn.new_entries("", GROUPED)
+
+
+def test_the_real_changelog_cuts_into_new_fixed_and_changed() -> None:
+    """What the next release body holds: Unreleased's lines under the three headings."""
+    text = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+    notes = rn.new_entries("", text, "v0.8.90-Public")
+    headings = [line for line in notes.splitlines() if line.startswith("#")]
+    assert headings == ["### New", "### Fixed", "### Changed"]
+    unreleased = [b for s, _, b in rn.parse_sections(text) if s == "Unreleased"]
+    assert [line for line in notes.splitlines() if line.startswith("- ")] == unreleased
+
+
 TAGS = [
     "v0.6.59Public",
     "v0.8.0-Public",

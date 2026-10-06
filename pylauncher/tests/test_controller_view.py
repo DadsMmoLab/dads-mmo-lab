@@ -23,7 +23,15 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from tests import test_stop_waits_for_the_world as stop_world
-from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
+from tests.conftest import (
+    HANG_BOUND,
+    HANG_BOUND_MS,
+    process_events,
+    pump_until,
+    three_way_only,
+    wait_for_panel,
+)
+from tests.support_case import needs_case_sensitive_disk
 from yulon import apply as apply_module
 from yulon import (
     bot_population,
@@ -61,7 +69,7 @@ from yulon.apply import (
     DockerSql,
     required_prompts,
 )
-from yulon.catalog import composegen, native, upstream
+from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
@@ -99,6 +107,7 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
     BOT_COUNT_RUNNING,
+    CONSOLE_SHUTDOWN_REFUSED,
     RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
@@ -454,6 +463,46 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
     view.send_console_command()
     assert sent == ["server info"]
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "server shutdown 1",
+        ".server shutdown 60",
+        "server exit",
+        "SERVER IdleShutdown 5",
+        "ser shut 1",
+    ],
+)
+def test_a_shutdown_typed_at_the_console_is_not_sent_and_stop_is_named(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """T412, measured on yulon-ubuntu 2026-10-05: `server shutdown 1` saved and closed the world
+    cleanly (exit 0), and Docker started it again at once (`restart: unless-stopped`) -- an exit
+    the container chose is not a stop. The tab said Running over a server the player had shut
+    down. Stop is the press that stops it and keeps it stopped."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == []
+    assert CONSOLE_SHUTDOWN_REFUSED in view.console_log.text()
+    assert "Stop" in CONSOLE_SHUTDOWN_REFUSED
+
+
+@pytest.mark.parametrize(
+    "typed", ["server shutdown cancel", "server restart 10", "server info", "server motd hi"]
+)
+def test_what_does_not_end_the_world_for_good_is_still_sent(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """A cancel ends nothing, and a restart is what Docker's policy does anyway."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
 
 
 def test_an_empty_reply_is_said_out_loud_rather_than_shown_as_silence(
@@ -7510,6 +7559,24 @@ def test_stop_now_anyway_on_the_tab_sends_the_stop_and_keeps_the_warning_once(
     assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
 
 
+def test_a_world_that_crashed_while_it_saved_is_said_after_the_stop_with_its_last_lines(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T414: the sentence goes on the label and outlives the stop; the world's last lines go
+    under Details, never into the line."""
+    from yulon.said import details_below
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    crashed = details_below(docker.world_save_failed(139), "Cant begin transaction.")
+    view._stop_notice(crashed)
+    assert view.problem_label.text() == docker.world_save_failed(139)
+    assert "Cant begin transaction." in view.problem_details.text()
+    view._stop_done(True)
+    assert docker.world_save_failed(139) in view.problem_label.text()
+    assert "Details:" not in view.problem_label.text()
+    assert "Cant begin transaction." in view.problem_details.text()
+
+
 def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_stop(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9802,6 +9869,22 @@ def test_the_client_folder_row_reads_its_three_sentences(qapp: object, tmp_path:
     # instead of the "no Interface/" one.
 
 
+@needs_case_sensitive_disk
+def test_a_lowercase_interface_folder_is_the_clients_interface_folder(
+    qapp: object, tmp_path: Path
+) -> None:
+    """m910q live check of T261: `interface/` read as "no Interface/ folder yet", and
+    Tortoise's addons were refused a client that had one."""
+    real = tmp_path / "real-client"
+    (real / "interface" / "addons").mkdir(parents=True)
+
+    view, _ = _client_dir_view(WOTLK, tmp_path / "real", client_dir=real)
+
+    assert view.client_dir_label.text() == f"Client folder: {real}"
+    assert controller_view_module._client_dir_for_addons(real) == real
+    assert sorted(p.name for p in real.iterdir()) == ["interface"], "nothing renamed or added"
+
+
 def test_the_client_folder_buttons_read_set_or_change_and_forget_appears_once_recorded(
     qapp: object, tmp_path: Path
 ) -> None:
@@ -10109,6 +10192,41 @@ def test_wotlk_requires_at_least_a_data_folder(qapp: object, tmp_path: Path) -> 
     # Mutation: drop the `elif not (chosen / clientdir.DATA_DIR).is_dir(): ...
     # return` branch in `change_client_dir()` -- `empty` above is written
     # instead of refused.
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize("game", ["wotlk", "tbc"])
+def test_a_client_whose_data_folder_is_lowercase_is_taken(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T261: refused as having no `Data/` folder while it held `data/`.
+
+    WotLK through the press's own minimal rule, TBC through `clientdir.validate()`;
+    the folder written is the one picked, and nothing in it is renamed.
+    """
+    entry = WOTLK if game == "wotlk" else TBC
+    real = tmp_path / "real-client"
+    data = real / "data"
+    (data / "enus").mkdir(parents=True)
+    for index in range(8):
+        (data / f"patch-{index}.mpq").write_bytes(b"MPQ")
+    (data / "expansion.mpq").write_bytes(b"MPQ")
+    (data / "enus" / "locale-enus.mpq").write_bytes(b"MPQ")
+    monkeypatch.setattr(preflight, "free_bytes", lambda _path: 100 * 2**30)
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: asked.append(a) or 0
+    )
+    view, fake = _client_dir_view(entry, tmp_path / "server", pick_client_dir=lambda *_: real)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert failures == []
+    assert fake.written == [real]
+    assert asked == [], "no warning to answer: the client is complete"
+    assert sorted(p.name for p in real.iterdir()) == ["data"]
 
 
 def test_the_row_says_the_folder_is_missing_rather_than_no_interface(
@@ -11675,6 +11793,58 @@ def test_only_a_compile_that_succeeds_clears_the_banner_and_the_chip(
     assert view.modules_panel.row("mod-solocraft").chip_buttons == ()
 
 
+def test_a_stop_that_came_too_late_for_a_rebuild_clears_the_owed_rebuild_like_a_success(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T247 review, the lead's ruling: a Stop that came too late means the press SUCCEEDED.
+
+    The real rebuild engine, Stop pressed on this tab's own panel in the last
+    pause of T71's watch: the build met its proof and is kept, the header says
+    the job finished, and the owed rebuild is cleared as after any compile.
+    """
+    from tests.support_native import engine as wotlk_engine
+    from tests.test_ready_wait_stop import WATCH_PAUSES
+    from tests.test_update_to_latest import _ready
+    from yulon.catalog.installer import InstallOptions
+    from yulon.ui.widgets.log_panel import FINISHED_AFTER_A_LATE_STOP
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    rec, server_dir = _ready(tmp_path / "engine")
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+    pauses = {"n": 0}
+
+    def pause(_seconds: float) -> None:
+        pauses["n"] += 1
+        if pauses["n"] == WATCH_PAUSES:
+            reached.set()
+            assert gate[0].wait(HANG_BOUND), "Stop never came"
+
+    made = wotlk_engine(rec, sleep=pause)
+
+    def rebuild(cancel: threading.Event | None = None) -> Iterator[str]:
+        assert cancel is not None
+        gate.append(cancel)
+        return made.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = rebuild
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.rebuild_server() is True
+    pump_until(reached.is_set, "the last pause of the watch after the banner")
+    view.rebuild_log.stop()
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the rebuild finished")
+
+    assert view.rebuild_log.status_text() == FINISHED_AFTER_A_LATE_STOP
+    assert view.rebuild_banner.isHidden() is True, "the owed rebuild was not cleared"
+    assert view._rebuild_owed == set(), view._rebuild_owed
+
+
 def test_a_database_update_through_the_same_panel_clears_no_rebuild(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -12475,6 +12645,39 @@ def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_pa
     assert path.read_text(encoding="utf-8") != before
     view.tuning_panel.card("mod-transmog").revert_button.click()
     assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "2147483648"])
+def test_a_number_the_server_would_read_differently_is_refused_at_save(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """Through the card's own Save: `int()` reads each of these, the server does not.
+
+    `AuctionHouseBot.ItemsPerCycle` is an `int` with no bounds, so it is a text
+    box and nothing but the spelling rule stands between the text and the conf.
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    from tests.support_player_text import command_faults, text_faults
+
+    conf = "env/dist/etc/modules/mod_ahbot.conf"
+    _deploy(tmp_path, conf, "[worldserver]\nAuctionHouseBot.ItemsPerCycle = 200\n")
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-ah-bot-plus"}))
+    before = (tmp_path / conf).read_bytes()
+    card = view.tuning_panel.card("mod-ah-bot-plus")
+    box = card.editors["AuctionHouseBot.ItemsPerCycle"].control
+    assert isinstance(box, QLineEdit)
+    box.setText(typed)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert (tmp_path / conf).read_bytes() == before
+    assert tuning.backups_of(tmp_path / conf) == ()
+    said = view.tuning_report.toPlainText()
+    assert "AuctionHouseBot.ItemsPerCycle" in said
+    assert failures and command_faults(failures[0]) == [], failures
+    assert command_faults(said) == [] and text_faults(said) == [], said
 
 
 def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
@@ -13549,7 +13752,8 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
         boxes.append(self)
         return which
 
-    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", exec_)
+    # T243: the Yes/No questions are boxes too; they are still answered by `question`.
+    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", three_way_only(exec_))
     return boxes
 
 

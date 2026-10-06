@@ -54,7 +54,7 @@ from typing import Any, Protocol
 from yulon import client_names, docker, platform
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -733,6 +733,57 @@ def remove_case_view(view_dir: Path) -> bool:
     return _remove_tree(view_dir)
 
 
+_BAR = re.compile(r"[\[\]# ]*")
+"""A line that is nothing but a progress bar or a piece of one: `[####]`, `###]`, `#`, `[`."""
+
+_GLUED_BAR = re.compile(r"\[?(?:#{3,}(?=[^\s#\]])|#{1,2}(?=[A-Z]))")
+"""A bar's `#` run glued onto the front of the next line: `[###Extracting ...`, `#Extracting ...`.
+
+Residue only (cold review of T263): a run of three or more `#`, or one or two
+directly before a capital letter, which is how the bar's last cells meet the
+tool's next `Extracting`/`Processing` line. A `#` before a digit, a small
+letter or a space is the line's own (`#1 error`, `#define X`, `[#1] x`,
+`# a sentence`), and a `#` inside a line (`a#b.wmo`) is part of it.
+"""
+
+
+def without_progress(line: str) -> str | None:
+    """`line` without a progress bar's residue; None when that is all it was (T263).
+
+    The extraction tools draw progress bars for a terminal: `vmap4extractor`
+    prints `#` after `#` with no newline, so on a pipe its bar arrives as lines of
+    `#` alone or glued onto the front of the next line, and a tool that redraws
+    with a carriage return leaves every reading on one line. Seen on yulon-ubuntu2
+    (2026-10-05): a lone `#` was the last line of a killed `vmap4extractor`, and
+    so stood in its last words between the file it was extracting and the
+    sentence saying the old map data was put back. A redraw keeps its last
+    reading; a blank line stays blank.
+    """
+    if "\r" in line:
+        line = next((part for part in reversed(line.split("\r")) if part), "")
+    if line and _BAR.fullmatch(line) and any(mark in line for mark in "[#]"):
+        return None
+    return _GLUED_BAR.sub("", line, count=1) if line.startswith(("#", "[#")) else line
+
+
+def _quiet(run_container: RunContainer) -> RunContainer:
+    """`run_container` whose output reaches the sink and the last words without bar residue."""
+
+    def run(
+        spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        def said(line: str) -> None:
+            kept = without_progress(line)
+            if kept is not None:
+                sink(kept)
+
+        ran = run_container(spec, sink=said, cancel=cancel)
+        tail = tuple(kept for kept in map(without_progress, ran.tail) if kept is not None)
+        return replace(ran, tail=tail) if tail != ran.tail else ran
+
+    return run
+
+
 class RunContainer(Protocol):
     """`docker.run_container`'s shape, as a seam the tests fill with a recorder."""
 
@@ -1148,6 +1199,7 @@ def run_plan(
             all, or exited 0 with too few files.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
+    run_container = _quiet(run_container)  # no progress bar in the log or last words (T263)
     ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
     security_args = container_security_args(enforcing=ask())
     expected = expected_evidence(
@@ -1389,7 +1441,7 @@ def _conclude(
     """
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
         _left_running(tool.name, run, data_dir)
-        raise InstallerError(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
+        raise InstallStopped(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
             f"{tool.name} could not be started, so the client was never read. "
@@ -1934,7 +1986,7 @@ def run_mmaps(
         yield f"mmaps: already generated ({_counts_text(counts(produces, data_dir))})"
         return
     if cancel is not None and cancel.is_set():
-        raise InstallerError(
+        raise InstallStopped(
             f"map generation was stopped before it started, so nothing was removed. "
             f"{MMAPS_CANCEL_NOTE}"
         )
@@ -1969,7 +2021,7 @@ def run_mmaps(
         # (review, 2026-09-02).
         raise InstallerError(f"{exc}{cleared}") from exc
     yield f"mmaps: running {' '.join(plan.argv)}"
-    run = run_container(
+    run = _quiet(run_container)(
         docker.ContainerRun(
             image=image_ref,
             argv=tuple(plan.argv),
@@ -1983,7 +2035,7 @@ def run_mmaps(
     )
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
         _left_running("map generation", run, data_dir)
-        raise InstallerError(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
+        raise InstallStopped(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
             f"map generation could not be started, so no movement data was written."

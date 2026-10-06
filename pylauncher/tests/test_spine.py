@@ -2443,15 +2443,33 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "container -- and a listing that comes back without a `.dbc` in it is a refusal "
         "(`no .dbc files in ...`), never a copy reported as done"
     ),
-    ("apply.py", "_receipts"): (
-        "T67. Lists the SOURCE tree inside the clone this app made -- the files a `dest: data` "
-        "client step copies -- and maps each onto its destination, to hash the record "
-        "`remove()` checks before it DELETES anything from the user's game client. It decides "
-        "no write; it decides a later delete, and it is the reason the listing is of the clone "
-        "and not of the destination: round 1 review, 2026-09-16, listing `<client>/Data` "
-        "recorded the user's own archives as this app's and removing the Season of Discovery "
-        "keg emptied the folder. A listing that comes back empty records nothing, which at "
-        "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ("apply.py", "_plan_onto"): (
+        "T262 (was `_copy_onto`'s). Walks the SOURCE tree inside the clone this app made -- "
+        "the files a folder `client` step copies -- and lists each destination folder once to "
+        "land every folder and file on the name the client already has in another case. "
+        "Read-only: it plans the names; `_copy_onto()` writes them, and the receipts `remove()` "
+        "checks are of those names, taken from the source and never from a listing of the "
+        "destination (round 1 review, 2026-09-16: listing `<client>/Data` recorded the user's "
+        "own archives as this app's). A listing that fails raises, and the install stops"
+    ),
+    ("apply.py", "_data_destinations"): (
+        "T262 scoped re-review. Lists the one destination folder of each single-file `dest: "
+        "data` step to name the file it would write, for the refusal of a module whose file "
+        "another module already put there and for the aside of an earlier crash. Read-only; "
+        "it decides a refusal or which aside is put back, never a write of its own"
+    ),
+    ("apply.py", "_aside_names"): (
+        "T262 scoped re-review. Lists the folder of one client file to find its "
+        "`<name>.yulon-module-old[.N]` asides, any case. Read-only; an aside it finds that "
+        "no receipt records is renamed back to its own name when that is free, and named "
+        "otherwise -- never deleted. A folder that cannot be listed has none"
+    ),
+    ("apply.py", "_client"): (
+        "T262. Lists the one destination folder of a single-file `client` step (the client's "
+        "`Data/`, or `Interface/`) to find the name a file of that name already has there in "
+        "another case, so the copy lands on it rather than beside it. It decides which existing "
+        "name is written, never whether the client may be written: that is the step's own "
+        "`dest`. A folder that cannot be listed raises, and the install stops"
     ),
     ("catalog/world_data.py", "_folder_hash"): (
         "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
@@ -2647,11 +2665,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
     ("networking.py", "_realmlist_candidates"): (
-        "globs `Data/*/realmlist.wtf` in a client to find the file(s) to write: the first "
-        "for `write_client_realmlist()`, every one for T181's "
+        "lists a client's `Data/` (found whatever its case, T261) for its locale folders, "
+        "and finds `realmlist.wtf` in each the same way, to find the file(s) to write: the "
+        "first for `write_client_realmlist()`, every one for T181's "
         "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
-        "client. A glob matching nothing falls back to `Data/enUS/`, and each write is to a "
-        "named file"
+        "client. Finding none falls back to `Data/enUS/` under the names already on disk, "
+        "and each write is to a named file. A `Data/` that cannot be listed offers none"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
@@ -2699,6 +2718,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
+    ),
+    ("ui/controller_view.py", "_has_backups"): (
+        "T377: asks whether the backups directory holds any `*.sql`, to show or hide the "
+        "Restore a backup… offer beside a missing database; reads, decides no write"
     ),
     ("module_source.py", "_conf_steps"): (
         "lists the top level of a derived module's conf/ to find the .conf.dist files the "
@@ -2818,12 +2841,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("client_names.py", "on_disk"): (
         "T227. Lists each folder on the way to one client file to find the name on disk that "
-        "matches it whatever its case (exact spelling first). Read-only. Its answer decides a "
-        "write in exactly one way: which existing name in a ready-to-play client a pack's "
-        "file replaces or `remove_when_off` removes (`client_packs`), after that folder's "
-        "marker was checked and with every link refusal unchanged; it never decides whether "
-        "the app may write somewhere. A folder that cannot be listed ends the matching, and "
-        "the rest keeps the spelling it was asked for"
+        "matches it whatever its case (exact spelling first). Read-only. Its answer decides "
+        "only WHICH existing name a write lands on, never whether the app may write: which "
+        "name in a ready-to-play client a pack's file replaces or `remove_when_off` removes "
+        "(`client_packs`, after that folder's marker was checked and with every link refusal "
+        "unchanged); since T261/T262 also the realmlist a ready-to-play client's Play writes "
+        "(`networking`), the client folder a module's `client` step copies into (`apply`), "
+        "and the player's file a removed copy's read-only flag goes back on (`play_client`, "
+        "same inode only). A folder that cannot be listed ends the matching, and the rest "
+        "keeps the spelling it was asked for"
     ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
@@ -2905,6 +2931,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "continued: a walk that fails answers an empty hash, which never matches, so the "
         "tiles are removed and the run starts from the beginning -- never a resume over "
         "map data nobody could read"
+    ),
+    ("catalog/families/mmaps.py", "_whole_tiles"): (
+        "T263. Lists `data/mmaps` -- never through a link -- to count the `.mmtile` files "
+        "that are whole now, for the sentence a failed Re-extract adds about the tiles the "
+        "next run continues from. Read-only: nothing is removed or written, and a listing "
+        "that fails counts 0, which says nothing rather than promising tiles"
+    ),
+    ("catalog/families/mmaps.py", "_tile_fingerprint"): (
+        "T245/T263 poll cache. Lists `data/mmaps` once, stat only, for each `.mmtile`'s name, "
+        "size and date, so the Server tab's 5 s line opens the tiles again only when that "
+        "changed. Read-only; a listing that fails means no cache, and the count is taken "
+        "the long way"
+    ),
+    ("catalog/families/mmaps.py", "_whole_tiles_polled"): (
+        "T245/T263 poll cache. Lists `data/mmaps` to read each `.mmtile`'s header when the "
+        "folder's fingerprint changed, for the count the Server tab's line shows. Read-only; "
+        "a tile that cannot be opened keeps no count, and a listing that fails counts 0"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "

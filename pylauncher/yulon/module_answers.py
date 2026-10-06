@@ -103,6 +103,7 @@ def _load_for_write(path: Path) -> tuple[dict[str, Any] | None, str]:
         or not isinstance(parsed.get("modules", {}), dict)
         or not isinstance(parsed.get("applied", {}), dict)
         or not isinstance(parsed.get("pending", {}), dict)
+        or not isinstance(parsed.get(SETTINGS, {}), dict)
     ):
         return None, f"{path.name} is not in a shape this version knows; it was left as it is"
     return parsed, ""
@@ -240,6 +241,98 @@ def recorded_keys(server_dir: Path) -> RecordedKeys:
             return RecordedKeys(unreadable=f"its `{field}` is not in a shape this version knows")
         found[field] = frozenset(key for key in entries if isinstance(key, str))
     return RecordedKeys(applied=found["applied"], pending=found["pending"])
+
+
+SETTINGS = "settings"
+"""The record's map of settings-only installs: `<type>/<id>` -> conf file -> key -> value.
+
+A mod with no repository that only writes conf keys (Experience Rates, Message
+of the Day, Cross-Faction Play) leaves no folder, so before this map nothing
+said it was installed: its row read Not installed after a finished install, and
+offered no Remove. `apply.settings_installed()` reads it. Kept apart from
+`applied`, which says what the DATABASE holds and is dropped with a database
+imported fresh (`forget_database_records()`); a conf file is not in the database.
+"""
+
+
+def settings_keys(server_dir: Path) -> frozenset[str]:
+    """Every `<type>/<id>` with a settings receipt; empty for no file or one that cannot be read.
+
+    One read for the whole install, beside `recorded_keys()` on every reload. An
+    unreadable file reads as no receipts: the row then offers Install, and a second
+    Install of a settings-only mod only writes the same keys again.
+    """
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable settings receipts in {server_dir}: {exc}")
+        return frozenset()
+    entries = parsed.get(SETTINGS) if isinstance(parsed, dict) else None
+    if not isinstance(entries, dict):
+        return frozenset()
+    return frozenset(key for key in entries if isinstance(key, str))
+
+
+SETTINGS_REMOVED = "settings_removed"
+"""The record's map of settings-only mods a Remove put back: `<type>/<id>` -> `true` (T392).
+
+The saved answers outlive a Remove (T104), so keys set back by hand to what the install
+wrote would read as an older install again (`apply._settings_still_written()`). The mark
+says this install did have the mod and removed it: such a mod reads installed only through
+a new Install, which clears the mark. An install with no mark and no receipt, from before
+receipts, is still adopted by its values.
+"""
+
+
+def settings_removed(server_dir: Path, manifest: Manifest) -> bool:
+    """Whether a Remove marked `manifest` as removed (T392); `False` for no usable file."""
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable removed marks in {server_dir}: {exc}")
+        return False
+    marks = parsed.get(SETTINGS_REMOVED) if isinstance(parsed, dict) else None
+    return isinstance(marks, dict) and _key(manifest) in marks
+
+
+def record_settings(
+    server_dir: Path, manifest: Manifest, written: Mapping[str, Mapping[str, str]] | None
+) -> str:
+    """Record the conf keys and values a settings-only install wrote; `None` is a Remove.
+
+    An install saves the receipt and clears the removed mark; a Remove (`None`) drops
+    the receipt and sets the mark (T392), also for an install that had no receipt.
+    `""` if written (or nothing to change), else why not. The same careful write as
+    `record_answers()`: every other entry and field is kept, and a file this build
+    cannot use is left alone.
+    """
+    key = _key(manifest)
+    if written is None and key not in settings_keys(server_dir):
+        if settings_removed(server_dir, manifest):
+            return ""
+
+    def change(everything: dict[str, Any]) -> None:
+        entries = everything.get(SETTINGS, {})
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        marks = everything.get(SETTINGS_REMOVED, {})
+        marks = dict(marks) if isinstance(marks, dict) else {}
+        if written is None:
+            entries.pop(key, None)
+            marks[key] = True
+        else:
+            entries[key] = {
+                str(file): {str(k): str(v) for k, v in keys.items()}
+                for file, keys in written.items()
+            }
+            marks.pop(key, None)
+        everything[SETTINGS] = entries
+        everything[SETTINGS_REMOVED] = marks
+
+    return _write_record(server_dir, change, f"the settings receipt for {key}")
 
 
 def forget_applied(server_dir: Path, manifest: Manifest) -> str:
