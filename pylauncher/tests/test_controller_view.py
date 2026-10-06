@@ -11682,6 +11682,58 @@ def test_only_a_compile_that_succeeds_clears_the_banner_and_the_chip(
     assert view.modules_panel.row("mod-solocraft").chip_buttons == ()
 
 
+def test_a_stop_that_came_too_late_for_a_rebuild_clears_the_owed_rebuild_like_a_success(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T247 review, the lead's ruling: a Stop that came too late means the press SUCCEEDED.
+
+    The real rebuild engine, Stop pressed on this tab's own panel in the last
+    pause of T71's watch: the build met its proof and is kept, the header says
+    the job finished, and the owed rebuild is cleared as after any compile.
+    """
+    from tests.support_native import engine as wotlk_engine
+    from tests.test_ready_wait_stop import WATCH_PAUSES
+    from tests.test_update_to_latest import _ready
+    from yulon.catalog.installer import InstallOptions
+    from yulon.ui.widgets.log_panel import FINISHED_AFTER_A_LATE_STOP
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    rec, server_dir = _ready(tmp_path / "engine")
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+    pauses = {"n": 0}
+
+    def pause(_seconds: float) -> None:
+        pauses["n"] += 1
+        if pauses["n"] == WATCH_PAUSES:
+            reached.set()
+            assert gate[0].wait(HANG_BOUND), "Stop never came"
+
+    made = wotlk_engine(rec, sleep=pause)
+
+    def rebuild(cancel: threading.Event | None = None) -> Iterator[str]:
+        assert cancel is not None
+        gate.append(cancel)
+        return made.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = rebuild
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.rebuild_server() is True
+    pump_until(reached.is_set, "the last pause of the watch after the banner")
+    view.rebuild_log.stop()
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the rebuild finished")
+
+    assert view.rebuild_log.status_text() == FINISHED_AFTER_A_LATE_STOP
+    assert view.rebuild_banner.isHidden() is True, "the owed rebuild was not cleared"
+    assert view._rebuild_owed == set(), view._rebuild_owed
+
+
 def test_a_database_update_through_the_same_panel_clears_no_rebuild(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
