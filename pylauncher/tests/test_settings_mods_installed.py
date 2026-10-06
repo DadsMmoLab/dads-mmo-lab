@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QMessageBox
 from tests.support_player_text import command_faults, text_faults
 from yulon import apply as apply_module
 from yulon import module_answers, runner
-from yulon.apply import Applier
+from yulon.apply import Applier, ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import modules as tortoise_modules
@@ -530,6 +530,102 @@ def test_remove_asks_in_plain_words_what_goes_back(
     ), text
     assert "Rate.XP" not in text
     assert text_faults(title + text) == [] and command_faults(title + text) == []
+
+
+# ------------------------------------------------------------ after a Remove (T392)
+
+
+def test_rates_set_back_by_hand_after_a_remove_do_not_read_as_installed(tmp_path: Path) -> None:
+    """Install at 3, Remove, then the rates set to 3 by hand: the saved answers (3) outlive
+    the Remove and the keys read what the install wrote, but the Remove left a mark, so the
+    row stays Not installed. A new Install clears the mark.
+
+    Mutation: drop the removed mark and the hand-set keys read as installed again.
+    """
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    manifest = _manifest(tortoise_modules.store())
+    applier = Applier(server_dir)
+    applier.install(manifest, {"xp_rate": "3"})
+    applier.remove(manifest)
+    (server_dir / CMANGOS_CONF).write_text(STOCK_XP.replace("1", "3"), encoding="utf-8")
+
+    assert not apply_module.settings_installed(server_dir, manifest)
+    assert "xp-rates" not in apply_module.installed_modules(server_dir, manifests=[manifest]).get(
+        "mod", frozenset()
+    )
+
+    applier.install(manifest, {"xp_rate": "3"})
+
+    assert apply_module.settings_installed(server_dir, manifest)
+    assert "mod/xp-rates" in module_answers.settings_keys(server_dir)
+    assert not module_answers.settings_removed(server_dir, manifest)
+
+
+def test_remove_of_an_older_install_marks_it_removed_too(tmp_path: Path) -> None:
+    """An install from before the receipt has none to drop, but its Remove still marks."""
+    server_dir = _server(tmp_path, CMANGOS_CONF, STOCK_XP.replace("1", "3"))
+    manifest = _manifest(tortoise_modules.store())
+    _legacy(server_dir, manifest, {"xp_rate": "3"})
+    assert apply_module.settings_installed(server_dir, manifest)
+
+    Applier(server_dir).remove(manifest)
+    (server_dir / CMANGOS_CONF).write_text(STOCK_XP.replace("1", "3"), encoding="utf-8")
+
+    assert not apply_module.settings_installed(server_dir, manifest)
+
+
+def test_an_older_install_that_was_never_removed_is_still_adopted(tmp_path: Path) -> None:
+    """The mark is written by a Remove only: no mark, no receipt, answers and keys agree."""
+    server_dir = _server(tmp_path, CMANGOS_CONF, STOCK_XP.replace("1", "3"))
+    manifest = _manifest(tortoise_modules.store())
+    _legacy(server_dir, manifest, {"xp_rate": "3"})
+
+    assert not module_answers.settings_removed(server_dir, manifest)
+    assert apply_module.settings_installed(server_dir, manifest)
+
+
+# ------------------------------------------------------------ an unreadable conf (T393)
+
+
+def test_remove_question_says_plainly_when_the_conf_cannot_be_read(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conf was deleted or is not UTF-8: the question said "nothing in them changes",
+    which is false. It now says Yu'lon could not read the file and what Remove still does:
+    it stops with nothing changed (the patch has no file to work on) and the row stays.
+
+    Mutation: map the unreadable case back to the empty list and the old sentence returns.
+    """
+    view, server_dir, questions = _installed_on_tortoise(
+        tmp_path, monkeypatch, QMessageBox.StandardButton.No
+    )
+    (server_dir / CMANGOS_CONF).write_bytes(b"\xff\xfe not utf-8 \x80")
+
+    _row(view, "xp-rates").remove_button.click()  # type: ignore[attr-defined]
+
+    ((title, text),) = questions
+    assert "nothing in them changes" not in text
+    assert text == (
+        "Yu'lon could not read mangosd.conf, so it cannot tell which settings Remove "
+        "would change. If you go on, Remove tries to put them back and stops with nothing "
+        "changed if it still cannot read the file; Experience Rates stays listed as installed."
+    ), text
+    assert text_faults(title + text) == [] and command_faults(title + text) == []
+
+
+def test_remove_really_stops_when_the_conf_cannot_be_read(tmp_path: Path) -> None:
+    """What the question promises: Remove over an unreadable conf raises and drops nothing."""
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    manifest = _manifest(tortoise_modules.store())
+    applier = Applier(server_dir)
+    applier.install(manifest, {"xp_rate": "3"})
+    (server_dir / CMANGOS_CONF).write_bytes(b"\xff\xfe not utf-8 \x80")
+
+    with pytest.raises((ApplyError, UnicodeDecodeError)):
+        applier.remove(manifest)
+
+    assert "mod/xp-rates" in module_answers.settings_keys(server_dir)
+    assert not module_answers.settings_removed(server_dir, manifest)
 
 
 SETTINGS_STORES = [

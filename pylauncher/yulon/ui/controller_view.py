@@ -4796,6 +4796,18 @@ SETTINGS_REMOVE_NOTHING = (
 )
 """The Remove question when the remove steps would change no value."""
 
+SETTINGS_REMOVE_UNREADABLE = (
+    "Yu'lon could not read {files}, so it cannot tell which settings Remove would change. "
+    "If you go on, Remove tries to put them back and stops with nothing changed if it still "
+    "cannot read the file; {name} stays listed as installed."
+)
+"""The Remove question when a conf the remove steps patch cannot be read (T393)."""
+
+BIGGER_STACKS_REMOVE = (
+    "Every item's stack size goes back to what it was before {name} was installed."
+)
+"""The Remove question for a mod whose record is in the database (T398): Bigger Stacks."""
+
 
 def _and_join(items: Sequence[str]) -> str:
     """`a`, `a and b`, `a, b and c`."""
@@ -4805,7 +4817,9 @@ def _and_join(items: Sequence[str]) -> str:
 
 
 def remove_question(
-    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+    manifest: Manifest,
+    changes: Sequence[apply_module.SettingChange],
+    unreadable: Sequence[str] = (),
 ) -> tuple[str, str]:
     """The title and text of a settings-only mod's Remove question (T380 cold review).
 
@@ -4816,6 +4830,10 @@ def remove_question(
     mod changed goes back.
     """
     title = f"Remove {manifest.name}?"
+    if unreadable:
+        # T393: not "nothing changes" -- Yu'lon could not look.
+        files = _and_join([Path(file).name for file in unreadable])
+        return title, SETTINGS_REMOVE_UNREADABLE.format(files=files, name=manifest.name)
     if not changes:
         return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
     if any(change.label is None for change in changes):
@@ -15531,8 +15549,23 @@ class ControllerView(QWidget):
             title, text = remove_question(
                 manifest,
                 apply_module.settings_removal(self.services.controller.server_dir, manifest),
+                apply_module.settings_removal_unreadable(
+                    self.services.controller.server_dir, manifest
+                ),
             )
             if not self._confirm(title, text):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
+        if action == "remove" and apply_module.database_receipt(manifest):
+            # T398: Bigger Stacks' Remove put every item's stack size back at once,
+            # where a settings-only Remove has asked since T380. Asked first, No by
+            # default, in the box that fits the screen (T243).
+            if not self._confirm(
+                f"Remove {manifest.name}?", BIGGER_STACKS_REMOVE.format(name=manifest.name)
+            ):
                 self._module_pending = None
                 self.module_report.setPlainText(
                     f"remove {manifest.id}: cancelled — nothing on this machine was changed."

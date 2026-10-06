@@ -366,21 +366,23 @@ def _settings_still_written(
     """An install from before the receipt: its keys still read what it wrote, and Remove has
     something to undo.
 
-    Three things, all of them needed:
+    Four things, all of them needed:
 
+    0. A Remove has not marked it removed (`module_answers.SETTINGS_REMOVED`, T392).
     1. Every question a key's value is built from has an answer saved for this
        install. An install saves the answers it was given (T104) and nothing
        else does, so a value set by hand or on the Server rates card that
        happens to equal the mod's default is not taken for an install on a
        server where the mod was never installed. The answers outlive a Remove
-       (T104), so after one, keys set back by hand to exactly what the install
-       wrote do read as that install again (T392).
+       (T104), which is why item 0 exists.
     2. Every key reads exactly the value the install writes with those answers.
     3. The remove patches would change one of those keys' values: a conf already
        at what Remove leaves has nothing to remove, whatever was installed once.
 
     `texts` caches each conf file's text across the manifests of one reload.
     """
+    if module_answers.settings_removed(server_dir, manifest):
+        return False
     remembered = module_answers.read_answers(server_dir, manifest)
     confs = _key_written_confs(manifest)
     needed = {
@@ -440,6 +442,25 @@ def settings_removal(server_dir: Path, manifest: Manifest) -> tuple[SettingChang
         return _removal_changes(server_dir, manifest, vals, {})
     except ApplyError:
         return ()
+
+
+def settings_removal_unreadable(server_dir: Path, manifest: Manifest) -> tuple[str, ...]:
+    """The conf files Remove of the settings-only `manifest` would patch that cannot be read (T393).
+
+    Missing, no permission, or not UTF-8: `settings_removal()` can say nothing about
+    them and answers no changes, which is not the same as "nothing changes". Remove
+    itself stops on such a file with nothing changed (`Applier._patches()`).
+    """
+    if not settings_only(manifest):
+        return ()
+    files = {conf.file for conf in _key_written_confs(manifest)}
+    texts: dict[str, str | None] = {}
+    found: list[str] = []
+    for patch in manifest.patches:
+        if patch.when == "remove" and patch.file in files and patch.file not in found:
+            if _conf_text(server_dir, patch.file, texts) is None:
+                found.append(patch.file)
+    return tuple(found)
 
 
 def _removal_changes(
@@ -3264,8 +3285,9 @@ class Applier:
             self._record_database(manifest, vals, "remove", log)
         if settings_only(manifest):
             # T380: the settings are back, so the receipt that said they were
-            # changed goes. A legacy install has none, and its conf no longer
-            # reads as installed once the remove patches ran.
+            # changed goes, and a removed mark (T392) is left in its place so
+            # values set back by hand do not read as the install again. A legacy
+            # install has no receipt and gets the mark too.
             problem = module_answers.record_settings(self.server_dir, manifest, None)
             if problem:
                 log.skipped.append(
