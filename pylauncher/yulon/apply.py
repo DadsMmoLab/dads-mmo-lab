@@ -673,6 +673,9 @@ class ApplyRefusal(ApplyError, SaidByYulon):
     """An `ApplyError` whose message is Yu'lon's own sentence, shown as written (T214)."""
 
 
+_STARTED_DB_LINE = "started the database alone; the world server was left stopped"
+
+
 def _kept(cause: BaseException, message: str) -> ApplyError:
     """`message`, around `cause`'s text, as Yu'lon's sentence only if `cause` was one (T214).
 
@@ -3728,6 +3731,7 @@ class Applier:
         Nothing here writes, and the two things it reads are the answers it was
         handed and (through `_check_exists`) the server's own database.
         """
+        db_asked = [False]  # the database is started for the checks at most once
         for prompt in required_prompts(manifest, action):
             value = vals.get(prompt.key)
             if value is None:
@@ -3741,10 +3745,15 @@ class Applier:
                     f"{manifest.id}: {prompt.question} — {problem}, and {value!r} is not. "
                     f"Nothing was changed."
                 )
-            self._check_exists(manifest, prompt, vals, log)
+            self._check_exists(manifest, prompt, vals, log, db_asked)
 
     def _check_exists(
-        self, manifest: Manifest, prompt: Prompt, vals: Mapping[str, str], log: _Log
+        self,
+        manifest: Manifest,
+        prompt: Prompt,
+        vals: Mapping[str, str],
+        log: _Log,
+        db_asked: list[bool] | None = None,
     ) -> None:
         """Ask the database whether the thing this answer names is really there.
 
@@ -3760,6 +3769,13 @@ class Applier:
           refuse. A database is legitimately stopped while a module is being
           installed, and an install that a stopped server can veto would be a
           worse defect than the one this check is here for.
+
+        T396: where the caller handed over a way to start the database, it is
+        started alone first (once, before the first question), so a stopped
+        database is no longer a reason to skip the check. If it will not start
+        the install is refused before anything is written: a check that cannot
+        be made, over a module whose answer a wrong value silently breaks, is
+        not one to wave through and then run again on the next press.
         """
         check = prompt.exists
         if check is None:
@@ -3781,6 +3797,18 @@ class Applier:
                 f"like a module that does nothing"
             )
             return
+        if db_asked is not None and not db_asked[0] and self._start_database is not None:
+            db_asked[0] = True
+            try:
+                started = self._start_database()
+            except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
+                raise _kept(
+                    exc,
+                    f"{manifest.id}: the database could not be started to check "
+                    f"{prompt.question!r}. {exc} Nothing was changed.",
+                ) from exc
+            if started and _STARTED_DB_LINE not in log.done:
+                log.done.append(_STARTED_DB_LINE)
         statement = _render(check.query, vals, f"prompt {prompt.key}")
         try:
             rows = self.sql.query(check.db, statement)
@@ -4601,8 +4629,8 @@ class Applier:
                 f"{manifest.id}: the database could not be started, so no SQL was run and no "
                 f"rows were written: {steps}. {exc}",
             ) from exc
-        if started:
-            log.done.append("started the database alone; the world server was left stopped")
+        if started and _STARTED_DB_LINE not in log.done:
+            log.done.append(_STARTED_DB_LINE)
         return True
 
     def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:

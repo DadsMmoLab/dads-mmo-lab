@@ -11,16 +11,43 @@
   "sql": [
     {
       "db": "world",
+      "statement": "CREATE TABLE IF NOT EXISTS yulon_stackable_backup (entry INT UNSIGNED NOT NULL PRIMARY KEY, stackable SMALLINT UNSIGNED NOT NULL) ENGINE=InnoDB;",
+      "note": "the undo, taken before anything is changed"
+    },
+    {
+      "db": "world",
+      "statement": "INSERT IGNORE INTO yulon_stackable_backup (entry, stackable) SELECT entry, stackable FROM item_template WHERE stackable > 1;",
+      "note": "INSERT IGNORE so a second install never overwrites the ORIGINAL values with this mod's own"
+    },
+    {
+      "db": "world",
       "path": "All_Stackables_200_Up.sql",
-      "note": "upstream ships one size, 200, and its undo"
+      "note": "upstream ships one size, 200, and its undo; the backup above is taken first so Remove can put every stack size back exactly"
+    },
+    {
+      "db": "world",
+      "statement": "CREATE TABLE IF NOT EXISTS yulon_stackable_backup (entry INT UNSIGNED NOT NULL PRIMARY KEY, stackable SMALLINT UNSIGNED NOT NULL) ENGINE=InnoDB;",
+      "when": "remove",
+      "note": "so removing an install from before the backup existed still has a table to read (it holds nothing)"
     },
     {
       "db": "world",
       "path": "All_Stackables_200_Down.sql",
       "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t JOIN yulon_stackable_backup b ON b.entry = t.entry SET t.stackable = b.stackable;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "DROP TABLE IF EXISTS yulon_stackable_backup;",
+      "when": "remove"
     }
   ],
   "notes": [
-    "Takes effect after a restart."
+    "Takes effect after a restart.",
+    "The upstream Down script cannot restore the original stack sizes (it does not know them), so the backup table `yulon_stackable_backup` (same shape as Bigger Stacks on TBC/Vanilla/Tortoise) is filled before Up and put back after Down on Remove. Do not drop it by hand."
   ]
 }
