@@ -36,6 +36,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
 - A rebuild whose rollback did not come up says its containers are still running and to press Stop.
 - A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
+- After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
