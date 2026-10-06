@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+- Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
