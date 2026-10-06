@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_fake_docker import build_env, end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import (
+    build_builders,
+    build_env,
+    end_fake_containers,
+    lay_fake_docker,
+    use_builder,
+)
 from tests.support_fake_docker import calls as fake_calls
 from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
@@ -3348,6 +3354,7 @@ def test_build_staged_passes_all_three_compose_files_and_plain_progress(
     call each, in the overlay's order, and every call names all three files.
     """
     monkeypatch.setattr(docker.platform, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(docker, "_current_builder", lambda wsl_distro=None: ("default", "docker"))
     seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
     run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
     files = ["-f", THREE_FILES[0], "-f", THREE_FILES[1], "-f", THREE_FILES[2]]
@@ -3536,8 +3543,81 @@ def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
     for config, wslenv, inherited in seen:
         assert "BUILDX_CONFIG/p" in wslenv.split(":"), wslenv
         assert inherited == "yes"
+        # The builder the distro's own buildx config picked (T413) has to cross too.
+        assert "BUILDX_BUILDER" in wslenv.split(":"), wslenv
         # WSL turns `C:\\...` into `/mnt/c/...` for a folder that is there.
         assert Path(config).is_dir(), config
+
+
+def test_a_builder_picked_with_buildx_use_is_the_one_each_wotlk_service_builds_on(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """T413: a per-service BUILDX_CONFIG holds no `current`, so buildx falls back to the context's.
+
+    A builder of the `docker` driver is a docker context's own, and buildx finds
+    one by name in any config folder; naming it in BUILDX_BUILDER keeps the
+    user's pick while each service keeps its own node, which is T376's fix.
+    """
+    use_builder(build_cli, "desktop-linux", "docker")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
+    assert build_builders(build_cli) == ["desktop-linux"] * len(WOTLK_SERVICES)
+    assert len({config for config, _, _ in build_env(build_cli)}) == len(WOTLK_SERVICES)
+
+
+@pytest.mark.parametrize("driver", ["docker-container", "remote", "kubernetes"])
+def test_a_builder_of_its_own_driver_gets_the_single_build_call_on_the_users_config(
+    build_cli: Path, tmp_path: Path, driver: str
+) -> None:
+    """A docker-container or remote builder lives in the user's `instances/`, not in ours (T413).
+
+    The per-service folders cannot name it, so splitting would quietly build on
+    the context's builder instead. The single call on the user's own config is
+    what every build did before T376, and it builds on the builder they picked.
+    """
+    use_builder(build_cli, "mine", driver)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
+    assert build_builders(build_cli) == ["<unset>"]
+
+
+def test_a_builder_buildx_cannot_name_gets_the_single_build_call(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Unknown is not the default: a failed `buildx inspect` builds as before T376 (T413).
+
+    The split would put every service on the context's builder, which is a
+    guess; the single call is what a plain `docker compose build` would do.
+    """
+    (build_cli / "buildx-inspect-fails").write_text("", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
+
+
+def test_the_builder_is_read_from_the_builder_lines_not_from_its_nodes() -> None:
+    """`buildx inspect` names the builder first and then each node, each with its own `Name:`."""
+    text = (
+        "Name:          mine\n"
+        "Driver:        docker-container\n"
+        "Last Activity: 2026-10-06 00:00:00 +0000 UTC\n"
+        "\n"
+        "Nodes:\n"
+        "Name:             mine0\n"
+        "Endpoint:         unix:///var/run/docker.sock\n"
+        'Driver Options:   network="host"\n'
+        "Status:           inactive\n"
+    )
+    assert docker._builder_in(text) == ("mine", "docker-container")
+    assert docker._builder_in("Nodes:\nName: x0\n") is None
+    assert docker._builder_in("Nodes:\nName: x0\nDriver: docker\n") is None
+    assert docker._builder_in("Name: mine\n") is None
 
 
 def test_run_one_shot_keeps_the_argv_that_was_live_gated(

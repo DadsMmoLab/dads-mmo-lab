@@ -5079,10 +5079,17 @@ def build_staged(
     compose-context-resend.md`). Splitting the calls without the folders fixes
     nothing: the one key then flips between targets call by call. A game with
     one built service keeps the single call and the user's own buildx config,
-    because it has no race to lose and a new key costs one cold send. A
-    builder picked with `docker buildx use` is not in those folders, so the
-    split calls build on the docker context's default builder, which is the
-    one Yu'lon has always assumed.
+    because it has no race to lose and a new key costs one cold send.
+
+    **The builder a plain build would use is asked first (T413)**, because a
+    builder picked with `docker buildx use` is recorded in the user's buildx
+    config, which the per-service folders are not. A `docker`-driver builder is
+    a docker context's own and buildx finds it by name from any config folder,
+    so the split calls name it in `BUILDX_BUILDER`. Any other driver
+    (docker-container, remote, kubernetes) lives only in the user's
+    `instances/`, and an answer that cannot be read names no builder at all;
+    both get the single call on the user's own config, which is the build
+    before T376: their own builder, without the per-service cache.
 
     The calls run in the overlay's order and the first that does not exit 0
     ends the build: its run is returned as it is, so its status and its own
@@ -5098,7 +5105,13 @@ def build_staged(
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
     services = _built_services(server_dir, compose_files)
-    if len(services) < 2:
+    builder = _current_builder(wsl_distro) if len(services) >= 2 else None
+    if builder is not None and builder[1] != "docker":
+        logger.info(
+            f"build_staged(): the builder in use is {builder[0]} ({builder[1]} driver), "
+            "which only the user's own buildx config can name; one build call"
+        )
+    if builder is None or builder[1] != "docker":
         logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
         return run_attached(
             argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
@@ -5109,7 +5122,7 @@ def build_staged(
             logger.warning(f"build_staged(): stopped before building {service}")
             return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
         config = _buildx_config(server_dir, service)
-        extra = {"BUILDX_CONFIG": str(config)}
+        extra = {"BUILDX_CONFIG": str(config), "BUILDX_BUILDER": builder[0]}
         env = (
             platform.wsl_env(extra, paths=("BUILDX_CONFIG",))
             if wsl_distro is not None
@@ -5117,7 +5130,7 @@ def build_staged(
         )
         logger.info(
             f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
-            f"BUILDX_CONFIG={config}"
+            f"BUILDX_CONFIG={config} BUILDX_BUILDER={builder[0]}"
         )
         run = run_attached(
             [*argv, service],
@@ -5132,6 +5145,50 @@ def build_staged(
             return run
         tail.extend(run.tail)
     return AttachedRun(0, tuple(tail))
+
+
+BUILDER_PROBE_TIMEOUT = 30.0
+"""How long `_current_builder()` waits for `docker buildx inspect`: a bounded probe."""
+
+
+def _current_builder(wsl_distro: str | None = None) -> tuple[str, str] | None:
+    """(name, driver) of the builder a plain build would use; None if buildx will not say (T413).
+
+    Asked with the user's own environment and buildx config, so `docker buildx
+    use`, `BUILDX_BUILDER` and the docker context all count as they would for
+    a `docker compose build` started by hand. A refusal, a missing CLI or a
+    timeout is None: `build_staged()` then builds as it did before T376
+    rather than guess the builder.
+    """
+    proc = _docker(["buildx", "inspect"], timeout=BUILDER_PROBE_TIMEOUT, wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(
+            f"docker buildx inspect exited {proc.returncode}: {proc.stderr.strip()}; "
+            "the builder in use is not known"
+        )
+        return None
+    builder = _builder_in(proc.stdout)
+    if builder is None:
+        logger.warning(f"docker buildx inspect named no builder: {proc.stdout.strip()!r}")
+    return builder
+
+
+def _builder_in(text: str) -> tuple[str, str] | None:
+    """(name, driver) from `docker buildx inspect`'s text, or None when it names neither (T413).
+
+    The builder's own `Name:` and `Driver:` come before the `Nodes:` heading;
+    each node below it has a `Name:` of its own (`<builder>0`), which is not the
+    builder's, so nothing from the node block is read.
+    """
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.strip() == "Nodes:":
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in ("Name", "Driver") and key.strip() not in fields:
+            fields[key.strip()] = value.strip()
+    name, driver = fields.get("Name", ""), fields.get("Driver", "")
+    return (name, driver) if name and driver else None
 
 
 def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str, ...]:

@@ -15,7 +15,10 @@ With `late-create`, `run` makes no container at all until the test calls
 `BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
 is a variable a test sets in its own environment, to see the child inherit
 it), and exits 17 for a service named by a `fail-build-<service>` file in the
-state folder.
+state folder. It records `BUILDX_BUILDER` too (`build_builders()`, T413), and
+`buildx inspect` names the builder a plain build would use (`buildx-current`
+holds "<name> <driver>"; the default is the context's own `default`, driver
+`docker`) or, with `buildx-inspect-fails`, refuses.
 
 Its argv0 is `fake-docker`, so `conftest`'s real-daemon guard lets it run: it
 is a script in the test's own folder and talks to nothing.
@@ -52,16 +55,37 @@ if args[:1] == ["run"]:
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
+if args[:2] == ["buildx", "inspect"]:
+    # T413: the builder a plain build would use, in buildx's own text shape:
+    # the builder's Name and Driver first, then its nodes, each with a Name of
+    # its own. `buildx-current` holds "<name> <driver>"; without it, the
+    # docker context's own builder. `buildx-inspect-fails` makes it refuse.
+    if (state / "buildx-inspect-fails").exists():
+        sys.stderr.write("ERROR: failed to find instance: no such builder\\n")
+        sys.exit(1)
+    current = state / "buildx-current"
+    name, driver = (
+        current.read_text(encoding="utf-8").split() if current.exists() else ("default", "docker")
+    )
+    sys.stdout.write(
+        f"Name:          {{name}}\\nDriver:        {{driver}}\\n"
+        "Last Activity: 2026-10-06 00:00:00 +0000 UTC\\n\\nNodes:\\n"
+        f"Name:      {{name}}0\\nEndpoint:  unix:///var/run/docker.sock\\nStatus:    running\\n"
+    )
+    sys.exit(0)
 if args[:1] == ["compose"] and "build" in args:
     # T376: a build is a line of output and an exit status, per call. What the
     # test reads is what the CLI was HANDED: its argv in `calls.log`, and the
-    # BUILDX_CONFIG and WSLENV of its own environment in `build-env.log`.
+    # BUILDX_CONFIG and WSLENV of its own environment in `build-env.log`; since
+    # T413 its BUILDX_BUILDER in `build-builder.log`.
     with open(state / "build-env.log", "a", encoding="utf-8") as seen:
         seen.write(
             os.environ.get("BUILDX_CONFIG", "<unset>") + "\\t"
             + os.environ.get("WSLENV", "<unset>") + "\\t"
             + os.environ.get("FAKE_DOCKER_INHERITED", "<unset>") + "\\n"
         )
+    with open(state / "build-builder.log", "a", encoding="utf-8") as seen:
+        seen.write(os.environ.get("BUILDX_BUILDER", "<unset>") + "\\n")
     target = args[-1] if args[-1] != "plain" else "<every service>"
     sys.stderr.write(f"#1 building {{target}}\\n")
     sys.stderr.flush()
@@ -171,3 +195,14 @@ def build_env(state: Path) -> list[tuple[str, str, str]]:
         return []
     rows = [line.split("\t") for line in log.read_text(encoding="utf-8").splitlines()]
     return [(row[0], row[1], row[2]) for row in rows]
+
+
+def build_builders(state: Path) -> list[str]:
+    """The BUILDX_BUILDER per `compose build` the CLI ran, `<unset>` when it had none (T413)."""
+    log = state / "build-builder.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def use_builder(state: Path, name: str, driver: str) -> None:
+    """What `docker buildx use <name>` leaves behind: the builder a plain build now uses (T413)."""
+    (state / "buildx-current").write_text(f"{name} {driver}", encoding="utf-8")
