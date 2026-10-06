@@ -45,26 +45,23 @@ class TortoiseController(Controller):
     ) -> None:
         super().__init__(docker_ctl.SPEC, server_dir, wsl_distro=wsl_distro, pre_stop=pre_stop)
 
-    def start(self) -> None:
-        """The base start, with the bot dashboard brought up first when it is switched on (T127).
+    def _before_the_servers_start(self) -> None:
+        """Bring the bot dashboard up first when it is switched on (T127).
 
         First, because the bots module resolves the dashboard's service name
         once, when it loads: a world that starts before the dashboard sends
-        nowhere until its next start. Only when nothing holds this install's
-        ports, so a start the base class is about to refuse does not leave the
-        dashboard running on its own. `botdash.start_if_on()` never raises: the
-        dashboard is never the reason a server does not start.
+        nowhere until its next start. Called by the base `start()` only once
+        every refusal has passed -- its folder and guard, the ports, the
+        database (T377) -- so a refused start does not leave the dashboard
+        running on its own. `botdash.start_if_on()` never raises: the dashboard
+        is never the reason a server does not start.
         """
-        # T197 fix round 2: a refused start must not start the bot dashboard either.
-        self.refuse_start()
-        if not self.port_conflicts():
-            try:
-                entry = game.entry()
-            except game.CatalogFactsError as exc:
-                logger.warning(f"the bot dashboard was not checked before the start: {exc}")
-            else:
-                botdash.start_if_on(entry, self.server_dir, wsl_distro=self.wsl_distro)
-        super().start()
+        try:
+            entry = game.entry()
+        except game.CatalogFactsError as exc:
+            logger.warning(f"the bot dashboard was not checked before the start: {exc}")
+        else:
+            botdash.start_if_on(entry, self.server_dir, wsl_distro=self.wsl_distro)
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
         """Poll until the world container is up and this core's ready marker appears.

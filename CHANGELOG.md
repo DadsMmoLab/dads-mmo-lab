@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
 - Centurion can be installed from the Catalog on Windows and Linux: level-60 PvP WoW on the 3.3.5a client, with bots.
@@ -30,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
 - **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
