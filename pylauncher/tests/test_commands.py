@@ -210,3 +210,32 @@ def test_the_level_ceiling_is_the_trees_and_not_a_number_in_this_file() -> None:
         commands.account_set_gm_level("BOB", 5, realms=False, highest=4, digits_are_ids=False)
     with pytest.raises(commands.CommandError):
         commands.account_set_gm_level("BOB", -1, realms=False, highest=4, digits_are_ids=False)
+
+
+@pytest.mark.parametrize(
+    ("typed", "ends"),
+    [
+        ("server shutdown 1", True),
+        ("  .server shutdown 60 ", True),
+        ("server exit", True),
+        ("server idleshutdown 5", True),
+        ("Server Shutdown 1 0", True),
+        ("ser shut 1", True),
+        (".server shutd 10", True),
+        ("server e", True),
+        ("server idle 5", True),
+        ("server shut can", False),
+        ("server in", False),
+        ("server re 5", False),
+        ("server shutdown cancel", False),
+        ("server idleshutdown cancel", False),
+        ("server restart 10", False),
+        ("server info", False),
+        ("serverr shutdown 1", False),
+        ("server", False),
+        ("", False),
+    ],
+)
+def test_a_line_that_shuts_the_world_down_for_good_is_recognised(typed: str, ends: bool) -> None:
+    """T412: such a line closes the world, and Docker starts it again at once."""
+    assert commands.ends_the_world(typed) is ends
