@@ -1769,9 +1769,10 @@ class InstallChannel:
         if operations is None:
             return self._state
         account = account_name(self.install_id)
+        asked_from = self._state
         password = (
-            self._state.password
-            if isinstance(self._state, Pending | Verified)
+            asked_from.password
+            if isinstance(asked_from, Pending | Verified)
             else generate_password()
         )
         # The one seam, not a second construction: this line used to build its
@@ -1784,7 +1785,7 @@ class InstallChannel:
         # otherwise read as a lost password.
         self._settles += 1
         try:
-            self._state = ensure(
+            answer = ensure(
                 account=account,
                 password=password,
                 create=self._create,
@@ -1795,9 +1796,15 @@ class InstallChannel:
                 port=endpoint.port,
                 namespace=endpoint.namespace,
                 config_dir=self._config_dir,
-                state=self._state,
+                state=asked_from,
                 gm_level=operations.gm_level or 3,
             )
         finally:
             self._settles -= 1
+        # Kept only over the state it was asked from (cold review, T427): a
+        # Refresh's look and a Start's settle can each have an ask out, and
+        # the one that answers last is not the newer news -- a proof the other
+        # made meanwhile must not be put back to waiting, or to gave up.
+        if self._state is asked_from:
+            self._state = answer
         return self._state
