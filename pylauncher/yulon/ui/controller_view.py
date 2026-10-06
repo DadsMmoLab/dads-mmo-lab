@@ -91,6 +91,7 @@ from yulon import (
     reset_defaults,
     resources,
     server_build_presses,
+    server_rates,
     server_time_zone,
     serverlock,
     tuning,
@@ -728,7 +729,8 @@ class PromptAsker(Protocol):
     is what gets applied now (T100 review). `remembered` is what this install
     last answered (T104, `Applier.remembered_answers()`), filled in over the
     manifest's defaults. `removing` is True for a Remove, which asks only what
-    the record cannot answer (`apply.must_ask()`).
+    the record cannot answer (`apply.must_ask()`). `notes` are sentences shown
+    above the questions (T302: an answer that replaces a Server rates value).
     """
 
     def __call__(
@@ -740,6 +742,7 @@ class PromptAsker(Protocol):
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
+        notes: Sequence[str] = (),
     ) -> Mapping[str, str] | None: ...
 
 
@@ -6007,6 +6010,9 @@ the file is one a person may also want to look at by hand.
 """
 
 TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
+
+TUNING_RATES_REFUSED = "Nothing was written. {why}"
+"""The Server rates card's refusal (T302): the sentence names the row, so no card id."""
 
 TUNING_REFUSED = "{module}: nothing was written — {why}"
 """A refusal that names the key, in the box every other answer on this tab is read in.
@@ -15730,6 +15736,16 @@ class ControllerView(QWidget):
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
+        # T302: an answer written to a Server rates key is held to that key's rule,
+        # because the world server stops at start on a rate it cannot read.
+        problem = server_rates.answer_problem(self.entry, manifest, values)
+        if problem is not None:
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+            )
+            self.action_failed.emit(problem)
+            return
         run = {
             "install": applier.install,
             "remove": applier.remove,
@@ -15791,6 +15807,22 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
+        extra: dict[str, tuple[str, ...]] = {}
+        if action != "remove":
+            # T302 (cold review): an answer written to a key the Server rates card
+            # writes starts at what the card says now -- over the mod's default and
+            # over last install's answer -- and the dialog says it replaces it.
+            rates = server_rates.rows(self.entry, self.services.controller.server_dir)
+            now = server_rates.prompt_values(manifest, rates)
+            if now:
+                asked = tuple(
+                    p.model_copy(update={"default": now[p.key]}) if p.key in now else p
+                    for p in asked
+                )
+                remembered = {k: v for k, v in remembered.items() if k not in now}
+                note = server_rates.prompt_note(manifest, rates)
+                if note is not None:
+                    extra["notes"] = (note,)
         answers = self._prompt_asker(
             self,
             manifest,
@@ -15798,6 +15830,7 @@ class ControllerView(QWidget):
             again=again,
             remembered=remembered,
             removing=action == "remove",
+            **extra,
         )
         return (False, None) if answers is None else (True, answers)
 
@@ -17334,6 +17367,8 @@ class ControllerView(QWidget):
         # collision and the truer one -- this tab is the modules' settings.
         self._add_panel_tab(tab, "modules", "Tuning")
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        # T302: the built-in Server rates card's rows, read with the modules'.
+        self._rate_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -17373,6 +17408,8 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
+        # T302: the world conf's rates, read in the same pass -- one file, no job.
+        self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -17392,13 +17429,19 @@ class ControllerView(QWidget):
         self._look_up_time_zone()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
-        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+        """The Server rates card (T302), the modules' rows, then the server's own bot keys
+        (T99, CMaNGOS and Tortoise).
 
-        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
-        latter is what T94's reset reads as "keys an installed MODULE keeps",
-        and these are the server's own keys, which a reset puts back.
+        Kept apart in `_rate_rows` and `_bot_rows` rather than folded into
+        `_tuning_rows`: the latter is what T94's reset reads as "keys an installed
+        MODULE keeps", and these are the server's own keys, which a reset puts
+        back. For the same reason a module row the rates card also writes is
+        made read-only HERE, for the drawing only (`server_rates.yield_to_card`),
+        and `_tuning_rows` keeps it as the module declared it.
         """
-        return self._tuning_rows + self._bot_rows
+        modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
+        rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
+        return rates + modules + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -18274,6 +18317,8 @@ class ControllerView(QWidget):
         """
         if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
+        if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
+            return server_rates.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -18316,7 +18361,9 @@ class ControllerView(QWidget):
                     tuning.check(specs[file].get(key), value)
                 except tuning.TuningError as exc:
                     self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                        TUNING_RATES_REFUSED.format(why=exc)
+                        if (family, module_id) == server_rates.CARD
+                        else TUNING_REFUSED.format(module=module_id, why=exc)
                     )
                     self.action_failed.emit(str(exc))
                     return

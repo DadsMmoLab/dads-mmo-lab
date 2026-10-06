@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
 - Centurion can be installed from the Catalog on Windows and Linux: level-60 PvP WoW on the 3.3.5a client, with bots.
 - Each server has its own game launcher: press **▶** on its tab or **Play** to see who is online and press **PLAY**.
@@ -29,8 +30,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
-- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
+- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
+- Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
 - After you remove Experience Rates, setting its rates back by hand no longer makes it read as installed again.
 - Removing a settings module whose file Yu'lon cannot read now says so instead of claiming nothing changes.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.

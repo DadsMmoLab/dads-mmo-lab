@@ -2367,7 +2367,28 @@ def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: st
 
 # --------------------------------------------------- the answers to prompts
 
-_INT = re.compile(r"[+-]?\d+")
+_INT = re.compile(r"-?[0-9]+")
+"""An `int` answer's spelling: ASCII digits and a leading minus, the one AzerothCore's
+`std::from_chars` reads (see `tuning.WHOLE_NUMBER`). No `\\d`, which in Python
+also matches other scripts' digits, and no `+`, which `from_chars` refuses."""
+
+_STORED_INT = re.compile(r"\s*(?:\+?([0-9]+)|(-[0-9]+))\s*")
+"""An `int` answer as a build before the digits rule stored it: spaces round it, or a `+`."""
+
+
+def stored_answer(prompt: Prompt, value: str) -> str:
+    """A remembered or applied answer, in the spelling `check_answer()` takes today.
+
+    For STORED values only; typed input stays strict. A build before the digits
+    rule accepted ` 5` and `+5` for an `int` question and recorded them as typed,
+    and the SQL it sent read them as 5, so they are read back as `5` rather than
+    dropped from the dialog or called an unusable record by Remove. Anything else
+    -- other scripts' digits, `1_0` -- is returned unchanged for `check_answer()`
+    to refuse, because no server ever read it as the number Python does.
+    """
+    old = _STORED_INT.fullmatch(value) if prompt.kind == "int" else None
+    return value if old is None else (old.group(1) or old.group(2))
+
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
@@ -2560,7 +2581,13 @@ def check_answer(prompt: Prompt, value: str) -> str:
     if not text:
         return "this cannot be left empty"
     if prompt.kind == "int":
-        return prompt.range_problem(text) if _INT.fullmatch(text) else "this must be a whole number"
+        # The answer is written as given, so its spaces are checked too.
+        if not _INT.fullmatch(value):
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            return f"this must be a whole number, typed with the digits 0 to 9 only{spaces}"
+        if not tuning.INT32_SMALLEST <= int(value) <= tuning.INT32_LARGEST:
+            return f"this must be a number from {tuning.INT32_SMALLEST} to {tuning.INT32_LARGEST}"
+        return prompt.range_problem(text)
     if prompt.kind == "float":
         try:
             float(text)
@@ -5352,11 +5379,13 @@ class Applier:
         cannot read is no record (`module_answers._read_all()`).
         """
         saved = module_answers.read_answers(self.server_dir, manifest)
-        return {
-            prompt.key: saved[prompt.key]
-            for prompt in manifest.prompts
-            if prompt.key in saved and check_answer(prompt, saved[prompt.key]) == ""
-        }
+        usable: dict[str, str] = {}
+        for prompt in manifest.prompts:
+            if prompt.key in saved:
+                value = stored_answer(prompt, saved[prompt.key])
+                if check_answer(prompt, value) == "":
+                    usable[prompt.key] = value
+        return usable
 
     def applied_record(self, manifest: Manifest) -> tuple[dict[str, str] | None, str]:
         """What this install's database holds for a relative manifest, and why not (T115).
@@ -5382,6 +5411,7 @@ class Applier:
             value = raw.get(prompt.key)
             if value is None:
                 return None, f"it has no value for {prompt.question!r}"
+            value = stored_answer(prompt, value)
             problem = check_answer(prompt, value)
             if not problem and prompt.kind in ("int", "float") and float(value) == 0:
                 problem = "it is zero, and nothing divides by zero"
