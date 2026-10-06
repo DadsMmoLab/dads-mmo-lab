@@ -2394,7 +2394,10 @@ def test_the_database_is_not_started_for_a_module_with_no_question_to_check(
 ) -> None:
     start = _StartDb()
     Applier(
-        tmp_path, git=_stackables_git(), sql=_FakeReader(), world_running=lambda: False,
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeReader(),
+        world_running=lambda: False,
         start_database=start,
     ).install(parse_manifest(STACKABLES))
     # The direct-SQL path starts it once for its own reasons; the check adds none.
