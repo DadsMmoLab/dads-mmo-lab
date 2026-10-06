@@ -159,3 +159,29 @@ def test_a_force_added_file_under_an_ignored_folder_is_scanned(tmp_path: Path) -
     assert _candidates(tmp_path) == [], "an ignored, unadded file is not publishable"
     git("add", "-f", ".notes/gates/press.log")
     assert _candidates(tmp_path) == [(Path(".notes/gates/press.log"), 1, value)]
+
+
+def test_the_stop_time_snapshot_written_to_disk_carries_no_generated_password(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T352: `logsnap.capture` writes the world's log to disk; it is masked first."""
+    import subprocess
+
+    from yulon import docker, logsnap, runner
+
+    minted = "tbc-" + "faf2e5c4" + "5f363783"
+    line = f"Cannot connect to world database tbc-db;3306;mangos;{minted};mangos\n"
+
+    def run(cmd, cwd=None, timeout=None):  # noqa: ANN001, ANN202 - a double of runner.run
+        if cmd[:3] == ["docker", "compose", "ps"]:
+            return subprocess.CompletedProcess(cmd, 0, "abc\n", "")
+        return subprocess.CompletedProcess(cmd, 0, line, line)
+
+    monkeypatch.setattr(runner, "run", run)
+    spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(1,))
+    (tmp_path / "srv").mkdir()
+
+    snap = logsnap.capture(spec, tmp_path / "srv", game="tbc", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    assert _GENERATED_PASSWORD.search(snap.path.read_text(encoding="utf-8")) is None

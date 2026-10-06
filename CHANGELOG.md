@@ -31,6 +31,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
+- On Windows, **Stop** also ends the helper programs a build started on your PC.
+- The worldserver log saved when you stop a server has passwords masked, as the support file does.
+- A failed install is listed once in the support file, however its folder is spelled.
+- After a module install on a stopped server, the report says to press **Start** rather than **Stop** then **Start**.
+- Refusing a client folder now reads as two plain sentences instead of one run-on line.
+- A module's right-click **Remove** is offered only when the module is installed.
+- **Forget Yu'lon's record…** asks in a box that fits small screens and defaults to No.
 - The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
 - A database that is a moment slow to answer after a start no longer logs a warning.
 - The corrections dialog names each step by what it does instead of "statement 1".
@@ -50,6 +58,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The main window fits a Steam Deck or a small screen instead of hanging off its edges, and scrolls when it is cramped.
 - Long error and warning messages scroll inside their box, so its OK button always stays on screen.
 - After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
+- After **Repair the database…**, the command channel offers **Repair** for its lost account, or turning on if it is off.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
