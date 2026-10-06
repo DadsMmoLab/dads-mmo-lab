@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
@@ -1207,7 +1207,7 @@ def wsl_prefix(wsl_distro: str, *, inside: str | None = None) -> tuple[str, ...]
     return (launcher, "-d", wsl_distro, *location, "--")
 
 
-def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+def wsl_env(extra: dict[str, str] | None = None, *, paths: Collection[str] = ()) -> dict[str, str]:
     """This process's environment, plus `extra`, with `WSLENV` naming what must cross.
 
     A variable does NOT reach a process inside a distro just because it is set
@@ -1223,6 +1223,11 @@ def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     argv that `ps` can read, and that property only survives the crossing if
     `WSLENV` names the variable.
 
+    A name in `paths` crosses as `NAME/p`, which has WSL translate the Windows
+    path it holds into the distro's spelling (`C:\\x` -> `/mnt/c/x`); T376 sends
+    the build's `BUILDX_CONFIG` folder that way. Any other spelling of that
+    name already in `WSLENV` is replaced, because WSL would honour the first.
+
     An existing `WSLENV` is extended rather than replaced - it may be carrying
     somebody else's flags, and the separator is `:` even on Windows because
     `WSLENV` is read by the Linux side.
@@ -1234,7 +1239,10 @@ def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         return env
     existing = [part for part in env.get("WSLENV", "").split(":") if part]
     for name in names:
-        if name not in existing and f"{name}/p" not in existing:
+        if name in paths:
+            existing = [part for part in existing if part.split("/", 1)[0] != name]
+            existing.append(f"{name}/p")
+        elif name not in existing and f"{name}/p" not in existing:
             existing.append(name)
     env["WSLENV"] = ":".join(existing)
     return env
