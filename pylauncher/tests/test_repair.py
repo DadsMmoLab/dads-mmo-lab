@@ -436,6 +436,18 @@ def test_first_setup_is_waited_out_on_the_databases_own_health(
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
+def test_a_failed_health_read_mid_wait_falls_back_to_the_fixed_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waited: list[float] = []
+    monkeypatch.setattr(repair, "_sleep", waited.append)
+    mysql = _FirstSetup("ERROR 2002 (HY000): Can't connect", ready_after=3)
+    answers = iter(["starting", "unknown", "unknown"])
+    state = repair.import_state(_Sql({AUTH: ["account"]}), mysql, lambda: next(answers))
+    assert state.state != "unreadable"
+    assert waited == [repair._HEALTH_POLL, 1.0, 2.0]
+
+
 def test_an_access_denied_from_a_healthy_database_is_not_waited_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -459,7 +471,7 @@ def test_a_database_that_stays_starting_is_given_up_on_after_the_cap(
     monkeypatch.setattr(repair, "_sleep", lambda s: None)
     mysql = _FirstSetup("ERROR 2002 (HY000): Can't connect", ready_after=10**6)
     assert repair.import_state(_Sql(), mysql, lambda: "starting").state == "unreadable"
-    assert mysql.asked == repair._HEALTH_POLLS + 1
+    assert mysql.asked == repair._HEALTH_POLLS + 1 + len(repair._NOT_UP_YET_WAITS)
 
 
 def test_any_other_listing_failure_is_not_waited_for(monkeypatch: pytest.MonkeyPatch) -> None:

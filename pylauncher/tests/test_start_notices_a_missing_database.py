@@ -539,6 +539,33 @@ def test_a_status_answer_puts_the_sentence_back_when_something_cleared_the_line(
     assert database_presence.MISSING in view.problem_label.text()
 
 
+def test_refresh_keeps_the_sentence_while_its_status_answer_is_still_out(
+    qapp: object, db: _DbDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T426: the poll is asynchronous, so Refresh itself must not leave the line empty."""
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    monkeypatch.setattr(view, "refresh_status", lambda: None)
+    view.recheck()
+    assert database_presence.MISSING in view.problem_label.text()
+
+
+def test_a_status_answer_itself_keeps_the_sentence_when_the_line_was_cleared(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    """T426: the poll's answer lands after Refresh cleared the line; it puts the sentence back."""
+    from yulon.controller import InstallStatus
+
+    db.volumes.clear()
+    view = _view(db, tmp_path, [])
+    view.start_server()
+    view._set_busy(False)
+    view.problem_label.setText("")
+    view._status_ready(InstallStatus(db=False, auth=False, world=False))
+    assert database_presence.MISSING in view.problem_label.text()
+
+
 def test_a_newer_line_is_not_overwritten_by_the_kept_sentence(
     qapp: object, db: _DbDocker, tmp_path: Path
 ) -> None:

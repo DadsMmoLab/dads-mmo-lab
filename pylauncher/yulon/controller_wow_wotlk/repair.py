@@ -201,7 +201,7 @@ def _databases_when_up(
                     logger.info("the database is still doing its first setup; waiting for it")
                 _sleep(_HEALTH_POLL)
                 continue
-            if not _is_not_up_yet(exc) or polls:
+            if not _is_not_up_yet(exc):
                 raise
             wait = next(waits, None)
             if wait is None:
