@@ -1584,11 +1584,129 @@ def test_a_failed_reextract_leaves_a_pathfinding_run_that_continues_from_its_til
         tiles = _a_run_that_crashed(box, 12)
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
-    with pytest.raises(InstallerError):
+    with pytest.raises(InstallerError) as failed:
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert box.engine().mmaps_status(box.server_dir).kept == 12
+    assert str(failed.value).endswith(
+        f"{trinitycore.REEXTRACT_PUT_BACK} {trinitycore.reextract_kept_tiles(12)}"
+    ), "T263: the kept tiles are said, as the live test saw them kept"
     box.engine().start_mmaps(box.server_dir)
     assert fake.mmaps_at_run[-1] == tiles, "continued from its tiles, not from 0 %"
+
+
+def test_the_kept_tiles_say_how_many_and_what_continues_them() -> None:
+    """T263: the sentence a failed Re-extract adds when a part-made run's tiles were kept."""
+    assert trinitycore.reextract_kept_tiles(35) == (
+        "The 35 finished tiles of the pathfinding data that had stopped part-way were kept "
+        "too, and \u201cMake the pathfinding data\u201d on the Server tab continues from them."
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("evidence", ""), ("evidence", "0" * 64), ("resumable", False)],
+    ids=["unknown map data", "other map data", "not resumable"],
+)
+def test_a_failed_reextract_says_nothing_of_kept_tiles_a_next_run_would_not_continue(
+    box: Box, field: str, value: object
+) -> None:
+    """T263: only when the record is really kept for a resume. Each case breaks one rule a
+    start applies (`mmaps._resume_or_clear()`): the run could not tell which map data it
+    was made from, it was made from other map data, or it kept nothing to continue from.
+    The next run then starts from the beginning, and the sentence would promise what does
+    not happen."""
+    _a_run_that_crashed(box, 12)
+    record = box.server_dir / mmaps.RECORD_FILE
+    raw = json.loads(record.read_text("utf-8"))
+    assert raw["resumable"] is True and raw["kept"] == 12 and raw["evidence"]
+    raw[field] = value
+    record.write_text(json.dumps(raw), "utf-8")
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
+
+
+def test_a_failed_reextract_counts_the_tiles_that_are_whole_now(box: Box) -> None:
+    """Codex review of T263: the record's count is the failure's; a tile removed or cut
+    off since (by hand) is not one the next run continues from, so it is not counted."""
+    _a_run_that_crashed(box, 12)
+    out = box.server_dir / "data" / "mmaps"
+    tiles = sorted(out.glob("*.mmtile"))
+    tiles[0].unlink()
+    tiles[1].write_bytes(tiles[1].read_bytes()[:-1])
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert str(failed.value).endswith(trinitycore.reextract_kept_tiles(10))
+    assert tiles[1].is_file(), "counted, never removed: the next start decides that"
+
+
+@pytest.mark.parametrize(
+    "case", ["whole", "two tiles gone since", "unknown map data", "not resumable"]
+)
+def test_the_server_tab_and_a_failed_reextract_say_the_same_about_the_kept_tiles(
+    box: Box, case: str
+) -> None:
+    """T245 with T263: one rule and one count. The Server tab's line and the failure's
+    sentence both read `mmaps`' one answer, so after a failed Re-extract they agree on
+    whether the next press continues, and from how many tiles."""
+    _a_run_that_crashed(box, 12)
+    out = box.server_dir / "data" / "mmaps"
+    record = box.server_dir / mmaps.RECORD_FILE
+    if case == "two tiles gone since":
+        tiles = sorted(out.glob("*.mmtile"))
+        tiles[0].unlink()
+        tiles[1].write_bytes(tiles[1].read_bytes()[:-1])
+    elif case in ("unknown map data", "not resumable"):
+        raw = json.loads(record.read_text("utf-8"))
+        raw["evidence" if case == "unknown map data" else "resumable"] = (
+            "" if case == "unknown map data" else False
+        )
+        record.write_text(json.dumps(raw), "utf-8")
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    status = box.engine().mmaps_status(box.server_dir)
+    said = str(failed.value)
+    if case in ("whole", "two tiles gone since"):
+        tiles_now = 12 if case == "whole" else 10
+        assert said.endswith(trinitycore.reextract_kept_tiles(tiles_now))
+        assert status.kept == tiles_now and status.begins_again_because == ""
+        assert f"Its {tiles_now} finished tiles are kept" in status.line()
+        assert f"\u201c{mmaps.START_PRESS}\u201d continues from there" in status.line()
+    else:
+        assert said.endswith(trinitycore.REEXTRACT_PUT_BACK)
+        assert "continues from there" not in status.line()
+    assert mmaps.START_PRESS in trinitycore.reextract_kept_tiles(1)
+
+
+def test_a_failed_reextract_whose_old_data_did_not_come_back_says_nothing_of_kept_tiles(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T263: tiles made from the old map data continue only once that data is back."""
+    _a_run_that_crashed(box, 12)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    def stuck(data_dir: Path) -> tuple[str, ...]:
+        raise PermissionError("a file is held open")
+
+    monkeypatch.setattr(extract, "put_back", stuck)
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert "could not be put back (a file is held open)" in str(failed.value)
+    assert "finished tiles" not in str(failed.value)
 
 
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:
@@ -1920,8 +2038,8 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
         f"STOPPED: {UNFINISHED} Before it was replaced, {ENTRY.containers.world} had printed:\n"
         "TrinityCore rev. faac5fc9\nWorld initialized in 42 seconds\n"
         "What the new build wrote into the database on its first start, if anything, is NOT "
-        "put back by this -- the lines above say whether its updater ran -- so the old build "
-        "will start on the database as the new one left it.\n"
+        "put back by this, so the old build will start on the database as the new one left "
+        "it.\n"
         "Press “Finish the world update” on the Server tab (or “Update the server to latest…” "
         f"under “Server build ▾” again) to import {files} again. The world tables could not all "
         f"be put back for the build from before this update: {stopped} If you took the backup "
@@ -2633,6 +2751,61 @@ def test_the_record_stays_until_the_new_build_is_up_even_when_the_press_dies(
     assert pending is not None and ARENA in cast(list[str], pending["reimport"])
 
 
+def test_the_kept_tiles_sentence_names_the_press_as_the_server_tab_spells_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One spelling of the press (T245's `START_PRESS`): a renamed button renames it here too."""
+    monkeypatch.setattr(mmaps, "START_PRESS", "Build the pathfinding data")
+    assert "“Build the pathfinding data”" in trinitycore.reextract_kept_tiles(3)
+
+
+def test_the_server_tab_polls_open_no_tile_until_the_tiles_folder_changes(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coordinator, before the cold review: a full set is thousands of tiles (~2.7 GB), so
+    the 5 s poll reads one listing of names, sizes and dates, and opens tiles only when
+    that changed. Re-extract's one-off sentence still counts fresh."""
+    _a_run_that_crashed(box, 12)
+    opened: list[Path] = []
+    real = mmaps._tile_state
+
+    def spy(path: Path, header: object) -> bool | None:
+        opened.append(path)
+        return real(path, header)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mmaps, "_tile_state", spy)
+    monkeypatch.setattr(mmaps, "_TILE_COUNTS", {})  # as a fresh process: no count yet
+    first = box.engine().mmaps_status(box.server_dir)
+    counted = len(opened)
+    opened.clear()
+
+    second = box.engine().mmaps_status(box.server_dir)
+    third = box.engine().mmaps_status(box.server_dir)
+
+    assert counted == 12 and first.kept == 12
+    assert opened == [], "a poll with nothing changed opened a tile"
+    assert second.kept == third.kept == 12
+    tile = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    tile.write_bytes(tile.read_bytes()[:-1])
+
+    fourth = box.engine().mmaps_status(box.server_dir)
+
+    assert len(opened) == 12, "a changed tile is a recount"
+    assert fourth.kept == 11
+
+
+def test_a_tile_cut_short_with_its_old_date_kept_is_still_a_recount(box: Box) -> None:
+    """The fingerprint holds the size too: a tool that keeps a file's date is still seen."""
+    _a_run_that_crashed(box, 12)
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    tile = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    before = tile.stat()
+    tile.write_bytes(tile.read_bytes()[:-1])
+    os.utime(tile, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert box.engine().mmaps_status(box.server_dir).kept == 11
+
+
 def test_the_finish_and_its_start_are_refused_once_a_stopped_build_landed(box: Box) -> None:
     """T225 (scoped re-review 7): the finish ends in a start, so it asks what every Start asks."""
     on_the_built_commit(box)
@@ -2649,3 +2822,30 @@ def test_the_finish_and_its_start_are_refused_once_a_stopped_build_landed(box: B
         list(box.engine()._start_after_finish(context(box.m)))
     assert str(also.value).startswith("The world update is finished, but "), also.value
     assert native.STOPPED_BUILD_LANDED_REFUSAL in str(also.value)
+
+
+def test_a_poll_that_could_not_open_a_tile_keeps_no_count(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second scoped re-review: an unreadable tile is not known cut off, so the count it
+    gave is not kept; the next poll opens the tiles again."""
+    _a_run_that_crashed(box, 12)
+    monkeypatch.setattr(mmaps, "_TILE_COUNTS", {})
+    real = mmaps._tile_state
+    opened: list[Path] = []
+    busy = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    state = {"busy": True}
+
+    def flaky(path: Path, header: object) -> bool | None:
+        opened.append(path)
+        if path == busy and state["busy"]:
+            return None
+        return real(path, header)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mmaps, "_tile_state", flaky)
+    assert box.engine().mmaps_status(box.server_dir).kept == 11
+    state["busy"] = False
+    opened.clear()
+
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    assert len(opened) == 12, "asked again, not served from a count that could not see a tile"

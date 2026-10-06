@@ -56,28 +56,85 @@ def line(text: str) -> str:
 
 
 def valid_account_name(name: str) -> bool:
-    """`^[A-Za-z0-9_]{3,20}$` — what account creation accepts."""
-    return bool(_ACCOUNT_NAME.match(name))
+    """`^[A-Za-z0-9_]{3,20}$` — what account creation accepts.
+
+    `fullmatch`, not `match`: `$` also matches just before a final line break,
+    so `"ALICE\n"` passed (T301's cold review).
+    """
+    return bool(_ACCOUNT_NAME.fullmatch(name))
 
 
 def valid_account_password(password: str) -> bool:
     """`^[A-Za-z0-9_@#%+=!-]{4,16}$` — and the 16 is a ceiling, not a preference."""
-    return bool(_ACCOUNT_PASSWORD.match(password))
+    return bool(_ACCOUNT_PASSWORD.fullmatch(password))
 
 
 def valid_character_name(name: str) -> bool:
     """`^[A-Za-z0-9_]{1,12}$` — a character name as this core stores it."""
-    return bool(_CHARACTER_NAME.match(name))
+    return bool(_CHARACTER_NAME.fullmatch(name))
 
 
-def account_create(account: str, password: str) -> str:
-    """`account create <user> <pass>`, with both parts checked first."""
+NAME_LOOKUP_TREES = frozenset({"wow-wotlk", "wow-centurion"})
+"""The catalog entries whose servers look an account argument up by name and nothing else.
+
+`AccountMgr::GetId(accountName)`: AzerothCore 7f12e89e `cs_account.cpp:347`,
+TrinityCore112 faac5fc9 `cs_account.cpp:303`. Every other tree -- the CMaNGOS
+ones, and any added later until it is measured -- is treated as reading an
+all-digit argument as an account id (T301).
+"""
+
+DELETE_BY_ID = ("delete it", "account delete ID")
+GM_LEVEL_BY_ID = ("change its GM level", "account set gmlevel ID LEVEL")
+PASSWORD_BY_ID = ("change its password", "account set password ID NEWPASSWORD NEWPASSWORD")
+"""What each refused command does, and the line the player can type instead (T301, T340).
+
+With the account's id in place of a name, `ExtractAccountId` reaches exactly
+that account, so the console line is the safe way to do it on these trees.
+"""
+
+
+def digits_read_as_an_id(account: str, refused: tuple[str, str] = DELETE_BY_ID) -> str:
+    """The refusal for an all-digit account name on a tree that reads digits as an id.
+
+    The CMaNGOS trees' `ExtractAccountId` tries the argument as a number before
+    it tries it as a name (mangos-classic `src/game/Chat/Chat.cpp:3358`,
+    mangos-tbc `:3420`, tortoise-wow `:3549`), so `account delete 123` there
+    deletes account id 123, whatever it is called, and `account set gmlevel 123 3`
+    makes account id 123 a GM. Empty for any other name.
+    """
+    if not account.isdigit():
+        return ""
+    doing, console = refused
+    # The command is one the player has to type, since no press can do it
+    # safely, so it stays on the line: on a line of its own, never in
+    # backticks (owner rule, T296).
+    return (
+        f"{account} is a name made only of digits, and this server reads digits in its account "
+        "commands as an account number, so the command could reach a different account. "
+        f"Yu'lon does not {doing} from here. To do it, type this on the Console tab, with the "
+        f"account's id from the list in place of ID:\n{console}"
+    )
+
+
+def account_create(account: str, password: str, *, digits_are_ids: bool) -> str:
+    """`account create <user> <pass>`, with both parts checked first.
+
+    `digits_are_ids` is required for the reason `account_delete()` gives: an
+    all-digit account made on such a tree could never be named afterwards.
+    """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    _require(
+        not (digits_are_ids and account.isdigit()),
+        f"{account} is made only of digits, which this server's account commands read as an "
+        "account number",
+    )
     _require(valid_account_password(password), "that password is not one this server would accept")
     return line(f"account create {account} {password}")
 
 
-def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int) -> str:
+def account_set_gm_level(
+    account: str, level: int, *, realms: bool, highest: int, digits_are_ids: bool
+) -> str:
     """`account set gmlevel <user> <n>`, with `-1` for every realm where there are realms.
 
     `realms` is required and not defaulted, because the two cores disagree and
@@ -104,16 +161,58 @@ def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int
     (measured live, 2026-09-07: `4` was accepted and `5` answered "Incorrect
     values."). A number in this file would refuse a level the server accepts,
     in this app's own voice, as though the SERVER had said no.
+
+    `digits_are_ids` is required for the reason `account_delete()` gives: the
+    CMaNGOS handlers resolve the account with `ExtractAccountId` (mangos-classic
+    `Level3.cpp:1047`, mangos-tbc `:1086`, tortoise-wow `Commands.cpp:281`), so
+    an all-digit name would raise ANOTHER account's rights (T340).
     """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account, GM_LEVEL_BY_ID)
+        _require(not refusal, refusal)
     _require(0 <= level <= highest, f"{level} is not a GM level this server has")
     every_realm = " -1" if realms else ""
     return line(f"account set gmlevel {account} {level}{every_realm}")
 
 
-def account_set_password(account: str, password: str) -> str:
-    """`account set password <user> <pass> <pass>` — the server wants it twice."""
+def account_delete(account: str, *, digits_are_ids: bool) -> str:
+    """`account delete <user>` -- the same line on all five trees (T301).
+
+    Read from each pinned tree: AzerothCore `cs_account.cpp:93` (handler :330),
+    TrinityCore112 for Centurion `cs_account.cpp:77` (handler :294), mangos-tbc
+    and mangos-classic `src/game/Chat/Chat.cpp:83` (handlers `Chat.cpp:3800` and
+    `:3714`), and the tortoise fork `src/game/Chat/Chat.cpp:71` (handler
+    `src/mangosd/CliRunnable.cpp:74`). Every one allows the console, and on the
+    CMaNGOS trees the command is `SEC_CONSOLE`, which SOAP runs every command at
+    (`src/mangosd/MaNGOSsoap.cpp:113` on both, `:196` on the fork).
+
+    The server deletes the account's characters with it
+    (`AccountMgr::DeleteAccount`); the caller asks the person about them first.
+
+    `digits_are_ids` is the tree's, and required: on the CMaNGOS trees an
+    all-digit argument is read as an account id (`digits_read_as_an_id()`),
+    while AzerothCore and TrinityCore look the name up and nothing else
+    (`cs_account.cpp:347` and `:303`).
+    """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account)
+        _require(not refusal, refusal)
+    return line(f"account delete {account}")
+
+
+def account_set_password(account: str, password: str, *, digits_are_ids: bool) -> str:
+    """`account set password <user> <pass> <pass>` — the server wants it twice.
+
+    `digits_are_ids` is the tree's own for THIS command: mangos-classic and
+    mangos-tbc resolve it with `ExtractAccountId` (`Level3.cpp:1097`, `:1136`),
+    while the tortoise fork looks the name up (`Commands.cpp:338`) (T340).
+    """
+    _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account, PASSWORD_BY_ID)
+        _require(not refusal, refusal)
     _require(valid_account_password(password), "that password is not one this server would accept")
     return line(f"account set password {account} {password} {password}")
 
@@ -354,6 +453,34 @@ It prints the core revision, `Players online: N. Max online: M.` and uptime
 (`cmangos.md` records the same shape on that family), so a reply is both proof
 the channel works and something a person can read in a capture.
 """
+
+
+_ENDS_THE_WORLD = ("shutdown", "exit", "idleshutdown")
+
+
+def ends_the_world(typed: str) -> bool:
+    """Does this console line shut the world server down for good (T412)?
+
+    `server shutdown`, `server exit` and `server idleshutdown`, with or without a
+    leading dot, in any case, and ABBREVIATED as the consoles accept them
+    (AzerothCore, TrinityCore and CMaNGOS all take a command by any prefix of each
+    word, so `ser shut 1` is `server shutdown 1`) -- and not their `cancel`.
+    Measured on yulon-ubuntu 2026-10-05 (WotLK): `server shutdown 1` saved and
+    closed the world cleanly, exit 0, and Docker started it again at once,
+    because every service here has `restart: unless-stopped` and an exit the
+    container chose itself is not a stop. `server restart` is not one of these:
+    Docker bringing it back is what it asks for.
+
+    A prefix the console itself would find ambiguous (`server s`) is refused
+    too: nothing a player needs is lost by that, and the console would not have
+    run it either.
+    """
+    words = typed.strip().lstrip(".").lower().split()
+    if len(words) < 2 or not "server".startswith(words[0]):
+        return False
+    if not any(verb.startswith(words[1]) for verb in _ENDS_THE_WORLD):
+        return False
+    return not (len(words) > 2 and "cancel".startswith(words[2]))
 
 
 def _require(ok: bool, message: str) -> None:

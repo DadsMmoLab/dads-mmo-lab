@@ -523,6 +523,43 @@ def test_wait_ready_declares_a_crash_loop_when_the_restart_count_keeps_growing(
     assert "restart" in caplog.text.lower()
 
 
+def test_wait_ready_ends_within_a_poll_once_its_cancel_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T247: Stop ends the wait inside the pause it lands in, not when the timeout runs out.
+
+    The pause is thirty seconds and the timeout twenty, and the cancel is
+    set a moment after the first look. A pause that is a plain sleep cannot hear
+    it (`time.sleep` raises here); a loop that does not ask the cancel goes on
+    looking (the look count); either way the wait would not end in time.
+    """
+    seen = _ready_fakes(monkeypatch, world_log="loading...\n")
+
+    def deaf(_seconds: float) -> None:
+        raise AssertionError("the pause between looks was a sleep Stop cannot interrupt")
+
+    monkeypatch.setattr(docker.time, "sleep", deaf)
+    cancel = threading.Event()
+    spec = docker.ReadySpec(world="ready", timeout=20.0, interval=30.0, cancel=cancel)
+    timer = threading.Timer(0.2, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is False
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 10.0, "the wait outlived the Stop"
+    assert len([c for c in seen if c[:2] == ["docker", "ps"]]) == 1, "it looked again after Stop"
+
+
+def test_a_ready_spec_with_a_cancel_equals_one_without() -> None:
+    """The cancel rides along; it is not part of what "ready" means, so it changes no comparison."""
+    assert docker.ReadySpec(world="ready", cancel=threading.Event()) == docker.ReadySpec(
+        world="ready"
+    )
+    assert "cancel" not in repr(docker.ReadySpec(world="ready", cancel=threading.Event()))
+
+
 def test_wait_ready_does_not_call_a_server_that_restarted_last_week_a_crash_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -858,8 +895,12 @@ def test_the_rebuilds_recreate_stops_the_servers_before_it_replaces_the_database
     assert docker.recreate_staged(SPEC, Path("/tmp/wow")) is True
     stop = ["docker", "compose", "stop", "-t", _GRACE, SPEC.world, SPEC.auth]
     up = ["docker", *docker.recreate_argv(SPEC)]
-    assert calls[:2] == [stop, up], calls
-    assert SPEC.db not in calls[0], "the database is stopped by the recreate, after the servers"
+    # T384: the world is asked to stop on its own first, and saves before `stop` reaches it.
+    assert calls[0] == ["docker", "kill", "-s", "TERM", SPEC.world], calls
+    composed = [call for call in calls if call[1:2] == ["compose"]]
+    assert composed[:2] == [stop, up], calls
+    assert calls.index(stop) < calls.index(up)
+    assert SPEC.db not in stop, "the database is stopped by the recreate, after the servers"
 
 
 def test_start_staged_never_starts_a_container_by_global_name(

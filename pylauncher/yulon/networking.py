@@ -197,7 +197,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from yulon import platform, runner
+from yulon import client_names, platform, runner
 from yulon.apply import ApplyError, SqlRunner
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
@@ -4321,8 +4321,30 @@ def _ssh_rules_still_missing(network_plan: NetworkPlan, done: list[str]) -> tupl
 
 
 def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
-    """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level."""
-    return sorted((client_dir / "Data").glob(f"*/{realmlist_file}")) + [client_dir / realmlist_file]
+    """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level.
+
+    Every name as the disk spells it (T261): `data/enus/realmlist.wtf`, which
+    `unzip -LL` leaves, is the client's file on a disk that tells cases apart,
+    and writing `Data/enUS/realmlist.wtf` beside it made a second, empty `Data/`
+    tree the game never reads. A `Data` folder that cannot be listed offers none.
+    """
+    found: list[Path] = []
+    data = client_names.find(client_dir, client_names.DATA_FOLDER)
+    if data is not None and data.is_dir():
+        try:
+            locales = sorted(entry for entry in data.iterdir() if entry.is_dir())
+        except OSError as exc:
+            logger.warning(f"could not list {data} for its realmlist files: {exc}")
+            locales = []
+        found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
+    top = client_names.find(client_dir, realmlist_file) or client_dir / realmlist_file
+    return [*found, top]
+
+
+def _fresh_realmlist(client_dir: Path, realmlist_file: str) -> Path:
+    """`Data/enUS/<realmlist_file>`, under the names already on disk (`data/enus/`, T261)."""
+    rel = f"{client_names.DATA_FOLDER}/enUS/{realmlist_file}"
+    return client_dir.joinpath(*client_names.on_disk(client_dir, rel).parts)
 
 
 def _set_realmlist(target: Path, address: str) -> None:
@@ -4350,7 +4372,7 @@ def write_client_realmlist(
     """
     target = next(
         (c for c in _realmlist_candidates(client_dir, realmlist_file) if c.is_file()),
-        client_dir / "Data" / "enUS" / realmlist_file,
+        _fresh_realmlist(client_dir, realmlist_file),
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     _set_realmlist(target, address)
@@ -4377,7 +4399,7 @@ def write_ready_to_play_realmlists(
     """
     found = [c for c in _realmlist_candidates(play_dir, realmlist_file) if c.is_file()]
     if not found:
-        fresh = play_dir / "Data" / "enUS" / realmlist_file
+        fresh = _fresh_realmlist(play_dir, realmlist_file)
         fresh.parent.mkdir(parents=True, exist_ok=True)
         _set_realmlist(fresh, address)
         return (fresh,)

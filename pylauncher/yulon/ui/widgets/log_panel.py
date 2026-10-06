@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
-from yulon.after_stop import TrueAfterStop
+from yulon.after_stop import PutBackAfterStop, TrueAfterStop, stop_took_effect
 from yulon.log import get_logger
 from yulon.said import split_details, with_details
 from yulon.support import runlog
@@ -79,12 +79,31 @@ class Seams:
 
 
 STOPPED_THEN_FAILED = "Stopped. FAILED: "
-"""The header's opening when a stopped job ended on a failure that says what it left (T228).
+"""The header's opening when a stopped job ended on a failure (T228, T250).
 
 Stop was pressed, so "Stopped" comes first; the failure's own sentence follows
-because it says what state the server is in and what to press. Which failures
-those are is decided by type (`yulon.after_stop.TrueAfterStop`), never by words.
+because it says what state the server is in and what to press. Two kinds reach
+it, both decided by type and never by words: a failure that says what the press
+left (`yulon.after_stop.TrueAfterStop`, T228), and any failure that is not the
+Stop taking effect at all (`StopTookEffect`, T250) -- a real one that landed as
+the button was pressed.
 """
+
+STOPPED_PUT_BACK = "Stopped: "
+"""The header's opening when a stopped press put everything back cleanly (T247 live review).
+
+The lead's ruling: a Stop during a rebuild's load that ends in a CLEAN rollback -- the
+build from before up again and, with T217, its databases back too -- is a plain stop
+whose sentence says what was put back, not a red FAILED. Decided by type
+(`yulon.after_stop.PutBackAfterStop`), never by words. `STOPPED_THEN_FAILED` stays for
+a rollback that left something wrong.
+"""
+
+FINISHED_AFTER_A_LATE_STOP = "finished: Stop came too late to change anything; the job finished."
+"""The header when a job took its Stop back because it came too late (T247 review, the lead's
+ruling: a Stop that came too late means the press SUCCEEDED). See `after_stop.withdraw_stop()`:
+the job clears the Cancel this panel set, and the panel reads that as "finished", not
+"cancelled" -- so `cancelled` is False and every owner's success path runs."""
 
 _MAX_BLOCKS = 5000
 
@@ -337,6 +356,7 @@ class _StreamWorker(QObject):
     """Runs a `LineSource` to exhaustion on its thread, emitting each line."""
 
     line = Signal(str)
+    stopped_by = Signal(object)  # the type of what a clean stop ended on, just before `finished`
     finished = Signal(bool, str)  # ok, message
 
     def __init__(self, source: LineSource, *, drains: bool = False) -> None:
@@ -380,6 +400,7 @@ class _StreamWorker(QObject):
     def run(self) -> None:
         ok = True
         message = "done"
+        put_back = False
         # Published BEFORE the source is touched, because that is the only
         # moment at which this thread's ident is knowable to `request_stop()`
         # while the source can still be reached: everything after this line may
@@ -412,29 +433,43 @@ class _StreamWorker(QObject):
             # T248: and its Details below it, for `_on_finished` to fold away.
             message = with_details(exc, str(exc) or UNDESCRIBED_FAILURE)
             raised = f"{type(exc).__name__}: {exc}"
-            if self._stop and isinstance(exc, TrueAfterStop):
+            if self._stop and isinstance(exc, PutBackAfterStop):
+                # T247 live review: everything was put back cleanly after the
+                # Stop. Not a failure; its sentence says what was put back, and
+                # `_on_finished` shows it under "Stopped:".
+                logger.info(f"log panel job put everything back after a stop: {raised}")
+                ok, put_back = True, True
+                self.stopped_by.emit(type(exc))
+            elif self._stop and isinstance(exc, TrueAfterStop):
                 # T228: NOT the Stop taking effect. What the route did after the
                 # Stop -- a rollback that stopped early, sources left on the new
                 # commits, a start now refused -- left the server in a state its
                 # sentence describes, and that sentence is the one the player
                 # needs. Kept as a failure; `_on_finished` puts "Stopped" first.
                 logger.warning(f"log panel job failed after a stop: {raised}")
-            elif self._stop:
-                # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
-                # `request_stop()` ends the job's children, and a terminated
-                # child exits non-zero, so `runner.stream()` raises
-                # `CalledProcessError` on the way out — exit 143 on the live box
-                # (the last line of the 7.10 probe's own log). Reporting that as
-                # `ok=False` would put a refusal on screen for a button the user
-                # pressed, which is the twin of the "finished: stopped" bug
-                # `_on_finished` exists to fix. The text is kept in the log, at
-                # debug, so a genuine failure that happened to land in the same
-                # millisecond is not lost.
+            elif self._stop and stop_took_effect(exc):
+                # THE STOP TAKING EFFECT, said so by type (T250). `request_stop()`
+                # ends the job's children, and a terminated child exits non-zero,
+                # so `runner.stream()` raises `StreamEnded` on the way out — exit
+                # 143 on the live box (the last line of the 7.10 probe's own log);
+                # the engine raises `InstallStopped` where it hears the cancel. A
+                # route that turns either into its own sentence raises `from` it.
+                # Reporting that as `ok=False` would put a refusal on screen for a
+                # button the user pressed, which is the twin of the "finished:
+                # stopped" bug `_on_finished` exists to fix.
                 logger.debug(f"log panel job ended after a stop was asked for: {raised}")
                 ok, message = True, "stopped"
+                self.stopped_by.emit(type(exc))
+            elif self._stop:
+                # T250: NOT the Stop. Until T250 everything raised after a Stop
+                # was read as it, by timing alone, so a real failure that landed
+                # as the button was pressed -- a full disk, a lost daemon, a crash
+                # loop seen in the same moment -- was shown as "cancelled". Kept
+                # as a failure; `_on_finished` puts "Stopped" first.
+                logger.warning(f"log panel job failed as it was being stopped: {raised}")
             else:
                 logger.warning(f"log panel job failed: {raised}")
-        if self._stop and ok:
+        if self._stop and ok and not put_back:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
             # cancel (`runner.interact()`) reached the end of its iterator and
@@ -742,6 +777,7 @@ class LogPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
         self._stop_requested = False
+        self._stopped_by: type | None = None
         # T93. The run being kept on disk, if its owner asked for one. Opened by
         # `run()` after the busy check, closed by `_on_finished()`; flushed per
         # line, so the two ways out that never deliver `_on_finished` (app exit;
@@ -1030,6 +1066,7 @@ class LogPanel(QWidget):
         self._cancel = cancel
         self._ended = ended
         self._stop_requested = False
+        self._stopped_by = None
         self._job_label = f'log panel "{title}"'
         # The zero the elapsed clock counts from. Set on the RUN, not on the
         # panel or the first line: the same panel is reused for the next
@@ -1054,6 +1091,7 @@ class LogPanel(QWidget):
         in_flight().hold(thread, worker, label=self._job_label)
         thread.started.connect(worker.run)
         worker.line.connect(self.append)
+        worker.stopped_by.connect(self._on_stopped_by)
         worker.finished.connect(self._on_finished)
         worker.finished.connect(thread.quit)
         # Deliberately NOT `thread.finished.connect(worker.deleteLater)`, the
@@ -1141,6 +1179,22 @@ class LogPanel(QWidget):
 
     # -- slots ----------------------------------------------------------
 
+    @property
+    def stopped_by(self) -> type | None:
+        """The type of the Stop a cancelled job ended on, when it ended by raising one (T247).
+
+        `cancelled` says Stop was pressed; this says WHERE it took effect, by
+        type, for the one owner that words its popup by it: an install stopped in
+        its ready wait (`ReadyWaitStopped`) has left a server running, and its
+        popup says so. None for a job that ended without raising, or that was
+        not stopped.
+        """
+        return self._stopped_by
+
+    @Slot(object)
+    def _on_stopped_by(self, kind: object) -> None:
+        self._stopped_by = kind if isinstance(kind, type) else None
+
     @Slot(bool, str)
     def _on_finished(self, ok: bool, message: str) -> None:
         # Cancellation is asked about FIRST, because a stopped job arrives here
@@ -1152,14 +1206,32 @@ class LogPanel(QWidget):
         # finish it. What was left behind is the caller's story to tell — the
         # panel does not know whether it was following a log or building a
         # server.
+        late = self._stop_requested and self._cancel is not None and not self._cancel.is_set()
+        if late:
+            # The job took its Stop back (`after_stop.withdraw_stop()`): it came too
+            # late to change anything, and the press succeeded. Not cancelled, so
+            # `cancelled` is False for every owner's success path.
+            self._stop_requested = False
+            if ok:
+                message = "done"
         # T248: the header and the line get the sentence; its Details go in
         # the fold under the line and, whole, into the run's record.
         said, details = split_details(message)
-        if self._stop_requested:
-            # T228: a stopped job that still FAILED carries a sentence about what
-            # it left (`TrueAfterStop`; the worker decides by type), shown under
-            # "Stopped". Every other stopped job is a clean cancel.
-            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + said
+        if late and ok:
+            verdict = FINISHED_AFTER_A_LATE_STOP
+        elif self._stop_requested:
+            # T228/T250: a stopped job that still FAILED -- with a sentence about
+            # what it left (`TrueAfterStop`), or on something that was not the
+            # Stop (`StopTookEffect`; the worker decides both by type) -- is shown
+            # under "Stopped". Every other stopped job is a clean cancel.
+            if (
+                ok
+                and self._stopped_by is not None
+                and issubclass(self._stopped_by, PutBackAfterStop)
+            ):
+                verdict = STOPPED_PUT_BACK + said
+            else:
+                verdict = "cancelled" if ok else STOPPED_THEN_FAILED + said
         elif ok and self._ended is not None:
             verdict = self._ended
         else:

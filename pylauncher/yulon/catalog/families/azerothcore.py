@@ -20,12 +20,13 @@ import os
 import stat
 import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 from yulon import git
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -280,6 +281,18 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("ready", self.stage_ready, recorded=False),
         )
 
+    def repair_database_stages(self) -> tuple[Stage, ...]:
+        """The spine's four, after the client-data download (T377).
+
+        The server data lives in its own volume, and a prune that removed the
+        database's volume removed that one too (live, yulon-win11 2026-10-05: the
+        hand ran `ac-client-data-init` as well as the import). The download
+        checks what the volume holds and ends in seconds when it is all there.
+        """
+        return (
+            replace(self.stage_named("client-data"), recorded=False),
+        ) + super().repair_database_stages()
+
     def databases_a_new_build_changes(self) -> tuple[Db, ...]:
         """Every database the update changes before and at the new build's first start (T217, T220).
 
@@ -340,7 +353,7 @@ class AzerothCoreInstaller(StagedInstaller):
             # says "the install was stopped", and this is an update (cold review).
             self._check_run(run, "Applying the new build's database updates", None, "")
             if ctx.cancel is not None and ctx.cancel.is_set():
-                raise InstallerError(f"{press} was stopped. {CORE_UPDATES_NOTE}")
+                raise InstallStopped(f"{press} was stopped. {CORE_UPDATES_NOTE}")
             yield "The new build's database updates are in."
 
         return ServersDownWork(
@@ -440,8 +453,7 @@ class AzerothCoreInstaller(StagedInstaller):
             existing = self._remote_of(dest)
             if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
-                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
-                    "changed."
+                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was changed."
                 )
             if not has_git and dest.is_dir() and _listing(dest):
                 raise InstallerError(

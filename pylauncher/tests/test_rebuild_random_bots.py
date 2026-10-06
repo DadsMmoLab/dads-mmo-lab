@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
-from tests.conftest import pump_until
+from tests.conftest import pump_until, three_way_only
 from yulon import docker, tuning
 from yulon.catalog.catalog import load_catalog
 from yulon.channel import Answer
@@ -866,14 +866,15 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[QMessageBox]
         boxes.append(self)
         return which
 
-    monkeypatch.setattr(QMessageBox, "exec", exec_)
+    # T243: the Yes/No questions are boxes too; they are still answered by `question`.
+    monkeypatch.setattr(QMessageBox, "exec", three_way_only(exec_))
     return boxes
 
 
 def _answers(monkeypatch: pytest.MonkeyPatch, *which: object) -> None:
     """Answer the three-way dialogs in order: the update's, then the rebuild's."""
     queue = list(which)
-    monkeypatch.setattr(QMessageBox, "exec", lambda _self: queue.pop(0))
+    monkeypatch.setattr(QMessageBox, "exec", three_way_only(lambda _self: queue.pop(0)))
 
 
 def _wait(view: controller_view_module.ControllerView) -> None:
@@ -1295,6 +1296,8 @@ def test_restart_world_says_which_half_failed() -> None:
         def refuse_start(self) -> None:
             return None
 
+        refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+
         def stop(self) -> None:
             raise RuntimeError("no stop")
 
@@ -1306,6 +1309,8 @@ def test_restart_world_says_which_half_failed() -> None:
 
         def refuse_start(self) -> None:
             return None
+
+        refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
 
         def stop(self) -> None:
             return None
