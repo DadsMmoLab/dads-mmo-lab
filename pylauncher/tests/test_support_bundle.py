@@ -257,7 +257,7 @@ def test_a_wedged_docker_is_asked_once_per_bundle_not_once_per_install(
         return None
 
     monkeypatch.setattr(docker, "compose_container_id", container_id)
-    monkeypatch.setattr(docker, "log_tail", lambda *a, **k: pytest.fail("logs asked"))
+    monkeypatch.setattr(docker, "last_lines", lambda *a, **k: pytest.fail("logs asked"))
     # Every `None` now took the whole bound: the first ask marks this docker silent.
     monkeypatch.setattr(docker, "COMPOSE_PS_TIMEOUT", 0.0)
     installs = (_install(tmp_path, "0badc0de"), _install(tmp_path, "0badf00d"))

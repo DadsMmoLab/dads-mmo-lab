@@ -2223,8 +2223,8 @@ def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Pa
         (" 5", "no spaces"),
         ("+5", "whole number"),
         ("0x10", "whole number"),
-        ("2147483648", "2147483647"),
-        ("-2147483649", "2147483647"),
+        ("4294967296", "4294967295"),
+        ("-2147483649", "0 to 4294967295"),
     ],
 )
 def test_a_number_answer_the_server_would_read_differently_is_refused_before_the_clone(
@@ -2260,6 +2260,74 @@ def _int_prompt() -> Any:
             "prompts": [{"key": "n", "question": "How many?", "kind": "int"}],
         }
     ).prompts[0]
+
+
+def _prompt(**over: Any) -> Any:
+    prompt = {"key": "n", "question": "How many?", "kind": "int", **over}
+    return parse_manifest(
+        {
+            "schema_version": 1,
+            "id": "n",
+            "name": "N",
+            "type": "module",
+            "game": "wow-wotlk",
+            "description": "one number",
+            "source": {"repo": "acme/n"},
+            "prompts": [prompt],
+        }
+    ).prompts[0]
+
+
+def test_an_unsigned_question_takes_zero_to_uint32_and_refuses_a_negative() -> None:
+    """T370: the AH bot's GUID is read as `uint32`; 3000000000 is a number, -1 is not."""
+    prompt = _prompt(unsigned=True)
+    for good in ("0", "2147483648", "3000000000", "4294967295"):
+        assert apply_module.check_answer(prompt, good) == "", good
+    for bad in ("-1", "4294967296"):
+        assert apply_module.check_answer(prompt, bad) != "", bad
+    assert apply_module.check_answer(_prompt(), "3000000000") != ""
+
+
+@pytest.mark.parametrize(
+    "typed", ["1_0", "+1", "１.５", "١", "1e3", "inf", "nan", " 1", "1 ", "1,5"]
+)
+def test_a_decimal_answer_in_any_spelling_but_plain_digits_is_refused(typed: str) -> None:
+    """T395: `float("1_0")` is 10.0 to Python and 1 to the server's `std::stof`/`atof`."""
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, typed) != "", typed
+    from tests.support_player_text import command_faults
+
+    assert command_faults(apply_module.check_answer(prompt, typed)) == []
+
+
+@pytest.mark.parametrize(
+    ("stored", "read"), [("2 ", "2"), (" 2", "2"), ("+2", "2"), ("2e0", "2"), ("1.5e1", "15")]
+)
+def test_a_decimal_stored_before_the_spelling_rule_is_still_read_back(
+    stored: str, read: str
+) -> None:
+    """The SQL that build sent read each of these as the number it says (cold review)."""
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, stored) != "", "typing stays strict"
+    assert apply_module.stored_answer(prompt, stored) == read
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) == ""
+
+
+@pytest.mark.parametrize("stored", ["1_0", "１.５", "inf", "1e-7", "1e99999"])
+def test_a_stored_decimal_no_server_reads_is_still_refused(stored: str) -> None:
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) != ""
+
+
+@pytest.mark.parametrize("typed", ["0.00001", "9" * 50])
+def test_a_decimal_answer_follows_the_tuning_rules_on_places_and_size(typed: str) -> None:
+    """One rule with the Server rates card (`tuning.decimal_fault`), not a second regex."""
+    assert apply_module.check_answer(_prompt(kind="float"), typed) != ""
+
+
+def test_a_decimal_answer_in_plain_digits_still_passes() -> None:
+    for good in ("0", "1", "1.5", "2.", ".5", "-0.5", "007", "0.0001"):
+        assert apply_module.check_answer(_prompt(kind="float"), good) == "", good
 
 
 def test_a_number_answer_in_plain_digits_still_passes() -> None:
