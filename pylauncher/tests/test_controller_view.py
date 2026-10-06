@@ -2754,7 +2754,7 @@ def test_the_custom_install_report_is_the_one_install_selected_prints(
 
 
 def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_a_folder(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real bindings behind the two buttons, driven end to end on a scratch install.
 
@@ -2783,6 +2783,8 @@ def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_
     (source / ".git").mkdir()
     (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
+    # The conf write asks the report to read the world once (T397); no docker here.
+    monkeypatch.setattr(docker, "world_running", lambda *a, **k: None)
     services = ControllerServices.for_entry(WOTLK, server_dir)
     assert services.module_from_link is not None
     assert services.module_from_folder is not None
@@ -12413,11 +12415,19 @@ def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
     menu = _row_menu(view, "mod-aoe-loot")
 
     labels = [action.text() for action in menu.actions() if action.text()]
-    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    assert labels == ["Install Selected Module", "Copy Module ID"], "T399: not installed here"
 
     next(a for a in menu.actions() if a.text() == "Install Selected Module").trigger()
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
+
+    installed = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-aoe-loot"}))
+    menu = _row_menu(installed, "mod-aoe-loot")
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    next(a for a in menu.actions() if a.text() == "Remove Selected Module").trigger()
+    applier = installed.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-aoe-loot"]
 
 
 def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(

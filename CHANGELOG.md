@@ -31,6 +31,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- After a module install on a stopped server, the report says to press **Start** rather than **Stop** then **Start**.
+- Refusing a client folder now reads as two plain sentences instead of one run-on line.
+- A module's right-click **Remove** is offered only when the module is installed.
+- **Forget Yu'lon's record…** asks in a box that fits small screens and defaults to No.
 - The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
 - A database that is a moment slow to answer after a start no longer logs a warning.
 - The corrections dialog names each step by what it does instead of "statement 1".

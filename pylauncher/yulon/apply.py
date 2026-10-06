@@ -2018,7 +2018,9 @@ class ApplyReport:
     deleted because the game can be told to ignore it instead.
     """
     world_stopped: bool = False
-    """This run's running-world guard asked, and was told explicitly "not running" (T130).
+    """This run read the world and was told explicitly "not running" (T130; T397).
+
+    Read by the SQL guard, or, for a conf-only run that sent no SQL, once by the report.
 
     Only ever set from a reading, never from the manifest. `False` covers three
     things that are not the same: "running" and "could not ask" (both refuse,
@@ -4458,8 +4460,9 @@ class Applier:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
 
         Returns whether it ASKED and was told "not running" (T130), which is
-        `ApplyReport.world_stopped`'s only source. Every early return below is
-        `False`, because none of them read anything about the world.
+        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in
+        `_report`, T397). Every early return below is `False`, because none of them read
+        anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
         direct writes to `characters`/`world` while running; reads are fine* —
@@ -5643,6 +5646,22 @@ class Applier:
                 f"so the next Update of {manifest.id} will offer the defaults instead"
             )
 
+    def _world_read_stopped_for_a_conf_write(self, log: _Log) -> bool:
+        """Whether a conf write that asks for a restart found the world already stopped (T397).
+
+        A conf-only install sends no SQL, so the SQL guard never read the world and the
+        report said "Stop and then Start" to a player who had stopped it first. One read,
+        only when a conf write is what asks for the restart; only an explicit "not running"
+        counts, a running world or a seam that cannot answer leave the old line.
+        """
+        if log.world_stopped or not log.conf_restart or self._world_running is None:
+            return log.world_stopped
+        try:
+            return self._world_running() is False
+        except Exception as exc:  # noqa: BLE001 - could not ask is not "stopped"
+            logger.warning(f"could not tell whether the world is running: {exc}")
+            return False
+
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(
             action=action,
@@ -5677,7 +5696,7 @@ class Applier:
             left_behind=(
                 _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
             ),
-            world_stopped=log.world_stopped,
+            world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
