@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from yulon import platform
+from yulon import client_names, platform
 from yulon.log import get_logger
 from yulon.steam import client_executable
 
@@ -336,6 +336,17 @@ def read_marker(folder: Path) -> Marker | None:
         return None
 
 
+def data_folder(original: Path) -> Path:
+    """The client's `Data` folder as the disk names it (`data/` too, T261); `Data` if none.
+
+    Found whatever its case and never renamed: `unzip -LL` and some copy tools
+    leave `data/`, which on a disk that tells cases apart is not `Data/`. A name
+    that is not there answers `original / "Data"`, which every caller then finds
+    is no folder.
+    """
+    return client_names.find(original, client_names.DATA_FOLDER) or original / "Data"
+
+
 def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> BuildPlan:
     """Walk `original` and sort its files into linked and copied; refuse a bad target.
 
@@ -358,13 +369,14 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
             "copy the client into itself. Nothing was created. Choose a folder "
             "outside it, for example next to it."
         )
-    if _is_link(original / "Data"):
+    data = data_folder(original)
+    if _is_link(data):
         raise PlayClientError(
             f"The Data folder of {original} is a link to another folder, so its game files "
             "cannot be shared from here. Nothing was created. Point Yu'lon at a real client "
             "folder: the one that holds Wow.exe and the Data folder itself."
         )
-    if not (original / "Data").is_dir():
+    if not data.is_dir():
         raise PlayClientError(
             f"{original} has no Data folder, so it does not look like a WoW client. "
             "Nothing was created. Point Yu'lon at the folder that holds Wow.exe and Data."
@@ -571,6 +583,11 @@ def _survivor(path: Path, folder: Path, original: Path | None) -> Path | None:
     file (`client_config._remove_own`), so it is still here when the folder goes.
     Only the same inode is ever given its flag back (`_remove_file`), so a name
     mapped to a file it does not share changes nothing.
+
+    Found in `original` whatever its case (T261): Centurion's extraction copy
+    renames a `data/` folder and its archives to the names the extractors open
+    (`Data/lichking.MPQ`), so on a disk that tells cases apart the player's file
+    is at the same path in another case.
     """
     if original is None:
         return None
@@ -578,7 +595,10 @@ def _survivor(path: Path, folder: Path, original: Path | None) -> Path | None:
     swapped = _PACK_SWAP_NAME.fullmatch(rel.name)
     if swapped is not None:
         rel = rel.with_name(swapped.group(1))
-    return original / rel
+    exact = original / rel
+    if os.path.lexists(exact):  # the usual answer, and the only one where case is ignored
+        return exact
+    return client_names.find(original, rel.as_posix()) or exact
 
 
 def _remove_link(path: Path, unlink: Callable[[Path], None]) -> None:
@@ -1281,7 +1301,7 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
     listing it would have Refresh put the original's back over it.
     """
     is_kept = _kept({*keep, *_packs_installed(play_dir)})
-    if not (original / "Data").is_dir():
+    if not data_folder(original).is_dir():
         logger.warning(
             "ready-to-play client %s: its original %s has no Data folder, not compared",
             play_dir,
@@ -1421,7 +1441,7 @@ def refresh(
             f"{original}, so nothing in it was changed. Refresh it from "
             f"{marker.source_client_dir}, or delete it and make it again from {original}."
         )
-    if not (original / "Data").is_dir():
+    if not data_folder(original).is_dir():
         raise PlayClientError(
             f"{original} has no Data folder any more, so there is nothing to refresh "
             "from. Nothing was changed. Put your client back there, or delete the "
@@ -1752,7 +1772,7 @@ def left_out_archives(
     top-level folders it leaves out, nor into WTF/ or Interface/, which are the
     player's own here. An original without a Data folder answers nothing.
     """
-    if not (original / "Data").is_dir():
+    if not data_folder(original).is_dir():
         return ()
     is_ignored = _kept({*ignore, *_packs_installed(play_dir)})
     found: list[Path] = []

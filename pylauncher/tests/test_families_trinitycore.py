@@ -711,6 +711,32 @@ def test_a_lowercase_client_reaches_the_extractors_under_the_names_they_open(
 
 
 @needs_case_sensitive_disk
+def test_a_client_whose_data_folder_is_lowercase_reaches_the_extractors_as_data(
+    machine: Machine,
+) -> None:
+    """T261: `data/` itself, as `unzip -LL` leaves it. The extractors open `Data/...` only
+    (`-i /client`, `-d /client/Data/`), so the copy's folder is renamed there too; the
+    player's client keeps its names, bytes and read-only flags."""
+    _lowercase_every_name_under_data(machine.client)
+    (machine.client / "Data").rename(machine.client / "data")
+    for rel in ("data/lichking.mpq", "data/enus/locale-enus.mpq"):  # T196/T198: flags kept
+        (machine.client / rel).chmod(0o444)
+    before = snapshot(machine.client)
+    lay_for_client_data(machine)
+
+    said = run_stage(machine, "client-data")
+
+    for program, files in machine.tools.seen.items():
+        archives = {
+            rel for rel in files if rel.startswith("Data/") and rel.casefold().endswith(".mpq")
+        }
+        assert archives == STOCK | {"Data/patch-X.MPQ", "Data/enUS/patch-enUS-A.MPQ"}, program
+        assert not any(rel.startswith("data/") for rel in files), program
+    assert snapshot(machine.client) == before, "the player's client was changed"
+    assert "Removed the temporary copy of your client." in said
+
+
+@needs_case_sensitive_disk
 def test_an_archive_already_under_the_catalog_s_name_is_never_replaced_by_its_case_twin(
     machine: Machine,
 ) -> None:

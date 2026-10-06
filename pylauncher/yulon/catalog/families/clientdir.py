@@ -104,8 +104,10 @@ def validate(
                 PICK_THE_CLIENT,
             ),
         )
-    data = client_dir / DATA_DIR
-    if not data.is_dir():
+    # Whatever its case (T261): `unzip -LL` and some copy tools leave `data/`, and
+    # on a disk that tells cases apart `client_dir / "Data"` is then nothing.
+    data = client_names.find(client_dir, DATA_DIR)
+    if data is None or not data.is_dir():
         return (
             Check(
                 CLIENT_CHECK,
@@ -115,7 +117,7 @@ def validate(
                 "or a backup.",
             ),
         )
-    checks: list[Check] = [Check(CLIENT_CHECK, "pass", f"{client_dir} has a {DATA_DIR} directory")]
+    checks: list[Check] = [Check(CLIENT_CHECK, "pass", f"{client_dir} has a {data.name} directory")]
     if spec.required_file is not None:
         # Found whatever its case, so `Data/lichking.mpq` is the file on a
         # case-sensitive disk too, and named as the disk names it (T227).
