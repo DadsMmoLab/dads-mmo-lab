@@ -19,6 +19,7 @@ are two files, and the one asked for by its own spelling is the one meant.
 from __future__ import annotations
 
 import os
+from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 
 
@@ -39,15 +40,24 @@ def on_disk(root: Path, rel: str | PurePosixPath) -> PurePosixPath:
             names = os.listdir(here)
         except OSError:
             return PurePosixPath(*spelled, *parts[index:])
-        if part not in names:
-            folded = part.casefold()
-            matches = sorted(name for name in names if name.casefold() == folded)
-            if not matches:
-                return PurePosixPath(*spelled, *parts[index:])
-            part = matches[0]
-        spelled.append(part)
-        here = here / part
+        found = match(names, part)
+        if found is None:
+            return PurePosixPath(*spelled, *parts[index:])
+        spelled.append(found)
+        here = here / found
     return PurePosixPath(*spelled)
+
+
+def match(names: Collection[str], name: str) -> str | None:
+    """The one of `names` that is `name`: itself if there, else its first twin in another case.
+
+    One folder's listing, asked the question `on_disk()` asks of each component,
+    for a caller that lists a folder once and places many names in it.
+    """
+    if name in names:
+        return name
+    folded = name.casefold()
+    return min((other for other in names if other.casefold() == folded), default=None)
 
 
 def find(root: Path, rel: str | PurePosixPath) -> Path | None:
