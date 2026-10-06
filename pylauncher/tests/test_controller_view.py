@@ -12588,6 +12588,39 @@ def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_pa
     assert path.read_text(encoding="utf-8") == before
 
 
+@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "2147483648"])
+def test_a_number_the_server_would_read_differently_is_refused_at_save(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """Through the card's own Save: `int()` reads each of these, the server does not.
+
+    `AuctionHouseBot.ItemsPerCycle` is an `int` with no bounds, so it is a text
+    box and nothing but the spelling rule stands between the text and the conf.
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    from tests.support_player_text import command_faults, text_faults
+
+    conf = "env/dist/etc/modules/mod_ahbot.conf"
+    _deploy(tmp_path, conf, "[worldserver]\nAuctionHouseBot.ItemsPerCycle = 200\n")
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-ah-bot-plus"}))
+    before = (tmp_path / conf).read_bytes()
+    card = view.tuning_panel.card("mod-ah-bot-plus")
+    box = card.editors["AuctionHouseBot.ItemsPerCycle"].control
+    assert isinstance(box, QLineEdit)
+    box.setText(typed)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert (tmp_path / conf).read_bytes() == before
+    assert tuning.backups_of(tmp_path / conf) == ()
+    said = view.tuning_report.toPlainText()
+    assert "AuctionHouseBot.ItemsPerCycle" in said
+    assert failures and command_faults(failures[0]) == [], failures
+    assert command_faults(said) == [] and text_faults(said) == [], said
+
+
 def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

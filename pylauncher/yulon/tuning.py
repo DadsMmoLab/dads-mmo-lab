@@ -400,6 +400,34 @@ trusting their own configuration.
 """
 
 
+WHOLE_NUMBER = re.compile(r"-?[0-9]+")
+"""How an `int` key's value may be spelled: ASCII digits and an optional leading minus.
+
+Narrower than Python's `int()` on purpose, which also reads other scripts' digits
+(`int("١٢") == 12`), underscores (`int("1_0") == 10`), a plus and surrounding
+spaces. The value is written as typed, and the cores read it in C++:
+AzerothCore's `Acore::StringTo<T>` (`src/common/Configuration/Config.cpp:584`,
+`src/common/Utilities/StringConvert.h:70` at its pin) runs `std::from_chars` over
+the whole value and falls back to the default on anything but this spelling;
+mangos-tbc's `GetIntDefault` (`src/shared/Config/Config.cpp:127-131`) is
+`std::stoi`, which reads `1_000` as 1 and `0x10` as 0 and throws -- at world
+start -- on a value with no digit in front. Matched against the value itself,
+not a stripped copy, because a space is part of what gets written.
+"""
+
+INT32_SMALLEST = -(2**31)
+INT32_LARGEST = 2**31 - 1
+"""The range of the C++ `int` an `int` key is read into.
+
+`GetIntDefault` returns `int32` in mangos-tbc (`std::stoi`, which throws
+`out_of_range` at world start past it), Tortoise (`atoi`) and Centurion. An
+AzerothCore module may read a key as `uint32` instead (`mod-ah-bot`'s GUID), and
+then 2147483648 and up is refused although that module could read it: no real
+GUID or count lives there, while accepting it for an `int32` reader is a value
+the server never sees. The catalog has no way yet to say a key is unsigned.
+"""
+
+
 def check(key: ConfKey | None, value: str) -> None:
     """Refuse a value that fails its own declared type, naming the key.
 
@@ -412,10 +440,18 @@ def check(key: ConfKey | None, value: str) -> None:
     if key is None or key.type is None:
         return
     if key.type == "int":
-        try:
-            number = int(value.strip())
-        except ValueError:
-            raise TuningError(f"{key.key}: `{value}` is not a whole number") from None
+        if WHOLE_NUMBER.fullmatch(value) is None:
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            raise TuningError(
+                f"{key.key}: '{value}' is not a whole number; "
+                f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
+            )
+        number = int(value)
+        if not INT32_SMALLEST <= number <= INT32_LARGEST:
+            raise TuningError(
+                f"{key.key}: {value} is more than the server can hold; "
+                f"use a number from {INT32_SMALLEST} to {INT32_LARGEST}"
+            )
         if key.min is not None and number < key.min:
             raise TuningError(f"{key.key}: {number} is below the smallest allowed value {key.min}")
         if key.max is not None and number > key.max:
