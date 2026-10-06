@@ -86,8 +86,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Questions with long button labels show the whole label, also on a Steam Deck screen.
 - Removing a server while its **Modules** tab is still loading no longer prints an error.
 - An "&" in a label or a server folder's name shows as written.
-- On Windows, a WotLK rebuild with nothing changed no longer re-sends gigabytes of server files to Docker first.
-- A WotLK build runs on the Docker builder you chose yourself, if you chose one.
+- A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
