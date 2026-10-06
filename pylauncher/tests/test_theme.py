@@ -517,7 +517,7 @@ def test_get_app_icon_renders_a_valid_non_null_icon(qapp: QApplication) -> None:
         ("stopping", "between", "STOPPING"),
         ("partial", "between", "PARTLY UP"),
         ("restarting", "restarting", "RESTARTING"),
-        ("loop", "restarting", "RESTARTING"),
+        ("loop", "restarting", "CRASH LOOP"),  # T391: same tone, its own words
         ("unknown", "unknown", "UNKNOWN"),
         ("stopped", "down", "OFFLINE"),
         ("exited", "down", "OFFLINE"),

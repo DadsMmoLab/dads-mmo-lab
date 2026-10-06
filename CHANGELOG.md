@@ -31,6 +31,11 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
+- Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
+- The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
+- A rebuild whose rollback did not come up says its containers are still running and to press Stop.
+- A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
 - The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
 - The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
 - A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".

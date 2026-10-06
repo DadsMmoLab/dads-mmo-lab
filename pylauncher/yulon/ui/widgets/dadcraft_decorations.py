@@ -171,7 +171,9 @@ class DadcraftRealmBadge(QWidget):
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1B4F72, stop:1 #154360)"
             border_color = COLOR_RARE
             text_color = "#EBF5FB"
-            display_text = "◆ RESTARTING"
+            # T391: "loop" is the Server tab's verdict saying the world is
+            # crash-looping under containers `docker ps` lists as up.
+            display_text = "◆ CRASH LOOP" if self._status == "loop" else "◆ RESTARTING"
         elif tone == "unknown":
             # T188: Docker did not answer, so nothing is known about the realm.
             # The offline sheet's neutral colours, with words that do not claim it.
