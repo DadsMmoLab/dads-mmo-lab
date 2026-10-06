@@ -31,7 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
-- Removing **All Stackables to 200** on WotLK puts every item's stack size back exactly as it was.
+- Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
