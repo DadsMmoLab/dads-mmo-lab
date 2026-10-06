@@ -35,6 +35,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
 - A rebuild whose rollback did not come up says its containers are still running and to press Stop.
 - A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
+- A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
+- On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
+- A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
+- **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
+- A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.

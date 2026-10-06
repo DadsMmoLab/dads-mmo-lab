@@ -107,6 +107,7 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
     BOT_COUNT_RUNNING,
+    CONSOLE_SHUTDOWN_REFUSED,
     RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
@@ -462,6 +463,46 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
     view.send_console_command()
     assert sent == ["server info"]
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "server shutdown 1",
+        ".server shutdown 60",
+        "server exit",
+        "SERVER IdleShutdown 5",
+        "ser shut 1",
+    ],
+)
+def test_a_shutdown_typed_at_the_console_is_not_sent_and_stop_is_named(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """T412, measured on yulon-ubuntu 2026-10-05: `server shutdown 1` saved and closed the world
+    cleanly (exit 0), and Docker started it again at once (`restart: unless-stopped`) -- an exit
+    the container chose is not a stop. The tab said Running over a server the player had shut
+    down. Stop is the press that stops it and keeps it stopped."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == []
+    assert CONSOLE_SHUTDOWN_REFUSED in view.console_log.text()
+    assert "Stop" in CONSOLE_SHUTDOWN_REFUSED
+
+
+@pytest.mark.parametrize(
+    "typed", ["server shutdown cancel", "server restart 10", "server info", "server motd hi"]
+)
+def test_what_does_not_end_the_world_for_good_is_still_sent(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """A cancel ends nothing, and a restart is what Docker's policy does anyway."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
 
 
 def test_an_empty_reply_is_said_out_loud_rather_than_shown_as_silence(
@@ -7516,6 +7557,24 @@ def test_stop_now_anyway_on_the_tab_sends_the_stop_and_keeps_the_warning_once(
     _loading_vanilla(view, monkeypatch, [_HEARS])
     view.stop_server()
     assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
+
+
+def test_a_world_that_crashed_while_it_saved_is_said_after_the_stop_with_its_last_lines(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T414: the sentence goes on the label and outlives the stop; the world's last lines go
+    under Details, never into the line."""
+    from yulon.said import details_below
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    crashed = details_below(docker.world_save_failed(139), "Cant begin transaction.")
+    view._stop_notice(crashed)
+    assert view.problem_label.text() == docker.world_save_failed(139)
+    assert "Cant begin transaction." in view.problem_details.text()
+    view._stop_done(True)
+    assert docker.world_save_failed(139) in view.problem_label.text()
+    assert "Details:" not in view.problem_label.text()
+    assert "Cant begin transaction." in view.problem_details.text()
 
 
 def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_stop(

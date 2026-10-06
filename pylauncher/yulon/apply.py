@@ -72,6 +72,7 @@ from yulon.git import (
 from yulon.log import get_logger
 from yulon.manifest import (
     ClientFile,
+    ConfFile,
     Db,
     Deploy,
     ExistsCheck,
@@ -250,19 +251,259 @@ def unknown_modules(
 
 
 def installed_modules(
-    server_dir: Path, relative: frozenset[str] = frozenset()
+    server_dir: Path,
+    relative: frozenset[str] = frozenset(),
+    manifests: Iterable[Manifest] = (),
 ) -> dict[str, frozenset[str]]:
-    """What is installed per family: the clone folders, plus the recorded sourceless mods (T121).
+    """What is installed per family: the clone folders, the recorded sourceless mods (T121),
+    and the settings-only mods (T380).
 
     The Modules tab's reading and the applier's conflict and requirement
     guards, so the tab and the refusal agree (T55's rule). `installed_clones()`
     keeps meaning "the folder is there" for the readers that need a folder.
     One directory listing per family and one small JSON read, on every reload.
+
+    A settings-only mod counts with a receipt (`module_answers.SETTINGS`), and
+    without one when it is among `manifests` and its conf still reads what an
+    install made before the receipt wrote (`settings_installed()`): one read of
+    each conf file those name.
     """
     found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
     for family, ids in recorded_modules(server_dir, relative).items():
         found.setdefault(family, set()).update(ids)
+    for family, ids in _by_family(module_answers.settings_keys(server_dir)).items():
+        found.setdefault(family, set()).update(ids)
+    texts: dict[str, str | None] = {}
+    for manifest in manifests:
+        if manifest.id in found.get(str(manifest.type), set()) or not settings_only(manifest):
+            continue
+        if _settings_still_written(server_dir, manifest, texts):
+            found.setdefault(str(manifest.type), set()).add(manifest.id)
     return {family: frozenset(ids) for family, ids in found.items()}
+
+
+def settings_only(manifest: Manifest) -> bool:
+    """Whether `manifest` is a mod that only changes settings: no repository, conf keys only (T380).
+
+    No source and no folder of its own, no SQL, no files deployed, nothing for the
+    client or the server's DBCs, no NPCs, and no patch inside a clone; at least one
+    conf key with a value to write into a `.conf`. Its install leaves no folder, so
+    a receipt is what says it is installed. The shipped ones are Experience Rates,
+    Message of the Day, Cross-Faction Play, All Flight Paths Known and Performance
+    Stats.
+    """
+    return (
+        manifest.source is None
+        and manifest.origin is None
+        and not manifest.sql
+        and not manifest.deploy
+        and not manifest.client
+        and not manifest.server_dbc
+        and not manifest.npcs
+        and not any(patch.in_clone for patch in manifest.patches)
+        and any(
+            key.default is not None for conf in _key_written_confs(manifest) for key in conf.keys
+        )
+    )
+
+
+def database_receipt(manifest: Manifest) -> bool:
+    """Whether `manifest`'s install writes the `applied` record, nothing else saying it ran (T385).
+
+    No source and no folder of its own, install-time SQL sent straight to the
+    database (`direct`; a `db-import` file is only staged, so the database does
+    not hold it yet), and not relative: a relative one (`reapplies_on_top()`)
+    keeps that record through `_run_relative()` already. Its install leaves no
+    folder under `sql_scripts/clones/`, so the record is the one thing that says
+    it is installed, and being in `applied` it is dropped with the database's
+    other records when a database is imported fresh
+    (`module_answers.forget_database_records()`). The shipped ones are Bigger
+    Stacks on TBC, Vanilla and Tortoise.
+    """
+    return (
+        manifest.source is None
+        and manifest.origin is None
+        and any(step.when == "install" for step in manifest.sql)
+        and all(step.applied_by == "direct" for step in manifest.sql)
+        and not reapplies_on_top(manifest)
+    )
+
+
+def _key_written_confs(manifest: Manifest) -> tuple[ConfFile, ...]:
+    """The conf files whose keys `Applier._conf()` writes, in the manifest's order."""
+    return tuple(
+        conf
+        for conf in manifest.conf
+        if not _is_glob(conf.file) and conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES)
+    )
+
+
+def settings_written(manifest: Manifest, vals: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Conf file -> key -> the value an install with `vals` writes there (T380).
+
+    `Applier._conf()`'s own rendering. A value that cannot be rendered raises
+    `ApplyError`, as the install does.
+    """
+    return {
+        conf.file: {
+            key.key: _render(key.default, vals, f"conf {key.key}")
+            for key in conf.keys
+            if key.default is not None
+        }
+        for conf in _key_written_confs(manifest)
+        if any(key.default is not None for key in conf.keys)
+    }
+
+
+def settings_installed(server_dir: Path, manifest: Manifest) -> bool:
+    """Whether the settings-only mod `manifest` is installed on the install at `server_dir`.
+
+    The Modules tab's reading for one mod, and the Server rates card's question
+    "is Experience Rates installed" (T302). True with a receipt; without one, when
+    the conf still reads what an install from before the receipt wrote
+    (`_settings_still_written()`). False for any other manifest.
+    """
+    if not settings_only(manifest):
+        return False
+    if f"{manifest.type}/{manifest.id}" in module_answers.settings_keys(server_dir):
+        return True
+    return _settings_still_written(server_dir, manifest, {})
+
+
+def _settings_still_written(
+    server_dir: Path, manifest: Manifest, texts: dict[str, str | None]
+) -> bool:
+    """An install from before the receipt: its keys still read what it wrote, and Remove has
+    something to undo.
+
+    Three things, all of them needed:
+
+    1. Every question a key's value is built from has an answer saved for this
+       install. An install saves the answers it was given (T104) and nothing
+       else does, so a value set by hand or on the Server rates card that
+       happens to equal the mod's default is not taken for an install on a
+       server where the mod was never installed. The answers outlive a Remove
+       (T104), so after one, keys set back by hand to exactly what the install
+       wrote do read as that install again (T392).
+    2. Every key reads exactly the value the install writes with those answers.
+    3. The remove patches would change one of those keys' values: a conf already
+       at what Remove leaves has nothing to remove, whatever was installed once.
+
+    `texts` caches each conf file's text across the manifests of one reload.
+    """
+    remembered = module_answers.read_answers(server_dir, manifest)
+    confs = _key_written_confs(manifest)
+    needed = {
+        field
+        for conf in confs
+        for key in conf.keys
+        if key.default
+        for field in _fields(key.default)
+    }
+    if any(field not in remembered for field in needed):
+        return False
+    vals = {p.key: p.default for p in manifest.prompts if p.default is not None}
+    vals.update(remembered)
+    try:
+        written = settings_written(manifest, vals)
+    except ApplyError:
+        return False
+    for file, keys in written.items():
+        text = _conf_text(server_dir, file, texts)
+        if text is None:
+            return False
+        for key, value in keys.items():
+            if tuning.conf_value(text, key) != value.replace('"', "").strip():
+                return False
+    try:
+        return bool(_removal_changes(server_dir, manifest, vals, texts))
+    except ApplyError:
+        return False
+
+
+@dataclass(frozen=True)
+class SettingChange:
+    """One conf key a settings-only mod's Remove changes, as the server reads it (T380)."""
+
+    file: str
+    key: str
+    label: str | None
+    """The key's name on the Tuning tab, or `None` where the catalog gives it none."""
+    now: str | None
+    after: str | None
+
+
+def settings_removal(server_dir: Path, manifest: Manifest) -> tuple[SettingChange, ...]:
+    """What Remove of the settings-only `manifest` would change in its conf, key by key.
+
+    The manifest's own remove patches, run over the conf as it is now, in memory;
+    each key the install writes whose value differs afterwards is listed, in the
+    manifest's order. What the Remove question says (T380 cold review), so a rate
+    changed since the install is named as going back too. Empty for any other
+    manifest, for a conf that cannot be read, and for a patch that cannot render.
+    """
+    if not settings_only(manifest):
+        return ()
+    vals = {p.key: p.default for p in manifest.prompts if p.default is not None}
+    vals.update(module_answers.read_answers(server_dir, manifest))
+    try:
+        return _removal_changes(server_dir, manifest, vals, {})
+    except ApplyError:
+        return ()
+
+
+def _removal_changes(
+    server_dir: Path,
+    manifest: Manifest,
+    vals: Mapping[str, str],
+    texts: dict[str, str | None],
+) -> tuple[SettingChange, ...]:
+    """The keys the remove patches change, compared as the server reads them.
+
+    Key by key and not as text: TBC's remove writes `Rate.XP.Kill    = 1` where
+    the install wrote `Rate.XP.Kill = 1`, the same value. Raises `ApplyError`
+    for a patch that cannot be rendered with `vals`.
+    """
+    confs = _key_written_confs(manifest)
+    files = {conf.file for conf in confs}
+    after: dict[str, str] = {}
+    for patch in manifest.patches:
+        if patch.when != "remove" or patch.file not in files:
+            continue
+        text = after.get(patch.file, _conf_text(server_dir, patch.file, texts))
+        if text is None:
+            continue
+        replacement = _render(patch.replace, vals, f"patch {patch.file}")
+        if patch.regex:
+            after[patch.file] = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
+        else:
+            after[patch.file] = text.replace(patch.find, replacement)
+    changes: list[SettingChange] = []
+    for conf in confs:
+        if conf.file not in after:
+            continue
+        before_text = _conf_text(server_dir, conf.file, texts) or ""
+        for key in conf.keys:
+            if key.default is None:
+                continue
+            now = tuning.conf_value(before_text, key.key)
+            then = tuning.conf_value(after[conf.file], key.key)
+            if now != then:
+                changes.append(SettingChange(conf.file, key.key, key.label, now, then))
+    return tuple(changes)
+
+
+def _conf_text(server_dir: Path, file: str, texts: dict[str, str | None]) -> str | None:
+    """`file`'s text under `server_dir`, read once per reload; `None` when it cannot be read."""
+    if file not in texts:
+        try:
+            texts[file] = (server_dir / file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug(
+                f"could not read {file} to tell whether a settings mod is installed: {exc}"
+            )
+            texts[file] = None
+    return texts[file]
 
 
 def conflicting_installed(
@@ -1797,6 +2038,10 @@ class _Log:
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
+    # T385. The SQL steps `_sql()` has sent, of any action: whether the database
+    # was reached at all, which `_record_database()` needs and the `done` lines
+    # cannot be counted for (a skipped step is not a line there either).
+    sql_sent: int = 0
 
 
 def take_back_file(
@@ -2763,7 +3008,10 @@ class Applier:
         # pass that would be false of the configure-time one.
         if first_configure_sql:
             self._refuse_direct_sql_into_a_running_world(manifest, "configure")
+        sent = log.sql_sent
         self._sql(manifest, clone, vals, "install", log, undo=undo)
+        if log.sql_sent > sent:
+            self._record_database(manifest, vals, "install", log)
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -2810,8 +3058,64 @@ class Applier:
             log.client_copies if log.client_ran else previous_copies,
             release=release_tag,
         )
+        if folder is None:
+            self._record_settings(manifest, vals, log)
         self._remember(manifest, values, log)
         return self._report("install", manifest, log)
+
+    def _record_settings(self, manifest: Manifest, vals: Mapping[str, str], log: _Log) -> None:
+        """Write a settings-only mod's receipt, the one thing that says it is installed (T380).
+
+        Last, after every step that can raise, like `_finish_claim()`: a receipt
+        says the keys were written. Only the conf files that are there, because
+        `_conf()` writes nothing into a missing one and has said so. Never fatal:
+        the keys are written and the player is owed the report of it.
+        """
+        if not settings_only(manifest):
+            return
+        written = {
+            file: keys
+            for file, keys in settings_written(manifest, vals).items()
+            if (self.server_dir / file).is_file()
+        }
+        if not written:
+            return
+        problem = module_answers.record_settings(self.server_dir, manifest, written)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the settings were written, but the note that "
+                f"{manifest.name} is installed could not be saved ({problem}), so its row will "
+                "keep reading Not installed"
+            )
+
+    def _record_database(
+        self, manifest: Manifest, vals: Mapping[str, str], when: When, log: _Log
+    ) -> None:
+        """Record a `database_receipt()` mod as in the database after an install, or not after
+        a remove, once its SQL was sent and returned (T385).
+
+        Right after the SQL, as `_run_relative()` records, and only when `_sql()`
+        returned: a statement that raised leaves the record as it was. After a
+        failed install that means none, and Install again is safe over whatever
+        it left (the statements are re-runnable; the backup keeps the original
+        values). After a failed restore the record stays, so Remove stays on
+        offer. Never fatal: the SQL ran and the player is owed the report of it.
+        """
+        if not database_receipt(manifest):
+            return
+        values = (
+            {prompt.key: vals[prompt.key] for prompt in manifest.prompts if prompt.key in vals}
+            if when == "install"
+            else None
+        )
+        problem = module_answers.record_applied(self.server_dir, manifest, values)
+        if problem:
+            state = "Not installed" if when == "install" else "Installed"
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the SQL ran, but Yu'lon's note that "
+                f"{manifest.name} is {'in' if when == 'install' else 'out of'} the database "
+                f"could not be saved ({problem}), so its row will keep reading {state}"
+            )
 
     def _finish_claim(
         self,
@@ -3287,7 +3591,21 @@ class Applier:
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
         self._patches(manifest, clone, vals, "remove", log)
+        sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
+        if log.sql_sent > sent:
+            self._record_database(manifest, vals, "remove", log)
+        if settings_only(manifest):
+            # T380: the settings are back, so the receipt that said they were
+            # changed goes. A legacy install has none, and its conf no longer
+            # reads as installed once the remove patches ran.
+            problem = module_answers.record_settings(self.server_dir, manifest, None)
+            if problem:
+                log.skipped.append(
+                    f"{module_answers.ANSWERS_FILE}: the settings were put back, but the note "
+                    f"that {manifest.name} is installed could not be cleared ({problem}), so its "
+                    "row will keep reading Installed"
+                )
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
@@ -4085,6 +4403,7 @@ class Applier:
             if not self._precondition_met(step, log):
                 continue
             self._run_sql(step, clone, vals, log, plan.get(index))
+            log.sql_sent += 1
             self._verify_sql(manifest, step, log)
 
     def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> bool:
