@@ -1214,9 +1214,7 @@ def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     )
     for _ in range(3):
         healthy.tick()
-    # T451: a run whose log never says ready is asked every tick (its badge says STARTING).
-    assert len(reads) == 3
-    reads.clear()
+    assert reads == [], "a settled server's log was read"
 
     looping, _ = _clocked(
         tmp_path,
@@ -1227,10 +1225,8 @@ def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     )
     for _ in range(6):
         looping.tick()
-    # 0 s: the first look, still loading. 5 s: the loop's own run, still loading.
-    # 10 s: the fixed run, ready. Then no more.
-    zero, five, ten = (timedelta(seconds=n) for n in (0, 5, 10))
-    assert reads == [zero, five, ten], "read again after ready"
+    # 5 s: the loop's own run, still loading. 10 s: the fixed run, ready. Then no more.
+    assert reads == [timedelta(seconds=5), timedelta(seconds=10)], "read again after ready"
 
 
 def test_a_loop_caught_inside_the_docker_restore_window_gets_the_note_once_fixed(
@@ -1415,3 +1411,16 @@ def test_a_run_that_said_ready_is_not_asked_again(tmp_path: Path) -> None:
 
     assert [watch.tick().ready for _ in range(3)] == [True] * 3
     assert len(asked) == 1
+
+
+def test_a_run_past_the_settle_time_is_ready_without_its_marker(tmp_path: Path) -> None:
+    """A rotated or unreadable log must not hold the header at STARTING for good.
+
+    Mutation: drop the `SETTLED_AFTER` clause in `_with_population()`, and this reads not ready.
+    """
+    run = _stamp(NOW - dashboard.SETTLED_AFTER - timedelta(seconds=1))
+    watch, _ = _clocked(
+        tmp_path, [(timedelta(0), _running(run))], logs=lambda _now, _since: "no marker here"
+    )
+
+    assert watch.tick().ready is True

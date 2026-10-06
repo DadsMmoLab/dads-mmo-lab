@@ -8351,11 +8351,7 @@ class ControllerView(QWidget):
         if self._world_loops and status.world:
             return "loop"
         word = _realm_badge_status(status)
-        if (
-            word == "running"
-            and not self._world_ready
-            and self.services.dashboard is not None
-        ):
+        if word == "running" and not self._world_ready and self.services.dashboard is not None:
             # T451: `docker ps` calls the world running seconds, or a whole map
             # load, before its ready marker, and a crash loop's fresh run is
             # running between two crashes. Without a verdict there is nothing
@@ -8633,6 +8629,10 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
+        # T451: no reading of the world's log can come, so nothing to wait for.
+        self._world_ready = True
+        if self._last_polled is not None and self._badge_held is None:
+            self.realm_badge.set_status(self._badge_word(self._last_polled))
         if (
             not self.docker_banner.isHidden()
             or isinstance(exc, docker.DockerCliMissingError)

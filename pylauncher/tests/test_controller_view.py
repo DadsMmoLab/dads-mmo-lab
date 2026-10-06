@@ -27276,9 +27276,9 @@ def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
     _drain_polls(view, jobs)
 
     # T451: all up reads STARTING until a verdict says the world is ready.
-    assert view.realm_badge.status == ("starting" if reading == "running" else reading), (
-        "the hold outlived the failed job"
-    )
+    assert view.realm_badge.status == (
+        "starting" if reading == "running" else reading
+    ), "the hold outlived the failed job"
     assert view._badge_held is None
 
 

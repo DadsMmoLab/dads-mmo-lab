@@ -491,7 +491,13 @@ class Dashboard:
     ) -> Verdict:
         """The two counts, or the reason there are none. Never a wrong number."""
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
-        ready = self._banner is None or self._saw_ready(state.started_at)
+        # A run past SETTLED_AFTER is called ready without its marker: a rotated or
+        # unreadable log must not hold the header at STARTING for good (review).
+        ready = (
+            self._banner is None
+            or (uptime is not None and uptime >= SETTLED_AFTER)
+            or self._saw_ready(state.started_at)
+        )
         if answer.marker is None:
             return Verdict(
                 "up",

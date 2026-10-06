@@ -130,3 +130,22 @@ def test_an_install_with_no_verdict_keeps_the_polls_word(
     view.refresh_status()
 
     assert view.realm_badge.status == "running"
+
+
+def test_a_dashboard_that_breaks_does_not_hold_the_header_at_starting(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An instrument that breaks must not take the header with it.
+
+    Mutation: drop `_world_ready = True` from `_verdict_failed()`, and this reads starting.
+    """
+
+    def boom() -> dashboard.Verdict:
+        raise RuntimeError("the dashboard broke")
+
+    ps.names = ALL_UP
+    view = _view(ps, tmp_path, boom)  # type: ignore[arg-type]
+    view.refresh_status()
+    view.refresh_verdict()
+
+    assert view.realm_badge.status == "running"
