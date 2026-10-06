@@ -928,7 +928,10 @@ def three_way_only(answer: Callable[[Any], object]) -> Callable[[Any], object]:
     def exec_(box: Any) -> object:
         from PySide6.QtWidgets import QMessageBox
 
-        if box.standardButtons() == QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No:
+        yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        if box.standardButtons() in (yes_no, QMessageBox.StandardButton.Ok):
+            # A Yes/No question goes to `question`, a one-button notice to the static
+            # `warning`/`information`/`critical` a test watches (T355).
             return _answer_like_the_static_question(box)
         return answer(box)
 
