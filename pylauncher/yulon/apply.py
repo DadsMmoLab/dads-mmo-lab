@@ -4434,8 +4434,8 @@ class Applier:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
 
         Returns whether it ASKED and was told "not running" (T130), which is
-        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in `_report`, T397). Every early return below is
-        `False`, because none of them read anything about the world.
+        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in
+        `_report`, T397). Every early return below is `False`, because none of them read anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
         direct writes to `characters`/`world` while running; reads are fine* —
