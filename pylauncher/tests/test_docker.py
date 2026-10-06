@@ -3381,6 +3381,7 @@ def build_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]
     monkeypatch.setattr(docker.platform, "config_dir", lambda: tmp_path / "cfg")
     monkeypatch.delenv("BUILDX_CONFIG", raising=False)
     monkeypatch.delenv("WSLENV", raising=False)
+    monkeypatch.delenv("BUILDX_BUILDER", raising=False)
     # A variable of this process's own: the child must see it, because a build
     # handed only BUILDX_CONFIG would run docker with no PATH and no HOME.
     monkeypatch.setenv("FAKE_DOCKER_INHERITED", "yes")
