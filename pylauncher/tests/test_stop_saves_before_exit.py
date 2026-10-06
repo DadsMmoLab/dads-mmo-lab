@@ -506,6 +506,8 @@ class _Console:
         self.queue = list(queue or [])
         self.looks = 0
         self.refuse = ""
+        self.refused: set[str] = set()
+        """Commands that alone fail as a console this host cannot reach does."""
         self.prompted = True
         self.after_look: object = None
 
@@ -514,8 +516,8 @@ class _Console:
 
         assert kw["container"] == self.fake.spec.world
         assert kw["prompt"] == self.fake.spec.save_first.prompt  # type: ignore[union-attr]
-        if self.refuse:
-            raise ConsoleError(self.refuse)
+        if self.refuse or command in self.refused:
+            raise ConsoleError(self.refuse or "no attach")
         self.fake.events.append(f"console: {command}")
         if command != "server debug":
             return ConsoleReply(command, ("All players saved.",), prompted=self.prompted)
@@ -541,16 +543,25 @@ def _with_console(
     return console
 
 
+BOTS_OUT = ["playerbot population stop", "server plimit administrator"]
+"""What Centurion is told before `saveall` so nothing new joins its save queue (T498)."""
+
+BOTS_BACK = ["server plimit reset", "playerbot population start"]
+"""What puts `BOTS_OUT` back when the stop is given up and the world is left running (T498)."""
+
+
 def test_centurion_and_tortoise_say_how_they_save_first_and_the_rest_do_not() -> None:
     centurion = CATALOG.get("wow-centurion").container_spec().save_first
     assert centurion is not None
     assert (centurion.command, centurion.queue_command) == ("saveall", "server debug")
+    assert (list(centurion.first), list(centurion.if_given_up)) == (BOTS_OUT, BOTS_BACK)
     assert centurion.queue_length("CharacterDatabase queue size: 2137") == 2137
     assert centurion.queue_length("LoginDatabase queue size: 9") is None
     assert (centurion.prompt, centurion.prompt_precedes_answer) == ("TC>", True)
     tortoise = CATALOG.get("wow-tortoise").container_spec().save_first
     assert tortoise is not None
     assert (tortoise.command, tortoise.queue_command) == ("saveall", "")
+    assert (tortoise.first, tortoise.if_given_up) == ((), ())
     assert tortoise.prompt == "mangos>"
     for game in ("wow-wotlk", "wow-vanilla", "wow-tbc"):
         assert CATALOG.get(game).container_spec().save_first is None, game
@@ -571,6 +582,10 @@ def test_a_queue_command_without_a_pattern_with_one_group_is_refused() -> None:
         {"command": "saveall", "queue_command": "server debug", "queue_pattern": r"(unclosed"},
         {"command": ""},
         {"command": "save\nall"},
+        {"command": "saveall", "first": ["server plimit\nadministrator"]},
+        {"command": "saveall", "first": [""]},
+        {"command": "saveall", "if_given_up": ["server plimit reset"]},
+        {"command": "saveall", "first": ["a"], "if_given_up": ["reset\nall"]},
     ):
         with pytest.raises(ValidationError):
             SaveBeforeStop(**bad)  # type: ignore[arg-type]
@@ -585,7 +600,8 @@ def test_centurion_saves_everyone_and_waits_for_the_queue_before_the_signal(
     console = _with_console(monkeypatch, fake, [2137, 1500, 600, 40, 0])
     stopped, said, _ = _stop(fake, tmp_path)
     assert stopped is True
-    assert fake.events[:7] == [
+    assert fake.events[:9] == [
+        *[f"console: {line}" for line in BOTS_OUT],
         "console: saveall",
         *["console: server debug"] * 5,
         "SIGTERM",
@@ -611,7 +627,7 @@ def test_a_queue_back_at_an_older_level_is_not_taken_for_the_saves_written(
     console = _with_console(monkeypatch, fake, [2140, 3, 3, 3, 0])
     _, said, _ = _stop(fake, tmp_path)
     assert console.looks == 5
-    assert fake.events.index("SIGTERM") == 1 + 5
+    assert fake.events.index("SIGTERM") == len(BOTS_OUT) + 1 + 5
     assert docker.SAVE_FIRST_WRITTEN in said
 
 
@@ -621,7 +637,7 @@ def test_a_queue_already_empty_is_not_waited_on(
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _with_console(monkeypatch, fake, [0])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
+    assert fake.events[2:5] == ["console: saveall", "console: server debug", "SIGTERM"]
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_WRITTEN]
 
 
@@ -681,7 +697,7 @@ def test_a_queue_length_that_cannot_be_read_at_all_is_not_waited_on(
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _with_console(monkeypatch, fake, [None])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
+    assert fake.events[2:5] == ["console: saveall", "console: server debug", "SIGTERM"]
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING]
 
 
@@ -795,6 +811,106 @@ def test_giving_up_while_the_queue_drains_sends_nothing_and_says_the_world_still
     assert touched == []
 
 
+def test_giving_up_puts_back_the_logins_the_stop_closed_before_it_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T498: the world is left running after a give-up, so the bots and players it logged out
+    for the save may come back: the login limit is reset and the bot population restarted."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(10))
+    console = _with_console(monkeypatch, fake, [900, 800, 700, 600, 500])
+    control = docker.StopControl()
+    console.after_look = lambda: control.abandon.set() if console.looks == 2 else None
+    with pytest.raises(docker.SaveFirstAbandoned):
+        docker.save_then_stop_the_world(fake.spec, control)
+    assert fake.events[-len(BOTS_BACK) :] == [f"console: {line}" for line in BOTS_BACK]
+    assert "SIGTERM" not in fake.events
+
+
+def test_a_stop_that_goes_on_does_not_let_the_logins_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [900, 800])
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.SAVE_FIRST_UNFINISHED in said
+    assert not [e for e in fake.events if e.endswith(tuple(BOTS_BACK))]
+
+
+def test_a_bots_out_line_the_console_refuses_does_not_stop_the_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Logging the bots out makes the wait shorter; it is not the save. The save is asked and
+    waited for as before when it could not be typed."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake, [40, 0])
+    console.refused = set(BOTS_OUT)
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events[:4] == [
+        "console: saveall",
+        "console: server debug",
+        "console: server debug",
+        "SIGTERM",
+    ]
+    assert said[:3] == [
+        docker.SAVE_FIRST_ASKING,
+        docker.SAVE_FIRST_QUEUED.format(count=40),
+        docker.SAVE_FIRST_WRITTEN,
+    ]
+
+
+def test_tortoise_types_no_bots_out_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _with_console(monkeypatch, fake)
+    _stop(fake, tmp_path)
+    assert [e for e in fake.events if e.startswith("console")] == ["console: saveall"]
+
+
+# -- T498: a queue the world keeps filling is not a stuck one ----------------------------------
+#
+# Live, yulon-win11, 2026-10-06 (Centurion, 150 bots): after `saveall` the character queue sat at
+# 1948 and never went below it for 5 minutes, because the bots' 90-second autosaves kept topping
+# it up while it drained. The stop read that as stuck, gave up, and the close threw away every
+# save queued since 14:58. The bots are now logged out first; and a queue is stuck only when it
+# stops getting shorter at all, not when it is never shorter than its lowest.
+
+
+def test_a_queue_that_keeps_draining_while_it_is_refilled_is_waited_out_past_the_stall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    looks = int(STALL / 2.0) + 40
+    refilled: list[int | None] = [1948 if n % 2 else 1990 for n in range(looks)]
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [1948, *refilled, 600, 0])
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.termed_at is not None and fake.termed_at > STALL
+    assert docker.SAVE_FIRST_UNFINISHED not in said
+    assert docker.SAVE_FIRST_WRITTEN in said
+
+
+def test_a_queue_that_only_grows_is_stuck(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A worker that writes nothing while saves still arrive: longer at every look, never
+    shorter. Movement is not progress; only a shorter queue is."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [*range(900, 900 + 10**4)])
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.termed_at is not None
+    assert STALL <= fake.termed_at < STALL + 4 * fake.step
+    assert docker.SAVE_FIRST_UNFINISHED in said
+
+
+def test_the_stall_is_counted_from_the_last_look_that_found_the_queue_shorter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shorter than the look before counts, even when it is not below the lowest seen."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    flat = int(STALL / 2.0) - 10
+    _with_console(monkeypatch, fake, [500, 900, *[900] * flat, 899, *[899] * flat, 0])
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.SAVE_FIRST_UNFINISHED not in said
+    assert docker.SAVE_FIRST_WRITTEN in said
+
+
 def test_the_rebuilds_hook_comes_after_the_save_and_right_before_the_signal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -803,7 +919,8 @@ def test_the_rebuilds_hook_comes_after_the_save_and_right_before_the_signal(
     docker.stop_servers_staged(
         fake.spec, tmp_path, before_signal=lambda: fake.events.append("about to signal")
     )
-    assert fake.events[:5] == [
+    assert fake.events[:7] == [
+        *[f"console: {line}" for line in BOTS_OUT],
         "console: saveall",
         "console: server debug",
         "console: server debug",
@@ -1020,7 +1137,8 @@ def test_centurion_on_windows_waits_for_its_save_queue_through_the_channel(
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _on_windows(monkeypatch, fake, _Channel(fake, [40, 0]))
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:4] == [
+    assert fake.events[:6] == [
+        *[f"channel: {line}" for line in BOTS_OUT],
         "channel: saveall",
         "channel: server debug",
         "channel: server debug",

@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
 - Installing a module that asks a question about your characters starts a stopped database to check the answer.
 - Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.

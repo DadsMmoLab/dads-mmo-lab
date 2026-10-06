@@ -163,6 +163,10 @@ class SaveFirst:
     command: str
     queue_command: str = ""
     queue_pattern: str = ""
+    first: tuple[str, ...] = ()
+    """Typed before `command` so nothing new joins the save queue (T498): Centurion's bots out."""
+    if_given_up: tuple[str, ...] = ()
+    """Typed when the stop is given up before its signal, to undo `first` (T498)."""
     prompt: str = "AC>"
     prompt_precedes_answer: bool = True
 
@@ -3693,14 +3697,24 @@ def _save_everyone_first(
 
     * the console did not answer (`SAVE_FIRST_NOT_ASKED`): the close then loses
       what it always lost;
-    * the queue has not got shorter, or could not be read, for
-      `WORLD_SAVE_STALL_SECONDS`, or the wait reaches `WORLD_SAVE_CEILING_SECONDS`
-      (`SAVE_FIRST_UNFINISHED`). Unlike the wait after the signal, an unreadable
-      look is not given the benefit of the doubt: the world is RUNNING here, and
-      a wait that cannot see anything would hold a live server for half an hour.
+    * no look has found the queue shorter than the look before it (or none could be
+      read) for `WORLD_SAVE_STALL_SECONDS`, or the wait reaches
+      `WORLD_SAVE_CEILING_SECONDS` (`SAVE_FIRST_UNFINISHED`). Unlike the wait after
+      the signal, an unreadable look is not given the benefit of the doubt: the world
+      is RUNNING here, and a wait that cannot see anything would hold a live server
+      for half an hour.
+
+    Before the save, `SaveFirst.first` is typed so nothing new joins the queue (T498):
+    live, 150 Centurion bots autosaving every 90 s kept it at ~1950 for 5 minutes while
+    it drained, and "never below its lowest" was read as stuck. `server debug` prints
+    no count of what was written (`cs_server.cpp:255-257` at the pin), so "still
+    written" is read as a queue shorter than at the look before: a worker that writes
+    nothing never makes it shorter, however much is still added. A `first` line that
+    cannot be typed is logged and the save goes on.
 
     `control.abandon` raises `StopAbandoned`: nothing has been sent, the world is
-    still running, which is what every handler of that type says.
+    still running, which is what every handler of that type says -- after
+    `SaveFirst.if_given_up` is typed, so what `first` closed is open again.
 
     Returns whether the save was asked for and, for a queue core, seen through: False after
     `SAVE_FIRST_NOT_ASKED` (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this
@@ -3711,6 +3725,9 @@ def _save_everyone_first(
     assert save is not None
     not_asked = SAVE_FIRST_NOT_ASKED if _console_reaches(wsl_distro) else SAVE_FIRST_NOT_ASKED_HERE
     say(SAVE_FIRST_ASKING)
+    for line in save.first:
+        if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+            logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
     reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
@@ -3719,10 +3736,13 @@ def _save_everyone_first(
         return answered
     started = _save_clock()
     last_shrunk = started
-    lowest: int | None = None
+    before: int | None = None
     looked = False
     while True:
         if control.abandon.is_set():
+            for line in save.if_given_up:
+                if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+                    logger.warning(f"{spec.world} was left running without {line!r}")
             raise SaveFirstAbandoned(
                 f"The stop was not sent: it was given up while {spec.world} was writing its "
                 "saves, so the world was left running."
@@ -3744,9 +3764,10 @@ def _save_everyone_first(
         if length == 0:
             say(SAVE_FIRST_WRITTEN)
             return True
-        if length is not None and (lowest is None or length < lowest):
-            lowest = length
-            last_shrunk = now
+        if length is not None:
+            if before is not None and length < before:
+                last_shrunk = now
+            before = length
         if (
             now - started >= WORLD_SAVE_CEILING_SECONDS
             or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
