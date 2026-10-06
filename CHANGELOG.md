@@ -30,9 +30,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
-- **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
-- On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
+- On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
+- A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
 - A module that only changes settings, such as Experience Rates, now shows as installed and can be removed.
 - Number boxes in Tuning and module questions take only the digits 0 to 9, so the server reads exactly what you typed.

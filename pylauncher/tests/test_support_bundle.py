@@ -402,8 +402,10 @@ def test_live_logs_are_cut_shorter_until_the_zip_fits_the_cap(tmp_path: Path) ->
     """Codex T93 review: dropping snapshots and runs alone left a zip far over the cap.
 
     Three installs of hardly compressible container logs (9 x 1.25 MiB, ~9 MB
-    deflated) and confs (6 x 256 KiB): after the run log and snapshot go, the live logs are cut --
-    their END kept -- and the confs, which fit once the live logs are cut, are not.
+    deflated) and confs (6 x 256 KiB): after the snapshot goes, the live logs are cut --
+    their END kept -- and the confs, which fit once the live logs are cut, are not. The
+    one run log is the newest, which is never left out (T249), and it is cut only after
+    the confs, so here it stays whole.
     """
     config = platform.config_dir()
     runs = src.runlog.runs_dir(config)
@@ -427,10 +429,8 @@ def test_live_logs_are_cut_shorter_until_the_zip_fits_the_cap(tmp_path: Path) ->
     members = _read(dest)
     manifest = members["MANIFEST.txt"]
     assert "Still larger" not in manifest
-    assert report.dropped == (
-        "snapshots/wow-tbc-0badc0de-20260922T101010Z.log",
-        "runs/install-wow-tbc-20260922T101010Z.log",
-    )
+    assert report.dropped == ("snapshots/wow-tbc-0badc0de-20260922T101010Z.log",)
+    assert "runs/install-wow-tbc-20260922T101010Z.log" in members
     live = [name for name in members if name.startswith("live/")]
     assert len(live) == 9
     assert report.cut and set(report.cut) <= set(live)
