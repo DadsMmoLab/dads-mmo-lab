@@ -8033,6 +8033,11 @@ def test_every_slot_the_controller_view_declares_takes_the_arguments_it_declares
     assert wrong == []
 
 
+def test_the_help_and_forget_buttons_land_on_declared_slots() -> None:
+    """T520: inserting `show_help` took the `@Slot()` that belonged to `forget_install`."""
+    assert {"show_help", "forget_install"} <= set(_declared(ControllerView, "Slot"))
+
+
 def test_the_rebuild_panels_finish_lands_on_a_slot_declared_with_its_own_signature() -> None:
     """T167: the receiver of `run_finished` is declared as the (bool, str) the panel sends."""
     sent = _declared(LogPanel, "Signal")["run_finished"]

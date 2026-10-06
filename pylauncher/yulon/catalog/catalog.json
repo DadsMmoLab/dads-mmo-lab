@@ -154,7 +154,7 @@
         {
           "label": "AzerothCore",
           "url": "https://github.com/azerothcore/azerothcore-wotlk/issues",
-          "purpose": "Bugs in the WotLK server."
+          "purpose": "Bugs in the WotLK server that also happen without the bots."
         },
         {
           "label": "mod-playerbots",

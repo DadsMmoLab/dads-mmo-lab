@@ -10513,6 +10513,7 @@ class ControllerView(QWidget):
         """Open this game's "Where to get help" box (T520)."""
         show_help_places(self, self.entry)
 
+    @Slot()
     def forget_install(self) -> None:
         """The Server tab's "Remove from Yu'lon…" press: hand it to the window (T95).
 
