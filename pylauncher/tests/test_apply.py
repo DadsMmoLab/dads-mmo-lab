@@ -2214,6 +2214,59 @@ def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Pa
     assert not (tmp_path / "modules").exists(), "a refused install left a folder behind"
 
 
+@pytest.mark.parametrize(
+    ("bad", "said"),
+    [
+        ("１２", "whole number"),
+        ("١٢", "whole number"),
+        ("1_000", "whole number"),
+        (" 5", "no spaces"),
+        ("+5", "whole number"),
+        ("0x10", "whole number"),
+        ("2147483648", "2147483647"),
+        ("-2147483649", "2147483647"),
+    ],
+)
+def test_a_number_answer_the_server_would_read_differently_is_refused_before_the_clone(
+    tmp_path: Path, bad: str, said: str
+) -> None:
+    """`int()` reads every one of these; the conf the answer lands in is read by C++.
+
+    AzerothCore's `std::from_chars` takes ASCII digits and a leading minus over
+    the whole value, inside the type's range, or falls back to the default.
+    """
+    from tests.support_player_text import command_faults
+
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+    with pytest.raises(ApplyError) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": bad})
+    assert said in str(refusal.value), str(refusal.value)
+    assert git.calls == []
+    assert apply_module.check_answer(_int_prompt(), bad) != ""
+    assert command_faults(apply_module.check_answer(_int_prompt(), bad)) == []
+
+
+def _int_prompt() -> Any:
+    return parse_manifest(
+        {
+            "schema_version": 1,
+            "id": "n",
+            "name": "N",
+            "type": "module",
+            "game": "wow-wotlk",
+            "description": "one number",
+            "source": {"repo": "acme/n"},
+            "prompts": [{"key": "n", "question": "How many?", "kind": "int"}],
+        }
+    ).prompts[0]
+
+
+def test_a_number_answer_in_plain_digits_still_passes() -> None:
+    for good in ("0", "42", "-5", "007", "2147483647", "-2147483648"):
+        assert apply_module.check_answer(_int_prompt(), good) == "", good
+
+
 def test_installing_the_ah_bot_with_a_real_guid_writes_that_number(tmp_path: Path) -> None:
     git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
     reader = _FakeReader(rows="Ahbot\n")
