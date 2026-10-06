@@ -2382,6 +2382,96 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
 
 
+class _StoppedThenStarted(_FakeReader):
+    """A reader whose database answers only after the start seam has been pressed."""
+
+    def __init__(self, rows: str = "Ahbot\n") -> None:
+        super().__init__(rows=rows)
+        self.up = False
+
+    def query(self, db: str, statement: str) -> str:
+        if not self.up:
+            self.queries.append((db, statement))
+            raise RuntimeError("Error response from daemon: container x is not running")
+        return super().query(db, statement)
+
+
+def test_a_stopped_database_is_started_for_the_does_it_exist_check(tmp_path: Path) -> None:
+    """T396: the check ran against a stopped database, said "skipped" and went on.
+
+    With a start seam the database is brought up alone first, so the answer is
+    really checked, once for the two questions, and the report says so.
+    Mutation: drop the start call and both questions read "NOT checked".
+    """
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _StoppedThenStarted()
+
+    def start() -> bool:
+        reader.up = True
+        start.calls += 1  # type: ignore[attr-defined]
+        return True
+
+    start.calls = 0  # type: ignore[attr-defined]
+    report = Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+    )
+
+    assert start.calls == 1  # type: ignore[attr-defined]
+    assert [s for s in report.skipped if "NOT checked" in s] == []
+    assert "started the database alone; the world server was left stopped" in report.done
+
+
+def test_a_wrong_answer_is_refused_even_when_the_database_was_stopped(tmp_path: Path) -> None:
+    """The point of T396: a stopped database no longer lets a wrong GUID through."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _StoppedThenStarted(rows="")
+
+    def start() -> bool:
+        reader.up = True
+        return True
+
+    with pytest.raises(ApplyError) as refusal:
+        Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+            _shipped("mod-ah-bot-plus"), {"bot_guid": "999"}
+        )
+
+    assert "999" in str(refusal.value)
+    assert git.calls == []
+
+
+def test_a_database_that_will_not_start_refuses_before_anything_is_written(
+    tmp_path: Path,
+) -> None:
+    """Could not start it, could not check: refuse, so a second press cannot repeat SQL."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    start = _StartDb(boom=ApplyError("the database did not become healthy in 180 seconds"))
+
+    with pytest.raises(ApplyError) as refusal:
+        Applier(tmp_path, git=git, sql=_StoppedThenStarted(), start_database=start).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+        )
+
+    assert "did not become healthy" in str(refusal.value)
+    assert "Nothing was changed" in str(refusal.value)
+    assert git.calls == []
+    assert not (tmp_path / "modules").exists()
+
+
+def test_the_database_is_not_started_for_a_module_with_no_question_to_check(
+    tmp_path: Path,
+) -> None:
+    start = _StartDb()
+    Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeReader(),
+        world_running=lambda: False,
+        start_database=start,
+    ).install(parse_manifest(STACKABLES))
+    # The direct-SQL path starts it once for its own reasons; the check adds none.
+    assert start.calls == 1
+
+
 def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:
     """Removing the AH bot renders no template, so it must ask the user nothing."""
     ahbot = _shipped("mod-ah-bot")
@@ -5094,6 +5184,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     45 after T104: `npc-teleporter` writes the Onyxia-level answer into the one
     `conditions` row upstream builds from `@ONY_LEVEL`, as an inline `world`
     step after the file, so the question it always asked finally does something.
+    50 after T394: WotLK's `all-stackables` gained the backup table's two install
+    steps and its three remove steps, around the repository's own files.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5114,7 +5206,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        45,
+        50,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

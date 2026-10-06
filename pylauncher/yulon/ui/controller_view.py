@@ -2739,6 +2739,12 @@ def _assemble(
     function object in all four packages.
     """
     spec = entry.container_spec()
+    if spec.save_first is not None and channel_setup is not None:
+        # T496: where the console needs a terminal this host cannot open (Windows), the save
+        # a Stop asks for first goes through this install's command channel, on every route.
+        live_channel = getattr(channel_setup, "live_channel", None)
+        if callable(live_channel):
+            docker.save_through_channel(spec.world, server_dir, live_channel)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
@@ -8842,6 +8848,7 @@ class ControllerView(QWidget):
         """
         self._disarm_actions()
         self.problem_label.setText("")
+        self._keep_the_database_sentence()
         # Ask the database again: Refresh is the only way for a user who has
         # just fixed something to make the tab re-examine an unfinished import.
         self._import_asked = False
@@ -8924,6 +8931,7 @@ class ControllerView(QWidget):
         if self.problem_label.text() in _POINTERS_AT_THE_BANNER:
             # A failed Start's pointer at the box: the box is gone, so the line is too.
             self.problem_label.setText("")
+        self._keep_the_database_sentence()
         self._update_client_dir_row()
         # T133: every answer, stale or not -- what WSL said about the distro is
         # not a fact an action of ours can make wrong the way "world down" is.
@@ -9922,6 +9930,20 @@ class ControllerView(QWidget):
         self.repair_database_button.setVisible(self.services.repair_database is not None)
         self.repair_database_button.setEnabled(True)
         self.restore_backup_button.setVisible(self._has_backups())
+
+    def _keep_the_database_sentence(self) -> None:
+        """Put the offer's sentence back when something cleared the line, offer shown (T426).
+
+        Refresh and the status poll empty the problem line; Repair the database…
+        and Restore a backup… stay, and without the sentence nothing says why.
+        Only an empty line is filled: a newer sentence of its own is left alone.
+        """
+        if not self._database_sentence or self.problem_label.text():
+            return
+        if self.repair_database_button.isVisibleTo(self) or self.restore_backup_button.isVisibleTo(
+            self
+        ):
+            self.problem_label.setText(self._database_sentence)
 
     def _withdraw_the_database_offer(self) -> None:
         """A Start that worked, or a new press, takes the T377 offer down."""

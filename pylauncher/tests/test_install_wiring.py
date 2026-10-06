@@ -85,7 +85,9 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
 ) -> None:
     seen: list[tuple[str, str]] = []
 
-    def fake_import_state(sql: DockerSql, mysql: DockerMysql) -> docker.ImportState:
+    def fake_import_state(
+        sql: DockerSql, mysql: DockerMysql, db_health: object = None
+    ) -> docker.ImportState:
         seen.append((sql.db_container, mysql.db_container))
         assert sql.root_password == install_wiring.fixed_db_password(WOTLK)
         return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
@@ -105,6 +107,33 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
     assert seen == [(db, db), (db, db)]
 
 
+def test_the_probe_is_given_this_entry_s_db_health_to_wait_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T425: without it a fresh volume's first setup is not waited out and warns."""
+    asked: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        docker,
+        "health",
+        lambda container, *, wsl_distro=None: asked.append((container, wsl_distro)) or "starting",
+    )
+    got: list[str] = []
+
+    def fake_import_state(
+        sql: object, mysql: object, db_health: object = None
+    ) -> docker.ImportState:
+        assert callable(db_health)
+        got.append(db_health())
+        return docker.ImportState("imported", "x", complete=True)
+
+    monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
+    probe, _reset = install_wiring.import_gate_for(WOTLK, wsl_distro="Ubuntu")
+    assert probe is not None
+    probe()
+    assert got == ["starting"]
+    assert asked == [(WOTLK.container_spec().db, "Ubuntu")]
+
+
 def test_the_probe_seams_carry_this_entry_s_schemas_and_the_distro_they_live_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,7 +146,9 @@ def test_the_probe_seams_carry_this_entry_s_schemas_and_the_distro_they_live_in(
     """
     captured: list[tuple[DockerSql, DockerMysql]] = []
 
-    def fake_import_state(sql: DockerSql, mysql: DockerMysql) -> docker.ImportState:
+    def fake_import_state(
+        sql: DockerSql, mysql: DockerMysql, db_health: object = None
+    ) -> docker.ImportState:
         captured.append((sql, mysql))
         return docker.ImportState("imported", "", complete=True)
 
@@ -664,7 +695,7 @@ def test_the_wiring_never_renders_the_password_it_carries(
         repr(probe.__closure__),
     ]
 
-    def boom(sql: object, mysql: object) -> docker.ImportState:
+    def boom(sql: object, mysql: object, db_health: object = None) -> docker.ImportState:
         raise InstallerError("the import probe could not reach the database")
 
     monkeypatch.setattr(wotlk_repair, "import_state", boom)
@@ -1544,6 +1575,7 @@ def test_an_install_probe_the_database_refuses_carries_the_refusal(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _mysql_refuses(monkeypatch)
+    monkeypatch.setattr(docker, "health", lambda *a, **k: "healthy")
     probe, _reset = install_wiring.import_gate_for(WOTLK)
     assert probe is not None
     with caplog.at_level(logging.DEBUG):
