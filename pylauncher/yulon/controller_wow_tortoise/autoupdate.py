@@ -561,6 +561,7 @@ def guarded_applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    stop_database: Callable[[], None] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> GuardedApplier:
@@ -573,6 +574,7 @@ def guarded_applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        stop_database=stop_database,
     )
 
 

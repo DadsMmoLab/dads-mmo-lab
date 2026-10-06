@@ -100,6 +100,7 @@ def applier(
     sql: SqlRunner | None,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    stop_database: Callable[[], None] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> Applier:
@@ -140,6 +141,7 @@ def applier(
         client_dir=client_dir,
         world_running=world_running,
         start_database=start_database,
+        stop_database=stop_database,
     )
 
 
@@ -151,6 +153,7 @@ def apply_module(
     sql: SqlRunner | None,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    stop_database: Callable[[], None] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the TBC server at `server_dir`.
@@ -169,5 +172,6 @@ def apply_module(
         sql=sql,
         world_running=world_running,
         start_database=start_database,
+        stop_database=stop_database,
         client_dir=client_dir,
     ).install(manifest, values)

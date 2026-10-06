@@ -3138,6 +3138,7 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            stop_database=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
         )
         if entry.has_manifests
         else None
@@ -3501,6 +3502,7 @@ def _for_tbc(
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
                 ),
+                stop_database=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
             )
             if entry.has_manifests
             else None
@@ -3674,6 +3676,7 @@ def _for_vanilla(
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
                 ),
+                stop_database=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
             )
             if entry.has_manifests
             else None
@@ -4092,6 +4095,7 @@ def _for_tortoise(
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
                 ),
+                stop_database=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
                 # T30. `applier()` has taken this keyword since 8.7d and this
                 # factory was the one caller that swallowed it, so a manifest
                 # `client` step on this game reported "no client dir configured"
