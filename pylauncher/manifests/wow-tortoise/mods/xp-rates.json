@@ -16,15 +16,18 @@
         {
           "key": "Rate.XP.Kill",
           "default": "{xp_rate}",
+          "label": "XP from kills",
           "note": "World.cpp setConfig(CONFIG_FLOAT_RATE_XP_KILL, \"Rate.XP.Kill\", 1.0f)"
         },
         {
           "key": "Rate.XP.Quest",
-          "default": "{xp_rate}"
+          "default": "{xp_rate}",
+          "label": "XP from quests"
         },
         {
           "key": "Rate.XP.Explore",
-          "default": "{xp_rate}"
+          "default": "{xp_rate}",
+          "label": "XP from exploring"
         }
       ]
     }

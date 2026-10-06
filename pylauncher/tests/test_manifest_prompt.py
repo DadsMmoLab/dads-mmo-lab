@@ -52,6 +52,21 @@ def test_a_number_box_refuses_letters_and_emptiness_before_anything_is_applied(
     assert dialog.answers() == {"bot_guid": "42", "bot_account": "7"}
 
 
+@pytest.mark.parametrize("typed", ["１２", "١٢", "1_000", " 5", "+5", "0x10", "2147483648"])
+def test_a_number_box_refuses_a_number_the_server_would_read_differently(
+    qapp: object, typed: str
+) -> None:
+    """`int()` reads each of these; the GUID lands in a conf a C++ server reads."""
+    from tests.support_player_text import command_faults
+
+    manifest = _ahbot()
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    dialog.set_answer("bot_account", "7")
+    dialog.set_answer("bot_guid", typed)
+    assert "GUID of the AH bot character" in dialog.problem(), dialog.problem()
+    assert command_faults(dialog.problem()) == [], dialog.problem()
+
+
 @pytest.mark.parametrize(
     ("kind", "extra", "bad", "good"),
     [

@@ -25,6 +25,7 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -38,6 +39,7 @@ from typing import Literal
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest
 from yulon.manifest_store import FAMILY_FILES
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -379,6 +381,15 @@ class TuningError(RuntimeError):
     """A refusal that names the key it is about, raised before anything is written."""
 
 
+class RateRefused(TuningError, SaidByYulon):
+    """A `float` value refused in a sentence for the player, naming the row by its label.
+
+    `SaidByYulon` so the player-lines guard (`test_player_lines_name_no_commands`)
+    reads every one of these sentences in the source (live test of T302, 2026-10-05:
+    the line read "Rate.XP.Kill: `0.00001` ...", a key and backticks).
+    """
+
+
 _ADDED_BY = "# Added by Yu'lon on {date} — this key was not in the file."
 """The comment a key the file does not carry is appended under.
 
@@ -386,6 +397,34 @@ Named and dated because the next person to read this file is entitled to know
 which lines a program put there and when; `apply._set_conf_key()` appends such a
 key silently today, and a conf full of unattributed lines is how a person stops
 trusting their own configuration.
+"""
+
+
+WHOLE_NUMBER = re.compile(r"-?[0-9]+")
+"""How an `int` key's value may be spelled: ASCII digits and an optional leading minus.
+
+Narrower than Python's `int()` on purpose, which also reads other scripts' digits
+(`int("١٢") == 12`), underscores (`int("1_0") == 10`), a plus and surrounding
+spaces. The value is written as typed, and the cores read it in C++:
+AzerothCore's `Acore::StringTo<T>` (`src/common/Configuration/Config.cpp:584`,
+`src/common/Utilities/StringConvert.h:70` at its pin) runs `std::from_chars` over
+the whole value and falls back to the default on anything but this spelling;
+mangos-tbc's `GetIntDefault` (`src/shared/Config/Config.cpp:127-131`) is
+`std::stoi`, which reads `1_000` as 1 and `0x10` as 0 and throws -- at world
+start -- on a value with no digit in front. Matched against the value itself,
+not a stripped copy, because a space is part of what gets written.
+"""
+
+INT32_SMALLEST = -(2**31)
+INT32_LARGEST = 2**31 - 1
+"""The range of the C++ `int` an `int` key is read into.
+
+`GetIntDefault` returns `int32` in mangos-tbc (`std::stoi`, which throws
+`out_of_range` at world start past it), Tortoise (`atoi`) and Centurion. An
+AzerothCore module may read a key as `uint32` instead (`mod-ah-bot`'s GUID), and
+then 2147483648 and up is refused although that module could read it: no real
+GUID or count lives there, while accepting it for an `int32` reader is a value
+the server never sees. The catalog has no way yet to say a key is unsigned.
 """
 
 
@@ -401,18 +440,89 @@ def check(key: ConfKey | None, value: str) -> None:
     if key is None or key.type is None:
         return
     if key.type == "int":
-        try:
-            number = int(value.strip())
-        except ValueError:
-            raise TuningError(f"{key.key}: `{value}` is not a whole number") from None
+        if WHOLE_NUMBER.fullmatch(value) is None:
+            spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            raise TuningError(
+                f"{key.key}: '{value}' is not a whole number; "
+                f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
+            )
+        number = int(value)
+        if not INT32_SMALLEST <= number <= INT32_LARGEST:
+            raise TuningError(
+                f"{key.key}: {value} is more than the server can hold; "
+                f"use a number from {INT32_SMALLEST} to {INT32_LARGEST}"
+            )
         if key.min is not None and number < key.min:
             raise TuningError(f"{key.key}: {number} is below the smallest allowed value {key.min}")
         if key.max is not None and number > key.max:
             raise TuningError(f"{key.key}: {number} is above the largest allowed value {key.max}")
         return
+    if key.type == "float":
+        _check_decimal(key, value)
+        return
     if key.type == "bool" and value.strip().lower() not in _BOOL_WORDS:
         allowed = ", ".join(sorted(_BOOL_WORDS))
         raise TuningError(f"{key.key}: `{value}` is not an on/off value (use one of: {allowed})")
+
+
+DECIMAL = re.compile(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)")
+"""How a `float` key's value may be spelled: digits, at most one point, an optional minus.
+
+Narrower than Python's `float()` on purpose (T302). The cores parse a rate in C:
+mangos-tbc and mangos-classic with `std::stof` (`src/shared/Config/Config.cpp:134-139`
+at their pins), which throws -- at world start -- on a value that does not begin
+with a number, and Tortoise with `atof` (`src/shared/Config/Config.cpp:261-265`).
+Both stop at the first character they do not expect, so `float("1_0")` is 10 to
+this app and 1 to the server, and `1,5` is 1. `inf` and `nan` are numbers to
+Python and not rates. `[0-9]` and not `\\d`, which in a Python pattern also
+matches other scripts' digits: `float("١.٥")` is 1.5, and the server reads no
+number at all (Codex review, 2026-10-05). A value the two sides would read
+differently is refused rather than written.
+"""
+
+
+DECIMAL_PLACES = 4
+"""The most digits a `float` key may have after its point (cold review, 2026-10-05).
+
+`std::stof` throws `out_of_range` -- at world start, uncaught -- on a value under a
+C `float`'s smallest normal number (about 1.2e-38), and `0.` followed by forty
+zeros and a 1 is still a plain decimal. Four places keeps the smallest non-zero
+value at 0.0001, which every core reads, and is finer than any rate needs.
+"""
+
+FLOAT_LARGEST = 3.4028234663852886e38
+"""The largest number a C `float` holds (`FLT_MAX`): the cores read a rate into one,
+and `std::stof` throws `out_of_range` above it while Python's `float()` does not."""
+
+
+def _check_decimal(key: ConfKey, value: str) -> None:
+    """A `float` key's rule: a plain decimal, inside whichever bounds the key states.
+
+    Each refusal is one plain sentence naming the row as the card does (its
+    label; the key only where a declaration has none).
+    """
+    row = key.label or key.key
+    text = value.strip()
+    if not text:
+        raise RateRefused(f"{row} is empty. Write a number like 1, 2 or 1.5.")
+    if DECIMAL.fullmatch(text) is None:
+        raise RateRefused(f"{row}: {text} is not a number. Write it like 1, 2 or 1.5.")
+    _, point, places = text.partition(".")
+    if point and len(places) > DECIMAL_PLACES:
+        raise RateRefused(
+            f"{row}: {text} has too many decimals; use at most "
+            f"{DECIMAL_PLACES} digits after the point, like 0.0001."
+        )
+    number = float(text)
+    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
+        # Digits only, and still past what the server's float holds: `float()` says
+        # `inf` or a large double, and the core's parser says out of range (Codex
+        # review and cold review, 2026-10-05).
+        raise RateRefused(f"{row}: {text} is too large to be a number.")
+    if key.min is not None and number < key.min:
+        raise RateRefused(f"{row}: {text} is below the smallest allowed value {key.min}.")
+    if key.max is not None and number > key.max:
+        raise RateRefused(f"{row}: {text} is above the largest allowed value {key.max}.")
 
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false"})
