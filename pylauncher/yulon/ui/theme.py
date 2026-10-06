@@ -729,6 +729,16 @@ QFrame#panel:hover {{
    owner: the decorations module. That sheet names the card by its id
    (T188 C1), so the buttons and labels inside it are styled from here. */
 
+/* --- The window's scroll area (T388): see-through, so the window's own backdrop shows --- */
+QScrollArea#window-scroll {{
+    background-color: transparent;
+    border: none;
+}}
+
+QScrollArea#window-scroll > QWidget > QWidget#window-scroll-content {{
+    background-color: transparent;
+}}
+
 /* --- Catalog Tile Text Hierarchy & Scrollable Box Cover Inset --- */
 QScrollArea#catalog-shelf-scroll,
 QScrollArea#tile-desc-box {{
