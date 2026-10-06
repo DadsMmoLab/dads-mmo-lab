@@ -165,3 +165,46 @@ def test_a_test_that_names_no_home_never_reads_the_real_one(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
     assert sources_for_app([], CATALOG).installs == ()
+
+
+def test_a_remembered_install_spelled_through_a_link_is_not_listed_twice(tmp_path: Path) -> None:
+    """T353: a symlinked home spells one folder two ways."""
+    home = tmp_path / "home"
+    folder = _failed_folder(home)
+    linked_home = tmp_path / "linked"
+    linked_home.symlink_to(home, target_is_directory=True)
+    spelled = linked_home / folder.relative_to(home)
+
+    remembered = [KnownInstall(game="wow-tortoise", server_dir=spelled)]
+    sources = sources_for_app(remembered, CATALOG, home=home)
+
+    assert len(sources.installs) == 1
+
+
+def test_a_remembered_install_in_another_letter_case_is_not_listed_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T353: Windows is case-insensitive, so `C:\\Users\\Me` and `c:\\users\\me` are one folder."""
+    import ntpath
+
+    folder = _failed_folder(tmp_path)
+    monkeypatch.setattr("os.path.normcase", ntpath.normcase)
+    shouted = Path(str(folder).upper())
+
+    remembered = [KnownInstall(game="wow-tortoise", server_dir=shouted)]
+    sources = sources_for_app(remembered, CATALOG, home=tmp_path)
+
+    assert len(sources.installs) == 1
+
+
+def test_a_state_file_too_big_to_be_one_is_not_read(tmp_path: Path) -> None:
+    """T353: a failed-install check reads a file the player may have replaced; cap it."""
+    from yulon.support import sources as src
+
+    folder = _failed_folder(tmp_path)
+    state = {"game_id": "wow-tortoise", "last_error": "x" * (src.STATE_CAP + 10)}
+    (folder / STATE_FILE).write_text(
+        json.dumps({**state, "error_run": ERROR_RUN_INSTALL}), encoding="utf-8"
+    )
+
+    assert sources_for_app([], CATALOG, home=tmp_path).installs == ()

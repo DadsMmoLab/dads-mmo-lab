@@ -68,6 +68,40 @@ def test_a_folder_without_data_is_refused(tmp_path: Path) -> None:
     )
 
 
+def test_the_empty_folder_refusal_reads_as_two_plain_sentences(tmp_path: Path) -> None:
+    """T431: the paragraph a player reads began lower-case ("the client folder") and ran into
+    "Pick the folder..." with no full stop. Pinned whole, so a reworded refusal is a decision.
+
+    Catches `Check.sentence()` going back to the bare `name: detail remedy` join.
+    """
+    from yulon.catalog import preflight
+
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
+
+    assert preflight.Report(checks=checks).message() == (
+        f"The client folder: {folder} has no {clientdir.DATA_DIR} directory, so it is not a "
+        "game client. Pick the folder the game itself is installed in, not a launcher, an "
+        "installer or a backup."
+    )
+
+
+def test_every_client_refusal_paragraph_starts_with_a_capital_and_ends_in_a_full_stop(
+    tmp_path: Path,
+) -> None:
+    from yulon.catalog import preflight
+
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    for chosen in (None, tmp_path / "gone", tmp_path / "file", tmp_path / "empty"):
+        checks = clientdir.validate(chosen, TBC, free_bytes=lambda _p: PLENTY)
+        text = preflight.Report(checks=checks).message()
+        assert text[0].isupper() and text.endswith("."), text
+        (refused,) = [check for check in checks if check.verdict == "refuse"]
+        assert f". {refused.remedy}" in text, text
+
+
 def test_a_missing_required_file_is_refused_by_name(tmp_path: Path) -> None:
     folder = client(tmp_path, required=False)
     checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)

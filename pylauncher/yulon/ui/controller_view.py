@@ -3897,7 +3897,7 @@ def _check_sentence(check: preflight.Check) -> str:
     for a single check `change_client_dir()` shows outside a refusal (a warning, or the
     zero-archive case `preflight.Report.message()` never sees because it is not a refusal).
     """
-    return f"{check.name}: {check.detail} {check.remedy}".rstrip()
+    return check.sentence()
 
 
 _MPQ_COUNT_RE = re.compile(r"^(\d+) ")
@@ -19451,16 +19451,13 @@ class ControllerView(QWidget):
         applier = self.services.applier
         if manifest is None or applier is None:
             return
-        answer = QMessageBox.question(
+        if not ask_yes_no(
             self,
             "Forget Yu'lon's record?",
             (
                 FORGET_RECORD_QUESTION if reapplies_on_top(manifest) else FORGET_INSTALL_QUESTION
             ).format(name=manifest.name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if not said_yes(answer):
+        ):
             self.module_report.setPlainText(
                 f"forget {manifest.id}: cancelled — nothing on this machine was changed."
             )
@@ -19489,8 +19486,11 @@ class ControllerView(QWidget):
         elif self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
-            rem_act = menu.addAction("Remove Selected Module")
-            rem_act.triggered.connect(lambda: self._module_action("remove"))
+            row = self.modules_panel.selected_row()
+            if row is not None and row.data.installed:
+                # T399: the row's own button is Install or Remove by whether it is here.
+                rem_act = menu.addAction("Remove Selected Module")
+                rem_act.triggered.connect(lambda: self._module_action("remove"))
             if self._selected_row_is_record_backed():
                 forget_act = menu.addAction(FORGET_RECORD_ACTION)
                 forget_act.triggered.connect(self._forget_module_record)
@@ -19666,7 +19666,7 @@ def _format_report(report: ApplyReport) -> str:
                 "inert."
             )
     elif report.restart_recommended and report.world_stopped:
-        # T130: this run read the world as stopped immediately before its SQL,
+        # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
         # took down the database the run had started alone -- but it was a step
         # nobody needed, told to a player who had just been asked to press Stop.
