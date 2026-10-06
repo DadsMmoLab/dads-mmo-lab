@@ -45,7 +45,8 @@
           "note": "default 150",
           "label": "Items posted per cycle",
           "explain": "How many items to post on the auction house every house update. Items in a cycle will be posted by a randomly selected bot.",
-          "type": "int"
+          "type": "int",
+          "unsigned": true
         },
         {
           "key": "AuctionHouseBot.MinutesBetweenSellCycle",
@@ -71,6 +72,7 @@
       "key": "bot_guid",
       "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
       "kind": "int",
+      "unsigned": true,
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid}",

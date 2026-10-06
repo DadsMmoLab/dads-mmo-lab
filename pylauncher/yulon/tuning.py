@@ -424,8 +424,18 @@ INT32_LARGEST = 2**31 - 1
 AzerothCore module may read a key as `uint32` instead (`mod-ah-bot`'s GUID), and
 then 2147483648 and up is refused although that module could read it: no real
 GUID or count lives there, while accepting it for an `int32` reader is a value
-the server never sees. The catalog has no way yet to say a key is unsigned.
+the server never sees. A key the module reads as `uint32` says so with `unsigned`.
 """
+
+
+UINT32_LARGEST = 2**32 - 1
+"""The top of a `uint32` key's range (T370): `ConfKey.unsigned` / `Prompt.unsigned` says
+the module reads the value with `GetOption<uint32>`, so it starts at 0 and ends here."""
+
+
+def int_range(unsigned: bool) -> tuple[int, int]:
+    """The (smallest, largest) a whole-number key or answer may hold: one rule for both callers."""
+    return (0, UINT32_LARGEST) if unsigned else (INT32_SMALLEST, INT32_LARGEST)
 
 
 def check(key: ConfKey | None, value: str) -> None:
@@ -442,15 +452,17 @@ def check(key: ConfKey | None, value: str) -> None:
     if key.type == "int":
         if WHOLE_NUMBER.fullmatch(value) is None:
             spaces = ", with no spaces" if any(ch.isspace() for ch in value) else ""
+            example = "like 12" if key.unsigned else "like 12 or -5"
             raise TuningError(
                 f"{key.key}: '{value}' is not a whole number; "
-                f"type it with the digits 0 to 9 only{spaces}, like 12 or -5"
+                f"type it with the digits 0 to 9 only{spaces}, {example}"
             )
         number = int(value)
-        if not INT32_SMALLEST <= number <= INT32_LARGEST:
+        smallest, largest = int_range(key.unsigned)
+        if not smallest <= number <= largest:
             raise TuningError(
-                f"{key.key}: {value} is more than the server can hold; "
-                f"use a number from {INT32_SMALLEST} to {INT32_LARGEST}"
+                f"{key.key}: {value} is not a number the server can hold; "
+                f"use a number from {smallest} to {largest}"
             )
         if key.min is not None and number < key.min:
             raise TuningError(f"{key.key}: {number} is below the smallest allowed value {key.min}")
@@ -495,6 +507,27 @@ FLOAT_LARGEST = 3.4028234663852886e38
 and `std::stof` throws `out_of_range` above it while Python's `float()` does not."""
 
 
+def decimal_fault(text: str) -> str:
+    """Why this text is not a decimal the cores read as typed, or `""` (T395).
+
+    `"spelling"` (not `DECIMAL`), `"decimals"` (past `DECIMAL_PLACES`) or `"large"`
+    (past a C `float`). The one rule behind a `float` Tuning key AND a `float`
+    module question, each wording the refusal its own way.
+    """
+    if DECIMAL.fullmatch(text) is None:
+        return "spelling"
+    _, point, places = text.partition(".")
+    if point and len(places) > DECIMAL_PLACES:
+        return "decimals"
+    number = float(text)
+    # Digits only, and still past what the server's float holds: `float()` says
+    # `inf` or a large double, and the core's parser says out of range (Codex
+    # review and cold review, 2026-10-05).
+    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
+        return "large"
+    return ""
+
+
 def _check_decimal(key: ConfKey, value: str) -> None:
     """A `float` key's rule: a plain decimal, inside whichever bounds the key states.
 
@@ -505,20 +538,17 @@ def _check_decimal(key: ConfKey, value: str) -> None:
     text = value.strip()
     if not text:
         raise RateRefused(f"{row} is empty. Write a number like 1, 2 or 1.5.")
-    if DECIMAL.fullmatch(text) is None:
+    fault = decimal_fault(text)
+    if fault == "spelling":
         raise RateRefused(f"{row}: {text} is not a number. Write it like 1, 2 or 1.5.")
-    _, point, places = text.partition(".")
-    if point and len(places) > DECIMAL_PLACES:
+    if fault == "decimals":
         raise RateRefused(
             f"{row}: {text} has too many decimals; use at most "
             f"{DECIMAL_PLACES} digits after the point, like 0.0001."
         )
-    number = float(text)
-    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
-        # Digits only, and still past what the server's float holds: `float()` says
-        # `inf` or a large double, and the core's parser says out of range (Codex
-        # review and cold review, 2026-10-05).
+    if fault == "large":
         raise RateRefused(f"{row}: {text} is too large to be a number.")
+    number = float(text)
     if key.min is not None and number < key.min:
         raise RateRefused(f"{row}: {text} is below the smallest allowed value {key.min}.")
     if key.max is not None and number > key.max:
@@ -862,6 +892,36 @@ def lint(text: str) -> tuple[LintIssue, ...]:
         if line.find("=") <= 0:
             issues.append(LintIssue(number, line))
     return tuple(issues)
+
+
+def int_problems(text: str, keys: Mapping[str, ConfKey]) -> tuple[str, ...]:
+    """Each declared `int` key whose ACTIVE value in this raw conf text fails `check()` (T371).
+
+    The value is the one the server reads (`conf_value()`: first wins, comments
+    and sections skipped), checked by the same function the cards use, so the
+    raw box and the card cannot disagree. A key the catalog does not declare as
+    an `int` is free text and is never looked at.
+    """
+    found: list[str] = []
+    for name, key in keys.items():
+        if key.type != "int":
+            continue
+        value = conf_value(text, name)
+        if value is None:
+            continue
+        try:
+            check(key, value)
+        except TuningError as exc:
+            found.append(str(exc))
+    return tuple(found)
+
+
+VALUE_SENTENCE = "{first} Save it anyway?"
+
+
+def value_sentence(problems: Sequence[str]) -> str | None:
+    """The FIRST bad value in the sentence the confirm asks, or `None` when all are fine."""
+    return VALUE_SENTENCE.format(first=problems[0]) if problems else None
 
 
 LINT_SENTENCE = (

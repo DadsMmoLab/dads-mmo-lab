@@ -47,7 +47,12 @@ DIALOGS = (
     "repair",
     "longest",
     "longest-three-way",
+    "warning-longest",
+    "information-longest",
 )
+
+NOTICES = ("warning-longest", "information-longest")
+"""The one-button boxes; every other dialog here has at least two."""
 
 DECLINED = {
     "rebuild": "False",
@@ -56,6 +61,8 @@ DECLINED = {
     "longest": "False",
     "update-to-latest": "'cancel'",
     "longest-three-way": "'cancel'",
+    "warning-longest": "'ok'",
+    "information-longest": "'ok'",
 }
 """What each function answers when its decline button is clicked."""
 
@@ -135,7 +142,8 @@ def test_the_dialog_fits_the_screen(seen: dict[str, Any]) -> None:
 
 
 def test_every_button_is_inside_the_dialog_and_on_screen(seen: dict[str, Any]) -> None:
-    assert len(seen["buttons"]) >= 2, seen["buttons"]
+    wanted = 1 if seen["name"] in NOTICES else 2
+    assert len(seen["buttons"]) >= wanted, seen["buttons"]
     off = {
         label: where
         for label, where in seen["buttons"].items()
