@@ -78,6 +78,7 @@ from typing import Any, ClassVar, Literal, Protocol, cast
 from yulon import (
     __version__,
     ansi,
+    database_presence,
     dbsecret,
     docker,
     git,
@@ -534,6 +535,12 @@ Stop, then press … again"* — and a refusal that names a button which does no
 exist under that name is exactly the defect T7's ticket is titled after: an
 instruction the user cannot follow. One string, so a rename moves both.
 """
+
+REPAIR_DATABASE_OPENING_NOTE = (
+    "This makes the server's databases again from its own files, the way the install did, then "
+    "starts the server. Accounts and characters are not in those files; a backup brings them back."
+)
+"""Said once at the top of a database Repair (T377)."""
 
 UPDATES_OPENING_NOTE = (
     "You can stop this at any time. This does two things and nothing else: it starts this "
@@ -1637,7 +1644,7 @@ REBUILD_WAIT_HINT = (
 controls does at this point. Stop is the panel's Cancel."""
 
 ROLLBACK_STOPPING = (
-    "Stopping the new build (it may be force-stopped) and putting the previous build " "back\u2026"
+    "Stopping the new build (it may be force-stopped) and putting the previous build back\u2026"
 )
 """The rollback's first line once the containers were replaced (T158, round 3, the lead's words).
 
@@ -5734,6 +5741,15 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
+        database_presence.take_reading
+    )
+    """Is this install's database there at all (T377)? Asked by Rebuild and by Repair.
+
+    `database_presence.take_reading()`: `missing` (no volume), `empty` (no login
+    database), `present`, or `unknown` when Docker could not say. A Rebuild
+    refuses the first two before it compiles; Repair runs only on them.
+    """
     world_running: Callable[[str], bool | None] | None = None
     """Is this install's world server up? Three-valued, and `None` is not "no".
 
@@ -5932,6 +5948,7 @@ class Seams:
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
             volume_exists=on(docker.volume_exists, wsl_distro=distro),
+            read_database=on(database_presence.take_reading, wsl_distro=distro),
             world_running=on(docker.world_running, wsl_distro=distro),
             db_running=on(docker.world_running, wsl_distro=distro),
             stop_db=on(docker.stop_containers, wsl_distro=distro),
@@ -6619,6 +6636,66 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
+
+    def repair_database_stages(self) -> tuple[Stage, ...]:
+        """What Repair runs on a database Docker no longer has (T377): the install's own four.
+
+        The database started (compose makes its volume again, empty), the
+        family's import -- whose own probe reads `absent` there and imports the
+        whole plan, as the install did -- the servers started and the wait for
+        the world. Each is the family's own stage with its record taken away:
+        the install already recorded them, and this press must not write a
+        record of its own (`update_stages()`'s rule). AzerothCore puts its
+        client-data download first, because that data lives in a volume too.
+        """
+        return tuple(
+            replace(self.stage_named(name), recorded=False)
+            for name in ("start-db", "import", "up", "ready")
+        )
+
+    def repair_database(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Make a database Docker no longer has again, from the server files, and start (T377).
+
+        The Server tab offers it only after a Start or a Rebuild refused because
+        the database was missing or empty, and the press asks Docker again
+        before anything: it runs only when the answer is still `missing` or
+        `empty`. A database that is there, or one nobody could ask, is never
+        imported over -- the import's own probe would refuse a populated one,
+        but a press that consented to "make it again" must not reach a database
+        that holds anything.
+
+        Raises:
+            InstallerError: the database is there or could not be asked, a
+                stage failed, or the press was cancelled.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        reading = self._seams.read_database(self.entry, server_dir)
+        if reading.presence == "present":
+            raise InstallerError(
+                f"Docker has {self.entry.name}'s database again, with its login database in it, "
+                f"so there is nothing to repair. Nothing was changed. Press Start."
+            )
+        if not reading.refuses:
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s database is there "
+                f"({reading.why or 'Docker did not say'}), so nothing was imported. Check that "
+                f"Docker is running, then press Repair again."
+            )
+        yield f"Repairing {self.entry.name}'s database in {server_dir}"
+        yield REPAIR_DATABASE_OPENING_NOTE
+        self._check_cancel(cancel)
+        ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
+        yield from self._staged(self.repair_database_stages(), ctx)
+        yield (
+            f"{self.entry.name}'s database was made again from the server files and the server "
+            f"is running. If you have a backup, restore it on the Maintenance tab."
+        )
 
     def _guard_then(
         self, stage: Stage, button: str, *, remedy: str = ""
@@ -7358,8 +7435,7 @@ class StagedInstaller:
             self._stopped_waiting_for_docker(stop)
             if answered:
                 yield (
-                    f"Docker answered after "
-                    f"{_spell_elapsed(self._seams.monotonic() - started)}."
+                    f"Docker answered after {_spell_elapsed(self._seams.monotonic() - started)}."
                 )
                 return None
         return self._seams.monotonic() - started
@@ -7674,6 +7750,11 @@ class StagedInstaller:
             refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
+        # T377: a rebuild ends in a start, and a start on a database Docker no
+        # longer has puts the server on a new, empty one. Asked before an hour of
+        # compiling; `unknown` goes on, as a Start does.
+        if self._seams.read_database(self.entry, server_dir).refuses:
+            raise InstallerError(f"{database_presence.MISSING} Nothing was changed.")
         # T217 (B): a plain Rebuild compiles the folder as it is, so a source that is
         # not on the commit the running build was made from would compile a mix of
         # two versions. The update route moves them together and passes its work.
@@ -10938,8 +11019,7 @@ class StagedInstaller:
             )
         if existing is not None and existing.game_id != self.entry.id:
             raise InstallerError(
-                f"{server_dir} already holds an install of {existing.game_id}. Pick another "
-                "folder."
+                f"{server_dir} already holds an install of {existing.game_id}. Pick another folder."
             )
         if existing is not None and existing.family and existing.family != self.family:
             raise InstallerError(
@@ -11252,8 +11332,7 @@ class StagedInstaller:
             existing = self._remote_of(dest)
             if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
-                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
-                    "changed."
+                    f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was changed."
                 )
             if not has_git and dest.is_dir():
                 leftovers = _listing(dest, ignoring=OUR_OWN_FILES)

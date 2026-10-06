@@ -154,6 +154,8 @@ class _Lifecycle:
     def refuse_start(self) -> None:
         return None
 
+    refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+
     def stop(self) -> bool:
         self.calls.append("stop")
         return True

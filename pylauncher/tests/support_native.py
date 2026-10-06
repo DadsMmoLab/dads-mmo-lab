@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
-from yulon import docker, git, platform, resources
+from yulon import database_presence, docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch
@@ -856,6 +856,9 @@ class Recorder:
             exec_stdin=self.exec_stdin,
             sql_query=self.sql_query,
             volume_exists=self.volume_exists,
+            # T377: a Rebuild and a Repair ask whether the database is there at all.
+            # Bound for the T64 reason above; a test about the answer states its own.
+            read_database=lambda entry, server_dir: database_presence.Reading("present"),
             # T159: the corrections press stops a running world by name. Bound
             # for the T64 reason above -- the default is the real `docker stop`.
             stop_world=lambda containers, **_kw: self.calls.append(
