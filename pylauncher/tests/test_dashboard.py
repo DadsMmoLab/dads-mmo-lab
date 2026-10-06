@@ -1447,7 +1447,8 @@ def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_fiv
         log_of=lambda _c, _s: "",
         now=lambda: NOW,
     )
-    states = [young, young, old, old, old, old]
+    restarted = _running("2026-09-06T17:48:00.000000000Z")  # a new run, 12 minutes up
+    states = [young, young, old, old, old, old, restarted, restarted]
     with caplog.at_level("INFO"):
         for _ in range(2):
             dash.tick()
@@ -1455,3 +1456,7 @@ def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_fiv
         for _ in range(4):
             dash.tick()
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+    with caplog.at_level("INFO"):
+        for _ in range(2):
+            dash.tick()
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2

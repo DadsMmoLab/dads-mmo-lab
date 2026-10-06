@@ -316,8 +316,9 @@ def population(
             if world_up > MISSING_TABLE_GRACE:
                 if said.should_say(run):
                     logger.warning(
-                        "the bots' table (acore_playerbots) is still missing, so the bots "
-                        "cannot be counted. Press Repair the database… to import it again."
+                        "The bots' tables are still missing, so bots cannot be counted. "
+                        "Stop and Start the server once; if they are still missing, press "
+                        "Save logs for support… and ask for help."
                     )
                 return Population(problem=f"could not read the server's characters: {exc}")
         say = logger.info if early else logger.warning

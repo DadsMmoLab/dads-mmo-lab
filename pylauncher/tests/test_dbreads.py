@@ -349,7 +349,8 @@ def test_a_playerbots_table_still_missing_after_two_minutes_warns_exactly_once(
             )
     warnings = _levels(caplog, "WARNING")
     assert len(warnings) == 1
-    assert "bots" in warnings[0] and "Repair" in warnings[0]
+    assert warnings[0].startswith("The bots' tables are still missing")
+    assert "Stop and Start" in warnings[0] and "Save logs for support…" in warnings[0]
 
 
 def test_the_missing_table_warning_comes_again_after_the_table_returns_or_the_world_restarts(
