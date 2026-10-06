@@ -2594,10 +2594,12 @@ def check_answer(prompt: Prompt, value: str) -> str:
             )
         if fault == "decimals":
             return f"this may have at most {tuning.DECIMAL_PLACES} digits after the point"
-        if fault == "large":
-            return "this is too large to be a number"
         # T122: the question's own range, finite; see `Prompt.range_problem()`.
-        return prompt.range_problem(text)
+        # Before the C `float` ceiling, so a question with a range names its range.
+        problem = prompt.range_problem(text)
+        if problem:
+            return problem
+        return "this is too large to be a number" if fault == "large" else ""
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":

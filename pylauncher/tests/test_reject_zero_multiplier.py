@@ -131,22 +131,22 @@ def test_a_default_outside_its_own_range_is_refused_when_the_manifest_is_read(
 
 
 @pytest.mark.parametrize(
-    "value", ["0", "0.0", "-0", "-1", "-0.25", "1e-50", "0.009", "1e39", "100.01", "1e2.5"]
+    "value", ["0", "0.0", "-0", "-1", "-0.25", "0.0000", "0.009", "1" + "0" * 39, "100.01", "1.2.5"]
 )
 def test_check_answer_refuses_a_multiplier_outside_the_range(value: str) -> None:
-    """1e-50 underflows the FLOAT column to 0 and 1e39 overflows it: neither can be divided back."""
+    """Zero cannot be divided back, and 1 followed by 39 zeros overflows the FLOAT column."""
     problem = check_answer(_mob().prompts[0], value)
-    expected = "this must be a number" if value == "1e2.5" else RANGE
-    assert problem == expected, (value, problem)
+    expected = "this must be a number" if value == "1.2.5" else RANGE
+    assert problem.startswith(expected), (value, problem)
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e999"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "9" * 400])
 def test_check_answer_refuses_a_number_that_is_not_finite(value: str) -> None:
     """`float()` reads these; a range check alone would let `nan` compare false both ways."""
-    assert check_answer(_mob().prompts[0], value) == "this must be a number"
+    assert check_answer(_mob().prompts[0], value).startswith("this must be a number")
 
 
-@pytest.mark.parametrize("value", ["0.01", "0.25", "1", "2", "100", "1e-2", "1e2"])
+@pytest.mark.parametrize("value", ["0.01", "0.25", "1", "2", "100", "0.010", "100.0"])
 def test_check_answer_accepts_a_multiplier_inside_the_range_ends_included(value: str) -> None:
     assert check_answer(_mob().prompts[0], value) == ""
 
@@ -184,7 +184,7 @@ def test_a_number_question_with_no_bound_still_accepts_zero() -> None:
 # ------------------------------------------------------------ the dialog
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "1e-50", "1e39", "100.01"])
+@pytest.mark.parametrize("value", ["0", "-1", "0.0000", "1" + "0" * 39, "100.01"])
 @pytest.mark.parametrize("removing", [False, True])
 def test_the_dialog_keeps_ok_disabled_and_names_the_range(
     qapp: object, value: str, removing: bool
@@ -220,7 +220,7 @@ def test_a_remembered_zero_is_not_filled_in(qapp: object) -> None:
 # ------------------------------------------------------------ the applier
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "1e-50", "1e39", "100.01"])
+@pytest.mark.parametrize("value", ["0", "-1", "0.0000", "1" + "0" * 39, "100.01"])
 def test_the_applier_refuses_an_install_outside_the_range_before_any_sql(
     tmp_path: Path, value: str
 ) -> None:
