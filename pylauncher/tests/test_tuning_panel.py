@@ -1307,7 +1307,7 @@ def test_an_int_box_holding_a_value_it_would_refuse_can_still_be_edited(qapp: ob
 def test_an_int_box_whose_file_holds_other_digits_drops_the_rule_until_they_are_gone(
     qapp: object,
 ) -> None:
-    """`_guard_int` asks the same rule in Python: the rule must not call `١٢` a fit."""
+    """`_guard_number` asks the same rule in Python: the rule must not call `١٢` a fit."""
     editor = tp.RowEditor(_row(type="int", min=0, current="١٢"))
     field = editor.control
     assert isinstance(field, QLineEdit)
