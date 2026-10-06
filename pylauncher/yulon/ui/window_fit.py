@@ -20,6 +20,9 @@ from PySide6.QtCore import QEvent, QObject, QRect, QTimer
 from PySide6.QtGui import QScreen
 from PySide6.QtWidgets import QApplication, QFrame, QMainWindow, QScrollArea, QWidget
 
+SETTLE_MS = 150
+"""How long a window must stop moving before it is fitted to the screen it landed on."""
+
 SCROLL_OBJECT_NAME = "window-scroll"
 """The scroll area round the window's contents; the theme makes it see-through."""
 
@@ -49,6 +52,12 @@ class WindowFit(QObject):
         self._screen: QScreen | None = None
         self._watched: QScreen | None = None
         self._busy = False
+        # A drag across monitors sends a Move for every pixel, and the system is
+        # still placing the window from the cursor: the fit waits for it to rest.
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(SETTLE_MS)
+        self._settle.timeout.connect(self._check_screen)
         window.installEventFilter(self)
         self.apply(first=True)
 
@@ -78,6 +87,9 @@ class WindowFit(QObject):
 
     def _apply(self, first: bool) -> None:
         w = self._window
+        if w.isMaximized() or w.isFullScreen() or w.isMinimized():
+            # The system sizes such a window itself; its frame hangs past the edges.
+            return
         avail = self._available()
         margin_w, margin_h = self._margins()
         room_w = max(1, avail.width() - margin_w)
@@ -133,7 +145,7 @@ class WindowFit(QObject):
                 QTimer.singleShot(0, self.apply)
             elif kind in (QEvent.Type.Move, QEvent.Type.ScreenChangeInternal):
                 if self._window.isVisible():
-                    self._check_screen()
+                    self._settle.start()
         return False
 
 
