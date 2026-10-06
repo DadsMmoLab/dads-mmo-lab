@@ -361,7 +361,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "7cbe416fb53827eed20beac00770951530494e8f", (
+    assert module.rev == "97c663d2fd91669b3601289979eced9a4552f9fe", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -381,14 +381,18 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "recruiter migration restored to its first release's bytes and the explicit guids "
         "moved to a new one, travel-planning speed-ups, ghosts reviving at the core's 39 yd, "
         "bag audits for gear, and the dashboard's anomaly reports throttled with its "
-        "protocol still 5; and since T416 it is 7cbe416f, the commit release v2026-10-06 "
+        "protocol still 5; T416 moved it to 7cbe416f, the commit release v2026-10-06 "
         "names after its 12:55Z rebuild that day (it named f0de4bed when the ticket began): "
         "212 commits, no conf key the install writes or the app reads renamed or "
         "removed (14 new AiPlayerbot keys, all with defaults), four idempotent module "
         "migrations (a `tortoise_bots_hire` ledger, CREATE TABLE IF NOT EXISTS, and world "
         "quest rows deleted before they are inserted), hired companions deleted when their "
         "hire ends or at the next start, and the dashboard protocol 5 -> 8 (the dashboard "
-        "is rebuilt from the same checkout, T162)"
+        "is rebuilt from the same checkout, T162); and since T416's second bump it is "
+        "97c663d2, the commit release v2026-10-06 names after upstream merged #517 (fix "
+        "#516: the module logs every bot out at shutdown, so a companion hired in this run "
+        "no longer outlives the databases and crashes the world with exit 139): 9 commits, "
+        "no conf key, SQL or build change, a consumable-mimic toggle that is off by default"
     )
     for source in sources:
         assert re.fullmatch(
