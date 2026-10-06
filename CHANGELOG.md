@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The worldserver log saved when you stop a server has passwords masked, as the support file does.
+- A failed install is listed once in the support file, however its folder is spelled.
 - **Save logs for support…** also reads the servers of an install that failed, even though it was never added to the list.
 - **Save logs for support…** keeps what database and Tortoise login containers wrote as errors, not only their normal output.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.

@@ -341,3 +341,51 @@ def test_the_cleanup_after_a_failed_write_cannot_itself_raise(tmp_path: Path, mo
 
     assert snap.path is None
     assert "this filesystem says no" in snap.problem
+
+
+def test_the_snapshot_on_disk_has_this_installs_passwords_masked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T352: the file is attached to bug reports, so it is redacted before it is written."""
+    conf_dir = tmp_path / "server" / "env" / "dist" / "etc"
+    conf_dir.mkdir(parents=True)
+    (conf_dir / "worldserver.conf").write_text(
+        'LoginDatabaseInfo = "db;3306;acore;Sw0rdfish-Only;acore_auth"\n', encoding="utf-8"
+    )
+    minted = "tbc-" + "0f1e2d3c" + "4b5a6978"
+    fake = _FakeRunner(
+        log_text=(
+            "Cannot connect to world database db;3306;mangos;" + minted + ";mangos\n"
+            "retrying with Sw0rdfish-Only again\n"
+        )
+    )
+    monkeypatch.setattr(runner, "run", fake)
+
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    written = snap.path.read_text(encoding="utf-8")
+    assert minted not in written
+    assert "Sw0rdfish-Only" not in written
+    assert "Cannot connect to world database" in written
+
+
+def test_a_failure_to_gather_passwords_still_saves_a_pattern_masked_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Redaction never prevents the stop's evidence: the patterns alone still run."""
+    minted = "tbc-" + "0f1e2d3c" + "4b5a6978"
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text=f"pw {minted}\n"))
+
+    def _boom(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("store unreadable")
+
+    from yulon.support import sources
+
+    monkeypatch.setattr(sources, "gather_known", _boom)
+    (tmp_path / "server").mkdir()
+
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    assert minted not in snap.path.read_text(encoding="utf-8")
