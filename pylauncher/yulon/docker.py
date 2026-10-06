@@ -5185,7 +5185,7 @@ def _builder_in(text: str) -> tuple[str, str] | None:
         if line.strip() == "Nodes:":
             break
         key, sep, value = line.partition(":")
-        if sep and key.strip() in ("Name", "Driver") and key.strip() not in fields:
+        if sep and key.strip() in ("Name", "Driver"):
             fields[key.strip()] = value.strip()
     name, driver = fields.get("Name", ""), fields.get("Driver", "")
     return (name, driver) if name and driver else None
