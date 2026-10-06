@@ -98,6 +98,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - An "&" in a label or a server folder's name shows as written.
 
 ### Changed
+- On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
 - A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.

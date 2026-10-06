@@ -1615,9 +1615,10 @@ def test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage(
     assert native.OPENING_NOTE in lines
     assert lines.index(native.OPENING_NOTE) == 1
     build_at = next(index for index, line in enumerate(lines) if line == "--- build")
-    assert native.BUILD_CANCEL_NOTE in lines
-    assert lines.index(native.BUILD_CANCEL_NOTE) > build_at
-    assert native.BUILD_CANCEL_NOTE not in lines[:build_at]
+    note = native.build_cancel_note()  # this platform's (T246, T298)
+    assert note in lines
+    assert lines.index(note) > build_at
+    assert note not in lines[:build_at]
 
 
 def test_a_cancel_says_what_is_true_of_the_stage_that_was_cancelled(tmp_path: Path) -> None:
@@ -1630,7 +1631,7 @@ def test_a_cancel_says_what_is_true_of_the_stage_that_was_cancelled(tmp_path: Pa
         install(rec, tmp_path / "download")
     # The client-data fetch resumes; nothing about a build step is true here.
     assert native.DOWNLOAD_CANCEL_NOTE in str(caught.value)
-    assert native.BUILD_CANCEL_NOTE not in str(caught.value)
+    assert native.build_cancel_note() not in str(caught.value)
 
     later = Recorder(images=False)
     installer = engine(later)

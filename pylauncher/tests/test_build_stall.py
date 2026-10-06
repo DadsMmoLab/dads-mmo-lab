@@ -305,9 +305,11 @@ def test_only_the_build_stage_is_watched(tmp_path: Path, monkeypatch: pytest.Mon
 # -- what a Stop during the build costs, per platform (T246) ----------------------
 #
 # On Windows a Stop now ends docker.exe's whole tree, and the yulon-win11 probe
-# (2026-10-05) saw the build end in the engine as `Error` at once. On Linux and
-# macOS a Stop still ends the docker CLI alone, and whether the build stops with
-# it is T298's open question, so the old sentence stays there.
+# (2026-10-05) saw the build end in the engine as `Error` at once. On Linux a Stop
+# ends the docker CLI alone, and T298's probes (yulon-ubuntu and m910q, 2026-10-06)
+# saw compose and `buildx bake` end with it within 2 s and the build never tag, so
+# Linux (the Steam Deck too) says the same. macOS was not probed: the old sentence
+# stays there.
 
 
 def test_on_windows_the_build_cancel_note_says_the_build_ends_and_the_cache_is_kept(
@@ -315,17 +317,26 @@ def test_on_windows_the_build_cancel_note_says_the_build_ends_and_the_cache_is_k
 ) -> None:
     monkeypatch.setattr(native.sys, "platform", "win32")
     note = native.build_cancel_note()
-    assert note == native.BUILD_CANCEL_NOTE_WINDOWS
+    assert note == native.BUILD_CANCEL_NOTE_ENDS
     assert "ends the build at once" in note
     assert "kept in Docker's build cache" in note
     assert "in the background" not in note, "the Windows note still says the build runs on"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
-def test_off_windows_the_build_cancel_note_still_says_docker_finishes_the_step(
-    monkeypatch: pytest.MonkeyPatch, platform: str
+def test_on_linux_the_build_cancel_note_says_the_build_ends_too(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(native.sys, "platform", platform)
+    """T298: measured, so said. A Stop there ends compose and BuildKit's build with the CLI."""
+    monkeypatch.setattr(native.sys, "platform", "linux")
+    note = native.build_cancel_note()
+    assert note == native.BUILD_CANCEL_NOTE_ENDS
+    assert "in the background" not in note, "the Linux note still says the build runs on"
+
+
+def test_on_macos_the_build_cancel_note_still_says_docker_finishes_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native.sys, "platform", "darwin")
     note = native.build_cancel_note()
     assert note == native.BUILD_CANCEL_NOTE
     assert "finishing the build step it is already on, in the background" in note
@@ -338,7 +349,10 @@ def test_the_azerothcore_build_stage_says_this_platforms_cancel_note(
     would say "Docker finishes the step in the background" on Windows, where it does not."""
     monkeypatch.setattr(native.sys, "platform", "win32")
     by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
-    assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE_WINDOWS
+    assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE_ENDS
     monkeypatch.setattr(native.sys, "platform", "linux")
+    by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
+    assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE_ENDS
+    monkeypatch.setattr(native.sys, "platform", "darwin")
     by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
     assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE

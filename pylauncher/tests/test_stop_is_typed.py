@@ -294,6 +294,33 @@ def test_a_build_that_exited_on_its_own_under_a_stop_reads_as_the_stop(tmp_path:
     assert str(stopped.value).startswith("the build was stopped."), stopped.value
 
 
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_a_stopped_build_ends_with_what_a_stop_costs_on_this_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """T298: the sentence after a stopped build is the one said before it, for this platform.
+
+    It used to be the macOS one everywhere, so on Windows (T246) and Linux (T298), where
+    a Stop ends the build, it still said Docker finishes the step in the background.
+    """
+    monkeypatch.setattr(native.sys, "platform", platform)
+    rec = Recorder()
+    cancel = threading.Event()
+
+    def stopped_build(server_dir: Path, files: object, **_kw: object) -> docker.AttachedRun:
+        rec.calls.append("build")
+        cancel.set()
+        return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("compiling",))
+
+    with pytest.raises(InstallStopped) as stopped:
+        list(
+            engine(rec, build=stopped_build).run(
+                InstallOptions(server_dir=tmp_path / "s"), cancel=cancel
+            )
+        )
+    assert str(stopped.value) == f"the build was stopped. {native.build_cancel_note()}"
+
+
 def test_a_real_compile_error_that_lands_as_stop_is_pressed_stays_a_failure(
     tmp_path: Path,
 ) -> None:
