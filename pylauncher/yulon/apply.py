@@ -266,7 +266,7 @@ def installed_modules(
     A settings-only mod counts with a receipt (`module_answers.SETTINGS`), and
     without one when it is among `manifests` and its conf still reads what an
     install made before the receipt wrote (`settings_installed()`): one read of
-    each conf file those name.
+    each conf file those name, and the answers file for the removed marks (T392).
     """
     found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
     for family, ids in recorded_modules(server_dir, relative).items():
