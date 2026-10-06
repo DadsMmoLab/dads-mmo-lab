@@ -56,7 +56,7 @@ from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import client_folder
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import install_wiring, platform, reset_defaults, runner, server_build_presses
+from yulon import docker, install_wiring, platform, reset_defaults, runner, server_build_presses
 from yulon.catalog import composegen, native
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
@@ -768,21 +768,25 @@ def test_a_stop_after_the_compile_but_before_any_container_moved_is_a_clean_canc
 ) -> None:
     """No rollback, the compile finished, the replace never started: nothing changed that runs.
 
-    The recreate's own preflight is held until Stop, then answers "no daemon".
-    The containers are the old build's, so this Stop left nothing to report.
+    The replace waits on the world's load until Stop, then gives the stop up
+    before its signal (T158's `StopAbandoned`). The containers are the old
+    build's, so this Stop left nothing to report.
+
+    Until T250 this was driven with a daemon that stopped answering at the
+    Stop. That is a real failure landing as the button is pressed, which the
+    panel now shows as the failure it is (`test_stop_is_typed.py`).
     """
     rec, server_dir, _client = _tbc_images_gone(tmp_path)
     reached = threading.Event()
     gate: list[threading.Event] = []
 
-    def docker_ready() -> bool:
-        if "build" not in rec.calls:
-            return True
+    def give_up(control: object) -> None:
         reached.set()
         gate[0].wait(HANG_BOUND)
-        return False
+        raise docker.StopAbandoned("the world was still loading")
 
-    _wired_to(monkeypatch, lambda: tbc_engine(rec, docker_ready=docker_ready))
+    rec.on_recreate = give_up
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
     rebuild = install_wiring.rebuild_for_app(TBC, server_dir)
 
     def press(cancel: threading.Event) -> Any:
