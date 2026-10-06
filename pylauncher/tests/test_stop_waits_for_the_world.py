@@ -124,6 +124,13 @@ class _Docker:
         if verb[:1] == ["stop"]:
             self._stopped({verb[-1]})
             return _completed()
+        if verb == ["kill", "-s", "TERM", self.spec.world]:
+            # T384: the world's own stop, before the rest. This world saves at once; the
+            # save wait itself is `test_stop_saves_before_exit.py`'s.
+            if self.spec.world not in self.running:
+                return _completed(returncode=1)
+            self._stopped({self.spec.world})
+            return _completed()
         if verb[:2] == ["ps", "-a"]:
             return _completed("".join(f"{n}\n" for n in sorted(self.present)))
         if verb[:1] == ["ps"]:
@@ -271,7 +278,9 @@ def test_tortoises_ready_banner_is_not_taken_for_a_world_that_can_hear_the_stop(
     fake = _install(monkeypatch, "wow-tortoise", frames)
     controller, _ = _controller(fake, tmp_path)
     assert controller.stop() is True
-    assert fake.events == ["look 1", "look 2", "stop"]
+    # The third look is the save's (T411): Tortoise is asked to save everyone at its console
+    # before the signal, only if it is running.
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"]
 
 
 def test_a_world_that_restarts_while_it_is_waited_on_is_waited_on_again(
@@ -376,7 +385,9 @@ def test_every_command_a_look_makes_is_bounded(
     controller, _ = _controller(fake, tmp_path)
     assert controller.stop() is True
     assert fake.timeouts and set(fake.timeouts) == {docker._LOAD_LOOK_TIMEOUT}, fake.timeouts
-    assert len(fake.timeouts) == 4
+    # Two looks of two commands each, and the save wait's one look at a world already down
+    # (T384), bounded the same way.
+    assert len(fake.timeouts) == 5
 
 
 def test_stop_now_anyway_ends_a_wait_that_cannot_check(
