@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- Installing a module that asks a question about your characters starts a stopped database to check the answer.
+- Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
 - **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
 - On Windows, **Stop** also ends the helper programs a build started on your PC.
 - The worldserver log saved when you stop a server has passwords masked, as the support file does.
@@ -64,6 +66,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- On Windows, Centurion and Tortoise's **Stop** asks for that save through the command channel and says when it could not.
 - **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
 - A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
@@ -150,7 +153,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A build that loses Docker, often from too little memory, says so in plain words and what to try.
 - After **PLAY**, the launcher says when the game was started instead of a lasting "is starting".
 - The **Logs** tab colours warnings amber and errors red.
-- Fresh Tortoise installs build TortoiseBots v2026-09-28: bots respawn nearby and travel to zones that fit them.
+- Fresh Tortoise installs build TortoiseBots v2026-10-06: hired companions are deleted when dismissed or on restart.
 - Removing **Bigger Stacks** asks first and says every item's stack size goes back.
 
 ## v0.8.90-Public — 2026-09-26
