@@ -290,6 +290,40 @@ def test_a_schema_the_world_has_not_made_yet_is_not_a_warning(
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
+def test_a_playerbots_table_the_world_has_not_made_yet_is_not_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T425: ERROR 1146 on a playerbots table just after the world started is the early poll."""
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+
+    class _Early:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError(
+                "ERROR 1146 (42S02): Table 'acore_playerbots.playerbots_account_type' doesn't exist"
+            )
+
+    with caplog.at_level("INFO"):
+        counts = dbreads.population(_Early(), WOTLK, answer.marker)
+    assert counts.problem != ""
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_missing_table_that_is_not_a_playerbots_one_is_still_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+
+    class _Broken:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError("ERROR 1146 (42S02): Table 'acore_characters.x' doesn't exist")
+
+    with caplog.at_level("INFO"):
+        dbreads.population(_Broken(), WOTLK, answer.marker)
+    assert [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 def test_an_answer_that_is_not_four_numbers_is_reported_rather_than_parsed_optimistically(
     tmp_path: Path,
 ) -> None:
