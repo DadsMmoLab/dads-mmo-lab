@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
 - **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
 - Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
 - The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.

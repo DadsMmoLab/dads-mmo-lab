@@ -233,6 +233,7 @@ def test_a_marker_that_cannot_be_resolved_refuses_the_counts_without_hiding_the_
         sql=sql,
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -271,6 +272,7 @@ def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_contain
         sql=_FakeSql(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -362,6 +364,7 @@ def test_a_world_whose_database_is_gone_is_not_stable_even_though_it_is_up(
         sql=_Dead(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -389,6 +392,7 @@ def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path
         sql=_FakeSql(),
         state_of=lambda _c: _running(),
         daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: BANNER,
         now=lambda: NOW,
     )
 
@@ -939,6 +943,8 @@ def test_the_real_readers_ask_docker_for_the_daemons_identity(
     def run(
         cmd: list[str], cwd: object = None, timeout: object = None
     ) -> subprocess.CompletedProcess[str]:
+        if "logs" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, BANNER, "")
         if "network" in cmd:
             asked.append(cmd[cmd.index("network") :])
             return subprocess.CompletedProcess(cmd, 0, bridges.pop(0), "")
@@ -1192,7 +1198,7 @@ def test_a_run_that_said_ready_and_then_died_does_not_end_the_loop(tmp_path: Pat
 def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     tmp_path: Path,
 ) -> None:
-    """A tick is one inspect and one SQL read; the log read is paid only to end a loop."""
+    """A tick is one inspect and one SQL read; the log is read only until a run says ready (T390, T451)."""
     fixed = _stamp(NOW + timedelta(seconds=9))
     reads: list[timedelta] = []
     ready = _said_ready_from(timedelta(seconds=10), fixed)
@@ -1208,7 +1214,9 @@ def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     )
     for _ in range(3):
         healthy.tick()
-    assert reads == [], "a healthy server's log was read"
+    # T451: a run whose log never says ready is asked every tick (its badge says STARTING).
+    assert len(reads) == 3
+    reads.clear()
 
     looping, _ = _clocked(
         tmp_path,
@@ -1219,8 +1227,10 @@ def test_the_world_s_log_is_read_only_while_a_loop_is_current_and_once_per_run(
     )
     for _ in range(6):
         looping.tick()
-    # 5 s: the loop's own run, still loading. 10 s: the fixed run, ready. Then no more.
-    assert reads == [timedelta(seconds=5), timedelta(seconds=10)], "read again after ready"
+    # 0 s: the first look, still loading. 5 s: the loop's own run, still loading.
+    # 10 s: the fixed run, ready. Then no more.
+    zero, five, ten = (timedelta(seconds=n) for n in (0, 5, 10))
+    assert reads == [zero, five, ten], "read again after ready"
 
 
 def test_a_loop_caught_inside_the_docker_restore_window_gets_the_note_once_fixed(
@@ -1360,3 +1370,48 @@ def test_a_world_that_crashes_again_after_it_recovered_is_a_loop_again_at_once(
 
     assert verdicts[4].state == "up", "recovered"
     assert verdicts[5].state == "restart_loop", "crashed again: a loop, not up"
+
+
+def test_a_running_world_is_not_ready_until_its_log_says_so(tmp_path: Path) -> None:
+    """T451: `docker ps` says the world runs seconds before it can take a login.
+
+    The first tick of a run reads up with `ready` False and says "starting", and
+    the tick after the run's own log printed the ready marker reads ready.
+
+    Mutation: leave `ready` at its default in `_with_population()`, and the first
+    tick reads ready.
+    """
+    run = _stamp(NOW - timedelta(seconds=3))
+    watch, _ = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(run)),
+            (timedelta(seconds=30), _running(run)),
+        ],
+        logs=_said_ready_from(timedelta(seconds=20), run),
+    )
+
+    loading, loaded = watch.tick(), watch.tick()
+
+    assert loading.state == "up" and loading.ready is False
+    assert dashboard.line(loading).startswith("starting")
+    assert loaded.ready is True and dashboard.line(loaded).startswith("up")
+
+
+def test_a_run_that_said_ready_is_not_asked_again(tmp_path: Path) -> None:
+    """The log is read until the marker is seen, and not on the healthy ticks after."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    watch = dashboard.Dashboard(
+        SPEC,
+        WOTLK,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or BANNER,
+        now=lambda: NOW,
+    )
+
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1

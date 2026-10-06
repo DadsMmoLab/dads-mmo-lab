@@ -168,4 +168,4 @@ def test_a_loop_seen_before_our_own_restart_is_not_carried_past_it(
 
     view.restart_server()
 
-    assert view.realm_badge.status == "running"
+    assert view.realm_badge.status == "starting"  # T451: no verdict about the new run yet

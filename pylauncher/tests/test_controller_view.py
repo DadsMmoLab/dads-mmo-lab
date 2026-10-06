@@ -27242,7 +27242,10 @@ def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
     assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
     _drain_polls(view, jobs)
 
-    assert view.realm_badge.status == reading, "the hold outlived the failed job"
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == ("starting" if reading == "running" else reading), (
+        "the hold outlived the failed job"
+    )
     assert view._badge_held is None
 
 
@@ -27264,7 +27267,8 @@ def test_every_hold_lets_go_when_the_job_is_done(
     _drain_polls(view, jobs)
 
     assert view._badge_held is None
-    assert view.realm_badge.status == ("running" if press in _AFTER else "stopped")
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == ("starting" if press in _AFTER else "stopped")
 
 
 def test_a_stop_goes_from_stopping_to_stopped_and_never_through_running(
