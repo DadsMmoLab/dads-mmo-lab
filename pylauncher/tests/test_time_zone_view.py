@@ -302,4 +302,4 @@ def test_the_tuning_recreate_says_it_too(
     view.recreate_containers()
 
     report = view.tuning_report.toPlainText()
-    assert report.startswith("recreate: done.") and "UTC" in report
+    assert report.startswith("recreate: the server was started.") and "UTC" in report

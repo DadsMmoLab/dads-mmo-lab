@@ -1382,6 +1382,28 @@ def test_wsl_env_keeps_an_existing_wslenv(monkeypatch: pytest.MonkeyPatch) -> No
     assert "MYSQL_PWD" in env["WSLENV"]
 
 
+def test_wsl_env_marks_a_path_variable_for_translation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T376: a Windows folder handed to a distro has to arrive as the distro's spelling of it.
+
+    `/p` is what tells WSL to turn `C:\\Users\\pk\\...` into `/mnt/c/Users/pk/...`;
+    without it buildx inside the distro is handed a path it reads as relative.
+    A variable not named a path keeps the bare name.
+    """
+    monkeypatch.delenv("WSLENV", raising=False)
+    env = platform.wsl_env({"BUILDX_CONFIG": "C:\\cfg", "OTHER": "x"}, paths=("BUILDX_CONFIG",))
+    assert env["BUILDX_CONFIG"] == "C:\\cfg"
+    assert env["WSLENV"].split(":") == ["BUILDX_CONFIG/p", "OTHER"]
+
+
+def test_wsl_env_replaces_an_existing_unflagged_spelling_of_a_path_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare `BUILDX_CONFIG` already in WSLENV would win the crossing untranslated (T376)."""
+    monkeypatch.setenv("WSLENV", "THEIRS/p:BUILDX_CONFIG")
+    env = platform.wsl_env({"BUILDX_CONFIG": "C:\\cfg"}, paths=("BUILDX_CONFIG",))
+    assert env["WSLENV"].split(":") == ["THEIRS/p", "BUILDX_CONFIG/p"]
+
+
 def test_wsl_distros_decodes_utf16(monkeypatch: pytest.MonkeyPatch) -> None:
     """`wsl.exe` writes UTF-16LE and a UTF-8 read returns garbage, not an error."""
     monkeypatch.setattr(platform, "_wsl_list_bytes", lambda: WSL_LIST_UTF16)
