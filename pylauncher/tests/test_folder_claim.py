@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -646,3 +647,40 @@ def test_a_released_claim_whose_removal_failed_is_swept(
     while name in fake_containers(fake_docker):
         assert time.monotonic() < deadline, "the claim stayed"
         time.sleep(0.02)
+
+
+# -- T549: a claim that ends before its press does --------------------------------
+
+
+def test_a_claim_that_ends_while_its_press_holds_it_says_it_was_lost(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """T549: Docker Desktop restarted, or the container removed: the claim's CLI exits.
+
+    The press must hear it: a second Yu'lon can claim the folder from then on.
+    Ended here as `docker rm -f` ends it, by ending the CLI attached to it.
+
+    Mutation this catches: nothing watching the claim's CLI (`lost` never set).
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    name = _claim_name(folder)
+    with docker.folder_claim(folder, IMAGE) as held:
+        assert not held.lost.is_set()
+        cli = int((fake_docker / "containers" / name).read_text(encoding="utf-8"))
+        os.kill(cli, signal.SIGKILL)
+        assert held.lost.wait(HANG_BOUND), "a claim that ended mid-press was not noticed"
+        assert held.name == name
+
+
+def test_a_claim_its_press_lets_go_is_not_lost(fake_docker: Path, tmp_path: Path) -> None:
+    """The press's own release ends the CLI too, and that is not a loss.
+
+    Mutation this catches: the watcher reading every end of the CLI as a loss.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        pass
+    time.sleep(0.3)  # the watcher has seen the CLI end by now
+    assert not held.lost.is_set()

@@ -5752,10 +5752,13 @@ class Seams:
     # `sqlplan.ExecStdin`/`SqlQuery` declare the keyword for the opposite
     # reason. Nobody has reconciled the two — undecided.
     run_container: Callable[..., docker.AttachedRun] = docker.run_container
-    folder_claim: Callable[[Path, str, threading.Event | None], AbstractContextManager[bool]] = (
+    folder_claim: Callable[[Path, str, threading.Event | None], AbstractContextManager[object]] = (
         docker.folder_claim
     )
-    """T543: a Re-extract's claim on its `data/`, made by the daemon that runs the tools."""
+    """T543: a Re-extract's claim on its `data/`, made by the daemon that runs the tools.
+
+    What it yields is a `docker.ClaimHeld` (T549: whether the claim was lost mid-press);
+    a stand-in that yields anything else is a claim nobody watches."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query

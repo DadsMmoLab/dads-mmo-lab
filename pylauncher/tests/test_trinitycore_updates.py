@@ -3422,3 +3422,84 @@ def test_a_reextract_lets_go_of_its_claim_however_it_ends(
             assert made and "yulon-claim-" in made[0], made
     finally:
         end_fake_containers(state)
+
+
+# -- T549: the folder's claim ends mid-press -----------------------------------------
+
+
+def test_a_press_whose_folder_claim_ends_stops_and_leaves_the_old_map_data_aside(
+    box: Box,
+) -> None:
+    """T549: the claim gone, a second Yu'lon may claim the folder and set its own work
+    going, so this press stops as a Stop would -- its tools end, nothing more runs -- and
+    does not put the old map data back underneath another press. It says why.
+
+    Mutation this catches: the press not watching its claim (the other two tools run and
+    the old data is put back), or a claim-lost press reading as a plain Stop.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    tools = box.m.tools
+    real_call = type(tools).__call__
+
+    def tool_then_lose_the_claim(self, spec, *, sink, cancel=None):  # type: ignore[no-untyped-def]
+        run = real_call(self, spec, sink=sink, cancel=cancel)
+        lost.set()  # Docker Desktop restarted while the first tool ran
+        return run
+
+    type(tools).__call__ = tool_then_lose_the_claim  # type: ignore[method-assign]
+    try:
+        box.m.tools.seen.clear()
+        box.world.running = False
+        with pytest.raises(InstallerError) as raised:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    finally:
+        type(tools).__call__ = real_call  # type: ignore[method-assign]
+    said = str(raised.value)
+    assert list(box.m.tools.seen) == ["mapextractor"], "the press went on after the claim ended"
+    assert "yulon-claim-0123456789abcdef" in said and "reservation" in said, said
+    assert not stop_took_effect(raised.value), "a lost claim is not the player's Stop"
+    data = box.server_dir / "data"
+    assert (data / extract.PREVIOUS_DIR).is_dir(), "the old map data was put back under it"
+
+
+def test_a_press_whose_folder_claim_ended_before_anything_moved_changes_nothing(
+    box: Box,
+) -> None:
+    """T549: lost before the old map data is moved aside, the press stops with nothing changed.
+
+    Mutation this catches: no look at the claim before the old map data is set aside.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    lost = threading.Event()
+    lost.set()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "Nothing was moved aside" in str(raised.value), raised.value
+    assert box.m.tools.seen == {}, "a tool ran after the claim was lost"
+    assert data_files(box) == before
