@@ -135,6 +135,22 @@ _LIVE_STREAMS: weakref.WeakKeyDictionary[Generator[str, None, None], _Child] = (
 )
 _LIVE_STREAMS_LOCK = threading.Lock()
 
+_STOPS_SENT: dict[int, int] = {}
+"""How many Stops `end_streams_started_on()` was sent per thread ident, under the lock (T321)."""
+
+
+def stops_sent_to(ident: int) -> int:
+    """How many times a Stop was sent to thread `ident`, live stream or not (T321).
+
+    `end_streams_started_on()` ends only what is live, and a Stop that lands while
+    the thread is in a plain `run()` -- `docker create`, which no Stop may cut short
+    (`container_end`) -- finds nothing to end. A caller that must not lose that
+    Stop reads this before such a call and again after it: a different count is a
+    Stop sent in between. A count, not a flag, so nothing has to be reset.
+    """
+    with _LIVE_STREAMS_LOCK:
+        return _STOPS_SENT.get(ident, 0)
+
 
 def _register(generator: Generator[str, None, None], child: _Child) -> None:
     """Put `generator` under the exit hook's eye, with the holder its body reports `proc` in."""
@@ -163,9 +179,15 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool 
     terminated its children's parent is gone.
 
     `terminate()`/`kill()` stay after it as the fallback, and are what a
-    taskkill that failed, timed out or could not start leaves in charge. Off
-    Windows nothing changes; T298 is the follow-up that asks whether Linux and
-    macOS need a process group.
+    taskkill that failed, timed out or could not start leaves in charge.
+
+    Off Windows the docker CLI alone is signalled, and on Linux that was
+    measured to be enough (T298, 2026-10-06, yulon-ubuntu and m910q): SIGTERM,
+    and SIGKILL too, left no compose or `buildx bake` process 2 s later, and the
+    stopped build never tagged its image. The CLI closes its plugin's socket and
+    compose ends its bake on that; both plugins ran in the CLI's own process
+    group, so a group signal would also have reached them, had it been needed.
+    macOS was not probed.
 
     `bounded` is for a caller that must not block for long (T365: a Stop on the
     thread that pressed it): the `kill()` is not waited for. Nothing is lost by
@@ -211,6 +233,7 @@ def _finish(
     *,
     stopped: bool = False,
     child: _Child | None = None,
+    drained: bool = True,
 ) -> None:
     """A stream's last word on its child: end it if it is running, then let its job go.
 
@@ -221,6 +244,17 @@ def _finish(
     The job is closed only after it was asked to end the tree, because a
     closed job's handle can no longer end anything.
 
+    **Ran out by itself means the root exited AND its output was read to the
+    end (T495).** `drained` is False for a stream its consumer closed before
+    EOF. Its root may have exited, but something still held the pipe, and that
+    is the command's own work: docker.exe ended by hand while compose and
+    `buildx bake` went on compiling into the pipe (yulon-win11-gate
+    2026-10-06). The Stop reached that stream only as a cancel that closed it
+    (the stream had been started on `native._pump()`'s worker, which the
+    panel's `end_streams_started_on()` does not match), and a release here let
+    the build compile on for 11 minutes. Such a job is closed. `interact()`
+    passes nothing: it stops reading when its child exits, by design.
+
     A Stop overrides `poll()`: if docker.exe exits before the Stop's thread
     runs, a release here would leave the rest of the tree running (Codex's
     second adversarial review). For a registered stream that Stop is
@@ -230,7 +264,7 @@ def _finish(
     it (Codex's fourth). `stopped` is the same for `interact()`, which is not
     registered and whose cancel is its Stop.
     """
-    ran_out = proc.poll() is not None
+    ran_out = drained and proc.poll() is not None
     try:
         _end_child(proc, job)
     finally:
@@ -457,6 +491,7 @@ def end_streams_started_on(ident: int) -> int:
     where it is said (`LogPanel._on_finished`).
     """
     with _LIVE_STREAMS_LOCK:
+        _STOPS_SENT[ident] = _STOPS_SENT.get(ident, 0) + 1  # `stops_sent_to()` (T321)
         # Only copied out under the lock, and nothing else done there: the
         # dictionary is weak and every other reader takes the same lock, and a
         # generator can be finalised on this thread inside this very walk (its
@@ -821,10 +856,12 @@ def _stream_lines(
             _abandon_unread(proc, job)
             raise
 
+    drained = False  # set at EOF; a stream closed before it did not run out (T495)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             yield line.rstrip("\n")
+        drained = True
 
         if reader is not None:
             reader.join()
@@ -841,7 +878,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -995,6 +1032,7 @@ def _progress_lines(
         _abandon_unread(proc, job)
         raise
 
+    drained = False  # set once both pipes reached EOF; see `stream()` (T495)
     try:
         done = 0
         while done < len(readers):
@@ -1003,6 +1041,7 @@ def _progress_lines(
                 done += 1
                 continue
             yield item
+        drained = True
         for reader in readers:
             reader.join()
         proc.wait()
@@ -1015,7 +1054,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):

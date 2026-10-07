@@ -2209,6 +2209,142 @@ def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reporte
     assert raised.value.returncode == 1, "a Stop must not read as exit 0"
 
 
+class _JobKillingOnClose(_JobHoldingAPid):
+    """`_JobHoldingAPid` whose `close()` also ends its member, as KILL_ON_JOB_CLOSE does.
+
+    `release()` clears that flag first, so it ends nothing: the member goes on.
+    """
+
+    def close(self) -> None:
+        super().close()
+        if self.member is not None:
+            try:
+                os.kill(self.member, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _gone(pid: int) -> bool:
+    """True once `pid` has exited (a zombie counts: it runs nothing), within `HANG_BOUND`."""
+    deadline = time.monotonic() + HANG_BOUND
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaped before the open, or between the open and the read (ESRCH,
+            # seen once in the mutation runs of 2026-10-07).
+            return True
+        time.sleep(POLL_PACE)
+    return False
+
+
+_ROOT_EXITS_GRANDCHILD_WRITES = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', "
+    "\"import os, time\\nprint('pid', os.getpid(), flush=True)\\n"
+    "while True:\\n    print('compiling', flush=True); time.sleep(0.05)\"], "
+    "stderr=subprocess.DEVNULL); "
+    "print('first', flush=True)"
+)
+"""A root that starts a grandchild on its own output pipe and exits 0 at once.
+
+The grandchild says its pid, then writes a line every 50 ms for as long as it
+lives: docker.exe ended by hand while docker-compose.exe and `buildx bake` go on
+compiling into the pipe (T495, yulon-win11-gate 2026-10-06, step 2).
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads /proc")
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_on_windows_a_stream_closed_before_eof_after_its_root_died_ends_its_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Root gone, tree still writing, consumer closes early: the job is closed, never released.
+
+    T495, seen live on yulon-win11-gate 2026-10-06 (T299 step 2): Rebuild,
+    docker.exe ended by hand, compose and buildx compiling on into the pipe,
+    then Stop. The stream had been started on `native._pump()`'s worker, so the
+    panel's `end_streams_started_on()` did not find it; the cancel event made
+    `docker.run_attached()` return at the next line and close the generator.
+    Its `finally` saw a root that had exited and read that as "ran out by
+    itself": the job was RELEASED and the build compiled on for 11 minutes.
+
+    A stream abandoned before its pipe reached EOF did not run out: somebody
+    is still holding the pipe, and that somebody is the command's own work.
+
+    Mutation this catches: `_finish` deciding "ran out" from `poll()` alone,
+    without asking whether the stream was read to its end.
+    """
+    job = _JobKillingOnClose()
+    spawned = _windows_spawns(monkeypatch, job)
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd(_ROOT_EXITS_GRANDCHILD_WRITES))
+    try:
+        while job.member is None:
+            line = next(lines)
+            if line.startswith("pid "):
+                job.member = int(line.split()[1])
+        proc = spawned[0]["proc"]
+        assert isinstance(proc, _REAL_POPEN)
+        assert proc.wait(timeout=HANG_BOUND) == 0
+        assert next(lines) in ("compiling", "first")  # the tree still writes, root or no root
+
+        lines.close()  # `run_attached()`'s `closing` on a cancel: GeneratorExit at the yield
+
+        assert "release" not in job.events, job.events
+        assert job.events[-1] == "close", job.events
+        assert _gone(job.member), "the job's tree outlived its stream"
+    finally:
+        lines.close()
+        if job.member is not None and not _gone(job.member):
+            os.kill(job.member, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads /proc")
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_off_windows_a_stream_closed_before_eof_after_its_root_died_is_as_before(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """Off Windows T495 changes nothing: no job is made, and nothing signals the leftover tree.
+
+    The same shape as the Windows test above. Off Windows a closed stream ends
+    its root if the root still runs and nothing else; T298 measured on Linux
+    that compose and `buildx bake` end with the docker CLI, so a dead root's
+    leftovers are not this code's to end. The grandchild is still running
+    after the close, as it was before T495.
+
+    Mutation this catches: the early-close ending reaching a POSIX stream
+    (signalling the tree, or making a job off Windows).
+    """
+    _as_windows(monkeypatch, platform)
+    made: list[object] = []
+    monkeypatch.setattr(runner.winjob, "create", lambda: made.append("job"))
+    lines = stream(_python_cmd(_ROOT_EXITS_GRANDCHILD_WRITES))
+    member: int | None = None
+    try:
+        while member is None:
+            line = next(lines)
+            if line.startswith("pid "):
+                member = int(line.split()[1])
+        child = runner._LIVE_STREAMS[lines]
+        assert child.proc is not None
+        assert child.proc.wait(timeout=HANG_BOUND) == 0
+
+        lines.close()
+
+        assert made == []
+        assert child.job is None
+        os.kill(member, 0)  # still there: raises ProcessLookupError if it was ended
+        with open(f"/proc/{member}/stat", encoding="utf-8") as stat:
+            assert stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    finally:
+        lines.close()
+        if member is not None:
+            os.kill(member, signal.SIGKILL)
+
+
 def test_on_windows_a_stop_after_the_stream_gave_its_answer_leaves_it_a_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

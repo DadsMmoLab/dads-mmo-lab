@@ -3303,6 +3303,18 @@ def test_an_absent_database_is_never_cleared(monkeypatch: pytest.MonkeyPatch) ->
 # ------------------------------------------------- the build (roadmap 6.2)
 
 
+def _create_double(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record the `docker create` that `run_container()` runs first (T321), and answer it."""
+    created: list[list[str]] = []
+
+    def create(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        created.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "0123456789ab\n", "")
+
+    monkeypatch.setattr(docker.runner, "run", create)
+    return created
+
+
 def _stream_double(
     monkeypatch: pytest.MonkeyPatch, lines: Iterable[str]
 ) -> tuple[list[list[str]], list[bool]]:
@@ -4485,6 +4497,18 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "tool_containers_writing_into": (
+        "T303: asks about containers `run_container()` started, which run on the local "
+        "daemon for its own reason (above)"
+    ),
+    "tool_containers_left_running": (
+        "T303 (Codex review): asks for the tool containers `run_container()` starts, which run "
+        "on the local daemon for its own reason (above)"
+    ),
+    "_cli_ended_on": (
+        "T303: ends the docker CLI streams THIS thread started (`runner.end_streams_started_on`), "
+        "whichever daemon they reach; it addresses no daemon of its own"
+    ),
     "run_detached": (
         "`run_container`'s reason, for the background job T179 starts the same way: its "
         "mounts are paths on this machine, and a server Yu'lon installed is on the local "
@@ -4974,6 +4998,7 @@ def test_run_container_streams_the_spelled_argv_with_stderr_merged(
     an hour of blank panel, the same trade `build_staged()` refuses.
     """
     seen, merged = _stream_double(monkeypatch, ["extracting 1/3", "extracting 2/3"])
+    created = _create_double(monkeypatch)
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     spec = docker.ContainerRun(
         image="busybox:1.36",
@@ -4983,7 +5008,12 @@ def test_run_container_streams_the_spelled_argv_with_stderr_merged(
     )
     heard: list[str] = []
     run = docker.run_container(spec, sink=heard.append)
-    assert seen == [["docker", *spec.to_argv()]]
+    (create,) = created
+    name = create[create.index("--name") + 1]
+    assert re.fullmatch(r"yulon-extract-[0-9a-f]{12}", name), name  # T303: Stop ends it by name
+    # T321: created first, under its name, then attached to.
+    assert create == ["docker", *spec.to_create_argv(name=name)]
+    assert seen == [["docker", "start", "-a", name]]
     assert merged == [True]
     assert heard == ["extracting 1/3", "extracting 2/3"]
     assert run.returncode == 0
@@ -5014,6 +5044,7 @@ def test_a_container_that_exited_non_zero_keeps_the_words_that_say_why(
     say, and it cannot decide from a status this function flattened.
     """
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    _create_double(monkeypatch)
     monkeypatch.setattr(
         docker.runner,
         "stream",
@@ -5040,13 +5071,33 @@ def test_a_host_with_no_docker_cli_is_told_apart_from_a_container_that_failed(
     naming the wrong culprit entirely.
     """
     seen, _merged = _stream_double(monkeypatch, ["never read"])
+    created = _create_double(monkeypatch)
     monkeypatch.setattr(docker.platform, "docker_program", lambda: None)
     spec = docker.ContainerRun(image="busybox:1.36", argv=("true",))
     run = docker.run_container(spec, sink=lambda _line: None)
     assert run.returncode == docker._CLI_MISSING_RETURNCODE
     assert run.returncode not in (0, docker.CANCELLED_RETURNCODE)
     assert run.tail == (docker.platform.DOCKER_CLI_MISSING_HELP,)
-    assert seen == [], "a host with no docker CLI must not reach the spawn seam"
+    assert seen == [] and created == [], "a host with no docker CLI must not reach the spawn seam"
+
+
+def test_a_docker_cli_gone_at_the_create_is_the_missing_cli_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T321: the CLI uninstalled while the app is open now shows at `docker create`, the
+    first spawn, and it is the same "could not ask" as `run_attached()` gives it."""
+    seen, _merged = _stream_double(monkeypatch, ["never read"])
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    def gone(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(docker.runner, "run", gone)
+    spec = docker.ContainerRun(image="busybox:1.36", argv=("true",))
+    run = docker.run_container(spec, sink=lambda _line: None)
+    assert run.returncode == docker._CLI_MISSING_RETURNCODE
+    assert run.tail == (docker.platform.DOCKER_CLI_MISSING_HELP,)
+    assert seen == []
 
 
 def test_a_relative_mount_is_refused_before_any_container_starts(
@@ -5059,13 +5110,14 @@ def test_a_relative_mount_is_refused_before_any_container_starts(
     the extractor", and the install engine would retry it forever.
     """
     seen, _merged = _stream_double(monkeypatch, ["never read"])
+    created = _create_double(monkeypatch)
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     spec = docker.ContainerRun(
         image="busybox:1.36", argv=("true",), mounts=(docker.Mount(Path("data"), "/out"),)
     )
     with pytest.raises(ValueError, match="absolute"):
         docker.run_container(spec, sink=lambda _line: None)
-    assert seen == []
+    assert seen == [] and created == []
 
 
 def _copy_runner(
