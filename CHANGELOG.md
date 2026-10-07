@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- TBC and Vanilla servers no longer risk a crash when bots fight Netherspite in Karazhan or pick certain mounts.
 - On Windows, **Stop** ends a build's leftover helpers even when the build's own docker process had already exited.
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
@@ -26,7 +27,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
 
 ### Changed
-- TBC and Vanilla servers no longer risk a crash when bots fight Netherspite in Karazhan.
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 
 ## v0.9.14-Public — 2026-10-07

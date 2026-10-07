@@ -297,14 +297,17 @@ disk. The new playerbots commit is C++ only and shared, so the Vanilla build com
 
 T537 (2026-10-07) moved the shared `playerbots` again, 45bed519 -> da4419af (ten commits,
 the first being our Netherspite null checks, cmangos/playerbots#393; the rest are C++:
-mount crash fix, hunter pet pick, login delay setting, debug strategies, tests). The
+mount crash fix, hunter pet pick, login delay setting, debug strategies, log export, and
+the largest, da4419af's RandomTeleport rewrite in RandomPlayerbotMgr.cpp). The
 diff holds no SQL, conf, CMake or `contrib/` file. The other four sources were still
 upstream's heads. The gate was one TBC install made at the pins of upstream/Yulon
 (playerbots 45bed519, a0519cb4's code), moved onto this commit through "Update the
 server to latest..." on `yulon-fedora-gate`: rebuild 4528 s, world ready 201 s after the
 start, 500 bots (500-508 online of the 900 characters), SOAP Verified, SRP6 2.4.3 login
-ok/wrong/unknown, Stop clean, no ERROR/FATAL line. Vanilla was not run live: it builds
-the same playerbots commit.
+ok/wrong/unknown, Stop clean, no ERROR/FATAL line. Vanilla was not run live; the commit
+has Vanilla-only `#if` changes (tests/RegisterInstance.cpp now reads
+`instanceTemplate->maxPlayers`, which mangos-classic 8ec338a1 has at Maps/Map.h:81), and
+upstream's own `build (classic)` passed at da4419af against mangos-classic 8ec338a1.
 """
 
 
