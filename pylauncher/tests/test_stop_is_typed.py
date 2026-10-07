@@ -33,7 +33,7 @@ from yulon.catalog.installer import (
     ReadyWaitStopped,
 )
 from yulon.controller_wow_tortoise import botdash
-from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED
+from yulon.ui.widgets.log_panel import STOPPED_PUT_BACK, STOPPED_THEN_FAILED
 
 YULON = Path(native.__file__).resolve().parents[1]
 
@@ -268,8 +268,10 @@ def test_stop_while_docker_is_being_set_up_is_a_clean_cancel(qapp: object, tmp_p
 
     panel, finished = stop_when(press, reached, "provisioning")
 
-    assert panel.status_text() == "cancelled", panel.status_text()
-    assert finished == [(True, "stopped")], finished
+    # A clean Stop, and since T528 the engine's own sentence for it is the header.
+    said = native._cancelled_message("the install")
+    assert panel.status_text() == STOPPED_PUT_BACK + said, panel.status_text()
+    assert finished == [(True, said)], finished
 
 
 def test_a_build_that_exited_on_its_own_under_a_stop_reads_as_the_stop(tmp_path: Path) -> None:

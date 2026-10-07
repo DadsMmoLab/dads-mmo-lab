@@ -269,7 +269,7 @@ def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
     while _signal_group(group, 0) and time.monotonic() < deadline:
         time.sleep(_GROUP_POLL_SECONDS)
     if _signal_group(group, 0):
-        _signal_group(group, signal.SIGKILL)
+        _signal_group(group, getattr(signal, "SIGKILL"))  # noqa: B009 - POSIX-only attribute
     if proc.poll() is None:
         proc.kill()
         if not bounded:
@@ -283,8 +283,9 @@ _GROUP_POLL_SECONDS = 0.05
 
 def _signal_group(group: int, sig: int) -> bool:
     """Send `sig` to process group `group`; False when none of it is left or it cannot be asked."""
+    killpg = getattr(os, "killpg")  # noqa: B009 - POSIX-only attribute; Windows has no groups
     try:
-        os.killpg(group, sig)
+        killpg(group, sig)
     except ProcessLookupError:
         return False
     except OSError as exc:

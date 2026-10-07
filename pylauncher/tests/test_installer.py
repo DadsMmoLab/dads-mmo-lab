@@ -197,10 +197,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     # carry so the log panel shows them after a Stop. A marker class, imported.
     "TrueAfterStop",
     # Added deliberately with T247/T250: Stop taking effect, as a type the log
-    # panel reads as "cancelled" (`StopTookEffect`, imported), and its two
-    # install kinds -- any stage, and the ready wait. Exception types, not
-    # machinery.
-    "StopTookEffect",
+    # panel reads as the Stop (`StopSaid` since T528, imported: shown as
+    # "Stopped: <sentence>"), and its two install kinds -- any stage, and the
+    # ready wait. Exception types, not machinery.
+    "StopSaid",
     "InstallStopped",
     "ReadyWaitStopped",
     "cancelled_install_message",
