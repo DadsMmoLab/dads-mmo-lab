@@ -459,3 +459,17 @@ def test_remove_does_not_list_a_deploy_folder_that_became_a_link_after_the_look(
     assert (deployed / "linked.lua").is_file(), "removed though its source could not be listed"
     assert any("lua" in line and "link" in line for line in report.skipped), report.skipped
     assert _snapshot(run.outside) == run.before
+
+
+def test_the_deploy_copy_stops_in_a_folder_that_became_a_link_after_its_parent_was_listed(
+    tmp_path: Path,
+) -> None:
+    """`copytree` enters a child folder by its path after the parent's look; the folder is asked."""
+    outside = _outside(tmp_path)
+    clone = tmp_path / "clone"
+    (clone / "lua").mkdir(parents=True)
+    os.symlink(outside, clone / "lua" / "swapped", target_is_directory=True)
+    ignore = apply_module._stop_at_links(parse_manifest(MODULE), clone)
+    with pytest.raises(ApplyError) as stopped:
+        ignore(str(clone / "lua" / "swapped"), [".ssh", "notes.lua"])
+    assert "lua/swapped" in str(stopped.value)

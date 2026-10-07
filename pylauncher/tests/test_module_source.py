@@ -598,3 +598,17 @@ def test_copy_folder_stops_at_a_link_made_after_the_look(
         module_source.copy_folder(src, dest)
 
     assert not (dest / "src" / "secret.cpp").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_copy_folder_stops_in_a_folder_that_became_a_link_after_its_parent_was_listed(
+    tmp_path: Path,
+) -> None:
+    """`copytree` enters a child folder by its path after the parent's look; the folder is asked."""
+    home = tmp_path / "home"
+    home.mkdir()
+    src = tmp_path / "mod-my-thing"
+    src.mkdir()
+    os.symlink(home, src / "swapped", target_is_directory=True)
+    with pytest.raises(OSError, match="became a link"):
+        module_source._git_and_links(str(src / "swapped"), ["secret"])

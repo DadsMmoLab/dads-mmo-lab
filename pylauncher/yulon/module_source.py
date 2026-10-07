@@ -555,6 +555,8 @@ def _git_and_links(folder: str, names: list[str]) -> set[str]:
     An `OSError`, the copier's failure (`apply.FolderCopier`): reached only by a
     link made after `_first_link()` looked, when the old copy is already gone.
     """
+    if links.is_link(folder):  # a child folder swapped for a link after its parent's look
+        raise OSError(f"{folder} became a link while it was being copied; it was not copied")
     for name in sorted(names):
         path = os.path.join(folder, name)
         if name != ".git" and links.is_link(path):

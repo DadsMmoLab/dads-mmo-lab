@@ -1085,6 +1085,11 @@ def _stop_at_links(manifest: Manifest, clone: Path) -> Callable[[str, list[str]]
     """A `copytree` `ignore` that raises at the first link in a folder it copies (T530)."""
 
     def ignore(folder: str, names: list[str]) -> set[str]:
+        # The folder itself too: `copytree` lists a child folder by its path after
+        # the parent's look, so one swapped for a link in between is caught here,
+        # before anything listed in it is copied.
+        if links.is_link(folder):
+            raise ApplyError(_checkout_link_said(manifest.id, clone, Path(folder), None))
         for name in sorted(names):
             path = Path(folder) / name
             if links.is_link(path):
