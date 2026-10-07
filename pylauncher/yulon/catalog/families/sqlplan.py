@@ -1783,6 +1783,10 @@ def whole_table_problem(path: Path) -> str | None:
             return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
         # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
         # the table emptied first like a plain INSERT does (Codex, T534 round 2).
+        if re.match(r"(?i)UPDATE ", sql) and not re.match(rf"(?i)UPDATE {_TABLE} SET ", sql):
+            # A join, a list or an alias can write a table other than the first one
+            # named (Codex, T534): only the single-table form is read.
+            return f"it runs an UPDATE of more than one table ({sql[:40]}…)"
         match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
         if match:
             if match.group(1).lower() not in emptied:
