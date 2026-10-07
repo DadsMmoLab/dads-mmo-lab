@@ -1739,6 +1739,7 @@ def whole_table_problem(path: Path) -> str | None:
     world/classic file passes.
     """
     emptied: set[str] = set()
+    dropped: set[str] = set()
     for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
         if not raw:
             continue
@@ -1757,11 +1758,17 @@ def whole_table_problem(path: Path) -> str | None:
             continue
         if re.fullmatch(rf"(?i)ALTER TABLE {_TABLE} (DISABLE|ENABLE) KEYS", sql):
             continue
-        if head.startswith("CREATE TABLE"):
+        match = re.match(rf"(?i)CREATE TABLE (IF NOT EXISTS )?{_TABLE}", sql)
+        if match:
+            # A plain CREATE fails the second time unless the table was dropped first
+            # (Codex, T534 round 4); IF NOT EXISTS is repeatable on its own.
+            if match.group(1) is None and match.group(2).lower() not in dropped:
+                return f"it creates {match.group(2)} without dropping it first"
             continue
         match = re.match(rf"(?i)DROP TABLE IF EXISTS {_TABLE}", sql)
         if match:
             emptied.add(match.group(1).lower())
+            dropped.add(match.group(1).lower())
             continue
         match = re.match(rf"(?i)(?:DELETE FROM|TRUNCATE(?: TABLE)?) {_TABLE}(.*)$", sql)
         if match:
@@ -1809,6 +1816,16 @@ def index_statements(path: Path) -> list[str]:
         for raw in _statements(path.read_text(encoding="utf-8", errors="replace"))
         if " ".join(raw.split()).upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))
     ]
+
+
+def recreate_index_statement(statement: str) -> str | None:
+    """`DROP INDEX` + the same `CREATE INDEX`, for an index that is already there (T534)."""
+    match = re.match(
+        r"(?is)\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(`?\w+`?)\s+ON\s+(`?\w+`?)", statement
+    )
+    if match is None:
+        return None
+    return f"DROP INDEX {match.group(1)} ON {match.group(2)};\n{statement}"
 
 
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:

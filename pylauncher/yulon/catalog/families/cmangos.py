@@ -910,12 +910,31 @@ class CmangosInstaller(StagedInstaller):
                     and piece is not run
                     and any("ERROR 1061" in line or "Duplicate key name" in line for line in said)
                 ):
+                    # An index of that name is there, maybe with another definition: it is
+                    # dropped and made again from the file, as a fresh install has it
+                    # (Codex, T534 round 4).
                     refused.pop()
+                    again = sqlplan.recreate_index_statement(piece.statement or "")
+                    if again is None:
+                        refused.append(piece)
+                        continue
+                    yield from self._stream(
+                        _apply_one(
+                            replace(piece, statement=again, rel=f"{piece.rel} again"),
+                            container=container,
+                            client=db.client,
+                            password=password,
+                            exec_stdin=self._seams.exec_stdin,
+                            refused=refused,
+                        ),
+                        cancel=None,
+                        stage="world-updates",
+                    )
                     present += 1
             state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
             self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
             if present and not refused:
-                yield f"{run.rel}: {present} of its indexes were already there; the rest made."
+                yield f"{run.rel}: {present} of its indexes were there and were made again."
                 loaded += 1
                 continue
             if refused:

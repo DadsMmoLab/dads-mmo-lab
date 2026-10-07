@@ -165,7 +165,8 @@ def test_an_index_file_runs_one_index_at_a_time_and_a_present_one_hides_none_aft
 ) -> None:
     """ai_playerbot_indexes.sql is only CREATE INDEX. Run whole, the client stops at the
     first index that is already there and never makes a new one after it (Codex, round
-    3); run one at a time, each is made or reported present (ERROR 1061)."""
+    3); run one at a time, each is made, or -- already there (ERROR 1061) -- dropped and
+    made again from the file, so its definition is the file's (Codex, round 4)."""
     rec, server_dir, db, world = _installed(tmp_path)
     index = BOT_FILES[0]
     _lay(
@@ -173,9 +174,14 @@ def test_an_index_file_runs_one_index_at_a_time_and_a_present_one_hides_none_aft
     )
     sent = _index_client(db, {"idx_a": "ERROR 1061 (42000) at line 1: Duplicate key name 'idx_a'"})
     lines = _press(rec, server_dir, db, world)
-    assert [n for n in sent if n in ("idx_a", "idx_b")] == ["idx_a", "idx_b"], sent
+    # idx_a is there: refused, then dropped and made again from the file (Codex round 4,
+    # its definition may differ); idx_b is made; neither hides the other.
+    assert sent == ["idx_a", "idx_a", "dropped", "idx_b"], sent
     assert db.rows[("playerbots world", index)][1] == "applied"
-    assert any(index in line and "1 of its indexes were already there" in line for line in lines)
+    assert any(
+        index in line and "1 of its indexes were there and were made again" in line
+        for line in lines
+    )
     sent.clear()
     _press(rec, server_dir, db, world)
     assert sent == [], "applied: not run again"
@@ -214,6 +220,9 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         if found:
             names = [n.decode() for n in found]
             sent.extend(names)
+            if re.search(rb"(?i)drop index", data):
+                sent.append("dropped")
+                return subprocess.CompletedProcess(list(argv), 0, "", "")
             for name in names:
                 if name in refusals:
                     return subprocess.CompletedProcess(list(argv), 1, "", refusals[name])
@@ -253,6 +262,11 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         ("DELETE FROM t ORDER BY a LIMIT 1;\nINSERT INTO t VALUES (1);\n", "not safe to repeat"),
         ("DELETE t FROM t JOIN u ON t.a = u.a;\nINSERT INTO t VALUES (1);\n", "not safe to repeat"),
         ("ALTER TABLE t ADD COLUMN b int;\n", "not safe to repeat"),
+        ("CREATE TABLE t (a int);\n", "creates t without dropping it first"),
+        (
+            "CREATE TABLE IF NOT EXISTS t (a int);\nDELETE FROM t;\nINSERT INTO t VALUES (1);\n",
+            None,
+        ),
         ("/*!50000 ALTER TABLE t ADD COLUMN b int */;\n", "not safe to repeat"),
         ("INSERT INTO t VALUES ('x;DROP TABLE IF EXISTS t');\n", "it writes t without emptying"),
     ],
@@ -271,6 +285,8 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         "delete-order-limit",
         "delete-join",
         "alter",
+        "create-undropped",
+        "create-if-not-exists",
         "exec-alter",
         "quoted-drop",
     ],
