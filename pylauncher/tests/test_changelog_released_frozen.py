@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -40,17 +40,25 @@ PINNED: dict[str, tuple[int, str]] = {
     "v0.8.7-Public": (8, "39bd250cc89a516f1bc0bc1f224a484fea3235c66c70348814f7f59a239757b8"),
     "v0.8.4-Public": (8, "5519d9a553942f00b3f31aadd6139abd949b5acc6133c2e593c841cec7ebdb2f"),
     "v0.8.0-Public": (18, "bf6cb4ebf594a7d90c6029bfafc8311a0ec1779e0ecdb361630e6cd508e9f6ec"),
+    "v0.6.59Public": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
 }
 
 
 def released_bullets(text: str) -> dict[str, list[str]]:
-    """Each `## vX-Public` section's bullets, keyed by the tag name."""
-    found: dict[str, list[str]] = defaultdict(list)
+    """Each released `## vX` section's bullets, keyed by the tag name.
+
+    "Released" is `release_notes.version_key(name) is not None`, as in the cut
+    itself. A section with no bullets is kept, as an empty list.
+    """
+    found: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        if line.startswith("## ") and rn.version_key(line[3:].split(" ")[0]) is not None:
+            found.setdefault(line[3:].split(" ")[0], [])
     for section, _, bullet in rn.parse_sections(text):
         name = section.split(" ")[0]
-        if name.startswith("v") and name.endswith("-Public"):
+        if name in found:
             found[name].append(bullet)
-    return dict(found)
+    return found
 
 
 def pin(bullets: list[str]) -> tuple[int, str]:
@@ -82,6 +90,20 @@ def test_a_line_added_under_a_released_heading_is_caught() -> None:
     heading = next(x for x in text.splitlines() if x.startswith("## v0.9.14-Public"))
     edited = text.replace(heading, heading + "\n\n### New\n\n- A line that would never ship.", 1)
     assert drift(edited) == ["v0.9.14-Public: bullets changed (6 now, 5 pinned)"]
+
+
+def test_a_line_added_under_the_oldest_release_is_caught() -> None:
+    text = CHANGELOG.read_text(encoding="utf-8")
+    heading = next(x for x in text.splitlines() if x.startswith("## v0.6.59Public"))
+    edited = text.replace(heading, heading + "\n\n### New\n\n- A line that would never ship.", 1)
+    assert len(drift(edited)) == 1 and drift(edited)[0].startswith("v0.6.59Public: bullets changed")
+
+
+def test_an_empty_released_section_is_pinned_not_gone() -> None:
+    text = "## v9.9.9 — 2030-01-01\n\n### New\n\n" + CHANGELOG.read_text(encoding="utf-8")
+    assert released_bullets(text)["v9.9.9"] == []
+    assert pin([]) == (0, hashlib.sha256(b"").hexdigest())
+    assert drift(text) == ["v9.9.9: released but not pinned; add it to PINNED"]
 
 
 def test_an_unpinned_release_heading_is_caught() -> None:
