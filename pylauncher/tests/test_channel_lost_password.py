@@ -584,3 +584,371 @@ def test_a_settle_that_finishes_during_the_look_is_not_overwritten(tmp_path: Pat
     assert isinstance(looked, channel_setup.Verified), looked
     assert isinstance(setup.setup_state(), channel_setup.Verified)
     assert world.resets == 0
+
+
+# -- after "Repair the database…" the account is gone (T423) --------------------
+
+GONE_LINE = "Yu'lon's own server account is not in the database any more. Repair makes it again."
+
+
+def _proved(box: _Box) -> None:
+    """The ground: a channel that was proved on this machine, so a credential is saved."""
+    box.view._settle_the_channel()
+    box.view.repair_channel_button.click()
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+
+
+def _drop_the_account(box: _Box) -> None:
+    """What re-importing the database does to a row the import did not carry."""
+    with box.auth.lock:
+        box.auth.conn.execute("DELETE FROM account WHERE username = ?", (box.app,))
+
+
+def _repair_the_database(box: _Box, monkeypatch: pytest.MonkeyPatch, *, ok: bool = True) -> None:
+    from tests.conftest import wait_for_panel
+
+    def route(cancel: object = None) -> Iterator[str]:
+        if not ok:
+            raise RuntimeError("the import failed")
+        yield "Repairing"
+
+    box.view.services.repair_database = route
+    monkeypatch.setattr(controller_view_module, "ask_yes_no", lambda *a, **k: True)
+    assert box.view.repair_database()
+    wait_for_panel(box.view.rebuild_log)
+
+
+def test_after_a_database_repair_the_channel_says_its_account_is_gone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live case: the world is not up yet, so only the database can say the row is gone."""
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    assert _line(box).startswith("Command channel: verified"), "the ground: the stale row"
+
+    _repair_the_database(box, monkeypatch)
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+    assert player_text_faults(box.view) == []
+    assert command_faults(_line(box)) == []
+
+
+def test_repair_makes_the_gone_account_again_and_proves_it(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    _repair_the_database(box, monkeypatch)
+    before = box.auth.rows()
+    assert box.app not in before
+
+    box.wire.loading = False
+    box.view.repair_channel_button.click()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+    after = box.auth.rows()
+    assert {k: v for k, v in after.items() if k != box.app} == before, "another account changed"
+    assert len([k for k in after if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_a_world_that_is_up_and_refuses_the_gone_account_is_repaired_too(box: _Box) -> None:
+    """Refresh with the world answering: it refuses the saved password, and Repair must still work.
+
+    A reset of a row that is not there changes nothing, so Repair on its own
+    would be refused a second time.
+    """
+    _proved(box)
+    _drop_the_account(box)
+
+    box.view.recheck()
+    assert _offers_repair(box)
+    box.view.repair_channel_button.click()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+
+
+def test_a_database_repair_that_failed_still_asks_the_channel_again(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-done import leaves a database nobody has read, so the row is not left as it was."""
+    _proved(box)
+    _drop_the_account(box)
+    box.wire.loading = True
+    _repair_the_database(box, monkeypatch, ok=False)
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+
+
+def test_a_database_that_cannot_be_asked_leaves_the_proved_channel_alone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proved(box)
+    box.auth.down = True
+    _repair_the_database(box, monkeypatch)
+    assert _line(box).startswith(f"Command channel: verified as {box.app}")
+    assert not _offers_repair(box)
+
+
+def test_with_the_channel_off_repair_leaves_enable_on_offer(box: _Box) -> None:
+    """The row is there, the setting is off: the world cannot answer, so Repair ends waiting.
+
+    Hiding Enable then left a player with a channel that could never be proved.
+    """
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        # The trees that read the channel from their conf: a conf with none of its keys.
+        conf = box.view.services.channel_setup.server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+    box.view._settle_the_channel()
+    assert _offers_repair(box)
+    box.wire.loading = True  # a world with the channel off answers nobody
+
+    box.view.repair_channel_button.click()
+
+    assert "waiting to be proved" in _line(box)
+    assert not box.view.enable_channel_button.isHidden(), "Enable is not offered"
+
+
+def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    monkeypatch.setattr(type(setup), "is_enabled", lambda self: True, raising=False)
+    box.view._settle_the_channel()
+    box.wire.loading = True
+
+    box.view.repair_channel_button.click()
+
+    assert "waiting to be proved" in _line(box)
+    assert box.view.enable_channel_button.isHidden()
+
+
+def _real_override(box: _Box) -> tuple[object, str]:
+    """The channel-on override this install would write, and the setup that reads it."""
+    from yulon.catalog import bot_count
+
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        conf = setup.server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(
+            "".join(f"{k} = {v}\n" for k, v in operations.enable_conf.keys.items()),
+            encoding="utf-8",
+        )
+    env = bot_count.world_env(
+        box.entry, setup.server_dir, channel_setup._world_env(box.entry, operations.enable_env)
+    )
+    text = composegen.render(
+        box.entry,
+        setup.server_dir,
+        templates_root=setup.templates_root,
+        world_env=env,
+        db_password=setup._password(),
+        bind_label="",
+    ).override
+    return setup, text
+
+
+def _write(setup: object, text: str) -> None:
+    (setup.server_dir / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8")  # type: ignore[attr-defined]
+
+
+def test_a_real_override_without_the_channel_lines_reads_off(box: _Box) -> None:
+    """The live case: an override is there (every install has one) and the channel is off in it."""
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if not operations.enable_env:
+        pytest.skip("this tree's channel is in its conf, not the override")
+    _write(setup, on)
+    assert setup.is_enabled() is True  # type: ignore[attr-defined]
+    off = "".join(
+        line
+        for line in on.splitlines(keepends=True)
+        if not any(key in line for key in operations.enable_env)
+    )
+    assert off != on
+    _write(setup, off)
+    assert setup.is_enabled() is False  # type: ignore[attr-defined]
+
+
+def test_an_override_with_some_but_not_all_channel_lines_is_not_called_off(box: _Box) -> None:
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if len(operations.enable_env) < 2:
+        pytest.skip("needs two channel lines to be mixed")
+    lines = on.splitlines(keepends=True)
+    first = next(i for i, ln in enumerate(lines) if any(k in ln for k in operations.enable_env))
+    del lines[first]
+    _write(setup, "".join(lines))
+    assert setup.is_enabled() is None  # type: ignore[attr-defined]
+
+
+def test_an_override_with_other_edits_but_the_channel_lines_reads_on(box: _Box) -> None:
+    setup, on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if not operations.enable_env:
+        pytest.skip("this tree's channel is in its conf, not the override")
+    _write(setup, on + "# edited by hand\n")
+    assert setup.is_enabled() is True  # type: ignore[attr-defined]
+
+
+def test_an_override_of_a_conf_tree_that_reads_differently_is_unknown(box: _Box) -> None:
+    setup, _on = _real_override(box)
+    operations = box.entry.operations
+    assert operations is not None
+    if operations.enable_env:
+        pytest.skip("this tree's channel is in its override")
+    _write(setup, "# some older text\n")
+    assert setup.is_enabled() is None  # type: ignore[attr-defined]
+
+
+def test_a_start_finds_a_waiting_row_whose_account_was_deleted(box: _Box) -> None:
+    """The world is up and silent (channel off): only the database can say the row is gone."""
+    box.view._settle_the_channel()
+    box.wire.loading = True
+    box.view.repair_channel_button.click()
+    assert "waiting to be proved" in _line(box)
+    _drop_the_account(box)
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+
+
+# -- after the channel gave up proving, in the same app run (T427, T497) ---------
+
+GAVE_UP = "three round trips did not prove it"
+
+
+def _gave_up(box: _Box) -> None:
+    """The live ground: a row that waits to be proved, and three asks the world never answered.
+
+    Seen on m910q and yulon-win11-gate (2026-10-06): a Start against a world
+    whose channel is off spends the three tries and the row stops at "not set
+    up … it is over to you" for the rest of the app run.
+    """
+    box.view._settle_the_channel()
+    box.wire.loading = True  # a world whose channel is off answers nobody
+    box.view.repair_channel_button.click()
+    assert "waiting to be proved" in _line(box), "the ground: a row that waits"
+    for _ in range(3):
+        box.view._settle_the_channel()
+    assert GAVE_UP in _line(box), "the ground: the setup gave up"
+
+
+def test_after_the_channel_gave_up_refresh_finds_its_account_deleted(box: _Box) -> None:
+    """T427: a Refresh read the account again only after a relaunch."""
+    _gave_up(box)
+    _drop_the_account(box)
+
+    box.view.recheck()
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+    box.wire.loading = False
+    box.view.repair_channel_button.click()
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    assert len([k for k in box.auth.rows() if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_after_the_channel_gave_up_a_database_repair_finds_its_account_gone(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gave_up(box)
+    _drop_the_account(box)
+
+    _repair_the_database(box, monkeypatch)
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert _offers_repair(box)
+
+
+def test_after_the_channel_gave_up_refresh_proves_a_world_that_answers_now(box: _Box) -> None:
+    _gave_up(box)
+    box.wire.loading = False
+
+    box.view.recheck()
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    saved = _saved(box)
+    assert saved is not None and box.auth.accepts(box.app, saved.password)
+
+
+def test_after_the_channel_gave_up_a_refresh_that_learns_nothing_keeps_the_line(
+    box: _Box,
+) -> None:
+    """A look that is not answered is not news: the three tries already said what they found."""
+    _gave_up(box)
+    before = box.auth.rows()
+
+    box.view.recheck()
+
+    assert GAVE_UP in _line(box)
+    assert box.auth.rows() == before, "a Refresh wrote to the auth database"
+
+
+def test_turn_on_after_the_channel_gave_up_is_checked_at_the_next_start(
+    box: _Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T497: the press said "it is checked the next time you start the server", and it was not."""
+    _gave_up(box)
+    pressed: list[bool] = []
+
+    def wrote(entry: object, server_dir: Path, *, world_running: bool, **_k: object) -> object:
+        pressed.append(world_running)
+        return channel_setup.Enabled(path=server_dir, changed=True)
+
+    monkeypatch.setattr(channel_setup, "enable", wrote)
+    assert not box.view.enable_channel_button.isHidden(), "Turn on is offered after giving up"
+    box.view.stop_button.setEnabled(False)  # the press is made with the server stopped
+
+    box.view.enable_channel_button.click()
+
+    assert pressed == [False]
+    assert "checked the next time you start the server" in box.view.problem_label.text()
+    assert "waiting to be proved" in _line(box), "the gave-up line outlived the press"
+    asked = len(box.wire.asked_as)
+    box.wire.loading = False
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert len(box.wire.asked_as) > asked, "the Start after Turn on asked nothing"
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+    assert len([k for k in box.auth.rows() if k.startswith("YULON_")]) == 1, "a second app account"
+
+
+def test_a_start_after_the_channel_gave_up_asks_again(box: _Box) -> None:
+    """The setting was put right by hand, or the world was only slow: a Start is the next ask."""
+    _gave_up(box)
+    box.wire.loading = False
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box).startswith(f"Command channel: verified as {box.app} at ")
+
+
+def test_a_start_after_the_channel_gave_up_finds_its_account_deleted(box: _Box) -> None:
+    _gave_up(box)
+    _drop_the_account(box)
+    before = box.auth.rows()
+
+    box.view._settle_the_channel()  # what a finished Start runs
+
+    assert _line(box) == f"Command channel: {GONE_LINE}"
+    assert box.auth.rows() == before, "a Start made the row again unasked"

@@ -88,6 +88,8 @@ class _Docker:
         self.exit_code: str = "0"
         """What `docker inspect --format {{.State.ExitCode}}` answers once the world exited."""
         self.log_tail = "Halting process...\n"
+        self.working_dir = ""
+        """The world's compose working-dir label (T496), for telling two installs apart."""
 
     def _world_look(self) -> subprocess.CompletedProcess:
         world = self.spec.world
@@ -157,6 +159,8 @@ class _Docker:
         if verb[:2] == ["logs", "--tail"]:
             return _done(self.log_tail)
         if verb[:1] == ["inspect"]:
+            if docker.WORKING_DIR_LABEL in verb[-1]:
+                return _done(f"{self.working_dir}\n")
             if docker.PROJECT_LABEL in verb[-1]:
                 return _done("t384-server\n")
             if "{{.State.Status}}" in verb[-1] and verb[1] == world:
@@ -502,6 +506,8 @@ class _Console:
         self.queue = list(queue or [])
         self.looks = 0
         self.refuse = ""
+        self.refused: set[str] = set()
+        """Commands that alone fail as a console this host cannot reach does."""
         self.prompted = True
         self.after_look: object = None
 
@@ -510,8 +516,8 @@ class _Console:
 
         assert kw["container"] == self.fake.spec.world
         assert kw["prompt"] == self.fake.spec.save_first.prompt  # type: ignore[union-attr]
-        if self.refuse:
-            raise ConsoleError(self.refuse)
+        if self.refuse or command in self.refused:
+            raise ConsoleError(self.refuse or "no attach")
         self.fake.events.append(f"console: {command}")
         if command != "server debug":
             return ConsoleReply(command, ("All players saved.",), prompted=self.prompted)
@@ -532,19 +538,30 @@ def _with_console(
 ) -> _Console:
     console = _Console(fake, queue)
     monkeypatch.setattr(docker, "_console_send", console)
+    # The console path is this host's, whatever host the suite runs on (T496).
+    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: True)
     return console
+
+
+BOTS_OUT = ["playerbot population stop", "server plimit administrator"]
+"""What Centurion is told before `saveall` so nothing new joins its save queue (T498)."""
+
+BOTS_BACK = ["server plimit reset", "playerbot population start"]
+"""What puts `BOTS_OUT` back when the stop is given up and the world is left running (T498)."""
 
 
 def test_centurion_and_tortoise_say_how_they_save_first_and_the_rest_do_not() -> None:
     centurion = CATALOG.get("wow-centurion").container_spec().save_first
     assert centurion is not None
     assert (centurion.command, centurion.queue_command) == ("saveall", "server debug")
+    assert (list(centurion.first), list(centurion.if_given_up)) == (BOTS_OUT, BOTS_BACK)
     assert centurion.queue_length("CharacterDatabase queue size: 2137") == 2137
     assert centurion.queue_length("LoginDatabase queue size: 9") is None
     assert (centurion.prompt, centurion.prompt_precedes_answer) == ("TC>", True)
     tortoise = CATALOG.get("wow-tortoise").container_spec().save_first
     assert tortoise is not None
     assert (tortoise.command, tortoise.queue_command) == ("saveall", "")
+    assert (tortoise.first, tortoise.if_given_up) == ((), ())
     assert tortoise.prompt == "mangos>"
     for game in ("wow-wotlk", "wow-vanilla", "wow-tbc"):
         assert CATALOG.get(game).container_spec().save_first is None, game
@@ -565,6 +582,10 @@ def test_a_queue_command_without_a_pattern_with_one_group_is_refused() -> None:
         {"command": "saveall", "queue_command": "server debug", "queue_pattern": r"(unclosed"},
         {"command": ""},
         {"command": "save\nall"},
+        {"command": "saveall", "first": ["server plimit\nadministrator"]},
+        {"command": "saveall", "first": [""]},
+        {"command": "saveall", "if_given_up": ["server plimit reset"]},
+        {"command": "saveall", "first": ["a"], "if_given_up": ["reset\nall"]},
     ):
         with pytest.raises(ValidationError):
             SaveBeforeStop(**bad)  # type: ignore[arg-type]
@@ -579,7 +600,8 @@ def test_centurion_saves_everyone_and_waits_for_the_queue_before_the_signal(
     console = _with_console(monkeypatch, fake, [2137, 1500, 600, 40, 0])
     stopped, said, _ = _stop(fake, tmp_path)
     assert stopped is True
-    assert fake.events[:7] == [
+    assert fake.events[:9] == [
+        *[f"console: {line}" for line in BOTS_OUT],
         "console: saveall",
         *["console: server debug"] * 5,
         "SIGTERM",
@@ -605,7 +627,7 @@ def test_a_queue_back_at_an_older_level_is_not_taken_for_the_saves_written(
     console = _with_console(monkeypatch, fake, [2140, 3, 3, 3, 0])
     _, said, _ = _stop(fake, tmp_path)
     assert console.looks == 5
-    assert fake.events.index("SIGTERM") == 1 + 5
+    assert fake.events.index("SIGTERM") == len(BOTS_OUT) + 1 + 5
     assert docker.SAVE_FIRST_WRITTEN in said
 
 
@@ -615,7 +637,7 @@ def test_a_queue_already_empty_is_not_waited_on(
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _with_console(monkeypatch, fake, [0])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
+    assert fake.events[2:5] == ["console: saveall", "console: server debug", "SIGTERM"]
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_WRITTEN]
 
 
@@ -675,7 +697,7 @@ def test_a_queue_length_that_cannot_be_read_at_all_is_not_waited_on(
     fake = _install(monkeypatch, "wow-centurion", _rising(4))
     _with_console(monkeypatch, fake, [None])
     _, said, _ = _stop(fake, tmp_path)
-    assert fake.events[:3] == ["console: saveall", "console: server debug", "SIGTERM"]
+    assert fake.events[2:5] == ["console: saveall", "console: server debug", "SIGTERM"]
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING]
 
 
@@ -755,7 +777,7 @@ def test_a_console_that_cannot_be_reached_is_said_and_the_stop_goes_on(
     _, said, _ = _stop(fake, tmp_path)
     assert fake.events[0] == "SIGTERM"
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
-    assert said[2:] == [docker.WORLD_SAVING, docker.WORLD_SAVED]
+    assert said[2:] == [docker.WORLD_SAVING, docker.WORLD_CLOSED]
 
 
 def test_a_world_that_is_not_running_is_not_asked_to_save(
@@ -789,6 +811,106 @@ def test_giving_up_while_the_queue_drains_sends_nothing_and_says_the_world_still
     assert touched == []
 
 
+def test_giving_up_puts_back_the_logins_the_stop_closed_before_it_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T498: the world is left running after a give-up, so the bots and players it logged out
+    for the save may come back: the login limit is reset and the bot population restarted."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(10))
+    console = _with_console(monkeypatch, fake, [900, 800, 700, 600, 500])
+    control = docker.StopControl()
+    console.after_look = lambda: control.abandon.set() if console.looks == 2 else None
+    with pytest.raises(docker.SaveFirstAbandoned):
+        docker.save_then_stop_the_world(fake.spec, control)
+    assert fake.events[-len(BOTS_BACK) :] == [f"console: {line}" for line in BOTS_BACK]
+    assert "SIGTERM" not in fake.events
+
+
+def test_a_stop_that_goes_on_does_not_let_the_logins_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [900, 800])
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.SAVE_FIRST_UNFINISHED in said
+    assert not [e for e in fake.events if e.endswith(tuple(BOTS_BACK))]
+
+
+def test_a_bots_out_line_the_console_refuses_does_not_stop_the_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Logging the bots out makes the wait shorter; it is not the save. The save is asked and
+    waited for as before when it could not be typed."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    console = _with_console(monkeypatch, fake, [40, 0])
+    console.refused = set(BOTS_OUT)
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events[:4] == [
+        "console: saveall",
+        "console: server debug",
+        "console: server debug",
+        "SIGTERM",
+    ]
+    assert said[:3] == [
+        docker.SAVE_FIRST_ASKING,
+        docker.SAVE_FIRST_QUEUED.format(count=40),
+        docker.SAVE_FIRST_WRITTEN,
+    ]
+
+
+def test_tortoise_types_no_bots_out_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _with_console(monkeypatch, fake)
+    _stop(fake, tmp_path)
+    assert [e for e in fake.events if e.startswith("console")] == ["console: saveall"]
+
+
+# -- T498: a queue the world keeps filling is not a stuck one ----------------------------------
+#
+# Live, yulon-win11, 2026-10-06 (Centurion, 150 bots): after `saveall` the character queue sat at
+# 1948 and never went below it for 5 minutes, because the bots' 90-second autosaves kept topping
+# it up while it drained. The stop read that as stuck, gave up, and the close threw away every
+# save queued since 14:58. The bots are now logged out first; and a queue is stuck only when it
+# stops getting shorter at all, not when it is never shorter than its lowest.
+
+
+def test_a_queue_that_keeps_draining_while_it_is_refilled_is_waited_out_past_the_stall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    looks = int(STALL / 2.0) + 40
+    refilled: list[int | None] = [1948 if n % 2 else 1990 for n in range(looks)]
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [1948, *refilled, 600, 0])
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.termed_at is not None and fake.termed_at > STALL
+    assert docker.SAVE_FIRST_UNFINISHED not in said
+    assert docker.SAVE_FIRST_WRITTEN in said
+
+
+def test_a_queue_that_only_grows_is_stuck(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A worker that writes nothing while saves still arrive: longer at every look, never
+    shorter. Movement is not progress; only a shorter queue is."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [*range(900, 900 + 10**4)])
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.termed_at is not None
+    assert STALL <= fake.termed_at < STALL + 4 * fake.step
+    assert docker.SAVE_FIRST_UNFINISHED in said
+
+
+def test_the_stall_is_counted_from_the_last_look_that_found_the_queue_shorter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shorter than the look before counts, even when it is not below the lowest seen."""
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    flat = int(STALL / 2.0) - 10
+    _with_console(monkeypatch, fake, [500, 900, *[900] * flat, 899, *[899] * flat, 0])
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.SAVE_FIRST_UNFINISHED not in said
+    assert docker.SAVE_FIRST_WRITTEN in said
+
+
 def test_the_rebuilds_hook_comes_after_the_save_and_right_before_the_signal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -797,7 +919,8 @@ def test_the_rebuilds_hook_comes_after_the_save_and_right_before_the_signal(
     docker.stop_servers_staged(
         fake.spec, tmp_path, before_signal=lambda: fake.events.append("about to signal")
     )
-    assert fake.events[:5] == [
+    assert fake.events[:7] == [
+        *[f"console: {line}" for line in BOTS_OUT],
         "console: saveall",
         "console: server debug",
         "console: server debug",
@@ -929,3 +1052,253 @@ def test_a_save_that_could_not_be_asked_takes_back_the_line_said_before_it(
     console.refuse = "no pty on this computer"
     _, said, _ = _stop(fake, tmp_path)
     assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED]
+
+
+# -- T496: where the console needs a terminal, the save is asked through the command channel ----
+#
+# Live, yulon-win11-gate, 2026-10-06 (Tortoise): Stop said "could not type 'saveall' ... The
+# worldserver console needs a terminal, and Yu'lon cannot open one on this computer", then
+# `SAVE_FIRST_NOT_ASKED`, then "The world server saved every character and closed." -- so the save
+# #326 added never reached Windows, and one Stop said both that it could not ask and that every
+# character was saved. Docker Desktop's CLI attaches a tty container's console only from a
+# terminal; the command channel (SOAP) is a plain TCP request and needs none.
+
+
+class _Channel:
+    """A command channel as `InstallChannel.live_channel()` hands one out: `send()` -> `Answer`.
+
+    `queue` is what each `server debug` finds, as `_Console` has it. `outcome` other than "yes"
+    answers every command that way, with `reason`.
+    """
+
+    def __init__(self, fake: _Docker, queue: list[int | None] | None = None) -> None:
+        self.fake = fake
+        self.queue = list(queue or [])
+        self.looks = 0
+        self.outcome = "yes"
+        self.indeterminate = False
+
+    def send(self, command: str) -> object:
+        from yulon.channel import Answer
+
+        self.fake.events.append(f"channel: {command}")
+        if self.outcome != "yes":
+            return Answer(
+                self.outcome,  # type: ignore[arg-type]
+                reason="the server is running but the command channel did not answer",
+                indeterminate=self.indeterminate,
+            )
+        if command != "server debug":
+            return Answer("yes", "All players saved.")
+        self.looks += 1
+        if self.looks > 1:
+            self.fake.now += self.fake.step
+        size = self.queue[min(self.looks, len(self.queue)) - 1] if self.queue else None
+        lines = ["Using World DB: TDB 335.21101", "LoginDatabase queue size: 0"]
+        if size is not None:
+            lines.append(f"CharacterDatabase queue size: {size}")
+        return Answer("yes", "\n".join(lines))
+
+
+SERVER = Path("/srv/this-install")
+"""The install folder the tests' channel is registered for."""
+
+
+def _on_windows(
+    monkeypatch: pytest.MonkeyPatch, fake: _Docker, channel: _Channel | None
+) -> _Console:
+    """This host cannot type at the console (no terminal), and `channel` is the install's own."""
+    console = _with_console(monkeypatch, fake)
+    monkeypatch.setattr(docker, "_console_reaches", lambda wsl_distro: False)
+    if channel is not None:
+        docker.save_through_channel(fake.spec.world, SERVER, lambda: channel)
+    return console
+
+
+def test_tortoise_on_windows_saves_everyone_through_its_command_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _on_windows(monkeypatch, fake, _Channel(fake))
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events == [
+        "channel: saveall",
+        "SIGTERM",
+        "world exited by itself",
+        "compose stop (world down)",
+    ]
+    assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+
+
+def test_centurion_on_windows_waits_for_its_save_queue_through_the_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _on_windows(monkeypatch, fake, _Channel(fake, [40, 0]))
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events[:6] == [
+        *[f"channel: {line}" for line in BOTS_OUT],
+        "channel: saveall",
+        "channel: server debug",
+        "channel: server debug",
+        "SIGTERM",
+    ]
+    assert said[:3] == [
+        docker.SAVE_FIRST_ASKING,
+        docker.SAVE_FIRST_QUEUED.format(count=40),
+        docker.SAVE_FIRST_WRITTEN,
+    ]
+    assert said[-1] == docker.WORLD_SAVED
+
+
+@pytest.mark.parametrize("why", ["no channel", "not set up", "unknown", "no", "raises"])
+def test_on_windows_a_channel_that_cannot_ask_is_said_and_never_claims_the_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, why: str
+) -> None:
+    """The one Stop says one thing: the warning that it could not ask, and a close that does not
+    say every character was saved."""
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    channel = _Channel(fake)
+    if why in ("unknown", "no"):
+        channel.outcome = why
+    _on_windows(monkeypatch, fake, None if why == "no channel" else channel)
+    if why == "not set up":
+        docker.save_through_channel(fake.spec.world, SERVER, lambda: None)
+    if why == "raises":
+
+        def broken() -> object:
+            raise OSError("the credential file could not be read")
+
+        docker.save_through_channel(fake.spec.world, SERVER, broken)
+    _, said, _ = _stop(fake, tmp_path)
+    assert not [e for e in fake.events if e.startswith("console")]
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
+    assert docker.SAVE_FIRST_NOT_ASKED_HERE in docker.FORCE_STOP_WARNINGS
+    assert docker.WORLD_SAVED not in said
+    assert said[-1] == docker.WORLD_CLOSED
+    assert not docker.outlives_the_stop(docker.WORLD_CLOSED)
+
+
+def test_where_the_console_can_be_typed_at_the_channel_is_not_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Linux (and a WSL-resident server) keep #326's console path exactly."""
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _with_console(monkeypatch, fake)
+    docker.save_through_channel(fake.spec.world, SERVER, lambda: _Channel(fake))
+    _, said, _ = _stop(fake, tmp_path)
+    assert fake.events[:2] == ["console: saveall", "SIGTERM"]
+    assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+
+
+def test_the_console_is_reached_where_the_shared_transport_says_it_can_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon.controller_wow_wotlk import console
+
+    monkeypatch.setattr(console, "pty_supported", lambda: False)
+    assert docker._console_reaches(None) is False
+    assert docker._console_reaches("Ubuntu") is True
+    monkeypatch.setattr(console, "pty_supported", lambda: True)
+    assert docker._console_reaches(None) is True
+
+
+def test_a_save_queue_that_ran_out_does_not_end_in_saved_every_character(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _install(monkeypatch, "wow-centurion", _rising(4))
+    _with_console(monkeypatch, fake, [900, None])
+    _, said, _ = _stop(fake, tmp_path)
+    assert docker.SAVE_FIRST_UNFINISHED in said
+    assert docker.WORLD_SAVED not in said
+    assert said[-1] == docker.WORLD_CLOSED
+
+
+@pytest.mark.parametrize("game", ["wow-tortoise", "wow-centurion"])
+def test_the_real_wiring_hands_the_stop_this_installs_command_channel(
+    tmp_path: Path, game: str
+) -> None:
+    """The mechanism is called: the factory the tab is built from registers the install's own
+    `live_channel` for its world, so every stop route (Stop, Restart, rebuild, uninstall) finds it.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    entry = CATALOG.get(game)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    services = ControllerServices.for_entry(entry, server_dir, client_dir=None)
+    setup = services.channel_setup
+    assert setup is not None
+    registered = docker._save_channels[entry.container_spec().world]
+    assert registered == {docker._folder_key(str(server_dir)): setup.live_channel}  # type: ignore[attr-defined]
+
+
+def test_a_game_that_does_not_save_first_registers_no_channel(tmp_path: Path) -> None:
+    from yulon.ui.controller_view import ControllerServices
+
+    entry = CATALOG.get("wow-wotlk")
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    ControllerServices.for_entry(entry, server_dir, client_dir=None)
+    assert entry.container_spec().world not in docker._save_channels
+
+
+def test_with_two_installs_of_one_game_the_running_worlds_own_channel_is_asked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A world's container name is the game's, so two installs register under one name; the
+    world's compose working-dir label says which install it was brought up from (cold review)."""
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _on_windows(monkeypatch, fake, None)
+    other, mine = _Channel(fake), _Channel(fake)
+    other.outcome = "unknown"
+    docker.save_through_channel(fake.spec.world, tmp_path / "other", lambda: other)
+    docker.save_through_channel(fake.spec.world, tmp_path / "mine", lambda: mine)
+    docker.save_through_channel(fake.spec.world, tmp_path / "third", lambda: other)
+    fake.working_dir = str(tmp_path / "mine")
+    _, said, _ = _stop(fake, tmp_path)
+    assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+    fake2 = _install(monkeypatch, "wow-tortoise", _rising(10))
+    fake2.working_dir = ""
+    other.fake = mine.fake = fake2
+    _, said, _ = _stop(fake2, tmp_path)
+    assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
+    assert "channel: saveall" not in fake2.events
+
+
+@pytest.mark.parametrize(
+    ("outcome", "saved"), [("answered", True), ("unauthorised", False), ("silent", False)]
+)
+def test_the_real_soap_channel_answers_the_save_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str, saved: bool
+) -> None:
+    """Through `SoapChannel` itself, so the mapping of a SOAP reply onto "asked" is the shipped
+    one: only a command the server ran and reported as succeeding is a save."""
+    from yulon import soap
+    from yulon.channel import SoapChannel
+
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    _on_windows(monkeypatch, fake, None)
+    sent: list[str] = []
+
+    def execute(endpoint: soap.Endpoint, command: str, **_kw: object) -> soap.Reply:
+        sent.append(command)
+        return soap.Reply(outcome, "All players saved." if outcome == "answered" else "")  # type: ignore[arg-type]
+
+    endpoint = soap.Endpoint("127.0.0.1", 7878, "YULON", "pw", namespace="urn:MaNGOS")
+    channel = SoapChannel(
+        endpoint=endpoint, state_of=lambda: docker.ContainerState("running"), send=execute
+    )
+    docker.save_through_channel(fake.spec.world, SERVER, lambda: channel)
+    _, said, _ = _stop(fake, tmp_path)
+    assert sent == ["saveall"]
+    if saved:
+        assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+    else:
+        assert said[:2] == [docker.SAVE_FIRST_ASKING, docker.SAVE_FIRST_NOT_ASKED_HERE]
+        assert said[-1] == docker.WORLD_CLOSED

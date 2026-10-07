@@ -11,16 +11,43 @@
   "sql": [
     {
       "db": "world",
+      "statement": "CREATE TABLE IF NOT EXISTS yulon_stackable_backup (entry INT UNSIGNED NOT NULL PRIMARY KEY, stackable INT NOT NULL, maxcount INT NOT NULL) ENGINE=InnoDB;",
+      "note": "the undo, taken before anything is changed"
+    },
+    {
+      "db": "world",
+      "statement": "INSERT IGNORE INTO yulon_stackable_backup (entry, stackable, maxcount) SELECT entry, stackable, maxcount FROM item_template WHERE (stackable > 1 OR maxcount > 1) AND (SELECT COUNT(*) FROM item_template WHERE stackable = 200) < 1000;",
+      "note": "INSERT IGNORE so a second install never overwrites the ORIGINAL values; skipped when the 200s are already in (an install from before the backup existed), so those are never recorded as the originals"
+    },
+    {
+      "db": "world",
       "path": "All_Stackables_200_Up.sql",
-      "note": "upstream ships one size, 200, and its undo"
+      "note": "upstream ships one size, 200, and its undo; the backup above is taken first so Remove can put every stack size back exactly"
+    },
+    {
+      "db": "world",
+      "statement": "CREATE TABLE IF NOT EXISTS yulon_stackable_backup (entry INT UNSIGNED NOT NULL PRIMARY KEY, stackable INT NOT NULL, maxcount INT NOT NULL) ENGINE=InnoDB;",
+      "when": "remove",
+      "note": "so removing an install from before the backup existed still has a table to read (it holds nothing)"
     },
     {
       "db": "world",
       "path": "All_Stackables_200_Down.sql",
       "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t JOIN yulon_stackable_backup b ON b.entry = t.entry SET t.stackable = b.stackable, t.maxcount = b.maxcount;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "DROP TABLE IF EXISTS yulon_stackable_backup;",
+      "when": "remove"
     }
   ],
   "notes": [
-    "Takes effect after a restart."
+    "Takes effect after a restart.",
+    "The upstream Down script cannot restore the original stack sizes or per-character limits (it does not know them), so the table `yulon_stackable_backup` (stackable and maxcount, as INT: some currency items sit at 2147483647) is filled before Up and put back after Down on Remove. Do not drop it by hand."
   ]
 }

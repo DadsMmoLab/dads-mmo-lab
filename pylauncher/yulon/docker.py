@@ -163,6 +163,10 @@ class SaveFirst:
     command: str
     queue_command: str = ""
     queue_pattern: str = ""
+    first: tuple[str, ...] = ()
+    """Typed before `command` so nothing new joins the save queue (T498): Centurion's bots out."""
+    if_given_up: tuple[str, ...] = ()
+    """Typed when the stop is given up before its signal, to undo `first` (T498)."""
     prompt: str = "AC>"
     prompt_precedes_answer: bool = True
 
@@ -3233,6 +3237,13 @@ WORLD_SAVING = (
 WORLD_SAVED = "The world server saved every character and closed."
 """Said when a world that `WORLD_SAVING` was said of has exited by itself (T384)."""
 
+WORLD_CLOSED = "The world server closed without an error."
+"""`WORLD_SAVED`'s place when the save asked for first did not happen or did not finish (T496).
+
+Live, yulon-win11-gate, 2026-10-06: one Stop said `SAVE_FIRST_NOT_ASKED` and then
+`WORLD_SAVED`, which contradict each other. The warning before it says what may be missing; this
+says only what was seen, a clean exit."""
+
 _WORLD_SAVE_FAILED_START = "The world server stopped with an error"
 
 
@@ -3344,6 +3355,16 @@ SAVE_FIRST_NOT_ASKED = (
 )
 """Said when the console the save is typed at could not be reached (T410, T411); outlives it."""
 
+SAVE_FIRST_NOT_ASKED_HERE = (
+    "Yu'lon could not ask the world server to save every character before stopping it. On this "
+    "computer it asks through the command channel, which is not turned on or did not answer, so "
+    "characters may be missing what happened since their last automatic save."
+)
+"""`SAVE_FIRST_NOT_ASKED` where the console needs a terminal this host cannot open (T496).
+
+There the save is asked through the install's command channel (`save_through_channel()`), so
+"its console did not answer" would name a thing that was never tried. Outlives the stop."""
+
 _SAVE_COMMAND_WINDOW_SECONDS = 10.0
 """How long the console is listened to after `saveall` (T410, T411).
 
@@ -3364,6 +3385,7 @@ FORCE_STOP_WARNINGS = frozenset(
         WORLD_SAVE_TOO_LONG,
         SAVE_FIRST_UNFINISHED,
         SAVE_FIRST_NOT_ASKED,
+        SAVE_FIRST_NOT_ASKED_HERE,
     }
 )
 """The sentences that must outlive the stop they were said in: it may have been forced."""
@@ -3513,12 +3535,120 @@ def _console_send(command: str, **kwargs: Any) -> Any:
     return console.send_command(command, **kwargs)
 
 
+def _console_reaches(wsl_distro: str | None) -> bool:
+    """Can this host type at a world's console at all? The shared transport's own answer (T496).
+
+    False on Windows with Docker Desktop: `docker attach` to a tty container needs a terminal,
+    and this process has none to give it. A WSL-resident server borrows the distro's.
+    """
+    from yulon.controller_wow_wotlk import console
+
+    return console.can_send(wsl_distro)
+
+
+_save_channels: dict[str, dict[str, Callable[[], object | None]]] = {}
+"""Each install's command channel, for a save asked where its console cannot be typed at (T496).
+
+World container name -> that install's folder -> its `live_channel`. A world's name is the
+game's, the same for every install of it, so the folder says whose channel it is: the one whose
+folder the running world was brought up from (`WORKING_DIR_LABEL`, cold review). Filled by the
+tab's wiring (`save_through_channel()`), read by every stop route through `_type_at_the_world()`.
+"""
+
+
+def save_through_channel(
+    world: str, server_dir: Path, channel_of: Callable[[], object | None]
+) -> None:
+    """Where this host cannot type at `world`'s console, ask its save through this channel (T496).
+
+    `channel_of` is the install's `InstallChannel.live_channel`: asked at the moment of the save,
+    it hands back a channel on the saved credential (an object whose `send(command)` returns a
+    `channel.Answer`), or None when the channel is not set up. On a host that can type at the
+    console this is never read, so Linux stops are #326's.
+    """
+    _save_channels.setdefault(world, {})[_folder_key(str(server_dir))] = channel_of
+
+
+def _folder_key(folder: str) -> str:
+    """One spelling per folder, for matching an install to a compose working-dir label."""
+    return os.path.normcase(os.path.normpath(folder))
+
+
+def _channel_of_the_running_world(
+    spec: ContainerSpec, wsl_distro: str | None
+) -> Callable[[], object | None] | None:
+    """The registered `live_channel` of the install whose world is running, or None (T496)."""
+    installs = _save_channels.get(spec.world, {})
+    if len(installs) == 1:
+        return next(iter(installs.values()))
+    if not installs:
+        return None
+    folder = container_working_dir(spec.world, wsl_distro=wsl_distro)
+    if folder is None or folder == UNREADABLE:
+        logger.warning(f"could not tell which install {spec.world} belongs to")
+        return None
+    return installs.get(_folder_key(folder))
+
+
+@dataclass(frozen=True)
+class _ChannelReply:
+    """A channel's `yes`, in the shape `_save_everyone_first()` reads a `ConsoleReply` in."""
+
+    lines: tuple[str, ...]
+    prompted: bool = True
+
+
+def _ask_the_channel(
+    spec: ContainerSpec, command: str, wsl_distro: str | None
+) -> _ChannelReply | None:
+    """One command through the world's command channel; None when it was not asked or not run.
+
+    Only a `yes` is an answer: `no` is a refusal, and `unknown` is no answer about it (a timeout
+    may have run it, which is still not a save anyone saw).
+    """
+    channel_of = _channel_of_the_running_world(spec, wsl_distro)
+    if channel_of is None:
+        logger.warning(
+            f"could not ask {spec.world} for {command!r}: its console needs a terminal on this "
+            "computer and no command channel is known for it"
+        )
+        return None
+    try:
+        channel = channel_of()
+        if channel is None:
+            logger.warning(
+                f"could not ask {spec.world} for {command!r}: its console needs a terminal on "
+                "this computer and its command channel is not set up"
+            )
+            return None
+        answer = channel.send(command)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - every channel failure means "not asked" here
+        logger.warning(f"could not ask {spec.world} for {command!r} through its channel: {exc}")
+        return None
+    if getattr(answer, "outcome", "") != "yes":
+        why = getattr(answer, "reason", "") or getattr(answer, "text", "") or "no answer"
+        logger.warning(f"the command channel did not run {command!r} on {spec.world}: {why}")
+        return None
+    lines = tuple(str(getattr(answer, "text", "")).splitlines())
+    logger.info(
+        f"asked {spec.world} for {command!r} through its command channel: "
+        f"{lines[0] if lines else 'answered'}"
+    )
+    return _ChannelReply(lines)
+
+
 def _type_at_the_world(
     spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
 ) -> Any | None:
-    """One console line to this world; its `ConsoleReply`, or None when it could not be typed."""
+    """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
+
+    Where this host cannot type at the console at all (T496), the line goes through the
+    install's command channel instead (`_ask_the_channel()`).
+    """
     save = spec.save_first
     assert save is not None
+    if not _console_reaches(wsl_distro):
+        return _ask_the_channel(spec, command, wsl_distro)
     try:
         return _console_send(
             command,
@@ -3545,7 +3675,7 @@ def _queue_length(spec: ContainerSpec, wsl_distro: str | None) -> int | None:
 
 def _save_everyone_first(
     spec: ContainerSpec, control: StopControl, say: Callable[..., None], wsl_distro: str | None
-) -> None:
+) -> bool:
     """Have a running world whose own close loses saves save everyone, and wait for it (T410, T411).
 
     Before the signal, while the world still runs and its database is up. Typed at
@@ -3567,30 +3697,52 @@ def _save_everyone_first(
 
     * the console did not answer (`SAVE_FIRST_NOT_ASKED`): the close then loses
       what it always lost;
-    * the queue has not got shorter, or could not be read, for
-      `WORLD_SAVE_STALL_SECONDS`, or the wait reaches `WORLD_SAVE_CEILING_SECONDS`
-      (`SAVE_FIRST_UNFINISHED`). Unlike the wait after the signal, an unreadable
-      look is not given the benefit of the doubt: the world is RUNNING here, and
-      a wait that cannot see anything would hold a live server for half an hour.
+    * no look has found the queue shorter than the look before it (or none could be
+      read) for `WORLD_SAVE_STALL_SECONDS`, or the wait reaches
+      `WORLD_SAVE_CEILING_SECONDS` (`SAVE_FIRST_UNFINISHED`). Unlike the wait after
+      the signal, an unreadable look is not given the benefit of the doubt: the world
+      is RUNNING here, and a wait that cannot see anything would hold a live server
+      for half an hour.
+
+    Before the save, `SaveFirst.first` is typed so nothing new joins the queue (T498):
+    live, 150 Centurion bots autosaving every 90 s kept it at ~1950 for 5 minutes while
+    it drained, and "never below its lowest" was read as stuck. `server debug` prints
+    no count of what was written (`cs_server.cpp:255-257` at the pin), so "still
+    written" is read as a queue shorter than at the look before: a worker that writes
+    nothing never makes it shorter, however much is still added. A `first` line that
+    cannot be typed is logged and the save goes on.
 
     `control.abandon` raises `StopAbandoned`: nothing has been sent, the world is
-    still running, which is what every handler of that type says.
+    still running, which is what every handler of that type says -- after
+    `SaveFirst.if_given_up` is typed, so what `first` closed is open again.
+
+    Returns whether the save was asked for and, for a queue core, seen through: False after
+    `SAVE_FIRST_NOT_ASKED` (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this
+    host cannot open, T496) or `SAVE_FIRST_UNFINISHED`, so the close is not then said to have
+    saved every character.
     """
     save = spec.save_first
     assert save is not None
+    not_asked = SAVE_FIRST_NOT_ASKED if _console_reaches(wsl_distro) else SAVE_FIRST_NOT_ASKED_HERE
     say(SAVE_FIRST_ASKING)
+    for line in save.first:
+        if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+            logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
     reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:
-            say(SAVE_FIRST_NOT_ASKED, warn=True)
-        return
+            say(not_asked, warn=True)
+        return answered
     started = _save_clock()
     last_shrunk = started
-    lowest: int | None = None
+    before: int | None = None
     looked = False
     while True:
         if control.abandon.is_set():
+            for line in save.if_given_up:
+                if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+                    logger.warning(f"{spec.world} was left running without {line!r}")
             raise SaveFirstAbandoned(
                 f"The stop was not sent: it was given up while {spec.world} was writing its "
                 "saves, so the world was left running."
@@ -3605,22 +3757,23 @@ def _save_everyone_first(
                 if answered:
                     logger.info(f"{spec.world}'s save queue could not be read; not waited on")
                 else:
-                    say(SAVE_FIRST_NOT_ASKED, warn=True)
-                return
+                    say(not_asked, warn=True)
+                return answered
             if length > 0:
                 say(SAVE_FIRST_QUEUED.format(count=length))
         if length == 0:
             say(SAVE_FIRST_WRITTEN)
-            return
-        if length is not None and (lowest is None or length < lowest):
-            lowest = length
-            last_shrunk = now
+            return True
+        if length is not None:
+            if before is not None and length < before:
+                last_shrunk = now
+            before = length
         if (
             now - started >= WORLD_SAVE_CEILING_SECONDS
             or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
         ):
             say(SAVE_FIRST_UNFINISHED, warn=True)
-            return
+            return False
         control.abandon.wait(_SAVE_POLL_SECONDS)
 
 
@@ -3662,7 +3815,8 @@ def save_then_stop_the_world(
     bytes still moving mean it is still saving. It ends on the first of:
 
     * the world is no longer running: it exited by itself (`WORLD_SAVED`, if `WORLD_SAVING`
-      was said), or it restarted (a new `StartedAt`), which is left to the ordinary stop that
+      was said; `WORLD_CLOSED` when the save asked for first did not happen or finish, T496),
+      or it restarted (a new `StartedAt`), which is left to the ordinary stop that
       follows -- as is a signal Docker refused;
     * nothing moved for `WORLD_SAVE_STALL_SECONDS` -- killed, `WORLD_SAVE_STALLED`;
     * `WORLD_SAVE_CEILING_SECONDS` since the signal -- killed, `WORLD_SAVE_TOO_LONG`;
@@ -3690,10 +3844,11 @@ def save_then_stop_the_world(
         if before_signal is not None:
             before_signal()
         return
+    saved_first = True
     if spec.save_first is not None:
         state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         if state.settled:
-            _save_everyone_first(spec, control, say, wsl_distro)
+            saved_first = _save_everyone_first(spec, control, say, wsl_distro)
     if before_signal is not None:
         before_signal()
     proc = _docker(["kill", "-s", "TERM", world], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
@@ -3716,6 +3871,10 @@ def save_then_stop_the_world(
             # T414: "saved" only for a clean exit; a crash on the way out is said, whether or
             # not the save was said to have begun.
             ended, warn = _how_the_world_ended(world, wsl_distro)
+            if ended == WORLD_SAVED and not saved_first:
+                # T496: the save asked for first did not happen or did not finish, and the
+                # warning said so; "saved every character" here would take that back.
+                ended = WORLD_CLOSED
             if saying or (warn and ended != WORLD_SAVE_UNREAD):
                 # Before the first look nothing was claimed, so an exit that cannot be
                 # read claims nothing either; a known crash is said either way.
