@@ -100,12 +100,14 @@ if args[:1] == ["compose"] and "build" in args:
         seen.write(os.environ.get("BUILDX_BUILDER", "<unset>") + "\\n")
     # T527: compose (v5.4.0 on Docker Desktop, v5.5.0 on docker-ce, measured
     # 2026-10-07) refuses a BUILDX_BUILDER that names a docker context other
-    # than `default`, current or not; plain buildx accepts it. The fake refuses
-    # the current context's name, which is the case Yu'lon sent.
+    # than `default`, current or not; plain buildx accepts it. The contexts are
+    # the current one (`docker-context`) and any in `docker-contexts`.
     builder = os.environ.get("BUILDX_BUILDER", "")
-    context = state / "docker-context"
-    named = context.read_text(encoding="utf-8") if context.exists() else "default"
-    if builder and builder != "default" and builder == named:
+    known = {{"default"}}
+    for listed in ("docker-context", "docker-contexts"):
+        if (state / listed).exists():
+            known.update((state / listed).read_text(encoding="utf-8").split())
+    if builder and builder != "default" and builder in known:
         sys.stderr.write(
             f"use `docker --context={{builder}} buildx` to switch to context \\"{{builder}}\\"\\n"
         )
@@ -230,6 +232,12 @@ def build_builders(state: Path) -> list[str]:
 def use_builder(state: Path, name: str, driver: str) -> None:
     """What `docker buildx use <name>` leaves behind: the builder a plain build now uses (T413)."""
     (state / "buildx-current").write_text(f"{name} {driver}", encoding="utf-8")
+
+
+def add_context(state: Path, name: str) -> None:
+    """`docker context create <name>`: a context compose knows, not the current one (T527)."""
+    with open(state / "docker-contexts", "a", encoding="utf-8") as contexts:
+        contexts.write(name + "\n")
 
 
 def use_context(state: Path, name: str) -> None:

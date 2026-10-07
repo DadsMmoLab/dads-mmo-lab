@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_fake_docker import (
+    add_context,
     build_builders,
     build_env,
     end_fake_containers,
@@ -3624,6 +3625,28 @@ def test_another_contexts_builder_picked_with_buildx_use_gets_the_single_call(
     assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
     assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
     assert build_builders(build_cli) == ["<unset>"]
+
+
+def test_a_buildx_builder_of_another_context_set_by_the_user_fails_as_it_would_by_hand(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's own BUILDX_BUILDER naming ANOTHER context: the single call, compose's own answer.
+
+    Compose refuses that spelling whoever types it (codex adversarial, T527), so a
+    hand-typed `docker compose build` fails the same way, as every build did before
+    T376. Yu'lon neither drops the user's pick nor quietly builds somewhere else:
+    the one call carries it, and compose's own line is the build's last word.
+    """
+    use_context(build_cli, "desktop-linux")
+    add_context(build_cli, "other-context")
+    use_builder(build_cli, "other-context", "docker")
+    monkeypatch.setenv("BUILDX_BUILDER", "other-context")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_builders(build_cli) == ["other-context"]
+    assert run.returncode == 1
+    assert "switch to context" in run.tail[-1]
 
 
 def test_a_context_docker_will_not_name_gets_the_single_call(
