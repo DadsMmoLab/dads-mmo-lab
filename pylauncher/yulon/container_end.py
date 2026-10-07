@@ -46,11 +46,16 @@ def on_docker_desktop() -> bool:
     return sys.platform in ("win32", "darwin")
 
 
-def remove_it_or_run(name: str) -> str:
-    """How a player removes the container `name` this app could not: the log line's ending."""
+def remove_it() -> str:
+    """How a log line says to remove a container this app could not; the command follows.
+
+    Only the words: each caller spells `docker rm -f` itself, on the line after, so the
+    rule that a command the player has to type stands on its own line is read where the
+    line is made (T296).
+    """
     if on_docker_desktop():
-        return f"Remove it in Docker Desktop's Containers list, or run this:\ndocker rm -f {name}"
-    return f"Remove it by running this:\ndocker rm -f {name}"
+        return "Remove it in Docker Desktop's Containers list, or run this:"
+    return "Remove it by running this:"
 
 
 REMOVED = "removed"

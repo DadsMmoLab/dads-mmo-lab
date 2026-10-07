@@ -6894,8 +6894,8 @@ def tool_container_left_line(name: str, reason: str) -> str:
     """The log line for a stopped tool whose container could not be removed (T303)."""
     return (
         f"The extraction tool's container {name} could not be removed after Stop ({reason}), "
-        "so it may still be writing into the server's data folder. "
-        + container_end.remove_it_or_run(name)
+        f"so it may still be writing into the server's data folder. "
+        f"{container_end.remove_it()}\ndocker rm -f {name}"
     )
 
 

@@ -1207,7 +1207,7 @@ def container_left_line(name: str, dest: Path, reason: str) -> str:
     """The log line for a stopped clone whose container could not be removed (T240)."""
     return (
         f"The clone's container {name} could not be removed after Stop ({reason}), so it may "
-        f"still be writing into {dest}. " + container_end.remove_it_or_run(name)
+        f"still be writing into {dest}. {container_end.remove_it()}\ndocker rm -f {name}"
     )
 
 

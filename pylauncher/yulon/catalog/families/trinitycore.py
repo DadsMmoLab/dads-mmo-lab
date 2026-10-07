@@ -2238,16 +2238,21 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         running = docker.tool_containers_writing_into(data_dir)
         if running:
-            where = (
-                "in Docker Desktop's Containers list"
-                if container_end.on_docker_desktop()
-                else f"with docker rm -f {' '.join(running)}"
-            )
-            raise InstallerError(
+            said = (
                 f"An earlier extraction is still running in Docker ({', '.join(running)}) and "
                 f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
-                f"extracted again. Remove it {where}, then press "
-                f"\u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+                "extracted again."
+            )
+            again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+            if container_end.on_docker_desktop():
+                raise InstallerError(
+                    f"{said} Remove it in Docker Desktop's Containers list, then {again}"
+                )
+            # A Linux engine has no list to look in (live, yulon-ubuntu2): the command,
+            # on a line of its own (T296).
+            raise InstallerError(
+                f"{said} Remove it with the command below, then {again}\n"
+                f"docker rm -f {' '.join(running)}"
             )
 
     def _refuse_a_running_world_for_maps(self) -> None:
