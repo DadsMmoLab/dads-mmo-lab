@@ -184,7 +184,7 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "45bed51955bf6b07e750b72ac056d9253ca3cecd"
+            "rev": "da4419afc44f97bb950ca2ebccc3f29a902a3fab"
           },
           {
             "repo": "cmangos/tbc-db",
@@ -633,7 +633,7 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "45bed51955bf6b07e750b72ac056d9253ca3cecd"
+            "rev": "da4419afc44f97bb950ca2ebccc3f29a902a3fab"
           },
           {
             "repo": "cmangos/classic-db",

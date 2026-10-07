@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from yulon import docker, platform, resources, runner
-from yulon.after_stop import StopTookEffect, TrueAfterStop
+from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.catalog.upstream import UpstreamNews
@@ -151,15 +151,25 @@ class InstallerError(RuntimeError):
             self.detail = detail
 
 
-class InstallStopped(InstallerError, StopTookEffect):
+class OneShotLeftRunning(InstallerError, TrueAfterStop):
+    """A one-shot the engine had to end -- the database importer -- is still running (T539).
+
+    Raised after a Stop whose importer could not be ended, and before a retry's
+    reset that would DROP the databases under one. `TrueAfterStop`, because after
+    a Stop it is not a clean cancel: something may still be writing, and the
+    sentence says what and how to end it.
+    """
+
+
+class InstallStopped(InstallerError, StopSaid):
     """The player's Stop, taking effect in an install, a rebuild or a server press (T250).
 
     Raised wherever the engine hears the Stop and ends -- between stages, at a
     run the Stop cancelled, between import runs, at a stop it gave up -- with
     the sentence of what the Stop costs there. An `InstallerError`, so every
-    handler written for one still runs; `StopTookEffect`, so the log panel
-    says "cancelled" for it, and a plain `InstallerError` raised after a Stop
-    is shown as the failure it is.
+    handler written for one still runs; `StopSaid`, so the log panel reads it
+    as the Stop and shows that sentence under "Stopped:" (T528), and a plain
+    `InstallerError` raised after a Stop is shown as the failure it is.
     """
 
 

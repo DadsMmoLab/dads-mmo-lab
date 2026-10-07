@@ -116,6 +116,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     InstallStopped,
+    OneShotLeftRunning,
     ReadyWaitStopped,
     RollbackNotDone,
     UnsupportedPlatformError,
@@ -5582,6 +5583,8 @@ class Seams:
     None (`in_wsl()`): walking `\\\\wsl.localhost` would boot the distro (T133) and
     cross 9p for every file, so its finished builds are not kept (owner, D4)."""
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
+    end_one_shot: Callable[..., docker.OneShotLeft | None] = docker.end_one_shot
+    """T539: end what of a one-shot service is still running; None once nothing is."""
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
     container_exists: Callable[[str], bool] = docker.container_exists
     container_project: Callable[[str], str | None] = docker.container_project
@@ -5768,6 +5771,10 @@ class Seams:
     # `sqlplan.ExecStdin`/`SqlQuery` declare the keyword for the opposite
     # reason. Nobody has reconciled the two — undecided.
     run_container: Callable[..., docker.AttachedRun] = docker.run_container
+    folder_claim: Callable[[Path, str, threading.Event | None], AbstractContextManager[bool]] = (
+        docker.folder_claim
+    )
+    """T543: a Re-extract's claim on its `data/`, made by the daemon that runs the tools."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -5953,6 +5960,7 @@ class Seams:
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
+            end_one_shot=on(docker.end_one_shot, wsl_distro=distro),
             verify_import=refused("Checking a database import"),
             container_exists=on(docker.container_exists, wsl_distro=distro),
             container_project=on(docker.container_project, wsl_distro=distro),
@@ -5975,6 +5983,7 @@ class Seams:
             # end-to-end argv test). No SELinux, so no filesystem to ask about.
             fs_type=lambda _path: None,
             run_container=refused("Running an install container"),
+            folder_claim=refused("Claiming a server folder for an extraction"),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
@@ -12435,6 +12444,14 @@ class StagedInstaller:
         None this returns after the table and the family applies the SQL
         itself, re-probes and writes its own marker (7.3).
         """
+        if service is not None:
+            # T539: never read, clear or import under an importer still running from
+            # an earlier run -- a Stop whose importer outlived it, or a Yu'lon that
+            # closed mid-import. One that can be ended is ended first, and BEFORE the
+            # probe (cold review): a live importer changes what the probe would read.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         before = gate.probe()
         yield f"The databases read as {before.state}: {before.detail}"
         if before.state == "imported" or (before.state == "populated" and before.complete):
@@ -12511,6 +12528,11 @@ class StagedInstaller:
             stage="import",
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
+            # T539: the note promises the half-written databases are cleared before the
+            # import runs again, which is true only once nothing is still writing them.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=False))
             raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
@@ -13469,6 +13491,47 @@ def stop_abandoned_worker(
             f"{what} was abandoned and did not stop within {ABANDONED_WORKER_SECONDS}s; "
             f"thread {worker.name} was left running"
         )
+
+
+def _one_shot_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
+    """What a database importer that could not be ended means, and how to end it (T539)."""
+    names = ", ".join(left.names)
+    who = f"the database importer ({names})" if names else "the database importer"
+    if earlier:
+        said = (
+            f"A database import from an earlier run may still be running, and {who} could not "
+            f"be ended: {left.reason}. The half-written databases were not cleared and nothing "
+            "was imported."
+        )
+    else:
+        said = (
+            f"The database import was stopped, but {who} could not be ended: {left.reason}. "
+            "It may still be writing to the databases, and Install again will not clear them "
+            "while it runs."
+        )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+
+
+def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
+    """`_one_shot_left_sentence` for the server-data download (re-review of 7312223b)."""
+    names = ", ".join(left.names)
+    who = f"its container ({names})" if names else "its container"
+    if earlier:
+        said = (
+            f"A server-data download from an earlier run may still be running, and {who} could "
+            f"not be ended: {left.reason}. Nothing was downloaded."
+        )
+    else:
+        said = (
+            f"The server-data download was stopped, but {who} could not be ended: "
+            f"{left.reason}. It may still be writing the server data, and Install again will "
+            "not start another while it runs."
+        )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

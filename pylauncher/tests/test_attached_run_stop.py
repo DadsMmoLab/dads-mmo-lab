@@ -1,0 +1,247 @@
+"""T526: a Stop reaches an attached docker run whose output has gone quiet.
+
+The install engine runs its build, import and download one-shots through
+`native._pump()`, which calls `docker.run_attached()` on its own worker thread
+(`yulon-install-output`). The panel's Stop ends only what ITS thread started, so
+it reaches that run through the cancel token alone, and `run_attached()` used to
+read the token only when a line arrived. Measured 2026-10-07
+(`.notes/gates/probe-t529-t526-2026-10-07/laptop-t526/`): a fake build step silent
+for 60 s, Stop at 3 s, the run ended 57.01 s later -- the rest of the silence.
+"""
+
+from __future__ import annotations
+
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+from tests.conftest import HANG_BOUND
+from yulon import docker, runner
+
+# A docker CLI stand-in: one line, then nothing for ten minutes.
+_ONE_LINE_THEN_SILENCE = (
+    "import time; print('#12 RUN cmake --build .', flush=True); time.sleep(600)"
+)
+
+
+def _silent_build(
+    monkeypatch: pytest.MonkeyPatch, cancel: threading.Event, tmp_path: Path
+) -> tuple[threading.Thread, list[docker.AttachedRun]]:
+    """Start `run_attached()` on a worker thread against a quiet child; wait for its line."""
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    said = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_attached(
+                [], tmp_path, sink=lambda line: said.set(), cancel=cancel, merge_stderr=True
+            )
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t526-install-output")
+    worker.start()
+    assert said.wait(HANG_BOUND), "the child never printed its line"
+    return worker, result
+
+
+def test_a_stop_ends_a_silent_attached_run_and_reads_as_the_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cancel ends the docker CLI at once, and the run comes back as CANCELLED_RETURNCODE.
+
+    The return code is half the test: callers decide on `== CANCELLED_RETURNCODE`
+    (the build's "may have tagged", the import, botdash, extraction), so a Stop
+    that ended the CLI must not come back as the CLI's own exit (-15 or 143).
+
+    Mutations this catches: no watcher on the cancel (the worker is still
+    blocked at `HANG_BOUND`, the child sleeps 600 s), and the watcher without the
+    mapping (`returncode` is -15).
+    """
+    cancel = threading.Event()
+    worker, result = _silent_build(monkeypatch, cancel, tmp_path)
+    try:
+        cancel.set()
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the Stop waited for the silent child's next line"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+        assert result[0].tail == ("#12 RUN cmake --build .",)
+    finally:
+        if worker.is_alive():
+            runner.end_streams_started_on(worker.ident or 0)
+        worker.join(timeout=HANG_BOUND)
+
+
+def test_without_a_cancel_a_run_ended_from_its_own_thread_keeps_its_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mapping is for a Stop the cancel carried, and only that.
+
+    A child some other route ended, with no cancel set, keeps its exit status:
+    `run_attached()` returns it and its caller judges it, as before T526.
+    """
+    cancel = threading.Event()
+    worker, result = _silent_build(monkeypatch, cancel, tmp_path)
+    try:
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive()
+        assert result[0].returncode not in (0, docker.CANCELLED_RETURNCODE), result
+    finally:
+        worker.join(timeout=HANG_BOUND)
+
+
+def test_a_cancel_ends_the_attached_runs_own_cli_and_no_other_stream_of_its_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The watcher is scoped to the run, not to the thread (Codex adversarial review of T526).
+
+    A stream the same thread already holds -- suspended at a line, as an outer job's
+    stream is while it calls `run_attached()` -- is not this run's, and the run's
+    cancel must not end it. The panel's own Stop still ends everything its thread
+    started; that is `request_stop()`, not this.
+
+    Mutation this catches: the watcher ending every stream started on the thread
+    (`end_streams_started_on(ident)`) -- the outer child is then gone.
+    """
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    outer = runner.stream([sys.executable, "-c", _ONE_LINE_THEN_SILENCE])
+    held: list[object] = []
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        held.append(next(outer))  # the outer stream is live, suspended at its first line
+
+        def sink(line: str) -> None:
+            cancel.set()
+
+        result.append(docker.run_attached([], tmp_path, sink=sink, cancel=cancel))
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t526-scoped")
+    worker.start()
+    try:
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the cancelled run did not return"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+        with runner._LIVE_STREAMS_LOCK:
+            outer_child = runner._LIVE_STREAMS[outer].proc
+        assert (
+            outer_child is not None and outer_child.poll() is None
+        ), "the run's cancel ended a stream it did not start"
+    finally:
+        outer.close()
+        worker.join(timeout=HANG_BOUND)
+
+
+# A CLI that answers SIGTERM by stopping cleanly and exiting 0, as `compose up` does.
+_EXITS_ZERO_ON_SIGTERM = (
+    "import signal, sys, time; "
+    "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0)); "
+    "print('#12 RUN cmake --build .', flush=True); time.sleep(600)"
+)
+
+
+def test_a_cli_the_cancel_ended_reads_as_cancelled_even_when_it_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review of T526 (MUST): ended by the watcher is the Stop, whatever the exit code.
+
+    `compose up` traps SIGTERM, stops its containers and exits 0. Read by its exit
+    code alone, a stopped import or build came back as `AttachedRun(0)`: an import
+    read as finished, a build recorded as `_build_exit = 0`.
+
+    Mutation this catches: `run_attached()` not recording that its watcher ended
+    the stream (`returncode` is 0).
+    """
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _EXITS_ZERO_ON_SIGTERM),
+    )
+    said = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_attached([], tmp_path, sink=lambda line: said.set(), cancel=cancel)
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t526-exits-zero")
+    worker.start()
+    try:
+        assert said.wait(HANG_BOUND), "the child never printed its line"
+        cancel.set()
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the Stop waited for the silent child's next line"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+    finally:
+        if worker.is_alive():
+            runner.end_streams_started_on(worker.ident or 0)
+        worker.join(timeout=HANG_BOUND)
+
+
+# A CLI that takes 2 s to stop on SIGTERM and writes one line per SIGTERM it gets.
+_SLOW_TO_STOP = (
+    "import signal, sys, time\n"
+    "def stop(*_a):\n"
+    "    open(sys.argv[1], 'a').write('TERM\\n')\n"
+    "    time.sleep(2)\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "print('#12 RUN cmake --build .', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a Windows Stop ends a job, not a signal")
+def test_a_cancel_signals_a_slow_to_stop_cli_once_and_then_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T541: the watcher claims the run once; its later polls wait for that ending.
+
+    It polled every 0.1 s and each poll claimed the CLI again: a new SIGTERM, a new
+    5 s SIGKILL timer, a new thread. `docker compose up` reads a second SIGTERM as
+    "force", so a compose stopping its containers cleanly was forced within 0.1 s.
+
+    Mutation this catches: `_end_chosen` claiming a child that a Stop already claimed.
+    """
+    said_term = tmp_path / "terms.txt"
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _SLOW_TO_STOP, str(said_term)),
+    )
+    said = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_attached([], tmp_path, sink=lambda line: said.set(), cancel=cancel)
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t541-once")
+    worker.start()
+    try:
+        assert said.wait(HANG_BOUND), "the child never printed its line"
+        cancel.set()
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the cancelled run did not return"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+        assert said_term.read_text().splitlines() == ["TERM"], said_term.read_text()
+    finally:
+        if worker.is_alive():
+            runner.end_streams_started_on(worker.ident or 0)
+        worker.join(timeout=HANG_BOUND)

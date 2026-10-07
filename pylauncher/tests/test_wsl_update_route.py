@@ -282,6 +282,7 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "selinux_enforcing": "answered False: the WSL kernel runs no SELinux",
     "fs_type": "answered None: no SELinux, so nothing to ask (never the host's `stat -f`)",
     "run_container": "install-only (extraction); takes no distro, so it is refused instead",
+    "folder_claim": "T543: the Re-extract claim, beside `run_container`; refused the same way",
     "copy_from_image": "install-only (conf templates); takes no distro, so it is refused instead",
     "verify_import": "install-only (the import stage); takes no distro",
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
@@ -358,7 +359,13 @@ def test_the_install_only_seams_refuse_rather_than_reach_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seams = native.Seams.in_wsl(DISTRO)
-    for name in ("run_container", "copy_from_image", "verify_import", "ensure_docker"):
+    for name in (
+        "run_container",
+        "folder_claim",
+        "copy_from_image",
+        "verify_import",
+        "ensure_docker",
+    ):
         with pytest.raises(InstallerError, match="inside"):
             getattr(seams, name)()
 

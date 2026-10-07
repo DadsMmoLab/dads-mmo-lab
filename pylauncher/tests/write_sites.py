@@ -92,6 +92,11 @@ _QUALIFIED = {
     ("shutil", "copytree"),
     ("shutil", "move"),
     ("shutil", "unpack_archive"),
+    # T540: the first registry WRITE. A value under HKCU `...\\Run` starts a
+    # program at every sign-in, which is a change to the machine as real as a
+    # file, and `winreg` is a call vocabulary this walk had never seen.
+    ("winreg", "SetValueEx"),
+    ("winreg", "DeleteValue"),
 }
 _WRITING_MODE = set("wax+")
 

@@ -2582,6 +2582,11 @@ def _repair_doubles(
             if inspect_fails:
                 return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
             return _completed(stdout="" if owner is None else owner + chr(10))
+        if cmd[:2] == ["docker", "ps"] and any(
+            arg.startswith(f"label={docker.SERVICE_LABEL}=") for arg in cmd
+        ):
+            # T539: Repair asks for a leftover importer first; none is running here.
+            return _completed()
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         return _completed()
@@ -4501,13 +4506,30 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "T303: asks about containers `run_container()` started, which run on the local "
         "daemon for its own reason (above)"
     ),
+    **{
+        name: (
+            "T543: the Re-extract's folder claim, made on the daemon that runs the extraction "
+            "tools, which is the local one for `run_container`'s reason (above)"
+        )
+        for name in (
+            "folder_claim",
+            "_take_claim",
+            "_claim_coming_up",
+            "_sweep_late_claim",
+            "_start_sweep",
+            "_claim_in_use",
+            "_claim_facts",
+            "_release_claim",
+            "_remove_claim",
+        )
+    },
     "tool_containers_left_running": (
         "T303 (Codex review): asks for the tool containers `run_container()` starts, which run "
         "on the local daemon for its own reason (above)"
     ),
-    "_cli_ended_on": (
-        "T303: ends the docker CLI streams THIS thread started (`runner.end_streams_started_on`), "
-        "whichever daemon they reach; it addresses no daemon of its own"
+    "_ended_on_cancel": (
+        "T303/T526: ends the docker CLI of the one stream it is handed (`runner.end_stream`), "
+        "whichever daemon it reaches; it addresses no daemon of its own"
     ),
     "run_detached": (
         "`run_container`'s reason, for the background job T179 starts the same way: its "

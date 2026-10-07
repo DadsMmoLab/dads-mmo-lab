@@ -14,9 +14,15 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
+- TBC and Vanilla servers no longer risk a crash when bots fight Netherspite in Karazhan or pick certain mounts.
+- Two Yu'lons pressing **Re-extract map data** on one server folder at the same moment: only one goes ahead.
+- When another Yu'lon is extracting into the folder, **Re-extract map data** says so and never offers to remove its run.
+- Two Yu'lons sharing a server folder, as Windows and WSL or via a link, no longer extract into it once one has started.
+- On Windows, **Stop** ends a build's leftover helpers even when the build's own docker process had already exited.
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
 - **Stop** during a clone or map tool removes its container, even as it starts; one Docker would not start goes too.
@@ -24,9 +30,16 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A tool container Yu'lon could not remove is named with the command that removes it; host git never clones under one.
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+- **Stop** during a quiet build step ends the build at once, not at its next line.
+- **Stop** during a clone with your own git also ends the helpers git started.
+- A module whose files hold a link is refused, naming the link, so it never copies files from elsewhere on your computer.
+- Adding a module from a folder again keeps the working copy if the new copy fails part way, as the message says.
+- **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
+- **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 
 ### Changed
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
+- A stopped install or rebuild says what the Stop left, after **Stopped:**.
 
 ## v0.9.14-Public — 2026-10-07
 

@@ -172,6 +172,8 @@ the floor `sidebar.SidebarRail` keeps when every tab in it is hidden."""
 
 
 CHECK_UPDATES_BUTTON = "check-for-updates"
+SETTINGS_BUTTON = "yulon-settings"
+"""The header's Settings… (T540): the tray's two switches."""
 """objectName of the header's "Check for updates" (T90; a real button since T193).
 
 The header is 56px tall with 6px margins, so a button with the theme's 8px
@@ -639,8 +641,9 @@ QPushButton#{LAUNCHER_PLAY_BUTTON} {{
     border-radius: 4px;
 }}
 
-/* T193 A20: the header's update check, a real button that fits the header. */
-QPushButton#{CHECK_UPDATES_BUTTON} {{
+/* T193 A20: the header's update check, a real button that fits the header.
+   T540: Settings… beside it, the same size. */
+QPushButton#{CHECK_UPDATES_BUTTON}, QPushButton#{SETTINGS_BUTTON} {{
     padding: 4px 14px;
 }}
 
