@@ -16,10 +16,16 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
+- The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
+- **Stop** during a clone or map tool removes its container, even as it starts; one Docker would not start goes too.
+- **Re-extract map data** waits for a map tool an earlier Yu'lon left running instead of writing under it.
+- A tool container Yu'lon could not remove is named with the command that removes it; host git never clones under one.
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
 
 ### Changed
+- On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 
 ## v0.9.14-Public — 2026-10-07
 

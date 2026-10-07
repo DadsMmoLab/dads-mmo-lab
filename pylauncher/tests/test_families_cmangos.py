@@ -2660,10 +2660,11 @@ def test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage(
     assert said.index(native.OPENING_NOTE) == 1
     build_at = said.index("--- build")
     # Said at the build: the banner, then the note, and nothing between them.
-    assert said[build_at + 1] == native.BUILD_CANCEL_NOTE
+    note = native.build_cancel_note()  # this platform's (T246, T298)
+    assert said[build_at + 1] == note
     # Not before every stage: no earlier stage carries it, and no later one either.
-    assert said.count(native.BUILD_CANCEL_NOTE) == 1
-    assert native.BUILD_CANCEL_NOTE not in said[:build_at]
+    assert said.count(note) == 1
+    assert note not in said[:build_at]
 
 
 # -- db-password -------------------------------------------------------------
@@ -3805,11 +3806,12 @@ def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_
 def test_the_cmangos_build_stage_says_this_platforms_cancel_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On Windows a Stop ends the build at once (T246); elsewhere Docker finishes the step."""
+    """On Windows (T246) and Linux (T298) a Stop ends the build at once; on macOS Docker
+    finishes the step."""
     monkeypatch.setattr(native.sys, "platform", "win32")
     notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
-    assert notes["build"] == native.BUILD_CANCEL_NOTE_WINDOWS
-    monkeypatch.setattr(native.sys, "platform", "linux")
+    assert notes["build"] == native.BUILD_CANCEL_NOTE_ENDS
+    monkeypatch.setattr(native.sys, "platform", "darwin")
     notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
     assert notes["build"] == native.BUILD_CANCEL_NOTE
 

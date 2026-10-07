@@ -8858,12 +8858,17 @@ class ControllerView(QWidget):
         install…" (review, 2026-08-22).
         """
         self._disarm_actions()
-        self.problem_label.setText("")
+        # T304: a pathfinding press's sentence is not this paragraph. It stays while
+        # T245's rule says it still holds, and the reading asked for below decides.
+        said = self._pathfinding_said
+        if said is None or self.problem_label.text() != said[0]:
+            self.problem_label.setText("")
         self._keep_the_database_sentence()
         # Ask the database again: Refresh is the only way for a user who has
         # just fixed something to make the tab re-examine an unfinished import.
         self._import_asked = False
         self.refresh_status()
+        self.refresh_pathfinding()
         self.check_server_files()
         # T386: and the channel. A check proves an account that waits to be
         # proved, re-asks a saved credential, and finds this app's own account

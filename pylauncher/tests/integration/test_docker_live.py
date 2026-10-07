@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -453,6 +454,61 @@ def test_a_read_only_client_mount_refuses_a_write(tmp_path: Path, require_docker
     assert run.returncode != 0
     assert "Read-only file system" in " ".join(run.tail)
     assert not (client / "written").exists()
+
+
+def _tool_containers() -> list[str]:
+    """Every container, running or not, whose name says `run_container()` made it."""
+    done = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [n for n in done.stdout.split() if n.startswith(docker.TOOL_CONTAINER_PREFIX)]
+
+
+def test_run_container_returns_the_tools_own_exit_and_words_and_leaves_nothing(
+    require_docker: None,
+) -> None:
+    """T321, live: created, then `docker start -a`; the exit code is the container's, its
+    stdout and stderr both reach the sink, and `--rm` still removes it."""
+    before = _tool_containers()
+    heard: list[str] = []
+    run = docker.run_container(
+        docker.ContainerRun(
+            image=BUSYBOX_IMAGE, argv=("sh", "-c", "echo out-line; echo err-line >&2; exit 7")
+        ),
+        sink=heard.append,
+    )
+    assert run.returncode == 7, run
+    assert "out-line" in heard and "err-line" in heard, heard
+    deadline = time.monotonic() + 20
+    while _tool_containers() != before and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert _tool_containers() == before, "the tool's container was left behind"
+
+
+def test_a_stopped_run_container_ends_its_container_within_seconds(require_docker: None) -> None:
+    """T321, live: a Stop during `docker start -a` ends the container and removes it."""
+    before = _tool_containers()
+    cancel = threading.Event()
+    heard: list[str] = []
+
+    def sink(line: str) -> None:
+        heard.append(line)
+        if "started" in line:
+            cancel.set()
+
+    began = time.monotonic()
+    run = docker.run_container(
+        docker.ContainerRun(image=BUSYBOX_IMAGE, argv=("sh", "-c", "echo started; sleep 600")),
+        sink=sink,
+        cancel=cancel,
+    )
+    assert run.returncode == docker.CANCELLED_RETURNCODE, run
+    assert time.monotonic() - began < 30, "the Stop did not end the run within seconds"
+    assert run.container_left == "", run
+    assert _tool_containers() == before, "the stopped tool's container is still there"
 
 
 def test_copy_from_image_leaves_no_container_behind_either_way(

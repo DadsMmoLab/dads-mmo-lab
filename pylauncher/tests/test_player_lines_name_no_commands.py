@@ -197,6 +197,10 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         f"removing a clone's container that Stop could not remove: {_TYPED}",
         frozenset({"docker rm -f {…}"}),
     ),
+    ("yulon/catalog/families/trinitycore.py", "_refuse_a_tool_still_writing"): (
+        f"removing, on Linux, a map tool's container an earlier press left running: {_TYPED}",
+        frozenset({"docker rm -f {…}"}),
+    ),
     **{
         ("yulon/networking.py", owner): (
             f"allowing SSH in firewalld or ufw before turning the firewall on: {_TYPED}",

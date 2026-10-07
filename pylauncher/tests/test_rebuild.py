@@ -319,7 +319,7 @@ def test_the_rebuild_reports_through_the_installers_own_staged_reporting(
     steps = [line for line in said if line.startswith("Step ")]
     assert steps[0].startswith(f"Step 1 of {len(stages)}"), steps
     assert len(steps) == len(stages)
-    assert native.BUILD_CANCEL_NOTE in said
+    assert native.build_cancel_note() in said
 
 
 def test_the_rebuild_ends_by_saying_what_it_did_and_what_it_did_not(tmp_path: Path) -> None:

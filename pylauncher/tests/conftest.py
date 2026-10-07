@@ -1242,6 +1242,27 @@ def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker_module, "database_volume", REAL_DATABASE_VOLUME)
 
 
+REAL_LEFT_TOOL_READ = docker_module.tool_containers_left_running
+"""The real `docker.tool_containers_left_running`, for the tests about that question."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_for_tool_containers_left_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Re-extract asks Docker for extraction containers an earlier Yu'lon left (T303).
+
+    `docker ps`, before anything moves and again before old map data is put back; a unit
+    test hears none, so the tests written about something else keep testing that. The
+    tests about the question put the real one back with `real_left_tool_read`.
+    """
+    monkeypatch.setattr(docker_module, "tool_containers_left_running", lambda *_a, **_k: ())
+
+
+@pytest.fixture
+def real_left_tool_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_for_tool_containers_left_running` for a test about it."""
+    monkeypatch.setattr(docker_module, "tool_containers_left_running", REAL_LEFT_TOOL_READ)
+
+
 @pytest.fixture(autouse=True)
 def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the client probe without touching the seam the tests assert on.
