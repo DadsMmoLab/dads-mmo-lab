@@ -85,7 +85,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
-from yulon.catalog.installer import InstallerError, InstallStopped
+from yulon.catalog.installer import InstallerError, InstallStopped, UpdateRefused
 from yulon.catalog.native import (
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
@@ -460,7 +460,14 @@ class CmangosInstaller(StagedInstaller):
         Only a removal passes. Fail-closed: git that cannot say what changed refuses too.
         """
         new = self._seams.head_sha(dest)
-        if new is None or new == old:
+        if new is None:
+            # Fail-closed (cold review of T533): no commit, no reading of what it brings.
+            raise InstallerError(
+                f"Yu'lon could not read which commit {source.repo} moved to, so it could not "
+                "tell whether it adds database updates this server would need, and it did not "
+                "build it. Nothing was changed."
+            )
+        if new == old:
             return
         prefix = f"{source.dest.rstrip('/')}/"
         globs = [g[len(prefix) :] for phase in phases for g in _globs(phase)]
@@ -480,13 +487,15 @@ class CmangosInstaller(StagedInstaller):
         if added:
             shown = ", ".join(posixpath.basename(p) for p in added[:3])
             more = f" and {len(added) - 3} more" if len(added) > 3 else ""
-            raise InstallerError(
+            raise UpdateRefused(
                 f"{where[0].upper()}{where[1:]} in {source.repo} adds or changes {len(added)} "
                 f"database update(s) for your characters, accounts or world ({shown}{more}), and "
                 "Yu'lon "
                 "cannot yet apply those to a server that already exists. Nothing was built or "
                 "changed: your server stays on the code it runs. A fresh install of this server "
-                "gets them."
+                "gets them.",
+                repo=source.repo,
+                commit=new,
             )
 
     def _world_catch_up_plan(self) -> _WorldCatchUp:
@@ -581,12 +590,18 @@ class CmangosInstaller(StagedInstaller):
         ):
             return None
         catch_up = changes
-        applied: list[int] = [0]
+        applied: list[int] = [0, 0]
+        """World updates applied, bot table files loaded: what a rollback leaves in place."""
 
         def forward(ctx: StageContext) -> Iterator[str]:
             yield from self._catch_up_world(ctx, catch_up, applied)
 
         def back(ctx: StageContext) -> Iterator[str]:
+            if applied[1]:
+                yield (
+                    f"The {applied[1]} bot table file(s) loaded before the new build started "
+                    "stay as those files left them; the build from before runs with them."
+                )
             if applied[0]:
                 yield (
                     f"The {applied[0]} world update(s) applied before the new build started stay "
@@ -670,7 +685,7 @@ class CmangosInstaller(StagedInstaller):
         if catch_up.applying():
             yield from self._bring_new_world_files(ctx, catch_up, ledger, applied)
         if catch_up.replacing():
-            yield from self._replace_changed_files(ctx, catch_up, ledger)
+            yield from self._replace_changed_files(ctx, catch_up, ledger, applied)
 
     def _bring_new_world_files(
         self,
@@ -821,6 +836,7 @@ class CmangosInstaller(StagedInstaller):
         ctx: StageContext,
         catch_up: _WorldCatchUp,
         ledger: dict[tuple[str, str], sqlplan.FileRow],
+        applied: list[int],
     ) -> Iterator[str]:
         """Each `replace_changed` file whose bytes the ledger lacks, run again whole (T534).
 
@@ -852,16 +868,26 @@ class CmangosInstaller(StagedInstaller):
                 due.append((run, sha))
         if not due:
             return
-        yield (
-            f"Loading {len(due)} changed bot table file(s) into {world} fresh while the servers "
-            "are stopped; what the bots generated into those tables is replaced by the files."
-        )
+        names = {phase.name for phase in catch_up.replacing()}
+        if not any(phase in names for phase, _file in ledger):
+            # The import writes no ledger rows, so the first update cannot tell what the
+            # install loaded (cold review of T534): it loads every file, once.
+            yield (
+                f"This is the first update to record the bot tables, so it loads every bot "
+                f"table ({len(due)} file(s)) into {world} fresh; later updates load only those "
+                "whose files changed. What the bots generated into them is replaced."
+            )
+        else:
+            yield (
+                f"Loading {len(due)} changed bot table file(s) into {world} fresh while the "
+                "servers are stopped; what the bots generated into those tables is replaced."
+            )
         loaded = 0
         for run, sha in due:
             self._check_cancel(ctx.cancel)
             assert run.path is not None
             why = sqlplan.whole_table_problem(run.path)
-            reaches = sqlplan.foreign_schemas(run.path, others)
+            reaches = sqlplan.foreign_schemas(run.path, others, executable_comments_ok=True)
             if why or reaches:
                 said = why or f"it reaches outside {world} ({', '.join(reaches)})"
                 yield (
@@ -944,7 +970,8 @@ class CmangosInstaller(StagedInstaller):
                 )
                 continue
             loaded += 1
-        yield f"{loaded} of {len(due)} changed bot table file(s) loaded."
+        applied[1] += loaded
+        yield f"{loaded} of {len(due)} bot table file(s) loaded."
 
     def _other_schemas(self) -> set[str]:
         """Every schema of this server that is not its world: what an update may never name."""

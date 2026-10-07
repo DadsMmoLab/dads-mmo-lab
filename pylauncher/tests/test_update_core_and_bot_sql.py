@@ -26,8 +26,10 @@ from tests.test_world_content_updates import (  # noqa: F401 - `_gated` is an au
     _lay,
     _press,
 )
+from yulon.catalog import native
+from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import sqlplan
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, UpdateRefused
 
 CORE = next(s for s in TBC.emulator.sources if s.repo == "cmangos/mangos-tbc")
 BOTS = next(s for s in TBC.emulator.sources if s.repo == "cmangos/playerbots")
@@ -101,7 +103,7 @@ def test_the_first_update_loads_every_bot_table_file_once_and_the_next_loads_non
     for rel in BOT_FILES:
         assert _sent(rec, rel) == 1, rel
         assert db.rows[("playerbots world", rel)][1] == "applied"
-    assert any("bot table file(s)" in line and "replaced" in line for line in lines), lines
+    assert any("every bot table" in line and "replaced" in line for line in lines), lines
     rec.sql_calls.clear()
     _press(rec, server_dir, db, world)
     assert not any(_sent(rec, rel) for rel in BOT_FILES)
@@ -233,6 +235,20 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
     return sent
 
 
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise", "wow-wotlk"])
+def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_generated(
+    game: str,
+) -> None:
+    """Restored in the T534 rework: an edit in round 3 deleted it by accident."""
+    entry = load_catalog().get(game)
+    for text in (
+        native.update_to_latest_confirmation(entry, Path("/srv"), "x/y"),
+        native.return_to_pin_confirmation(entry, Path("/srv"), "x/y"),
+    ):
+        said = "loads every bot table fresh" in text and "the bots generated" in text
+        assert said is (game in ("wow-tbc", "wow-vanilla")), text
+
+
 # -- the whole-table guard, pure --------------------------------------------------
 
 
@@ -312,3 +328,118 @@ def test_the_whole_table_guard(tmp_path: Path, text: str, problem: str | None) -
         assert found is None, found
     else:
         assert found is not None and problem in found, found
+
+
+# -- the real bot files (T534 cold review) -------------------------------------------
+
+PINNED_BOT_SQL = Path(__file__).parent / "data" / "playerbots-world-45bed519" / "world"
+"""playerbots 45bed519's sql/world files, statements verbatim, INSERTs cut to one row."""
+
+REAL_BOT_FILES = sorted(PINNED_BOT_SQL.rglob("*.sql"))
+
+
+def test_every_real_bot_file_is_one_the_reload_will_run() -> None:
+    """The cold review found 8 of these refused: mysqldump headers carry `/*!40101 SET
+    @OLD_SQL_MODE=… SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */`, and the strict world-update scan
+    refuses any executable comment and any sql_mode. The bot reload reads the bodies of
+    executable comments for schema names and does not refuse the comment itself."""
+    assert len(REAL_BOT_FILES) == 13, REAL_BOT_FILES
+    others = {"characters", "realmd", "logs"}
+    for path in REAL_BOT_FILES:
+        assert sqlplan.whole_table_problem(path) is None, path
+        assert sqlplan.foreign_schemas(path, others, executable_comments_ok=True) == (), path
+
+
+def test_the_bot_scan_still_reads_schema_names_inside_an_executable_comment(
+    tmp_path: Path,
+) -> None:
+    path = _lay(tmp_path, "x.sql", "/*!40101 UPDATE characters.c SET a=1 */;\n")
+    assert sqlplan.foreign_schemas(path, {"characters"}, executable_comments_ok=True) == (
+        "characters",
+    )
+
+
+def test_the_first_update_reloads_the_real_tbc_bot_files_headers_and_all(
+    tmp_path: Path,
+) -> None:
+    """A route test on the verbatim pinned files: every TBC bot world file (the root ones
+    and tbc/) is sent and recorded applied -- none named "not loaded"."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    bots_sql = server_dir / BOTS.dest / "sql" / "world"
+    for laid in [*bots_sql.glob("*.sql"), *(bots_sql / "tbc").glob("*.sql")]:
+        laid.unlink()
+    wanted = [p for p in REAL_BOT_FILES if p.parent.name in ("world", "tbc")]
+    for path in wanted:
+        target = bots_sql / path.relative_to(PINNED_BOT_SQL)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+    lines = _press(rec, server_dir, db, world)
+    assert not any("was not loaded" in line for line in lines), lines
+    rels = {f"{BOTS.dest}/sql/world/{p.relative_to(PINNED_BOT_SQL).as_posix()}" for p in wanted}
+    assert len(rels) == 8
+    assert {
+        f
+        for (phase, f), (_sha, state) in db.rows.items()
+        if phase == "playerbots world" and state == "applied"
+    } == rels
+
+
+# -- T533 refusals are remembered, and an unreadable move refuses ----------------------
+
+
+def test_a_refused_core_commit_is_remembered_so_it_is_not_offered_again(tmp_path: Path) -> None:
+    """UpdateRefused carries the repo and the commit; the route records them and the
+    Server tab stops offering that same commit (T179's mechanism)."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    core = server_dir / CORE.dest
+    rec.diffs[(core, OLD, NEW)] = (("A", "sql/updates/mangos/s9999_01_mangos_x.sql"),)
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server_dir, db, world)
+    refused = raised.value.__cause__  # the route adds that the sources went back
+    assert isinstance(refused, UpdateRefused), type(refused)
+    assert refused.repo == CORE.repo and refused.commit == NEW
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and (CORE.repo, NEW) in state.refused_updates
+
+
+def test_a_moved_core_git_cannot_name_is_refused_before_the_compile(tmp_path: Path) -> None:
+    """Cold review of T533: `head_sha()` answering None after the move let the press go on."""
+    from tests.test_families_cmangos import engine as tbc_engine
+    from tests.test_world_content_updates import _overrides
+    from yulon.catalog.installer import InstallOptions
+
+    rec, server_dir, db, world = _installed(tmp_path)
+    core = server_dir / CORE.dest
+
+    def head_sha(dest: Path) -> str | None:
+        if dest == core and rec.heads.get(dest) == NEW:
+            return None
+        return rec.head_sha(dest)
+
+    made = tbc_engine(rec, **_overrides(db, world), head_sha=head_sha)
+    with pytest.raises(InstallerError, match="could not read"):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls
+
+
+# -- what the player is told ---------------------------------------------------------------
+
+
+def test_a_rollback_says_the_bot_tables_stay_as_the_new_files_left_them(tmp_path: Path) -> None:
+    rec, server_dir, db, world = _installed(tmp_path)
+    rec.ready = False
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir, db, world, said=said)
+    assert any("bot table" in line and "build from before" in line for line in said), said
+
+
+def test_the_first_update_says_it_loads_every_bot_table_and_later_ones_only_changed(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, db, world = _installed(tmp_path)
+    lines = _press(rec, server_dir, db, world)
+    assert any("first update" in line and "every bot table" in line for line in lines), lines
+    text = native.update_to_latest_confirmation(TBC, Path("/srv"), "x/y")
+    assert "The first update loads every bot table fresh" in text
+    assert "later ones only those whose files changed" in text

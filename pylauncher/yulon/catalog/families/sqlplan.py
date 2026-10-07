@@ -1639,7 +1639,9 @@ def _code_only(text: str, *, backslash_escapes: bool = True) -> tuple[str, bool]
     return "".join(parts), executable
 
 
-def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
+def foreign_schemas(
+    path: Path, others: Collection[str], *, executable_comments_ok: bool = False
+) -> tuple[str, ...]:
     """What in a world update's text could reach past the world schema; empty when nothing.
 
     The update runs with `into` as the client's DEFAULT schema only -- the account
@@ -1654,19 +1656,30 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     whitespace after it, as in MySQL (`a--1` is arithmetic). Measured
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
+
+    `executable_comments_ok` is the bot reload's reading (T534 cold review): the
+    bots' mysqldump files open with `/*!40101 SET … SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */`,
+    so an executable comment or a session sql_mode is not by itself a reason there --
+    the comment bodies are still read for schema names, and both quote readings are
+    still taken.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     found: list[str] = []
     # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
     # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
     for escapes in (True, False):
-        for reason in _foreign_in(*_code_only(raw, backslash_escapes=escapes), others):
+        text, executable = _code_only(raw, backslash_escapes=escapes)
+        for reason in _foreign_in(
+            text, executable and not executable_comments_ok, others, executable_comments_ok
+        ):
             if reason not in found:
                 found.append(reason)
     return tuple(found)
 
 
-def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[str]:
+def _foreign_in(
+    text: str, executable: bool, others: Collection[str], mode_ok: bool = False
+) -> list[str]:
     """`foreign_schemas()` over one reading of the file's SQL."""
     found = [
         name
@@ -1677,7 +1690,7 @@ def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[st
         found.append("USE")
     if executable:
         found.append("an executable comment")
-    if re.search(r"(?i)\bsql_mode\b", text):
+    if not mode_ok and re.search(r"(?i)\bsql_mode\b", text):
         # ANSI_QUOTES or NO_BACKSLASH_ESCAPES would change what is a string from that
         # point on, which this reading cannot follow (Codex, T531): refused, not guessed.
         found.append("a change of sql_mode")

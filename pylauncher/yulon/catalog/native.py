@@ -1161,8 +1161,9 @@ def world_updates_note(entry: CatalogEntry) -> str:
     if "replace_changed" in modes:
         # T534, on the lead's word of 2026-10-07: say what the reload discards.
         said += (
-            " Bot tables whose files changed are loaded fresh from those files, which replaces "
-            "what the bots generated in them (travel routes, zone levels, named places)."
+            " The first update loads every bot table fresh from its file, and later ones only "
+            "those whose files changed, which replaces what the bots generated in them (travel "
+            "routes, zone levels, named places)."
         )
     return said
 
