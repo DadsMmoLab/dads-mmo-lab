@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - Two Yu'lons pressing **Re-extract map data** on one server folder at the same moment: only one goes ahead.

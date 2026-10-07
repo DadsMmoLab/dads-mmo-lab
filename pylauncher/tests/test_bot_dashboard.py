@@ -1812,3 +1812,21 @@ def test_a_failed_dashboard_job_says_its_reason_once(
     assert "port 8095 is taken" in view.dashboard_report.text()
     assert log.failure_label.isHidden(), "the reason is under the log as well as the report"
     assert log.failure_label.text() == ""
+
+
+def test_the_tray_can_put_the_bots_tab_on_screen_at_the_switch(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T540: the tray's "Turn on the bot dashboard…" lands on this switch, focused."""
+    view = _view(qapp, tmp_path, _Seam())
+    view.show()
+    try:
+        view.refresh_bot_dashboard()  # read: the switch is offered, so it can take the focus
+        assert view.dashboard_switch.isEnabled()
+        view._tabs.setCurrentIndex(0)
+        view.show_bot_dashboard_switch()
+        page = view._tabs.currentWidget()
+        assert page is not None and page.isAncestorOf(view.dashboard_switch)
+        assert view.dashboard_switch.hasFocus() or view.focusWidget() is view.dashboard_switch
+    finally:
+        view.hide()

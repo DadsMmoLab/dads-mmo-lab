@@ -594,6 +594,7 @@ def build_window() -> object:
         CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
+        SETTINGS_BUTTON,
         TAB_BUTTONS,
         apply_dadcraft_theme,
     )
@@ -649,6 +650,15 @@ def build_window() -> object:
         # and the one way one is opened (the sidebar ▶, the Server tab's Play).
         yulon_launchers: dict[tuple[str, Path], LauncherWindow]
         yulon_open_launcher: Callable[[str, object], LauncherWindow | None]
+        # T540: what the tray reads and calls. `servers_changed` says a server
+        # tab came or went, so the tray follows the badges of the tabs there
+        # are. `yulon_quit` is the one close the tray never turns into a hide:
+        # the window's own `close` until `ui.tray` replaces it.
+        servers_changed = Signal()
+        yulon_show_server_tab: Callable[[str, object], None]
+        yulon_show_logs: Callable[[], None]
+        yulon_quit: Callable[[], bool]
+        yulon_open_settings: Callable[[], None]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
             """The app is closing: its launcher windows go with it (T187).
@@ -706,6 +716,7 @@ def build_window() -> object:
     # the player's files while the old build is still the installed one.
     state = load_state(repair=not in_smoke_test())
     window = _Window()
+    window.yulon_quit = window.close
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     window.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(window)
@@ -905,6 +916,15 @@ def build_window() -> object:
         tabs.setCurrentWidget(view)
         _bring_to_front(window)
 
+    window.yulon_show_server_tab = show_server_tab
+
+    def show_logs() -> None:
+        """The tray's Logs (T540): this window, on the Logs tab (index 1, see above)."""
+        tabs.setCurrentIndex(1)
+        _bring_to_front(window)
+
+    window.yulon_show_logs = show_logs
+
     def drop_controller(key: tuple[str, Path]) -> None:
         """Tear one live tab down completely, mirroring `_stop_background_threads()`.
 
@@ -948,6 +968,7 @@ def build_window() -> object:
         # this the discarded view stays alive for the life of the process, and
         # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
         view.deleteLater()
+        window.servers_changed.emit()
 
     def _forget_live_record(game: str, server_dir: Path) -> Any:
         """`state.forget()` over the window's own state object, persisted. No Qt."""
@@ -1525,6 +1546,7 @@ def build_window() -> object:
         launcher = launchers.get(key)
         if launcher is not None and shiboken6.isValid(launcher):
             launcher.set_view(view)
+        window.servers_changed.emit()
 
     for install in state.installs:
         try:
@@ -1700,7 +1722,9 @@ def build_window() -> object:
             # `window.close()` answers a bool; nothing here reads it, and
             # typing the seam as taking none and returning one would make a
             # test's `lambda: closed.append(1)` the odd one out.
-            self.close_window: Callable[[], object] = window.close
+            # T540: through `yulon_quit`, read at the call: with the tray up a
+            # `close()` only hides the window, and the helper waits for an exit.
+            self.close_window: Callable[[], object] = lambda: window.yulon_quit()
             self.refusal: Callable[[], str | None] = lambda: close_refusal(window)
             self.make_progress: Callable[[str], Any] = lambda version: UpdateProgressDialog(
                 version, parent=window
@@ -2208,6 +2232,15 @@ def build_window() -> object:
     header = window.property("header")
     if header is not None:
         header.add_action(check_button)
+    # T540: the tray's two switches. `main()`'s `YulonTray` replaces the seam
+    # with its dialog; a window built without one (a test) only says so.
+    window.yulon_open_settings = lambda: logger.info("settings: no tray object in this window")
+    settings_button = QPushButton("Settings…", window)
+    settings_button.setObjectName(SETTINGS_BUTTON)
+    settings_button.setToolTip("Keep Yu'lon in the system tray, and start it when you sign in")
+    settings_button.clicked.connect(lambda _checked=False: window.yulon_open_settings())
+    if header is not None:
+        header.add_action(settings_button)
 
     if in_smoke_test():
         # No launch check: it would ask GitHub and write `update.json` in the
@@ -2435,13 +2468,15 @@ def main() -> int:
             pass
 
     from PySide6.QtCore import QEvent, QObject
-    from PySide6.QtWidgets import QApplication, QMainWindow
+    from PySide6.QtWidgets import QMainWindow
 
     from yulon.ui.icons import get_app_icon
     from yulon.ui.single_instance import UNANSWERED_TEXT, UNANSWERED_TITLE, InstanceGuard
     from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.tray import YulonApplication
 
-    app = QApplication(sys.argv)
+    # T540: an application that says when it is asked to quit (the tray's close-to-tray).
+    app = YulonApplication(sys.argv)
     app.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(app)
     # One Yu'lon per user (T152), claimed BEFORE the window: `build_window()`
@@ -2449,10 +2484,17 @@ def main() -> int:
     # either beside the first is the race this exists to stop. After the theme,
     # so the one box a second launch can show looks like the app.
     instance = InstanceGuard(platform.config_dir())
-    claim = instance.claim()
+    # T540: a `--tray` (sign-in) start only asks whether Yu'lon is there.
+    claim = instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
     if claim == "raised":
         return 0
+    # T540: the sign-in entry (`autostart`) starts Yu'lon with `--tray`: hidden
+    # in the tray, and quiet, because nobody at sign-in asked for a window.
+    start_in_tray = "--tray" in sys.argv[1:]
     if claim == "unanswered":
+        if start_in_tray:
+            logger.warning("single instance: a sign-in start found Yu'lon not answering; left")
+            return 0
         from yulon.ui.message_box import show_warning
 
         show_warning(None, UNANSWERED_TITLE, UNANSWERED_TEXT)
@@ -2522,7 +2564,18 @@ def main() -> int:
 
         guard = _RefuseCloseWhileBusy(window)
         window.installEventFilter(guard)
-        window.show()
+        # T540: AFTER the busy guard, so its filter runs first: a close by hand
+        # hides the window into the tray (a job keeps running, so nothing needs
+        # refusing), and only a real quit reaches the guard. Held in this frame
+        # for the life of the loop; parented to the window as well.
+        from yulon.ui.tray import YulonTray
+
+        tray = YulonTray(window, bring_forward=_bring_to_front)
+        tray.install()
+        if start_in_tray:
+            tray.start_hidden()
+        else:
+            window.show()
         # After show(), so the app is visibly UP before it admits to anything:
         # the log file failing is not a reason to hold the window back.
         _warn_about_the_log_file(window)

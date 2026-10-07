@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PySide6.QtWidgets import (
@@ -2388,6 +2389,45 @@ def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
 
     assert view._offer_a_restart_instead("boom") is True
     assert restarted, "an int Yes from the static question() did not offer the restart"
+
+
+def test_a_restart_that_lost_the_lock_quits_for_real_even_with_the_tray(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T540: the lost-lock exit calls `yulon_quit`, which the tray never turns into a hide."""
+    from contextlib import contextmanager
+
+    from PySide6.QtWidgets import QMainWindow
+
+    from yulon.ui import single_instance
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: int(QMessageBox.StandardButton.Yes)
+    )
+    monkeypatch.setattr(catalog_view.platform, "docker_group_reexec", lambda: ["yulon"])
+    monkeypatch.setattr(catalog_view.platform, "restart_under_docker_group", lambda *a, **k: None)
+
+    @contextmanager
+    def lost() -> Any:
+        yield single_instance.Handover(lost=True)
+
+    monkeypatch.setattr(catalog_view.single_instance, "handed_over", lost)
+    window = QMainWindow()
+    quits: list[int] = []
+
+    def quit_for_real() -> bool:
+        quits.append(1)
+        return True
+
+    window.yulon_quit = lambda: quits.append(0) or True  # type: ignore[attr-defined]
+    window.yulon_quit_for_good = quit_for_real  # type: ignore[attr-defined]
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    window.setCentralWidget(view)
+    try:
+        assert view._offer_a_restart_instead("boom") is True
+        assert quits == [1], "the lost-lock exit did not quit for good (cold review)"
+    finally:
+        window.deleteLater()
 
 
 # -- T33: a real `QMessageBox.question()`, not a fake one, reading Yes as Yes

@@ -93,6 +93,10 @@ class UiSettings(BaseModel):
     noticed_leftovers: list[str] = Field(default_factory=list)
     """T179: the temporary client copies Yu'lon has already said it could not remove,
     by folder, so the start-up notice is said once per folder and not at every start."""
+    keep_in_tray: bool = True
+    """T540: closing the window hides it into the tray (where a tray exists)."""
+    tray_note: str = ""
+    """T540: "never" once the player said not to show "Yu'lon stays in the tray" again."""
 
     @field_validator("noticed_leftovers", mode="before")
     @classmethod
@@ -237,4 +241,17 @@ def remember_leftover_notices(targets: Iterable[str], path: Path | None = None) 
         if not added:
             return True
         settings.noticed_leftovers = [*settings.noticed_leftovers, *added]
+        return save_ui_settings(settings, path)
+
+
+def remember_tray(
+    *, keep_in_tray: bool | None = None, tray_note: str | None = None, path: Path | None = None
+) -> bool:
+    """T540: write the tray's two choices onto what `ui.json` says now. False = not written."""
+    with _LOCK:
+        settings = load_ui_settings(path)
+        if keep_in_tray is not None:
+            settings.keep_in_tray = keep_in_tray
+        if tray_note is not None:
+            settings.tray_note = tray_note
         return save_ui_settings(settings, path)
