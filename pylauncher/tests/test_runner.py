@@ -2232,7 +2232,9 @@ def _gone(pid: int) -> bool:
             with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
                 if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
                     return True
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaped before the open, or between the open and the read (ESRCH,
+            # seen once in the mutation runs of 2026-10-07).
             return True
         time.sleep(POLL_PACE)
     return False
