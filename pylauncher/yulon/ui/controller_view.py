@@ -14571,6 +14571,14 @@ class ControllerView(QWidget):
     def _dashboard_state_failed(self, exc: object) -> None:
         self.dashboard_report.setText(f"Could not tell whether the dashboard is on: {exc}")
 
+    def show_bot_dashboard_switch(self) -> None:
+        """The Bots tab on screen at the dashboard's switch, focused (the tray's Turn on, T540)."""
+        switch = getattr(self, "dashboard_switch", None)
+        if switch is None:
+            return
+        self._show_page_of(switch)
+        switch.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _show_dashboard_switch(self, on: bool) -> None:
         self.dashboard_switch.setChecked(on)
         self.dashboard_switch.setText(DASHBOARD_SWITCH_ON if on else DASHBOARD_SWITCH_OFF)

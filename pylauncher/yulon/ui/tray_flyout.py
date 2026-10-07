@@ -137,6 +137,13 @@ class ServerCard(QFrame):
             label.setWordWrap(True)
         words.addWidget(self.title)
         words.addWidget(self.detail)
+        # A Tortoise server's TortoiseBots dashboard, under its name (T540).
+        self.dashboard = QPushButton(self)
+        self.dashboard.setFlat(True)
+        self.dashboard.setObjectName("tray-card-dashboard")
+        self.dashboard.setVisible(False)
+        self.dashboard_kind = ""
+        words.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignLeft)
         row.addLayout(words, 1)
         self.pill = QLabel(self)
         self.pill.setObjectName("tray-pill")
@@ -145,7 +152,7 @@ class ServerCard(QFrame):
         self.action.setMinimumWidth(72)
         row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
 
-    def show_server(self, view: Any, title: str, status: str, words: str) -> str:
+    def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
         """Fill the card; answers which button it shows (PLAY, START, OPEN or "")."""
         self.view = view
         self.title.setText(title)
@@ -159,8 +166,17 @@ class ServerCard(QFrame):
             f"color: {colour}; border: 1px solid {colour}; border-radius: 8px; padding: 1px 8px;"
         )
         detail = card_detail(getattr(view, "last_verdict", None)) if tone == "up" else ""
+        if entry is not None and not entry.enabled and entry.reason and not detail:
+            detail = entry.reason  # why the dashboard is greyed, on the card itself
         self.detail.setText(detail)
         self.detail.setVisible(bool(detail))
+        self.dashboard.setVisible(entry is not None)
+        self.dashboard_kind = ""
+        if entry is not None:
+            self.dashboard.setText(entry.label)
+            self.dashboard.setEnabled(entry.enabled)
+            self.dashboard.setToolTip(entry.reason)
+            self.dashboard_kind = entry.kind
         if tone == "up":
             which = PLAY
             enabled, why = True, f"Open the game launcher for {title}"
@@ -197,6 +213,8 @@ class TrayFlyout(QWidget):
     open_requested = Signal()
     quit_requested = Signal()
     settings_requested = Signal()
+    dashboard_requested = Signal(object, str)
+    """(view, kind): a card's bot dashboard entry was pressed."""
     dismissed = Signal()
     """It closed itself because something else took the focus (a click elsewhere)."""
 
@@ -225,6 +243,14 @@ class TrayFlyout(QWidget):
             QLabel#tray-header {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-detail {{ color: {COLOR_TEXT_MUTED}; }}
+            QPushButton#tray-card-dashboard {{
+                color: {COLOR_GOLD_BRIGHT};
+                border: none;
+                background: transparent;
+                padding: 0;
+                text-align: left;
+            }}
+            QPushButton#tray-card-dashboard:disabled {{ color: {COLOR_TEXT_MUTED}; }}
             QToolButton {{
                 color: {COLOR_GOLD_BRIGHT};
                 font-size: 16px;
@@ -276,8 +302,8 @@ class TrayFlyout(QWidget):
     def cards(self) -> list[ServerCard]:
         return [card for card in self._cards if not card.isHidden()]
 
-    def show_servers(self, header: str, servers: Sequence[tuple[Any, str, str, str]]) -> None:
-        """(view, title, badge word, pill words) per server. Cards are reused, not rebuilt.
+    def show_servers(self, header: str, servers: Sequence[tuple[Any, str, str, str, Any]]) -> None:
+        """(view, title, badge word, pill words, dashboard entry) per server. Cards are reused.
 
         Reused so a card the pad's focus is on keeps it across a refresh.
         """
@@ -285,10 +311,11 @@ class TrayFlyout(QWidget):
         while len(self._cards) < len(servers):
             card = ServerCard(self._list)
             card.action.clicked.connect(lambda _c=False, c=card: self._pressed(c))
+            card.dashboard.clicked.connect(lambda _c=False, c=card: self._dashboard_pressed(c))
             self._cards_box.insertWidget(len(self._cards), card)
             self._cards.append(card)
-        for card, (view, title, status, words) in zip(self._cards, servers, strict=False):
-            card.show_server(view, title, status, words)
+        for card, (view, title, status, words, entry) in zip(self._cards, servers, strict=False):
+            card.show_server(view, title, status, words, entry)
             card.setVisible(True)
         for card in self._cards[len(servers) :]:
             card.setVisible(False)
@@ -301,6 +328,10 @@ class TrayFlyout(QWidget):
         wanted = self._list.sizeHint().height() + 4
         self._scroll.setFixedHeight(min(wanted, FLYOUT_MAX_HEIGHT - 120))
         self.adjustSize()
+
+    def _dashboard_pressed(self, card: ServerCard) -> None:
+        if card.view is not None and card.dashboard_kind:
+            self.dashboard_requested.emit(card.view, card.dashboard_kind)
 
     def _pressed(self, card: ServerCard) -> None:
         view = card.view

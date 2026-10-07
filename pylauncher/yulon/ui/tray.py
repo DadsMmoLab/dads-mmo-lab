@@ -31,6 +31,7 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import shiboken6
@@ -127,6 +128,48 @@ def tray_tooltip(servers: Sequence[tuple[str, str]]) -> str:
         return "Yu'lon: no servers online"
     noun = "server" if len(online) == 1 else "servers"
     return "\n".join([f"Yu'lon: {len(online)} {noun} online", *online])
+
+
+DASHBOARD = "Bot dashboard"
+DASHBOARD_TURN_ON = "Turn on the bot dashboard…"
+DASHBOARD_START_FIRST = "Start the server first to open its bot dashboard."
+
+
+@dataclass(frozen=True)
+class DashboardEntry:
+    """What a Tortoise server's tray entry for the TortoiseBots dashboard says and does."""
+
+    label: str
+    menu_label: str
+    enabled: bool
+    reason: str
+    kind: str
+    """ "open" (the Bots tab's own Open), "switch" (the Bots tab, at the switch) or ""."""
+
+
+def dashboard_entry(view: Any, status: str) -> DashboardEntry | None:
+    """The bot dashboard's entry for one server, or None where it has none (not Tortoise).
+
+    Three states, read off the Bots tab itself so the tray cannot disagree with it:
+    the realm not up (greyed, start it first); up with the switch on (open it, or
+    greyed with the Open button's own reason, e.g. a rebuild owed); up with the
+    switch off (go to the switch).
+    """
+    if getattr(view.services, "bot_dashboard", None) is None:
+        return None
+    switch = getattr(view, "dashboard_switch", None)
+    opener = getattr(view, "open_dashboard_button", None)
+    if switch is None or opener is None:  # pragma: no cover - built with the seam
+        return None
+    if not is_online(status):
+        return DashboardEntry(
+            DASHBOARD, f"{DASHBOARD} (start the server first)", False, DASHBOARD_START_FIRST, ""
+        )
+    if not switch.isChecked():
+        return DashboardEntry(DASHBOARD_TURN_ON, DASHBOARD_TURN_ON, True, "", "switch")
+    if not opener.isEnabled():
+        return DashboardEntry(DASHBOARD, DASHBOARD, False, opener.toolTip(), "")
+    return DashboardEntry(DASHBOARD, DASHBOARD, True, "", "open")
 
 
 def header_text(statuses: Sequence[str]) -> str:
@@ -526,6 +569,14 @@ class YulonTray(QObject):
         if opener is not None:
             opener(view.entry.id, view.services.controller.server_dir)
 
+    def dashboard(self, view: Any, kind: str) -> None:
+        """The bot dashboard entry: open it (the Bots tab's own Open), or go to its switch."""
+        if kind == "open":
+            view.open_bot_dashboard()
+        elif kind == "switch":
+            self.show_server(view)
+            view.show_bot_dashboard_switch()
+
     def show_server(self, view: Any) -> None:
         shower = getattr(self.window, "yulon_show_server_tab", None)
         if shower is not None:
@@ -766,9 +817,18 @@ class YulonTray(QObject):
         servers = self.servers()
         header = menu.addAction(header_text([status for _, _, status in servers]))
         header.setEnabled(False)
-        for _view, title, status in servers:
+        for view, title, status in servers:
             row = menu.addAction(f"{title} — {status_words(status)}")
             row.setEnabled(False)
+            entry = dashboard_entry(view, status)
+            if entry is not None:
+                dash = menu.addAction(entry.menu_label)
+                dash.setEnabled(entry.enabled)
+                dash.setToolTip(entry.reason)
+                dash.triggered.connect(
+                    lambda _checked=False, v=view, k=entry.kind: self.dashboard(v, k)
+                )
+        menu.setToolTipsVisible(True)
         menu.addSeparator()
         open_action = menu.addAction(OPEN_YULON)
         font = QFont(open_action.font())
@@ -820,6 +880,7 @@ class YulonTray(QObject):
             flyout.open_requested.connect(self._flyout_open)
             flyout.quit_requested.connect(self._flyout_quit)
             flyout.settings_requested.connect(self._flyout_settings)
+            flyout.dashboard_requested.connect(self._flyout_dashboard)
             flyout.dismissed.connect(self._flyout_dismissed)
             self.flyout = flyout
         self._fill_flyout(self.servers())
@@ -837,7 +898,10 @@ class YulonTray(QObject):
             return
         self.flyout.show_servers(
             header_text([status for _, _, status in servers]),
-            [(view, title, status, status_words(status)) for view, title, status in servers],
+            [
+                (view, title, status, status_words(status), dashboard_entry(view, status))
+                for view, title, status in servers
+            ],
         )
 
     def _flyout_play(self, view: Any) -> None:
@@ -847,6 +911,10 @@ class YulonTray(QObject):
     def _flyout_show_server(self, view: Any) -> None:
         self.hide_flyout()
         self.show_server(view)
+
+    def _flyout_dashboard(self, view: Any, kind: str) -> None:
+        self.hide_flyout()
+        self.dashboard(view, kind)
 
     def _flyout_open(self) -> None:
         self.hide_flyout()
