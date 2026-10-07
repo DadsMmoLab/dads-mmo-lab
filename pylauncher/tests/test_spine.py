@@ -2725,6 +2725,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T377: asks whether the backups directory holds any `*.sql`, to show or hide the "
         "Restore a backup… offer beside a missing database; reads, decides no write"
     ),
+    ("links.py", "walk"): (
+        "T530. `os.walk` without ever entering a link (a junction included), naming the links "
+        "it met. Reads only: it decides no write itself, and every caller uses it either to "
+        "plan names from a module's checkout (`apply._plan_onto()`) or to find a link to "
+        "refuse (`apply._checkout_link()`, `module_source._first_link()`)"
+    ),
+    ("apply.py", "_checkout_link"): (
+        "T530. Walks what a manifest names in a module's checkout to find the first link on "
+        "the way or under it; decides a REFUSAL, never a write: an install, configure or "
+        "remove that would read or write through a link stops before it changes anything, or "
+        "the step that would use it stops (`_look_again()`)"
+    ),
+    ("module_source.py", "_first_link"): (
+        "T530. Walks the folder a player chose for Install from folder, `.git` aside, for a "
+        "link `copy_folder()` must not copy through; decides a REFUSAL raised before the old "
+        "copy is removed, never a write"
+    ),
     ("module_source.py", "_conf_steps"): (
         "lists the top level of a derived module's conf/ to find the .conf.dist files the "
         "manifest will name; decides no write, and a conf it cannot see is simply one "

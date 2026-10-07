@@ -56,6 +56,20 @@ def test_replacing_text_in_a_string_is_not_a_write_to_anything() -> None:
     assert _sites_in("def f(s):\n    return s.replace('a', 'b')\n") == set()
 
 
+def test_a_registry_value_set_or_deleted_is_a_write() -> None:
+    """T540: the Run value that starts Yu'lon at sign-in is a change to the machine."""
+    source = (
+        "import winreg\n"
+        "def f(k):\n"
+        "    winreg.SetValueEx(k, 'a', 0, 1, 'v')\n"
+        "def g(k):\n"
+        "    winreg.DeleteValue(k, 'a')\n"
+        "def h(k):\n"
+        "    winreg.QueryValueEx(k, 'a')\n"
+    )
+    assert _sites_in(source) == {"f::winreg.SetValueEx", "g::winreg.DeleteValue"}
+
+
 def test_replacing_a_file_is_a_write() -> None:
     assert _sites_in("import os\ndef f(a, b):\n    os.replace(a, b)\n") == {"f::os.replace"}
 

@@ -29,6 +29,7 @@ from yulon.support import runlog
 from yulon.ui import lines
 from yulon.ui.widgets.log_panel import (
     PALETTE,
+    STOPPED_PUT_BACK,
     STOPPED_THEN_FAILED,
     LogPanel,
     Seams,
@@ -1524,6 +1525,49 @@ def test_a_routes_own_sentence_raised_from_a_stopped_child_is_a_clean_cancel(
             raise RuntimeError("Fetching the core failed: git fetch was stopped.") from exc
 
     panel, finished = _stopped_then(wrapped)
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+
+
+def test_the_engines_own_stop_sentence_is_shown_under_stopped(qapp: object) -> None:
+    """T528: the sentence the engine raises for a Stop is what the header says after it.
+
+    Seen live on yulon-ubuntu2 and yulon-win11 (2026-10-07): a Rebuild stopped
+    mid-build ended on `--- cancelled` and nothing else, while `_check_run` had
+    raised "the build was stopped." with the per-platform note of what the Stop
+    cost (T307) -- logged at DEBUG, shown nowhere.
+
+    Mutation this catches: the worker turning every clean Stop into "stopped"
+    again, or `_on_finished` showing only a put-back's sentence.
+    """
+    from yulon.catalog import native
+    from yulon.catalog.installer import InstallStopped
+
+    sentence = native._cancelled_message("the build", native.build_cancel_note())
+
+    def engine_stop() -> None:
+        raise InstallStopped(sentence)
+
+    panel, finished = _stopped_then(engine_stop)
+
+    assert panel.cancelled is True
+    assert panel.status_text() == STOPPED_PUT_BACK + sentence
+    assert finished == [(True, sentence)], finished
+
+
+def test_a_stop_whose_sentence_is_a_command_line_still_says_cancelled(qapp: object) -> None:
+    """T528's other half: a Stop that only names what it ended is not a sentence for the player.
+
+    `GitStopped` says "git clone ... was stopped." with the whole argv in it; it
+    marks the Stop taking effect and nothing more, so the header stays "cancelled".
+    """
+    from yulon.git import GitStopped
+
+    def git_stop() -> None:
+        raise GitStopped("git -c core.autocrlf=false clone --progress https://x was stopped.")
+
+    panel, finished = _stopped_then(git_stop)
 
     assert panel.status_text() == "cancelled"
     assert finished == [(True, "stopped")], finished

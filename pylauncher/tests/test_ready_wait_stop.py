@@ -394,8 +394,10 @@ def test_stop_in_an_installs_ready_wait_is_a_clean_stop_that_says_the_server_is_
         lambda cancel: made.run(options, cancel=cancel), reached, "the install's ready wait"
     )
 
-    assert panel.status_text() == "cancelled"
-    assert finished == [(True, "stopped")], finished
+    # T528: the engine's own sentence for the Stop is the header, under "Stopped:".
+    assert finished and finished[0][0] is True, finished
+    assert native.READY_WAIT_STOPPED in finished[0][1], finished
+    assert panel.status_text() == STOPPED_PUT_BACK + finished[0][1]
     assert native.INSTALL_LEFT_LOADING in panel.text(), panel.text()
     assert len(waits.asked) == 1, "the install waited on after the Stop"
     assert not [c for c in rec.calls if c.startswith("stop")], rec.calls
@@ -429,7 +431,10 @@ def test_an_install_stopped_in_the_watch_after_its_banner_says_the_world_had_rep
     panel, finished = stop_when(press, reached, "the install's watch after the banner")
 
     said = panel.text()
-    assert panel.status_text() == "cancelled"
+    # T528: the engine's own sentence for the Stop is the header, under "Stopped:".
+    assert finished and finished[0][0] is True, finished
+    assert native.READY_STOPPED_IN_THE_WATCH in finished[0][1], finished
+    assert panel.status_text() == STOPPED_PUT_BACK + finished[0][1]
     assert native.INSTALL_LEFT_RUNNING in said, said
     assert native.INSTALL_LEFT_LOADING not in said, said
     assert panel.stopped_by is native.StoppedInTheWatch, panel.stopped_by

@@ -20,6 +20,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -752,3 +753,53 @@ def test_a_token_reaches_the_activation_on_wayland_and_is_never_left_behind(
         assert "XDG_ACTIVATION_TOKEN" not in os.environ
     finally:
         window.close()
+
+
+class _LineSocket:
+    """What `InstanceGuard._read` uses of a `QLocalSocket`, holding one line."""
+
+    def __init__(self, line: bytes) -> None:
+        from PySide6.QtCore import QByteArray
+
+        self._line = QByteArray(line)
+        self.written: list[bytes] = []
+        self.aborted = False
+
+    def canReadLine(self) -> bool:  # noqa: N802
+        return True
+
+    def bytesAvailable(self) -> int:  # noqa: N802
+        return len(self._line)
+
+    def readLine(self, _max: int) -> Any:  # noqa: N802
+        return self._line
+
+    def write(self, data: bytes) -> None:
+        self.written.append(bytes(data))
+
+    def flush(self) -> None:
+        return None
+
+    def disconnectFromServer(self) -> None:  # noqa: N802
+        return None
+
+    def abort(self) -> None:
+        self.aborted = True
+
+
+def test_a_sign_in_start_asks_whether_yulon_is_there_without_raising_it(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T540, normal review [P2]: a `--tray` launch that found Yu'lon open brought its window
+    forward. It now says "present", which is answered and raises nothing."""
+    from yulon.ui import single_instance
+
+    guard = single_instance.InstanceGuard(tmp_path / "config")
+    raised: list[str] = []
+    guard.raise_requested.connect(raised.append)
+    present = _LineSocket(b"present\n")
+    guard._read(present)  # type: ignore[arg-type]
+    assert raised == [] and present.written == [b"ok\n"] and not present.aborted
+    ask = _LineSocket(b"raise tok\n")
+    guard._read(ask)  # type: ignore[arg-type]
+    assert raised == ["tok"] and ask.written == [b"ok\n"]
