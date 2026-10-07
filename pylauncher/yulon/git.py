@@ -406,6 +406,15 @@ class GitStopped(GitError, StopTookEffect):
     """
 
 
+class GitContainerLeft(GitError):
+    """A containerized git whose container could not be removed: it may still write (Codex).
+
+    A failed containerized clone is answered with host git, and host git must not start
+    in a folder a container may still be cloning into. So this is a `GitError` that
+    `_falls_back()` refuses, and the log above it names the container and the command.
+    """
+
+
 @dataclass(frozen=True)
 class CloneSpec:
     """One source to materialize at `dest`.
@@ -1199,8 +1208,9 @@ def _streamed_git(
 
 
 def _falls_back(exc: GitError) -> bool:
-    """May a failed containerized git be answered with host git? Never after a Stop (T240)."""
-    return not isinstance(exc, GitStopped)
+    """May a failed containerized git be answered with host git? Never after a Stop (T240),
+    and never over a container that could not be removed (`GitContainerLeft`)."""
+    return not isinstance(exc, (GitStopped, GitContainerLeft))
 
 
 def container_left_line(name: str, dest: Path, reason: str) -> str:
@@ -2993,7 +3003,7 @@ class ContainerGit:
         ident = threading.get_ident()
         stops = runner.stops_sent_to(ident)
         try:
-            made, _refused = container_end.create(launcher, create, name, what="clone")
+            made, refused_late = container_end.create(launcher, create, name, what="clone")
         except OSError as exc:
             # The docker CLI gone from under the cached path: `_capture()`'s sentence.
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
@@ -3006,15 +3016,23 @@ class ContainerGit:
             # In an install the panel drains instead of closing this, and nothing
             # here reads the install's cancel, so the clone would run to its end --
             # or, had the create failed, fall back to host git (cold review).
-            if made.returncode == 0:
-                refused = self._end_container(launcher, name)
-                if refused is not None:
-                    yield container_left_line(name, dest, refused)
+            # A create that timed out was already ended by `create()`, and what it
+            # could not remove comes back as `refused_late` (Codex review).
+            refused = self._end_container(launcher, name) if made.returncode == 0 else refused_late
+            if refused is not None:
+                yield container_left_line(name, dest, refused)
             raise GitStopped(f"the clone into {dest} was stopped before it started.")
         if made.returncode != 0:
             # Nothing was started. A create that timed out had its late container
-            # looked for and removed (or the refusal logged) by `create()`.
+            # looked for and removed by `create()`; one it could not remove may
+            # still clone into `dest`, so it is said, and host git is not started.
             said = (made.stderr or made.stdout).strip() or "no answer"
+            if refused_late is not None:
+                yield container_left_line(name, dest, refused_late)
+                raise GitContainerLeft(
+                    f"docker create exited {made.returncode}: {said}; its container {name} "
+                    "could not be removed"
+                )
             raise GitError(f"docker create exited {made.returncode}: {said}")
         try:
             with closing(_streamed_git([*launcher, "start", "-a", name], stage=stage)) as lines:

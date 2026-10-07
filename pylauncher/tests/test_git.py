@@ -3791,3 +3791,54 @@ def test_each_answer_of_docker_rm_is_read_for_what_it_says_about_the_container(
     said = container_end.remove_once(["fake-docker"], "yulon-git-0")
     expected = {"removed": container_end.REMOVED, "gone": container_end.GONE}.get(answer, stderr)
     assert said == expected
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=("no-stop", "stopped-during-create"))
+def test_a_timed_out_clone_create_whose_late_container_will_not_go_is_said_not_cloned_again(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_docker: tuple[Path, Path],
+    stopped: bool,
+) -> None:
+    """Codex review of the stop-paths branch (both reviews, round 2): `create()` hands back
+    why a timed-out create's late container could not be removed, and it was dropped. The
+    container may still clone into the folder: its name and the command are said, and host
+    git is never started under it -- with or without a Stop sent during the create."""
+    cli, state = fake_docker
+    (state / "late-create").write_text("", encoding="utf-8")
+    monkeypatch.setattr(container_end, "CREATE_TIMEOUT", 0.5)
+    late: list[str] = []
+
+    def the_daemon_makes_it_and_will_not_remove_it() -> None:
+        late.append(finish_late_create(state))
+        (state / "refuse-rm").write_text("", encoding="utf-8")
+        if stopped:
+            # The panel's Stop, sent while the create had not answered.
+            runner.end_streams_started_on(threading.get_ident())
+
+    monkeypatch.setattr(
+        container_end, "time", _Settle(during=the_daemon_makes_it_and_will_not_remove_it)
+    )
+    container_git = _container_git(monkeypatch, cli)
+    host: list[git.CloneSpec] = []
+
+    def host_clone(
+        self: git.RunnerGit, spec: git.CloneSpec, *, stage: str = "clone"
+    ) -> Iterator[str]:
+        host.append(spec)
+        yield "host git cloned it"
+
+    monkeypatch.setattr(git.RunnerGit, "clone_lines", host_clone)
+    dest = tmp_path / "core"
+    said: list[str] = []
+
+    with pytest.raises(git.GitError) as failed:
+        for line in container_git.clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)):
+            said.append(line)
+
+    assert host == [], "host git was started under a container that may still be cloning"
+    assert isinstance(failed.value, git.GitStopped) is stopped, failed.value
+    assert fake_containers(state) == late, "the ground: the daemon kept it"
+    assert said and said[-1].startswith(f"The clone's container {late[0]} could not be removed")
+    assert f"docker rm -f {late[0]}" in said[-1], said[-1]
+    assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"

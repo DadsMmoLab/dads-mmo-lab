@@ -37,6 +37,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a clone or a map tool now finds that tool's container and removes it, even right as it starts.
 - **Re-extract map data** also waits for a map tool an earlier Yu'lon left running, instead of writing under it.
 - On Linux, a tool container Yu'lon could not remove is explained with the command that removes it, not Docker Desktop.
+- A clone whose container Yu'lon could not remove is named with how to remove it, and host git does not clone under it.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
 - A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
