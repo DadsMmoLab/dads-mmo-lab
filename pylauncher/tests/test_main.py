@@ -5910,3 +5910,66 @@ def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
         console.setHidden(was_hidden[0])
         toggle.setHidden(was_hidden[1])
         process_events(10)
+
+
+# ------------------------------------------------------- T540: the tray's wiring
+
+
+def test_the_tray_hears_each_server_tab_come_and_go(window: Any, tmp_path: Path) -> None:
+    """`servers_changed`: the tray follows the badges of the tabs there are, not of old ones."""
+    heard: list[int] = []
+
+    def hear() -> None:
+        heard.append(len(window.yulon_controllers))
+
+    before = len(window.yulon_controllers)
+    window.servers_changed.connect(hear)
+    try:
+        server_dir = tmp_path / "t540-tray-follows"
+        _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+        view = _tab_for(window, server_dir)
+        assert heard and heard[-1] == before + 1, "a new tab was not announced"
+        view.uninstalled.emit("wow-wotlk", server_dir)
+        assert heard[-1] == before, "a dropped tab was not announced"
+    finally:
+        window.servers_changed.disconnect(hear)
+
+
+def test_the_tray_can_put_a_server_tab_and_the_logs_on_screen(window: Any, tmp_path: Path) -> None:
+    server_dir = tmp_path / "t540-tray-shows"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    was_visible = window.isVisible()
+    try:
+        tabs.setCurrentIndex(0)
+        window.yulon_show_server_tab(view.entry.id, server_dir)
+        assert tabs.currentWidget() is view
+        window.yulon_show_logs()
+        assert tabs.currentIndex() == 1
+        assert window.isVisible(), "the Logs from the tray did not bring the window"
+    finally:
+        if not was_visible:
+            window.hide()
+        tabs.setCurrentIndex(0)
+
+
+def test_the_self_update_quits_through_the_trays_real_quit(update_host: Any, window: Any) -> None:
+    """With the tray up a `close()` is a hide, and the update helper would wait for ever."""
+    real = window.yulon_quit
+    quits: list[int] = []
+
+    def quit_for_real() -> bool:
+        quits.append(1)
+        return True
+
+    window.yulon_quit = quit_for_real
+    try:
+        update_host.close_window()
+    finally:
+        window.yulon_quit = real
+    assert quits == [1]
+
+
+def test_without_a_tray_the_windows_quit_is_its_close(window: Any) -> None:
+    assert window.yulon_quit == window.close

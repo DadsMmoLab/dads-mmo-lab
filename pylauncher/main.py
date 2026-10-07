@@ -649,6 +649,14 @@ def build_window() -> object:
         # and the one way one is opened (the sidebar ▶, the Server tab's Play).
         yulon_launchers: dict[tuple[str, Path], LauncherWindow]
         yulon_open_launcher: Callable[[str, object], LauncherWindow | None]
+        # T540: what the tray reads and calls. `servers_changed` says a server
+        # tab came or went, so the tray follows the badges of the tabs there
+        # are. `yulon_quit` is the one close the tray never turns into a hide:
+        # the window's own `close` until `ui.tray` replaces it.
+        servers_changed = Signal()
+        yulon_show_server_tab: Callable[[str, object], None]
+        yulon_show_logs: Callable[[], None]
+        yulon_quit: Callable[[], bool]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
             """The app is closing: its launcher windows go with it (T187).
@@ -706,6 +714,7 @@ def build_window() -> object:
     # the player's files while the old build is still the installed one.
     state = load_state(repair=not in_smoke_test())
     window = _Window()
+    window.yulon_quit = window.close
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     window.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(window)
@@ -905,6 +914,15 @@ def build_window() -> object:
         tabs.setCurrentWidget(view)
         _bring_to_front(window)
 
+    window.yulon_show_server_tab = show_server_tab
+
+    def show_logs() -> None:
+        """The tray's Logs (T540): this window, on the Logs tab (index 1, see above)."""
+        tabs.setCurrentIndex(1)
+        _bring_to_front(window)
+
+    window.yulon_show_logs = show_logs
+
     def drop_controller(key: tuple[str, Path]) -> None:
         """Tear one live tab down completely, mirroring `_stop_background_threads()`.
 
@@ -948,6 +966,7 @@ def build_window() -> object:
         # this the discarded view stays alive for the life of the process, and
         # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
         view.deleteLater()
+        window.servers_changed.emit()
 
     def _forget_live_record(game: str, server_dir: Path) -> Any:
         """`state.forget()` over the window's own state object, persisted. No Qt."""
@@ -1525,6 +1544,7 @@ def build_window() -> object:
         launcher = launchers.get(key)
         if launcher is not None and shiboken6.isValid(launcher):
             launcher.set_view(view)
+        window.servers_changed.emit()
 
     for install in state.installs:
         try:
@@ -1700,7 +1720,9 @@ def build_window() -> object:
             # `window.close()` answers a bool; nothing here reads it, and
             # typing the seam as taking none and returning one would make a
             # test's `lambda: closed.append(1)` the odd one out.
-            self.close_window: Callable[[], object] = window.close
+            # T540: through `yulon_quit`, read at the call: with the tray up a
+            # `close()` only hides the window, and the helper waits for an exit.
+            self.close_window: Callable[[], object] = lambda: window.yulon_quit()
             self.refusal: Callable[[], str | None] = lambda: close_refusal(window)
             self.make_progress: Callable[[str], Any] = lambda version: UpdateProgressDialog(
                 version, parent=window
@@ -2522,6 +2544,14 @@ def main() -> int:
 
         guard = _RefuseCloseWhileBusy(window)
         window.installEventFilter(guard)
+        # T540: AFTER the busy guard, so its filter runs first: a close by hand
+        # hides the window into the tray (a job keeps running, so nothing needs
+        # refusing), and only a real quit reaches the guard. Held in this frame
+        # for the life of the loop; parented to the window as well.
+        from yulon.ui.tray import YulonTray
+
+        tray = YulonTray(window, bring_forward=_bring_to_front)
+        tray.install()
         window.show()
         # After show(), so the app is visibly UP before it admits to anything:
         # the log file failing is not a reason to hold the window back.
