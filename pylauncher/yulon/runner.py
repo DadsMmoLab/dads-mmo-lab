@@ -178,8 +178,11 @@ def _end_child(
     *,
     bounded: bool = False,
     group: int | None = None,
-) -> None:
+) -> bool:
     """End `proc` if it is still running: on Windows its tree first, then terminate, then kill.
+
+    True if it found `proc` running and ended it; False if `proc` had already
+    exited, which a caller with a group to end then has to see to (`_finish`).
 
     **The tree is ended by `proc`'s Job object when it has one (T299)**, and by
     taskkill only when it has none or the job could not be ended. The job holds
@@ -232,13 +235,13 @@ def _end_child(
                 # adversarial review). A root still there is ended as before.
                 try:
                     proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-                    return
+                    return True
                 except subprocess.TimeoutExpired:
                     pass
             else:
                 _end_tree(proc)
         elif group is not None and _end_group(proc, group, bounded=bounded):
-            return
+            return True
         proc.terminate()
         try:
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
@@ -246,6 +249,8 @@ def _end_child(
             proc.kill()
             if not bounded:
                 proc.wait()
+        return True
+    return False
 
 
 def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
@@ -369,10 +374,11 @@ def _finish(
     ran_out = drained and exited
     group = child.group if child is not None else None
     try:
-        _end_child(proc, job, group=group)
-        if group is not None and exited and not drained:
-            # T495's rule off Windows (T529): closed before EOF with its root gone,
-            # something of its group still held the pipe -- the command's own work.
+        ended_root = False if exited else _end_child(proc, job, group=group)
+        if group is not None and not drained and not ended_root:
+            # T495's rule off Windows (T529): closed before EOF with its root gone --
+            # gone before this looked, or as `_end_child` looked (Codex review) --
+            # something of its group still held the pipe: the command's own work.
             _end_group(proc, group, bounded=False)
     finally:
         if child is not None and child.group is not None:

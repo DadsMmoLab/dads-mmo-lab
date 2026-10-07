@@ -2834,3 +2834,36 @@ def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> No
         except OSError:
             pass
         worker.join(timeout=HANG_BOUND)
+
+
+def test_an_undrained_close_ends_the_group_when_its_root_exits_as_the_close_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review of 9b1f04b0: the root can exit between `_finish`'s look and `_end_child`'s.
+
+    `_finish` saw it running, `_end_child` then found it gone and did nothing:
+    the group's member that holds the pipe must still be ended. Driven through
+    doubles, because the interleaving is a window of microseconds; no signal is
+    sent to anything.
+
+    Mutation this catches: `_finish` ending the group only when IT saw the root
+    exited.
+    """
+    ended_groups: list[int] = []
+    monkeypatch.setattr(runner, "_end_child", lambda proc, job=None, **kw: False)
+    monkeypatch.setattr(
+        runner, "_end_group", lambda proc, group, *, bounded: ended_groups.append(group) or True
+    )
+
+    class _Running:
+        returncode = None
+
+        def poll(self) -> int | None:
+            return None
+
+    child = runner._Child()
+    child.group = 424242
+    runner._finish(_Running(), None, child=child, drained=False)  # type: ignore[arg-type]
+
+    assert ended_groups == [424242]
+    assert child.settled
