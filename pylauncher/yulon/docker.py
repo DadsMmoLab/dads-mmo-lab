@@ -5734,6 +5734,7 @@ def run_attached(
         missing = _missing_cwd_result([*prefix, *argv], stream_cwd)
         return AttachedRun(missing.returncode, (missing.stderr,))
     live = sink
+    ended_by_cancel = threading.Event()  # set when the watcher ended this run's CLI
     try:
         # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
         # generator for `stream()`'s finally to terminate the child, and
@@ -5743,7 +5744,7 @@ def run_attached(
             closing(
                 runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
             ) as lines,
-            _ended_on_cancel(cancel, lines),
+            _ended_on_cancel(cancel, lines, ended_by_cancel),
         ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
@@ -5761,7 +5762,9 @@ def run_attached(
                         logger.warning(f"the output sink stopped accepting lines: {exc}")
                         live = None
     except subprocess.CalledProcessError as exc:
-        if isinstance(exc, runner.StreamEnded) and cancel is not None and cancel.is_set():
+        if ended_by_cancel.is_set() or (
+            isinstance(exc, runner.StreamEnded) and cancel is not None and cancel.is_set()
+        ):
             # The Stop ended the CLI (T526): said as the Stop, as the line check above says it.
             logger.warning(f"docker {' '.join(argv)} was cancelled; its client was ended")
             return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
@@ -5779,6 +5782,11 @@ def run_attached(
         # `follow_logs()` handles the same case one line above.
         logger.warning(f"{prefix[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    if ended_by_cancel.is_set():
+        # Ended by the cancel and exited 0 all the same: `compose up` traps SIGTERM,
+        # stops what it started and exits cleanly. Still the Stop (cold review of T526).
+        logger.warning(f"docker {' '.join(argv)} was cancelled; its client stopped cleanly")
+        return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
     return AttachedRun(0, tuple(tail))
 
 
@@ -7091,7 +7099,9 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
 
 @contextmanager
 def _ended_on_cancel(
-    cancel: threading.Event | None, stream: Generator[str, None, None]
+    cancel: threading.Event | None,
+    stream: Generator[str, None, None],
+    ended: threading.Event,
 ) -> Iterator[None]:
     """While inside, a set `cancel` ends the docker CLI of `stream`, and nothing else (T303, T526).
 
@@ -7103,7 +7113,9 @@ def _ended_on_cancel(
     this one, and a run's cancel is about the run. It keeps ending while it
     watches, for a CLI the lazy stream starts a moment after the token was set.
     Ending the CLI does not end the container on Docker Desktop;
-    `run_container()` does that next, by its name.
+    `run_container()` does that next, by its name. `ended` is set once it has
+    ended the CLI, so `run_attached()` reads the run as the Stop even when the
+    CLI then exits 0 (cold review of T526).
     """
     if cancel is None:
         yield
@@ -7113,7 +7125,8 @@ def _ended_on_cancel(
     def watch() -> None:
         while not done.is_set():
             if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
-                runner.end_stream(stream)
+                if runner.end_stream(stream):
+                    ended.set()
                 done.wait(_STOP_POLL_SECONDS)
 
     watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)

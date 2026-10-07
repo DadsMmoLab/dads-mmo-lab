@@ -142,3 +142,51 @@ def test_a_cancel_ends_the_attached_runs_own_cli_and_no_other_stream_of_its_thre
     finally:
         outer.close()
         worker.join(timeout=HANG_BOUND)
+
+
+# A CLI that answers SIGTERM by stopping cleanly and exiting 0, as `compose up` does.
+_EXITS_ZERO_ON_SIGTERM = (
+    "import signal, sys, time; "
+    "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0)); "
+    "print('#12 RUN cmake --build .', flush=True); time.sleep(600)"
+)
+
+
+def test_a_cli_the_cancel_ended_reads_as_cancelled_even_when_it_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review of T526 (MUST): ended by the watcher is the Stop, whatever the exit code.
+
+    `compose up` traps SIGTERM, stops its containers and exits 0. Read by its exit
+    code alone, a stopped import or build came back as `AttachedRun(0)`: an import
+    read as finished, a build recorded as `_build_exit = 0`.
+
+    Mutation this catches: `run_attached()` not recording that its watcher ended
+    the stream (`returncode` is 0).
+    """
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _EXITS_ZERO_ON_SIGTERM),
+    )
+    said = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_attached([], tmp_path, sink=lambda line: said.set(), cancel=cancel)
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t526-exits-zero")
+    worker.start()
+    try:
+        assert said.wait(HANG_BOUND), "the child never printed its line"
+        cancel.set()
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the Stop waited for the silent child's next line"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+    finally:
+        if worker.is_alive():
+            runner.end_streams_started_on(worker.ident or 0)
+        worker.join(timeout=HANG_BOUND)

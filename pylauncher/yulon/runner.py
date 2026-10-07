@@ -254,7 +254,7 @@ def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
     The group is `proc`'s own: `_group_led_by()` gave it only for a child this
     module started as a session leader, so it holds `proc` and what `proc`
     started, and nothing else. POSIX does not hand out a pid while it is still
-    some group's id, so the id stays this group's while any of it runs; the
+    some group's id, so the id stays this group's while any member lives; the
     SIGKILL is sent only while a member is still seen. False, having done
     nothing, for a group that cannot be signalled: `_end_child` then ends
     `proc` alone, as before T529.
@@ -363,9 +363,17 @@ def _finish(
     it (Codex's fourth). `stopped` is the same for `interact()`, which is not
     registered and whose cancel is its Stop.
     """
-    ran_out = drained and proc.poll() is not None
+    # Read BEFORE `_end_child`: a root it has just ended through its group is
+    # not one that had exited, and must not be sent the group's ending twice.
+    exited = proc.poll() is not None
+    ran_out = drained and exited
+    group = child.group if child is not None else None
     try:
-        _end_child(proc, job, group=child.group if child is not None else None)
+        _end_child(proc, job, group=group)
+        if group is not None and exited and not drained:
+            # T495's rule off Windows (T529): closed before EOF with its root gone,
+            # something of its group still held the pipe -- the command's own work.
+            _end_group(proc, group, bounded=False)
     finally:
         if child is not None and child.group is not None:
             # From here a Stop leaves this stream's group alone (`_group_unsettled`).

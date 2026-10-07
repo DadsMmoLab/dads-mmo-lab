@@ -2598,19 +2598,6 @@ _GRANDCHILD_HOLDS_THE_PIPE = (
 )
 
 
-def _gone(pid: int) -> bool:
-    """Has `pid` exited? A zombie waiting for its new parent to reap it counts as exited."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    stat = Path(f"/proc/{pid}/stat")
-    try:
-        return stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
-    except (OSError, IndexError):
-        return False
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
 def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns() -> None:
     """T529: the Stop reaches the whole clone, not just the `git` it started.
@@ -2644,9 +2631,6 @@ def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns()
         worker.join(timeout=HANG_BOUND)
         assert not worker.is_alive(), "the read waited on a grandchild the Stop never reached"
         assert isinstance(outcome[0], runner.StreamEnded), outcome
-        deadline = time.monotonic() + HANG_BOUND
-        while not _gone(grandchild) and time.monotonic() < deadline:
-            time.sleep(POLL_PACE)
         assert _gone(grandchild), f"the root's own child {grandchild} outlived the Stop"
     finally:
         try:
@@ -2760,10 +2744,90 @@ def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited
         worker.join(timeout=HANG_BOUND)
         assert not worker.is_alive(), "the Stop never reached the group of a root that had exited"
         assert isinstance(outcome[0], runner.StreamEnded), outcome
-        deadline = time.monotonic() + HANG_BOUND
-        while not _gone(grandchild) and time.monotonic() < deadline:
-            time.sleep(POLL_PACE)
         assert _gone(grandchild), f"the exited root's child {grandchild} outlived the Stop"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_host_git_stream_closed_before_its_end_ends_the_group_its_exited_root_left() -> None:
+    """T495's rule, on POSIX: a stream closed before EOF did not run out, root gone or not.
+
+    T495 closes a Windows job whose stream was closed while something still held
+    its pipe, though its root had exited. The same stream off Windows has a
+    process group (T529): what holds the pipe is a member of it, and it is the
+    command's own work, so the close ends it.
+
+    Measured before the fix: the close itself took 600 s, the grandchild's whole
+    sleep, because a reader was blocked in the pipe it held.
+
+    Mutation this catches: `_finish` reaching the group only while the root runs
+    (the close is still waiting at `HANG_BOUND`).
+    """
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    grandchild = int(next(generator))
+    try:
+        with runner._LIVE_STREAMS_LOCK:
+            root = runner._LIVE_STREAMS[generator].proc
+        assert root is not None
+        root.wait(timeout=HANG_BOUND)  # the leader is gone; its child holds the pipe
+        # Closed on a thread of its own: without the fix the close waits on a reader
+        # blocked in the grandchild's pipe for the whole 600 s of its sleep.
+        closer = threading.Thread(target=generator.close, daemon=True, name="test-t529-close")
+        closer.start()
+        closer.join(timeout=HANG_BOUND)
+        assert not closer.is_alive(), "closing the stream waited on its root's child"
+        assert _gone(grandchild), f"closing the stream left its root's child {grandchild} running"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+# A root whose child IGNORES SIGTERM and holds the pipe: only the group's SIGKILL ends it.
+_GRANDCHILD_IGNORES_SIGTERM = (
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen([sys.executable, '-c', "
+    "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    'print("ignoring", flush=True); time.sleep(600)\']); '
+    "print(kid.pid, flush=True); time.sleep(600)"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> None:
+    """T529's second step (cold review): what of the group outlives SIGTERM gets SIGKILL.
+
+    Mutation this catches: `_end_group` without its SIGKILL (the member ignores
+    SIGTERM, sleeps 600 s and holds the pipe, so the worker still reads at
+    `HANG_BOUND`).
+    """
+    generator = runner.stream_progress(_python_cmd(_GRANDCHILD_IGNORES_SIGTERM))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-ignores")
+    worker.start()
+    said = {fragments.get(timeout=HANG_BOUND), fragments.get(timeout=HANG_BOUND)}
+    said.discard("ignoring")
+    grandchild = int(said.pop())
+    try:
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "a member that ignored SIGTERM kept the read going"
+        assert _gone(grandchild), f"{grandchild} ignored SIGTERM and was never killed"
     finally:
         try:
             os.kill(grandchild, signal.SIGKILL)
