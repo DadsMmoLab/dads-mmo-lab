@@ -2712,3 +2712,61 @@ def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
     assert runner.end_streams_started_on(threading.get_ident()) == 1
     generator.close()
     assert signalled == []
+
+
+# The root has gone and its child still holds the pipe: what a Stop meets when the
+# leader exits a moment before the Stop's thread acts (Codex review of T529).
+_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE = (
+    "import subprocess, sys; "
+    "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+    "print(kid.pid, flush=True)"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited() -> None:
+    """T529, Codex's P1: a leader that exited does not take its group out of the Stop's reach.
+
+    The stream is still reading -- a member of the group holds its pipe -- so it is
+    still the job a Stop means, exactly as an unsettled Windows job is (T299). The
+    group's id cannot belong to anything else while a member is alive.
+
+    Mutation this catches: choosing only streams whose root is still running, or a
+    `_stop_child` that does nothing once the root has exited (the worker is still
+    reading at `HANG_BOUND`: the grandchild sleeps 600 s).
+    """
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-root-gone")
+    worker.start()
+    grandchild = int(fragments.get(timeout=HANG_BOUND))
+    try:
+        with runner._LIVE_STREAMS_LOCK:
+            root = next(
+                c.proc for c in runner._LIVE_STREAMS.values() if c.started_on == worker.ident
+            )
+        assert root is not None
+        root.wait(timeout=HANG_BOUND)  # the leader is gone; its child reads on
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the Stop never reached the group of a root that had exited"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+        deadline = time.monotonic() + HANG_BOUND
+        while not _gone(grandchild) and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert _gone(grandchild), f"the exited root's child {grandchild} outlived the Stop"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)

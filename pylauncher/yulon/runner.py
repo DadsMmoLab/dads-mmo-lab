@@ -367,6 +367,10 @@ def _finish(
     try:
         _end_child(proc, job, group=child.group if child is not None else None)
     finally:
+        if child is not None and child.group is not None:
+            # From here a Stop leaves this stream's group alone (`_group_unsettled`).
+            with child.lock:
+                child.settled = True
         # Whatever `_end_child` did, the job is let go (Codex's third review).
         if job is not None:
             if child is not None:
@@ -608,14 +612,14 @@ def end_streams_started_on(ident: int) -> int:
         # reads it under this lock in `_answer`, so either the Stop claims the
         # stream first and the reader reports a Stop, or the reader answers
         # first and the Stop leaves the stream alone (scoped review of d3252e19).
-        # Only with a job: off Windows nothing ends a root that has exited, and
-        # its exit status is the whole story, as before.
+        # Only with a job or a group (T529): without one nothing ends a root
+        # that has exited, and its exit status is the whole story, as before.
         with child.lock:
             if child.answered:
                 continue
-            if _still_running(child.proc) or _job_unsettled(child):
+            if _still_running(child.proc) or _job_unsettled(child) or _group_unsettled(child):
                 child.ended = True
-                child.cut_short = child.job is not None
+                child.cut_short = child.job is not None or child.group is not None
                 children.append(child)
     for child in children:
         proc = child.proc
@@ -651,11 +655,26 @@ def _job_unsettled(child: _Child) -> bool:
     return child.proc is not None and child.job is not None and not child.settled
 
 
+def _group_unsettled(child: _Child) -> bool:
+    """`_job_unsettled` for a POSIX group (T529, Codex's review): its root may have exited.
+
+    A member that holds the output pipe keeps the stream reading after its leader
+    is gone, so it is still the job a Stop means. Settled by `_finish`, and asked
+    of the group itself: one with no member left is nothing to end.
+    """
+    return (
+        child.proc is not None
+        and child.group is not None
+        and not child.settled
+        and _signal_group(child.group, 0)
+    )
+
+
 def _stop_child(child: _Child, *, bounded: bool = False) -> None:
-    """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299).
+    """A Stop's ending: `_end_child`, or the job (T299) or group (T529) alone after the root exited.
 
     The choice in `end_streams_started_on()` already set `cut_short` for a
-    child with a job, so whatever this ends, the stream reports a Stop.
+    child with a job or a group, so whatever this ends, the stream reports a Stop.
     `bounded` is passed on to `_end_child`.
     """
     proc, job = child.proc, child.job
@@ -664,6 +683,9 @@ def _stop_child(child: _Child, *, bounded: bool = False) -> None:
         _end_child(proc, job, bounded=bounded, group=child.group)
     elif job is not None:
         job.end()
+    elif child.group is not None:
+        # The leader has exited and something of its group may still read on (T529).
+        _end_group(proc, child.group, bounded=bounded)
 
 
 def _stop_child_here(child: _Child) -> None:
