@@ -1772,36 +1772,48 @@ BUILD_CANCEL_NOTE = (
     "That is deliberate: the work it has done is kept, and starting this install again picks up "
     "from there instead of compiling it all a second time."
 )
-"""What a Stop does DURING THE BUILD on Linux and macOS, said just before the build starts.
+"""What a Stop does DURING THE BUILD on macOS, said just before the build starts.
 
 Abandoning the compose client does not abandon the daemon's work, and the
 layer cache is precisely what makes a resume cheap — a user told "cancelled"
 without this sentence reaches for `docker builder prune` and throws away the
 thing that would have saved them three hours.
 
-Off Windows a Stop still ends the docker CLI alone, and whether the build ends
-with it there is T298's open question, so this sentence stays until a probe
-answers it. Windows says `BUILD_CANCEL_NOTE_WINDOWS`; ask `build_cancel_note()`.
+Said on macOS only since T298, which measured Linux (`BUILD_CANCEL_NOTE_ENDS`)
+and could not reach a Mac: whether Docker Desktop there ends the build with the
+CLI was not probed, so the older, cautious sentence stays. Ask
+`build_cancel_note()`.
 """
 
-BUILD_CANCEL_NOTE_WINDOWS = (
+BUILD_CANCEL_NOTE_ENDS = (
     "Stopping now ends the build at once. The steps it has already finished are kept in Docker's "
     "build cache, so starting this install again picks up from there instead of compiling it all "
     "a second time."
 )
-"""`BUILD_CANCEL_NOTE` on Windows, where a Stop ends the build's whole process tree (T246).
+"""`BUILD_CANCEL_NOTE` on Windows and Linux, where a Stop was measured to end the build.
 
-Measured on yulon-win11 2026-10-05: with the tree ended, BuildKit's build went
-to `Error` within seconds and no image tag moved; before T246 the orphaned
-compose and buildx processes finished it and moved the live tag 10 min 38 s
-after Stop. The cache half is said for the same reason as on Linux: the
-finished steps are what makes the next press cheap.
+Windows (T246), yulon-win11 2026-10-05: with docker.exe's tree ended, BuildKit's
+build went to `Error` within seconds and no image tag moved; before T246 the
+orphaned compose and buildx processes finished it and moved the live tag
+10 min 38 s after Stop.
+
+Linux (T298), 2026-10-06, on yulon-ubuntu (Ubuntu's docker.io 29.1.3, compose
+2.40.3) and m910q (Docker CE 29.7.2, compose v5.5.0): a compose build of a
+60-second RUN step, stopped as `runner._end_child()` stops it -- SIGTERM to the
+docker CLI alone, and separately SIGKILL -- left no compose or `buildx bake`
+process 2 s later and never tagged its image, where the same build left alone
+tagged it. The CLI closes the plugin's socket on either signal (a SIGKILL
+closes it with the process), and compose ends its bake on that. The Steam Deck
+runs the same Linux CLI and was not probed separately.
+
+The cache half is said everywhere: the finished steps are what makes the next
+press cheap.
 """
 
 
 def build_cancel_note() -> str:
     """The build stage's cancel note for THIS platform, asked when the stages are built."""
-    return BUILD_CANCEL_NOTE_WINDOWS if sys.platform == "win32" else BUILD_CANCEL_NOTE
+    return BUILD_CANCEL_NOTE if sys.platform == "darwin" else BUILD_CANCEL_NOTE_ENDS
 
 
 BUILDER_LOST = (
@@ -12340,7 +12352,7 @@ class StagedInstaller:
                 f"{_spell_seconds(HUB_RETRY_S)} apart, so nothing was compiled. Check this "
                 f"computer's internet connection, then {again}."
             )
-        self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
+        self._check_run(run, "the build", ctx.cancel, build_cancel_note(), from_build=True)
         write_build_cache_baseline(ctx.server_dir, baseline, finished=True)
         yield "The build finished."
 

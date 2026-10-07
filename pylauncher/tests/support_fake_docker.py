@@ -11,6 +11,12 @@ leaves the file exactly where the daemon would leave the container. `rm -f
 With `late-create`, `run` makes no container at all until the test calls
 `finish_late_create()`: the daemon that finishes a create after the Stop.
 
+Since T321 it also answers `create --rm --name <name>` (the container exists,
+not yet running; `slow-create` holds the answer, `create-refused` refuses it as
+a missing image) and `start -a <name>` (the CLI attached to it, as `run` is), and
+`ps --filter name=<part>` lists the running ones. With `start-refused`, `start -a` fails
+and leaves the container created, as a daemon that cannot start it does.
+
 `compose ... build` (T376) prints one line, records its environment's
 `BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
 is a variable a test sets in its own environment, to see the child inherit
@@ -38,7 +44,17 @@ state = pathlib.Path({state!r})
 args = sys.argv[1:]
 with open(state / "calls.log", "a", encoding="utf-8") as calls:
     calls.write(" ".join(args) + "\\n")
-if args[:1] == ["run"]:
+def attached(box):
+    # The CLI attached to a running container: it prints, then only watches.
+    box.write_text(str(os.getpid()), encoding="utf-8")
+    sys.stderr.write("Cloning into '.'...\\n")
+    sys.stderr.write("Receiving objects:   9% (21504/230316)\\r")
+    sys.stderr.flush()
+    deadline = time.monotonic() + {lasts}
+    while box.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    sys.exit(137 if not box.exists() else 0)
+if args[:1] in (["run"], ["create"]):
     name = args[args.index("--name") + 1] if "--name" in args else "unnamed"
     box = state / "containers" / name
     if (state / "late-create").exists():
@@ -49,14 +65,68 @@ if args[:1] == ["run"]:
         sys.stderr.flush()
         time.sleep({lasts})
         sys.exit(0)
-    box.write_text(str(os.getpid()), encoding="utf-8")
-    sys.stderr.write("Cloning into '.'...\\n")
-    sys.stderr.write("Receiving objects:   9% (21504/230316)\\r")
-    sys.stderr.flush()
-    deadline = time.monotonic() + {lasts}
-    while box.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    sys.exit(137 if not box.exists() else 0)
+if args[:1] == ["create"]:
+    # T321: `docker create` answers once the container exists. With `slow-create`
+    # the daemon takes its time: the CLI says it was asked (`create-asked`) and
+    # answers when the test removes `slow-create`.
+    if (state / "slow-create").exists():
+        (state / "create-asked").write_text(name, encoding="utf-8")
+        while (state / "slow-create").exists():
+            time.sleep(0.02)
+    if (state / "create-refused").exists():
+        sys.stderr.write("Unable to find image 'yulon.local/nope:native' locally\\n")
+        sys.stderr.write("Error response from daemon: pull access denied\\n")
+        sys.exit(125)
+    box.write_text("created", encoding="utf-8")
+    if "--label" in args:
+        # Cold review of the stop-paths branch: whose Yu'lon made it and which folders it
+        # writes, one `key=value` per line, read back by `ps`.
+        labels = state / "labels"
+        labels.mkdir(exist_ok=True)
+        given = [args[i + 1] for i, arg in enumerate(args) if arg == "--label"]
+        (labels / name).write_text("\\n".join(given), encoding="utf-8")
+    sys.stdout.write(name + "-id\\n")
+    sys.exit(0)
+if args[:2] == ["start", "-a"]:
+    # T321: attach to a container `create` made; its exit code is the container's.
+    box = state / "containers" / args[2]
+    if not box.exists():
+        sys.stderr.write(f"Error response from daemon: No such container: {{args[2]}}\\n")
+        sys.exit(1)
+    if (state / "start-refused").exists():
+        # Codex review round 3: the daemon will not start it, so it never runs and
+        # `--rm` never removes it: it stays, created.
+        sys.stderr.write("Error response from daemon: failed to create task for container\\n")
+        sys.exit(1)
+    attached(box)
+if args[:1] == ["run"]:
+    attached(box)
+if args[:1] == ["ps"]:
+    # `docker ps --filter name=<part> --format '{{{{.Names}}}}<tab>{{{{.Label ...}}}}'` (Codex
+    # review of T303): the RUNNING containers only, as the real `ps` lists without `-a` --
+    # not one merely created -- each with its owner label's value (empty without one).
+    if (state / "no-answer").exists():
+        sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
+        sys.exit(1)
+    part = args[args.index("--filter") + 1].split("=", 1)[1] if "--filter" in args else ""
+    for box in sorted((state / "containers").iterdir()):
+        if part in box.name and box.read_text(encoding="utf-8") != "created":
+            label = state / "labels" / box.name
+            given = label.read_text(encoding="utf-8").splitlines() if label.exists() else []
+            values = dict(line.split("=", 1) for line in given if "=" in line)
+            owner, writes = values.get("yulon.owner", ""), values.get("yulon.writes", "")
+            sys.stdout.write(box.name + "\\t" + owner + "\\t" + writes + "\\n")
+    sys.exit(0)
+if args[:1] == ["inspect"]:
+    # `docker.container_exit()`'s question (T303): a container still there is running.
+    if (state / "no-answer").exists():
+        sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
+        sys.exit(1)
+    if (state / "containers" / args[1]).exists():
+        sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
+        sys.exit(0)
+    sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
+    sys.exit(1)
 if args[:2] == ["buildx", "inspect"]:
     # T413: the builder a plain build would use, in buildx's own text shape:
     # the builder's Name and Driver first, then its nodes, each with a Name of
@@ -189,6 +259,15 @@ def containers(state: Path) -> list[str]:
     return sorted(box.name for box in (state / "containers").iterdir())
 
 
+def running(state: Path) -> list[str]:
+    """The fake containers a `start -a` (or `run`) has started, not merely created (T321)."""
+    return [
+        name
+        for name in containers(state)
+        if (state / "containers" / name).read_text(encoding="utf-8") != "created"
+    ]
+
+
 def calls(state: Path) -> list[str]:
     """Every argv the fake CLI was run with, one line each, in order."""
     log = state / "calls.log"
@@ -206,9 +285,9 @@ def finish_late_create(state: Path) -> str:
 
     Called by the test, not by a process of its own: the daemon this stands in
     for used to be a second process polling `calls.log`, and it raced the very
-    `rm -f` it waited for (T305).
+    `rm -f` it waited for (T305). The create is a `run` or, since T321, a `create`.
     """
-    (run,) = [call.split() for call in calls(state) if call.startswith("run ")]
+    (run,) = [call.split() for call in calls(state) if call.startswith(("run ", "create "))]
     name = run[run.index("--name") + 1]
     (state / "containers" / name).write_text("created", encoding="utf-8")
     return name

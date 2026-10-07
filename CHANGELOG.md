@@ -14,6 +14,34 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+
+### Fixed
+- Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
+- **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
+- The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
+- **Stop** during a clone or map tool removes its container, even as it starts; one Docker would not start goes too.
+- **Re-extract map data** waits for a map tool an earlier Yu'lon left running instead of writing under it.
+- A tool container Yu'lon could not remove is named with the command that removes it; host git never clones under one.
+- Installing a module never writes into another folder through a link in your game client; it names the link instead.
+- On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+
+### Changed
+- On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
+
+## v0.9.14-Public — 2026-10-07
+
+### Fixed
+- On Windows with Docker Desktop, a WotLK build no longer fails within a second of starting.
+- A Tortoise server installed before the dbc.MPQ check learns that archive on its next Install, so a later swap is noticed.
+
+### Changed
+- A WotLK install keeps one copy of the shared server source in Docker's build cache instead of two, saving about 1.5 GB.
+- New TBC, Vanilla and Centurion servers build from their projects' newest code of October 2026.
+- TBC and Vanilla bots fight Netherspite better, and a Centurion battleground win restores a depleted mark.
+
+## v0.9.13-Public — 2026-10-06
+
+### New
 - **Where to get help…** on the Server tab links each game's server, bots and community, and Yu'lon's issues page.
 - If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
@@ -32,11 +60,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
-- Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
-- Installing a module never writes into another folder through a link in your game client; it names the link instead.
-- On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
-- On Windows with Docker Desktop, a WotLK build no longer fails within a second of starting.
-- A Tortoise server installed before the dbc.MPQ check learns that archive on its next Install, so a later swap is noticed.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
 - A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
@@ -142,9 +165,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
-- A WotLK install keeps one copy of the shared server source in Docker's build cache instead of two, saving about 1.5 GB.
-- New TBC, Vanilla and Centurion servers build from their projects' newest code of October 2026.
-- TBC and Vanilla bots fight Netherspite better, and a Centurion battleground win restores a depleted mark.
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
 - A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.

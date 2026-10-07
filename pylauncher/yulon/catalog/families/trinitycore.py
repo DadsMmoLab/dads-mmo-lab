@@ -58,7 +58,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
-from yulon import client_names, client_packs, docker, platform, play_client, server_build_presses
+from yulon import (
+    client_names,
+    client_packs,
+    container_end,
+    docker,
+    platform,
+    play_client,
+    server_build_presses,
+)
 from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -138,6 +146,14 @@ REEXTRACT_PUT_BACK = (
     "it had finished, so the server runs on it as before."
 )
 """What a failed `reextract()` ends with once the old map data is back in place (T241)."""
+
+REEXTRACT_KEPT_ASIDE = (
+    "The map data from before this press is kept aside in the server's data folder and was "
+    "not put back while that container may still write there. Once it is removed, press "
+    f"\u201c{REEXTRACT_BUTTON}\u201d again: it puts the old map data back first, or keeps the "
+    "new map data if it is whole."
+)
+"""What a stopped `reextract()` ends with when a tool's container could not be removed (T303)."""
 
 
 def reextract_kept_tiles(kept: int) -> str:
@@ -635,13 +651,30 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "Left out of the copy, because this server's map data is made from the stock "
                 f"archives and its own packs only: {', '.join(left_out)}."
             )
+        stop = ctx.cancel
+
+        def stopped() -> bool:
+            return stop is not None and stop.is_set()
+
         for pack in packs:
             yield f"Laying {pack.label} into the copy."
+            # T303: proving and laying a pack reads it end to end, which took 47 s
+            # for one pack on yulon-win11; the Stop is asked between its chunks.
             try:
-                fetched = client_packs.fetch_checkout(pack, ctx.server_dir)
+                fetched = client_packs.fetch_checkout(pack, ctx.server_dir, cancelled=stopped)
                 client_packs.install(
-                    temp, pack, fetched, game=self.entry.id, server_dir=ctx.server_dir
+                    temp,
+                    pack,
+                    fetched,
+                    game=self.entry.id,
+                    server_dir=ctx.server_dir,
+                    cancelled=stopped,
                 )
+            except client_packs.Cancelled as exc:
+                raise InstallStopped(
+                    f"Stop was pressed while {pack.label} was being laid into the temporary "
+                    "copy of your client, so nothing was extracted."
+                ) from exc
             except client_packs.PackError as exc:
                 raise InstallerError(f"{exc} The map data was not extracted.") from exc
 
@@ -2014,6 +2047,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"“{REEXTRACT_BUTTON}” again. Nothing was changed."
             )
         self._refuse_a_running_world_for_maps()
+        self._refuse_a_tool_still_writing(data_dir)
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
         background = mmaps.background_block(self.entry) is not None
         ident = self._install_id(server_dir) if background else ""
@@ -2051,11 +2085,18 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
-            told = self._put_the_old_map_data_back(data_dir)
-            if background:  # asked of `data/` as it is now: old data not back says 0
-                tiles = self._kept_for_the_next_run(server_dir, ident)
-                if tiles:
-                    told = f"{told} {reextract_kept_tiles(tiles)}"
+            if docker.tool_containers_writing_into(data_dir):
+                # T303: a tool Docker would not remove after a Stop
+                # (`extract.ContainerLeftRunning`), or one still being ended after the
+                # stream was closed, may still write into data/, so the old map data
+                # stays aside; the next press settles it.
+                told = REEXTRACT_KEPT_ASIDE
+            else:
+                told = self._put_the_old_map_data_back(data_dir)
+                if background:  # asked of `data/` as it is now: old data not back says 0
+                    tiles = self._kept_for_the_next_run(server_dir, ident)
+                    if tiles:
+                        told = f"{told} {reextract_kept_tiles(tiles)}"
             if isinstance(failure, InstallerError):  # its words are what the person reads
                 failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
@@ -2187,6 +2228,32 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "back otherwise."
             )
         return REEXTRACT_PUT_BACK
+
+    def _refuse_a_tool_still_writing(self, data_dir: Path) -> None:
+        """Refuse before anything moves while an earlier press's tool may write into data/ (T303).
+
+        A Stop whose tool container Docker would not remove left that container
+        extracting into `data/`. Settling the earlier press, setting data aside and
+        extracting again under it would mix its output with both.
+        """
+        running = docker.tool_containers_writing_into(data_dir)
+        if running:
+            said = (
+                f"An earlier extraction is still running in Docker ({', '.join(running)}) and "
+                f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
+                "extracted again."
+            )
+            again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+            if container_end.on_docker_desktop():
+                raise InstallerError(
+                    f"{said} Remove it in Docker Desktop's Containers list, then {again}"
+                )
+            # A Linux engine has no list to look in (live, yulon-ubuntu2): the command,
+            # on a line of its own (T296).
+            raise InstallerError(
+                f"{said} Remove it with the command below, then {again}\n"
+                f"docker rm -f {' '.join(running)}"
+            )
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""

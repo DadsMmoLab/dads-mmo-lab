@@ -1,8 +1,11 @@
 """The GitHub release body: what CHANGELOG.md gained since the previous -Public tag.
 
-Run by `release.yml` after the artifacts are built. The person who pushes the tag
-does nothing new: nobody retitles `## Unreleased`, and a changelog this script
-cannot read, or that gained nothing, leaves the body to GitHub's generated notes.
+Run by `release.yml` after the artifacts are built. The body does not depend on
+`## Unreleased` being retitled: a bullet is news if the previous tag's changelog
+lacks it. The cut (`pyplan/contribution.md`, "The changelog") still moves
+Unreleased under its release heading so that section stays below the update
+dialog's 16 KiB per-release cap. A changelog this script cannot read, or that
+gained nothing, leaves the body to GitHub's generated notes.
 It exits 0 whatever happens - a release is never refused over its notes.
 
 Stdlib only, and no import from `yulon`: it runs on a bare checkout.

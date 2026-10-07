@@ -757,7 +757,7 @@ def test_a_crash_replaces_the_making_sentence_with_where_it_stopped_and_what_sta
     assert view.pathfinding_label.text() == (
         "Pathfinding data stopped part-way (it had reached 17 %): the "
         "generator stopped with exit 139. 16% [Map 001] Building tile [32,48] / 17% [Map 001] "
-        "Building tile [33,48] / Segfault Its 644 finished tiles are kept, and “Make the "
+        "Building tile [33,48] / Segfault. Its 644 finished tiles are kept, and “Make the "
         "pathfinding data” continues from there."
     )
     assert view.pathfinding_start_button.text() == "Make the pathfinding data"
@@ -1053,3 +1053,107 @@ def test_a_stop_that_kept_nothing_goes_when_a_later_run_fails_with_nothing_kept(
 
     assert view.problem_label.text() == ""
     assert view.pathfinding_label.text().startswith("Pathfinding data could not be made")
+
+
+# -- T304: the generator's quoted log, and Refresh under T245's holds rule -------------------
+
+
+def test_a_log_the_crash_cut_mid_word_is_quoted_to_the_last_whole_word_and_ends_its_sentence(
+    qapp: object, tmp_path: Path
+) -> None:
+    """yulon-win11 2026-10-05: the log ended `Building t` (stdout flushed at a block edge).
+
+    The cut word is dropped, the quote says it goes on with an ellipsis, and a full stop
+    ends it, so the next sentence does not run on from it.
+    """
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 644)
+    job.docker.say("16% [Map 001] Building tile [40,53]")
+    job.docker.finish(139, cut="16% [Map 001] Building t")
+
+    view.refresh_pathfinding()
+
+    assert view.pathfinding_label.text() == (
+        "Pathfinding data stopped part-way (it had reached 16 %): the generator stopped with "
+        "exit 139. 16% [Map 001] Building tile [32,48] / 16% [Map 001] Building tile [40,53] / "
+        "16% [Map 001] Building…. Its 644 finished tiles are kept, and “Make the pathfinding "
+        "data” continues from there."
+    )
+
+
+def test_a_log_cut_at_a_space_keeps_its_last_word_and_still_says_it_goes_on(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The 17 % crash of the same day: `17% [Map 030] ` -- the cut fell between two words."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 644)
+    job.docker.finish(139, cut="17% [Map 030] ")
+
+    view.refresh_pathfinding()
+
+    assert (
+        "16% [Map 001] Building tile [32,48] / 17% [Map 030]…. Its 644 finished tiles"
+        in view.pathfinding_label.text()
+    )
+
+
+def test_a_long_log_is_quoted_from_a_whole_word_at_its_start_too(
+    qapp: object, tmp_path: Path
+) -> None:
+    """`docker.last_words()` keeps the last 400 characters, wherever that falls."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 644)
+    words = [f"w{index:03}xyz" for index in range(200)]
+    lines = [" ".join(words[start : start + 20]) for start in range(0, 200, 20)]
+    naive = docker.last_words(tuple(["16% [Map 001] Building tile [32,48]", *lines, "Segfault"]))
+    assert naive.startswith("…") and naive[1:].split()[0] not in words, "the ground: mid-word"
+    job.docker.say(*lines)
+    job.docker.finish(139)
+
+    view.refresh_pathfinding()
+
+    line = view.pathfinding_label.text()
+    quote = line.split("exit 139. ", 1)[1].split(". Its 644", 1)[0]
+    assert quote.startswith("…") and quote.endswith("Segfault"), quote
+    said = [word for word in quote[1:].split() if word != "/"]
+    assert said[:-1] and all(word in words for word in said[:-1]), said
+
+
+def test_refresh_keeps_the_stop_sentence_while_it_still_holds(qapp: object, tmp_path: Path) -> None:
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    stopped = view.problem_label.text()
+    assert stopped.startswith("Stopped making the pathfinding data.")
+
+    view.recheck()
+
+    assert view.problem_label.text() == stopped
+
+
+def test_refresh_drops_the_stop_sentence_once_it_no_longer_holds(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Refresh asks the job again, and T245's rule decides on that reading."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    job.start()  # a Rebuild started it again, without this tab's press
+
+    view.recheck()
+
+    assert view.problem_label.text() == ""
+    assert view.pathfinding_label.text().startswith("Pathfinding data: ")
+
+
+def test_refresh_still_clears_a_sentence_that_is_not_the_pathfinding_press(
+    qapp: object, tmp_path: Path
+) -> None:
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    view.problem_label.setText("Nothing was stopped: this could equally be another install.")
+
+    view.recheck()
+
+    assert view.problem_label.text() == ""

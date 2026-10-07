@@ -65,6 +65,7 @@ from yulon import (
     play_client,
     server_build_presses,
 )
+from yulon.after_stop import StopTookEffect
 from yulon.catalog.catalog import ClientPack
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -113,8 +114,12 @@ class PackUnavailable(PackError):
     """
 
 
-class Cancelled(PackError):
-    """The player pressed Cancel. What arrived is kept, so the next try continues from there."""
+class Cancelled(PackError, StopTookEffect):
+    """The player pressed Cancel. What arrived is kept, so the next try continues from there.
+
+    Or Stop, in a Re-extract laying the packs (T303): the player's own press either way,
+    so it carries `StopTookEffect` and the log panel reads it as "cancelled" (T250).
+    """
 
 
 @dataclass(frozen=True)
@@ -228,12 +233,40 @@ def _refuse_without_room(pack: ClientPack, folder: Path, needed: int) -> None:
         )
 
 
-def _digests(path: Path) -> tuple[str, str]:
+def _never() -> bool:
+    return False
+
+
+def _stop_if_asked(pack: ClientPack, cancelled: Callable[[], bool]) -> None:
+    """`Cancelled` once the caller's Stop is set: asked between chunks of every long read (T303).
+
+    Laying a pack into the map-data copy reads the pack's zip end to end to prove
+    it and copies its archives, which took 47 s for one pack on yulon-win11
+    (2026-10-05); a Stop that waited for that went on for 37 s. Asked per chunk,
+    a Stop costs at most one chunk, and the copy is left as `install()` leaves a
+    refusal: nothing of the pack renamed in, its temporaries removed.
+    """
+    if cancelled():
+        raise Cancelled(f"Laying {pack.label} was stopped part-way; nothing of it was installed.")
+
+
+def _copy(source: Any, out: Any, pack: ClientPack, cancelled: Callable[[], bool]) -> None:
+    """`shutil.copyfileobj()` that asks `cancelled` before every chunk (T303)."""
+    while chunk := source.read(CHUNK_BYTES):
+        _stop_if_asked(pack, cancelled)
+        out.write(chunk)
+
+
+def _digests(
+    path: Path, pack: ClientPack | None = None, cancelled: Callable[[], bool] = _never
+) -> tuple[str, str]:
     """The file's SHA-256 and MD5, in one pass so a 1.4 GB zip is read once."""
     sha256 = hashlib.sha256()
     md5 = hashlib.md5(usedforsecurity=False)
     with path.open("rb") as handle:
         while chunk := handle.read(CHUNK_BYTES):
+            if pack is not None:
+                _stop_if_asked(pack, cancelled)
             sha256.update(chunk)
             md5.update(chunk)
     return sha256.hexdigest(), md5.hexdigest()
@@ -261,7 +294,12 @@ def _pinned(pack: ClientPack) -> Expected | None:
 
 
 def _prove(
-    pack: ClientPack, path: Path, advice: str = _RETRY, *, expected: Expected | None = None
+    pack: ClientPack,
+    path: Path,
+    advice: str = _RETRY,
+    *,
+    expected: Expected | None = None,
+    cancelled: Callable[[], bool] = _never,
 ) -> str:
     """The file's SHA-256, once it matches the pack's checksum (or, with none, its zip CRCs).
 
@@ -273,7 +311,7 @@ def _prove(
     whether it may be deleted (a cache file may; a file of the server's own
     checkout may not).
     """
-    sha256, md5 = _digests(path)
+    sha256, md5 = _digests(path, pack, cancelled)
     want = expected if expected is not None else _pinned(pack)
     if want is not None:
         kind, expected_hex = want
@@ -461,7 +499,9 @@ def checkout_checksum(pack: ClientPack, server_dir: Path) -> str:
         raise _os_refusal(pack, exc) from exc
 
 
-def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
+def _fetch_checkout(
+    pack: ClientPack, server_dir: Path, cancelled: Callable[[], bool] = _never
+) -> Fetched:
     """A checkout pack's zip, proved against its checksum.
 
     The plain file when the checkout has it, verified where it is (and never
@@ -491,14 +531,24 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     version = _checkout_version(pack, path)
     if plain:
         try:
-            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES, expected=expected))
+            return Fetched(
+                path,
+                version,
+                _prove(pack, path, _FROM_SOURCES, expected=expected, cancelled=cancelled),
+            )
+        except Cancelled:
+            raise
         except PackError as exc:
             raise PackError(f"{exc} The file is {path}.") from exc
     folder = cache_dir() / "checkout" / expected[1]
     dest = folder / path.name
     if dest.is_file():
         try:
-            return Fetched(dest, version, _prove(pack, dest, expected=expected))
+            return Fetched(
+                dest, version, _prove(pack, dest, expected=expected, cancelled=cancelled)
+            )
+        except Cancelled:
+            raise
         except PackError:
             logger.info(f"client-packs: cached {dest} no longer proves; joining it again")
             dest.unlink(missing_ok=True)
@@ -509,8 +559,8 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
         with joining.open("wb") as out:
             for part in parts:
                 with part.open("rb") as piece:
-                    shutil.copyfileobj(piece, out, CHUNK_BYTES)
-        sha256 = _prove(pack, joining, _FROM_SOURCES, expected=expected)
+                    _copy(piece, out, pack, cancelled)
+        sha256 = _prove(pack, joining, _FROM_SOURCES, expected=expected, cancelled=cancelled)
         os.replace(joining, dest)
     except BaseException:
         joining.unlink(missing_ok=True)
@@ -519,10 +569,16 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     return Fetched(dest, version, sha256)
 
 
-def fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
-    """`_fetch_checkout`, with an operating-system failure worded as a `PackError`."""
+def fetch_checkout(
+    pack: ClientPack, server_dir: Path, *, cancelled: Callable[[], bool] = _never
+) -> Fetched:
+    """`_fetch_checkout`, with an operating-system failure worded as a `PackError`.
+
+    `cancelled` is asked between chunks of the proof and the join; once it answers
+    True this raises `Cancelled` (T303). A join cut short leaves no `.joining` file.
+    """
     try:
-        return _fetch_checkout(pack, server_dir)
+        return _fetch_checkout(pack, server_dir, cancelled)
     except OSError as exc:
         raise _os_refusal(pack, exc) from exc
 
@@ -1365,6 +1421,7 @@ def _extracted_copy(
     archive: zipfile.ZipFile,
     info: zipfile.ZipInfo,
     server_dir: Path,
+    cancelled: Callable[[], bool] = _never,
 ) -> tuple[Path, str]:
     """An `.MPQ` member extracted once into the cache, with its SHA-256.
 
@@ -1379,6 +1436,7 @@ def _extracted_copy(
         sha256, crc = hashlib.sha256(), 0
         with dest.open("rb") as handle:
             while chunk := handle.read(CHUNK_BYTES):
+                _stop_if_asked(pack, cancelled)
                 sha256.update(chunk)
                 crc = zlib.crc32(chunk, crc)
         if crc == info.CRC:
@@ -1390,7 +1448,7 @@ def _extracted_copy(
     try:
         with archive.open(info) as source, open(part, "xb") as out:
             tee = _Tee(out)
-            shutil.copyfileobj(source, tee, CHUNK_BYTES)
+            _copy(source, tee, pack, cancelled)
         os.replace(part, dest)
     except BaseException:
         _unlink_quietly(part)
@@ -1405,13 +1463,14 @@ def _stage(
     item: _Item,
     play_dir: Path,
     server_dir: Path,
+    cancelled: Callable[[], bool] = _never,
 ) -> tuple[Path, Path, str]:
     """Make `item`'s file under a temporary name beside its target; `(tmp, target, sha256)`."""
     target = play_dir / Path(*item.rel.parts)
     tmp = target.with_name(target.name + _STAGING)
     tmp.unlink(missing_ok=True)
     if item.rel.suffix.lower() == ".mpq":
-        cached, sha256 = _extracted_copy(pack, fetched, archive, item.info, server_dir)
+        cached, sha256 = _extracted_copy(pack, fetched, archive, item.info, server_dir, cancelled)
         try:
             os.link(cached, tmp)
         except OSError as exc:
@@ -1419,7 +1478,7 @@ def _stage(
                 raise
             try:
                 with cached.open("rb") as source, open(tmp, "xb") as out:
-                    shutil.copyfileobj(source, out, CHUNK_BYTES)
+                    _copy(source, out, pack, cancelled)
             except BaseException:
                 _unlink_quietly(tmp)
                 raise
@@ -1427,7 +1486,7 @@ def _stage(
     try:
         with archive.open(item.info) as source, open(tmp, "xb") as out:
             tee = _Tee(out)
-            shutil.copyfileobj(source, tee, CHUNK_BYTES)
+            _copy(source, tee, pack, cancelled)
     except BaseException:
         _unlink_quietly(tmp)
         raise
@@ -1443,6 +1502,7 @@ def install(
     server_dir: Path,
     previous: Mapping[str, Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    cancelled: Callable[[], bool] = _never,
 ) -> dict[str, Any]:
     """Unpack `pack`'s mapped members into `play_dir`; the record entry for what was written.
 
@@ -1467,6 +1527,10 @@ def install(
     A dropped file the player edited is kept and named in the returned entry's
     `"left_behind"` (absent when there is none).
 
+    `cancelled` is asked between chunks while the files are made, before any is
+    renamed in; once it answers True this raises `Cancelled` and the folder is as
+    it was (T303).
+
     The caller records the returned entry (`write_record`). Raises only
     `PackError`; `PartialInstall` (a subclass) when the rollback itself failed.
     """
@@ -1479,6 +1543,7 @@ def install(
             server_dir=server_dir,
             previous=previous,
             sleep=sleep,
+            cancelled=cancelled,
         )
     except OSError as exc:
         raise _write_refusal(pack.label, exc) from exc
@@ -1665,6 +1730,7 @@ def _install(
     server_dir: Path,
     previous: Mapping[str, Any] | None,
     sleep: Callable[[float], None],
+    cancelled: Callable[[], bool] = _never,
 ) -> dict[str, Any]:
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the pack {pack.label}")
     with zipfile.ZipFile(fetched.path) as archive:
@@ -1689,7 +1755,10 @@ def _install(
         try:
             for item in items:
                 made += _make_dirs((play_dir / Path(*item.rel.parts)).parent, play_dir)
-                staged.append(_stage(pack, fetched, archive, item, play_dir, server_dir))
+                staged.append(_stage(pack, fetched, archive, item, play_dir, server_dir, cancelled))
+            # Once more before anything is renamed in: a Stop after the last chunk
+            # (Codex review, T303) is answered here, not by a pack laid in anyway.
+            _stop_if_asked(pack, cancelled)
         except BaseException:
             for tmp, _, _ in staged:
                 _unlink_quietly(tmp)

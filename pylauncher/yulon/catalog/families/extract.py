@@ -51,7 +51,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import client_names, docker, platform
+from yulon import client_names, container_end, docker, platform
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
@@ -1145,6 +1146,31 @@ def _stage_failed(run: docker.AttachedRun) -> bool:
     )
 
 
+class ContainerLeftRunning(InstallerError, TrueAfterStop):
+    """A stopped tool whose container Docker would not remove (T303, Codex adversarial review).
+
+    It may still be writing into the server's `data/`, so it is not a clean Stop: it
+    is said under "Stopped" (`TrueAfterStop`), and a stopped Re-extract keeps the old
+    map data aside instead of putting it back under a tool that could write over it.
+    """
+
+
+def _left_running(what: str, run: docker.AttachedRun, data_dir: Path) -> None:
+    """`ContainerLeftRunning` when a Stop could not remove the tool's container."""
+    if run.container_left:
+        name = run.container_left
+        where = (
+            "Remove it in Docker Desktop's Containers list; the log above also gives the "
+            "command that removes it."
+            if container_end.on_docker_desktop()
+            else "Remove it with the command the log above gives."
+        )
+        raise ContainerLeftRunning(
+            f"{what} was stopped, but its container {name} could not be removed, so it may "
+            f"still be writing into {data_dir}. {where}"
+        )
+
+
 def run_plan(
     plan: ExtractPlan,
     *,
@@ -1323,6 +1349,14 @@ def run_plan(
             seen = counts(tool.produces, data_dir)
             yield f"{tool.name}: already extracted ({_counts_text(seen)})"
             continue
+        if cancel is not None and cancel.is_set():
+            # T303: a Stop that landed before this tool -- while the client packs
+            # were laid, or before the first tool -- starts no tool. `_conclude()`
+            # answers a Stop during a tool; nothing else asked before the first.
+            raise InstallStopped(
+                f"Stop was pressed before {tool.name} started, so it was not run. "
+                f"{EXTRACT_CANCEL_NOTE}"
+            )
         make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)
@@ -1481,6 +1515,7 @@ def _conclude(
     caller's "done" line.
     """
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        _left_running(tool.name, run, data_dir)
         raise InstallStopped(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
@@ -2074,6 +2109,7 @@ def run_mmaps(
         cancel=cancel,
     )
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        _left_running("map generation", run, data_dir)
         raise InstallStopped(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
