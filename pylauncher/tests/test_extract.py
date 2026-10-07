@@ -958,6 +958,62 @@ def test_a_tortoise_record_from_before_its_required_file_still_skips_and_a_chang
     assert changed.names() == every
 
 
+def old_shape_after_a_full_run(tmp_path: Path) -> Path:
+    """A finished `data/` whose record carries no required-file facts, as before T521 wrote them."""
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    full = extract.read_evidence(data)
+    assert full is not None and full.required_file_size is not None
+    extract.write_evidence(data, replace(full, required_file_size=None, required_file_mtime=None))
+    return data
+
+
+def test_an_old_record_skips_and_learns_the_required_file_then_notices_a_swap(
+    tmp_path: Path,
+) -> None:
+    data = old_shape_after_a_full_run(tmp_path)
+    again = Runner(FULL)
+    said = run(PLAN, again, tmp_path)
+    assert again.specs == []
+    assert sum("already extracted" in line for line in said) == 3
+    learned = extract.read_evidence(data)
+    expected = extract.expected_evidence(PLAN, tmp_path / "client", REQUIRED)
+    assert learned is not None
+    assert (learned.required_file_size, learned.required_file_mtime) == (
+        expected.required_file_size,
+        expected.required_file_mtime,
+    )
+    assert learned.required_file_size is not None
+    assert [record.name for record in learned.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+    (tmp_path / "client" / REQUIRED).write_bytes(b"swapped and longer than before" * 50)
+    said = run_until_refused(PLAN, Runner(FULL), tmp_path)[0]
+    assert any("another client" in line for line in said), said
+
+
+def test_a_record_that_already_has_the_facts_is_not_rewritten(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    path = tmp_path / "server" / "data" / extract.EVIDENCE_FILE
+    before = path.read_bytes()
+    stamp = path.stat().st_mtime_ns
+    run(PLAN, Runner(FULL), tmp_path)
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == stamp
+
+
+def test_a_record_is_not_upgraded_from_facts_that_were_not_fully_measured() -> None:
+    old = extract.Evidence("h", "/c", None, None, ())
+    partial = extract.Evidence("h", "/c", 5, 7, (), client_facts_complete=False)
+    assert extract.learn_required_file(old, partial) is old
+    complete = extract.Evidence("h", "/c", 5, 7, ())
+    learned = extract.learn_required_file(old, complete)
+    assert (learned.required_file_size, learned.required_file_mtime) == (5, 7)
+    unmeasured_old = extract.Evidence("h", "/c", None, None, (), client_facts_complete=False)
+    assert extract.learn_required_file(unmeasured_old, complete) is unmeasured_old
+    nothing_to_learn = extract.Evidence("h", "/c", None, None, ())
+    assert extract.learn_required_file(old, nothing_to_learn) is old
+
+
 def test_only_a_complete_record_with_no_required_file_facts_matches_one_that_has_them(
     tmp_path: Path,
 ) -> None:
