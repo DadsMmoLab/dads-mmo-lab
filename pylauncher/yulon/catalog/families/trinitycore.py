@@ -2194,6 +2194,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         background = mmaps.background_block(self.entry) is not None
         ident = self._install_id(server_dir) if background else ""
         if background:
+            # Asked before the job is stopped (Codex review of cff3f4da): with the claim
+            # gone, a job running now may be another press's.
+            self._still_claimed(claim, data_dir, f"{data_dir} was not touched.")
             stopped = mmaps.stop_for_route(
                 server_dir,
                 self.entry,
@@ -2303,6 +2306,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         if claim is not None and not claim.held():
             # Lost while the pathfinding job started (Codex reviews of a62f138f): that
             # job writes under `data/`, so it is stopped again, and nothing says done.
+            not_stopped = ""
             if background:
                 try:
                     mmaps.stop_for_route(
@@ -2314,9 +2318,12 @@ class TrinityCoreInstaller(CmangosInstaller):
                         runner=self._mmaps_runner,
                         install_id=ident,
                     )
-                except Exception as exc:  # noqa: BLE001 - the loss is what is said
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - said, with what to do (adversarial review)
                     logger.warning(f"the pathfinding job could not be stopped again: {exc}")
-            self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
+                    not_stopped = f" The pathfinding job it had started could not be stopped: {exc}"
+            self._still_claimed(claim, data_dir, f"{REEXTRACT_FINISH_AGAIN}{not_stopped}")
         yield (
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."

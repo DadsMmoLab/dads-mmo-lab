@@ -3602,3 +3602,49 @@ def test_a_press_whose_claim_ends_as_pathfinding_starts_stops_it_and_does_not_sa
     assert any(
         call.startswith(("stop:", "remove:")) for call in after
     ), f"the job started under a lost claim was not stopped: {fake.calls}"
+
+
+def test_a_late_pathfinding_job_that_would_not_stop_is_named_in_the_sentence(box: Box) -> None:
+    """Codex adversarial review of cff3f4da: a stop that failed was only logged, so a writer
+    could run on unnamed. What the job's own stop said is part of the sentence.
+
+    Mutation this catches: the stop's failure swallowed into the log.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    finished_with_pathfinding(box)
+    flagged(box)
+    started = len(fake.started)
+
+    def held() -> bool:
+        if len(fake.started) == started:
+            return True
+        fake.refuse_remove = "Docker would not remove centurion-mmaps"  # the stop fails
+        return False
+
+    box.seams["folder_claim"] = _claim_asked_of_docker(held)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "could not be stopped" in str(raised.value), raised.value
+    assert "Docker would not remove centurion-mmaps" in str(raised.value), raised.value
+
+
+def test_a_job_running_at_the_start_is_not_stopped_once_the_claim_is_gone(box: Box) -> None:
+    """Codex review of cff3f4da: stopping a running pathfinding job is a change too; with the
+    claim gone, that job may be the next press's.
+
+    Mutation this catches: `mmaps.stop_for_route()` before the claim is asked.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    # A pathfinding job on record as running: the press's first change is to stop it.
+    (box.server_dir / mmaps.RECORD_FILE).write_text(
+        json.dumps({"state": "running", "container": "centurion-mmaps-0123abcd"}), "utf-8"
+    )
+    calls = len(fake.calls)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: False)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert fake.calls[calls:] == [], f"the pathfinding job was asked about: {fake.calls[calls:]}"
