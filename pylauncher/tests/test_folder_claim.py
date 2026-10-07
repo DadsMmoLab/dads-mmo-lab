@@ -519,3 +519,30 @@ def test_a_stop_during_the_question_whose_claim_it_is_is_a_stop(
 
     with pytest.raises(docker.ClaimStopped):
         docker._claim_in_use(name, IMAGE, cancel, again=True)
+
+
+def test_a_stop_during_the_look_that_finds_the_claim_running_is_a_stop(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the folds: Stop pressed while the look that finds the claim running
+    is asked. The press does not go ahead on it; the claim is let go of."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    cancel = threading.Event()
+    real = docker._claim_facts
+
+    def look(name: str, timeout: float = 5.0) -> object:
+        facts = real(name, timeout=timeout)
+        if facts is not None and facts.status == "running":
+            cancel.set()  # pressed while Docker answered
+        return facts
+
+    monkeypatch.setattr(docker, "_claim_facts", look)
+
+    with pytest.raises(docker.ClaimStopped):
+        with docker.folder_claim(folder, IMAGE, cancel):
+            pytest.fail("the press went ahead after Stop")
+    deadline = time.monotonic() + HANG_BOUND
+    while any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(fake_docker)):
+        assert time.monotonic() < deadline, "the claim was kept after the Stop"
+        time.sleep(0.02)

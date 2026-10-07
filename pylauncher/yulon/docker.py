@@ -7456,6 +7456,8 @@ def _claim_coming_up(
         # Running, not only there (Codex adversarial review, round 3): a claim whose
         # command failed is seen created, with this nonce, before `--rm` takes it.
         if facts is not None and facts.nonce == nonce and facts.status == "running":
+            if cancel is not None and cancel.is_set():  # pressed while Docker answered
+                raise ClaimStopped("Stop was pressed before the folder was reserved.")
             with _CLAIMS_LOCK:
                 _CLAIMS_HELD.add(name)
             return _Claim(name, facts.container, proc)
