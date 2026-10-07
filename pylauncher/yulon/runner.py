@@ -652,7 +652,10 @@ def _end_chosen(candidates: list[_Child]) -> int:
         # Only with a job or a group (T529): without one nothing ends a root
         # that has exited, and its exit status is the whole story, as before.
         with child.lock:
-            if child.answered:
+            if child.answered or child.ended:
+                # `ended`: a Stop already claimed it, and its ending is under way (T541).
+                # Claimed again it got a new SIGTERM on every poll of a watcher, and
+                # `docker compose up` reads a second SIGTERM as "force".
                 continue
             if _still_running(child.proc) or _job_unsettled(child) or _group_unsettled(child):
                 child.ended = True

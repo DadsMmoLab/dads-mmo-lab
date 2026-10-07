@@ -2599,6 +2599,7 @@ _GRANDCHILD_HOLDS_THE_PIPE = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns() -> None:
     """T529: the Stop reaches the whole clone, not just the `git` it started.
 
@@ -2708,6 +2709,7 @@ _ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited() -> None:
     """T529, Codex's P1: a leader that exited does not take its group out of the Stop's reach.
 
@@ -2754,6 +2756,7 @@ def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_host_git_stream_closed_before_its_end_ends_the_group_its_exited_root_left() -> None:
     """T495's rule, on POSIX: a stream closed before EOF did not run out, root gone or not.
 
@@ -2800,6 +2803,7 @@ _GRANDCHILD_IGNORES_SIGTERM = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> None:
     """T529's second step (cold review): what of the group outlives SIGTERM gets SIGKILL.
 
