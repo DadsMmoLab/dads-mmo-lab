@@ -793,3 +793,30 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
     alarm from prose in a string literal is not cheap. Strings are not SQL."""
     path = _lay(tmp_path, "x.sql", text)
     assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "reached"),
+    [
+        ("-- don't change this\nUPDATE characters.foo SET a='x';\n", ("characters",)),
+        ("# it's fine\nDELETE FROM realmd.account;\n", ("realmd",)),
+        ("UPDATE/* reason */characters.foo SET a=1;\n", ("characters",)),
+        ("INSERT INTO/* reason */mysql.user VALUES (1);\n", ("mysql",)),
+        ("UPDATE t SET a='-- not a comment'; UPDATE logs.x SET b=1;\n", ("logs",)),
+    ],
+    ids=[
+        "apostrophe-in-dash-comment",
+        "apostrophe-in-hash-comment",
+        "comment-before-name",
+        "comment-after-into",
+        "dashes-in-string",
+    ],
+)
+def test_comments_are_separators_and_never_hide_a_statement(
+    tmp_path: Path, text: str, reached: tuple[str, ...]
+) -> None:
+    """Codex on T531's string stripping: an apostrophe in a comment must not open a
+    string that swallows the next statement, and a comment between a keyword and a
+    schema name is a separator to MySQL, so it must be one to the scan."""
+    path = _lay(tmp_path, "x.sql", text)
+    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == reached

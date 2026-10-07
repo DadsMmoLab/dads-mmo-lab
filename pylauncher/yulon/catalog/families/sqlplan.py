@@ -1582,8 +1582,37 @@ _SYSTEM_SCHEMAS = ("mysql", "information_schema", "performance_schema", "sys")
 """Schemas no world update has business naming, beside the server's own non-world ones."""
 
 
-_STRINGS = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"", re.S)
-"""A quoted string literal, escapes and doubled quotes included: prose, not SQL."""
+_SQL_TOKENS = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'?"
+    r'|"(?:[^"\\]|\\.|"")*"?'
+    r"|`[^`]*`?"
+    r"|--[^\n]*|#[^\n]*"
+    r"|/\*![0-9]*|\*/"
+    r"|/\*.*?(?:\*/|$)"
+    r"|[^'\"`#/*-]+"
+    r"|.",
+    re.S,
+)
+"""SQL read left to right: a string, an identifier, a comment, an executable comment's
+markers, or plain text. Whichever starts first wins, so an apostrophe in a comment is
+the comment's and a `--` in a string is the string's (Codex, T531)."""
+
+
+def _code_only(text: str) -> str:
+    """The SQL MySQL would execute: string bodies emptied, comments made spaces, and an
+    executable comment's body kept (only its `/*!NNNNN` and `*/` go)."""
+    parts: list[str] = []
+    for match in _SQL_TOKENS.finditer(text):
+        token = match.group(0)
+        if token[0] in "'\"":
+            parts.append(" '' ")
+        elif token.startswith("/*!") or token == "*/":
+            parts.append(" ")
+        elif token.startswith(("--", "#", "/*")):
+            parts.append(" ")
+        else:
+            parts.append(token)
+    return "".join(parts)
 
 
 def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
@@ -1591,15 +1620,18 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
 
     The update runs with `into` as the client's DEFAULT schema only -- the account
     can reach every schema -- so a file that says `USE characters` or
-    `characters.x` would write there (Codex, T531). Comments are KEPT: MySQL
-    executes `/*! ... */`. String literals are REMOVED first, and a schema name
+    `characters.x` would write there (Codex, T531). Read as the SQL MySQL runs
+    (`_code_only()`): comments become spaces -- a separator, as they are to MySQL --
+    an executable comment's body is kept and the file is flagged for having one,
+    and string literals are emptied, so a schema name
     counts only at a SQL boundary and with the dot right after it (`logs.x`,
     `` `logs`.`x` ``), because a refused file holds back every later update and
     quest text says "ten logs. Then …" (cold review of T531). Measured
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
     """
-    text = _STRINGS.sub("''", path.read_text(encoding="utf-8", errors="replace"))
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    text = _code_only(raw)
     found = [
         name
         for name in sorted({*others, *_SYSTEM_SCHEMAS})
@@ -1607,7 +1639,7 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     ]
     if re.search(r"(?im)(^|;)\s*USE\s", text):
         found.append("USE")
-    if "/*!" in text:
+    if "/*!" in raw:
         found.append("an executable comment")
     if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
         found.append("a whole-database statement")
