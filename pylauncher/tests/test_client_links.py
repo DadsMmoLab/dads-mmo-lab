@@ -17,6 +17,7 @@ assertion is that this folder is byte for byte what it was.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -286,4 +287,94 @@ def test_the_copy_never_writes_through_a_linked_file(tmp_path: Path) -> None:
     with pytest.raises(ApplyError, match="link"):
         apply_module._copy_unshared(source, dest)
 
+    assert _snapshot(elsewhere) == before
+
+
+class _LinkAppearsDuringSql:
+    """The SQL step, run after the check and before the copy: a link appears meanwhile."""
+
+    def __init__(self, folder: Path, target: Path) -> None:
+        self.folder, self.target = folder, target
+
+    def run_file(self, db: str, path: Path) -> None:
+        if not self.folder.is_symlink():
+            if self.folder.exists():
+                shutil.rmtree(self.folder)
+            _symlink(self.target, self.folder)
+
+    def run_statement(self, db: str, statement: str) -> None:
+        raise AssertionError("no manifest here runs an inline statement")
+
+
+def test_a_linked_folder_that_appears_after_the_check_stops_the_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review: the check runs before deploy and SQL; a link made since is met at the copy.
+
+    The copy checks each file's way into a ready-to-play client again as it writes
+    it, so `Data/` turned into a link during the SQL step stops the copy at the link
+    and nothing lands in the folder it points to, not even an empty folder.
+    """
+    manifest = _manifest(ARAC)
+    elsewhere = _elsewhere(tmp_path)
+    before = _snapshot(elsewhere)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest)
+    applier.sql = _LinkAppearsDuringSql(play / "Data", elsewhere)
+
+    with pytest.raises(ApplyError) as failed:
+        applier.install(manifest)
+
+    assert (play / "Data").is_symlink(), "the test's link was not made"
+    assert str(play / "Data") in str(failed.value), str(failed.value)
+    assert _snapshot(elsewhere) == before
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        pytest.param("Data", id="the folder it copies into"),
+        pytest.param("Data/enUS", id="a folder under it"),
+    ],
+)
+def test_a_linked_folder_that_appears_after_the_check_stops_a_folder_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked: str
+) -> None:
+    """The same for a step that copies a folder (`_copy_onto()`): a keg's `data/` with `enUS/`."""
+    manifest = _manifest(SOD)
+    elsewhere = _elsewhere(tmp_path)
+    before = _snapshot(elsewhere)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest, _SodClone(manifest, ARAC_DBCS))
+    conf = applier._conf
+    link = play.joinpath(*linked.split("/"))
+
+    def link_appears(*args: Any, **kwargs: Any) -> None:  # after the check, before the copy
+        conf(*args, **kwargs)
+        if link.exists():
+            shutil.rmtree(link)
+        _symlink(elsewhere, link)
+
+    monkeypatch.setattr(applier, "_conf", link_appears)
+
+    with pytest.raises(ApplyError) as failed:
+        applier.install(manifest)
+
+    assert str(link) in str(failed.value), str(failed.value)
+    assert _snapshot(elsewhere) == before
+
+
+def test_a_link_above_a_folder_the_copy_must_make_stops_it_before_making_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An addon's `Interface/AddOns/<name>` is made by the copy; through a linked `Interface/` it
+    would be made in the folder the link points to, empty folders and all."""
+    manifest = _manifest("kegs/bmah.json")
+    elsewhere = _elsewhere(tmp_path)
+    before = _snapshot(elsewhere)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest)
+    applier.sql = _LinkAppearsDuringSql(play / "Interface", elsewhere)
+
+    with pytest.raises(ApplyError) as failed:
+        applier.install(manifest)
+
+    assert str(play / "Interface") in str(failed.value), str(failed.value)
     assert _snapshot(elsewhere) == before

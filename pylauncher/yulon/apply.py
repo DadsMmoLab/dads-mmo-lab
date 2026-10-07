@@ -952,8 +952,9 @@ def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> 
     Raises:
         ApplyError: `dst` is a symlink or junction (`yulon.links`), which `copy2`
             would write through into the file it points to (T300). The install
-            refuses one before copying (`Applier._refuse_links()`); this stops one
-            that appeared since.
+            refuses one before copying (`Applier._refuse_links()`) and the client
+            copy asks again per file (`Applier._link_on_the_way()`); this is the
+            last look at the file itself, for any other caller.
     """
     try:
         st = os.lstat(dst)
@@ -1012,7 +1013,10 @@ def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
 
 
 def _copy_onto(
-    src: Path, target: Path, place: Callable[[Path, Path], object] = _copy_unshared
+    src: Path,
+    target: Path,
+    place: Callable[[Path, Path], object] = _copy_unshared,
+    check: Callable[[Path, bool], None] | None = None,
 ) -> list[Path]:
     """Copy the tree at `src` into `target` as `_plan_onto()` plans it; the names written.
 
@@ -1025,14 +1029,21 @@ def _copy_onto(
     Copies go through `place`, `_copy_unshared()` unless the caller sets a file of
     the player's aside first (`Applier._placer()`), so a hard-linked archive is
     replaced, never written through. One name per file, of what is there last.
+    `check(path, is_file)`, when given, is asked before the target folder and each
+    file's folder are made and before the file is written, and raises to stop the
+    copy (`Applier._link_on_the_way()`, T300).
 
     Raises:
         OSError: a folder could not be made or listed, or a file not copied. What
             was written before it stays, as with `copytree`.
     """
+    if check is not None:
+        check(target, False)
     target.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for source, dest in _plan_onto(src, target):
+        if check is not None:
+            check(dest, True)
         dest.parent.mkdir(parents=True, exist_ok=True)
         place(source, dest)
         if dest not in written:
@@ -5044,6 +5055,18 @@ class Applier:
         """
         if self.client_dir is not None:
             log.client_ran = True
+        ready = self.client_dir is not None and self._writes_a_ready_client()
+
+        def check(path: Path, file: bool) -> None:
+            link = self._link_on_the_way(path, ready, file=file)
+            if link is not None:
+                raise ApplyError(
+                    f"{link} became a link to another place while {manifest.id} was being "
+                    f"installed, so the copy into your game client stopped there: writing "
+                    f"through it would have changed what it points to. Replace it with a real "
+                    f"folder or file, or remove it, then install {manifest.id} again."
+                )
+
         claimed = self._claimed_asides(log)
         for step in manifest.client:
             if self.client_dir is None:
@@ -5053,10 +5076,12 @@ class Applier:
             target = self._client_target(step, src)
             place = self._placer(step.src, log, claimed) if step.dest == "data" else _copy_unshared
             if src.is_dir():
-                _copy_onto(src, target, place)
+                _copy_onto(src, target, place, check)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
-                place(src, target / (client_names.match(os.listdir(target), src.name) or src.name))
+                dest = target / (client_names.match(os.listdir(target), src.name) or src.name)
+                check(dest, True)
+                place(src, dest)
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             log.done.append(f"client {step.src} → {step.dest}")
@@ -5127,7 +5152,7 @@ class Applier:
         if self.client_dir is None:
             return
         client = self.client_dir
-        ready = bool(self.client_origins) or os.path.lexists(client / play_client.MARKER)
+        ready = self._writes_a_ready_client()
         found: set[Path] = set()
         looked: set[Path] = set()
         for step in manifest.client:
@@ -5160,6 +5185,35 @@ class Applier:
             f"change what the link points to instead: {named}. {why} Nothing of "
             f"{manifest.id} was put into your game client or deployed."
         )
+
+    def _writes_a_ready_client(self) -> bool:
+        """Whether `client_dir` is a ready-to-play client: its marker, or its origins."""
+        assert self.client_dir is not None
+        return bool(self.client_origins) or os.path.lexists(self.client_dir / play_client.MARKER)
+
+    def _link_on_the_way(self, path: Path, ready: bool, *, file: bool) -> Path | None:
+        """The link a write to `path` would now go through, or None: `_refuse_links()` at the copy.
+
+        `_refuse_links()` looks before deploy and SQL, which can take minutes; the
+        copy asks again for each folder and file as it writes it (Codex review of
+        T300), so a link made meanwhile stops the copy at the link. The same rule:
+        in a ready-to-play client the outermost link from the client folder down to
+        `path`; in the player's own client only `path` itself, and only a file.
+        What it does not cover is a link made between this look and the write a
+        moment later, which no path-based copy can rule out.
+
+        Raises:
+            OSError: a path on the way could not be looked at.
+        """
+        client = self.client_dir
+        assert client is not None
+        if not ready:
+            return path if file and links.is_link(path) else None
+        way = [path, *(folder for folder in path.parents if folder.is_relative_to(client))]
+        for folder in reversed(way):
+            if folder != client and links.is_link(folder):
+                return folder
+        return None
 
     def _here(self, path: str) -> Path:
         """A receipt's path in the client this applier writes to (`rebased()`)."""
