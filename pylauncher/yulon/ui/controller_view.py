@@ -3001,6 +3001,35 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+def _realm_port_keeper(
+    entry: CatalogEntry, sql: apply_module.SqlRunner
+) -> Callable[[], None] | None:
+    """The repair's step that gives the realm row this server's world port again (T552).
+
+    A repair re-runs AzerothCore's importer, which seeds the realm row with
+    8085, WotLK's world port; the install sets it right before its first `up`
+    (`AzerothCoreInstaller._realm_port()`), and nothing else would after a
+    repair, so the next Start would send this server's players to WotLK's
+    world. None for an entry on 8085, whose repair is what it always was.
+    """
+    port = entry.ports.world
+    if port == azerothcore.SEEDED_WORLD_PORT:
+        return None
+    statement = networking.realm_port_sql(entry)
+
+    def keep() -> None:
+        try:
+            sql.run_statement("auth", statement)
+        except Exception as exc:  # noqa: BLE001 - any failure fails the repair, worded once
+            raise docker.DockerCommandError(
+                f"The databases were imported, but the realm could not be given this server's "
+                f"world port {port} ({exc}). Do not start the server yet: its players would be "
+                "sent to another server's world. Press the repair again."
+            ) from exc
+
+    return keep
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -3226,6 +3255,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
+            after_import=_realm_port_keeper(entry, sql),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of

@@ -414,3 +414,81 @@ def test_no_wotlk_bound_default_is_left_to_the_azerothcore_factory() -> None:
                 problems.append(f"{owner.id}.{node.func.attr}({param.name}=)")
     assert checked >= 10
     assert not problems, problems
+
+
+# -- review round 1: the realm port survives a repair, and a resume starts the DB first --
+
+
+def test_a_resumed_install_starts_the_database_before_the_port_statement(tmp_path: Path) -> None:
+    """`start-db` is never recorded, so every resume runs it before `up` (Codex review, P2)."""
+    _first, rec = _install_second(tmp_path)
+    calls = rec.calls  # type: ignore[attr-defined]
+    calls.clear()
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+    from yulon.catalog.installer import InstallOptions
+
+    engine = AzerothCoreInstaller(
+        second_ac_entry(),
+        installers_root=TEMPLATES,
+        import_probe=rec.probe,  # type: ignore[attr-defined]
+        reset_unfinished=rec.reset,  # type: ignore[attr-defined]
+        seams=rec.seams(),  # type: ignore[attr-defined]
+    )
+    list(engine.run(InstallOptions(server_dir=tmp_path / "srv")))
+    scripts = rec.sql_scripts  # type: ignore[attr-defined]
+    assert scripts.count(PORT_SQL) == 2
+    assert "start-db" in calls and calls.index("start-db") < calls.index("sql"), calls
+
+
+def test_a_repaired_import_gives_the_realm_its_port_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repair re-runs the importer, which seeds the realm row with 8085 (Codex adversarial).
+
+    So the AzerothCore factory hands its controller a step that runs after a
+    repair that finished, and a repair whose step fails is a failed repair.
+    """
+    from yulon import apply, docker
+    from yulon.ui import controller_view
+
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        apply.DockerSql, "run_statement", lambda self, db, statement: ran.append((db, statement))
+    )
+    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
+    entry = second_ac_entry(manifests_from="wow-wotlk")
+    services = controller_view._for_wotlk(entry, Path("/nonexistent/srv"), None, None)
+    assert services.controller.repair_import() is True
+    assert ran == [("auth", PORT_SQL)]
+
+
+def test_a_repair_whose_port_statement_fails_is_a_failed_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon import apply, docker
+    from yulon.ui import controller_view
+
+    def refuse(self: object, db: str, statement: str) -> None:
+        raise apply.ApplyError("ERROR 2002: cannot connect")
+
+    monkeypatch.setattr(apply.DockerSql, "run_statement", refuse)
+    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
+    services = controller_view._for_wotlk(
+        second_ac_entry(manifests_from="wow-wotlk"), Path("/nonexistent/srv"), None, None
+    )
+    with pytest.raises(docker.DockerCommandError, match="8086"):
+        services.controller.repair_import()
+
+
+def test_a_wotlk_repair_sends_no_port_statement(monkeypatch: pytest.MonkeyPatch) -> None:
+    from yulon import apply, docker
+    from yulon.ui import controller_view
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        apply.DockerSql, "run_statement", lambda self, db, statement: ran.append(statement)
+    )
+    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
+    services = controller_view._for_wotlk(
+        load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
+    )
+    assert services.controller.repair_import() is True
+    assert ran == []
