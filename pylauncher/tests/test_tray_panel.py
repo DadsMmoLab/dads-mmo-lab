@@ -408,12 +408,15 @@ def test_the_status_dot_says_the_status(tray: YulonTray, window: FakeWindow) -> 
     _add(window, FakeView("TBC", "/srv/b", "starting"))
     _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     _add(window, FakeView("Cata", "/srv/d", "partial"))
+    _add(window, FakeView("Mop", "/srv/e", "unknown"))  # Docker did not answer (Codex)
     panel = _open(tray)
-    assert [_row(panel, n).dot.accessibleName() for n in ("WotLK", "TBC", "Vanilla", "Cata")] == [
+    names = ("WotLK", "TBC", "Vanilla", "Cata", "Mop")
+    assert [_row(panel, n).dot.accessibleName() for n in names] == [
         "Online",
         "Starting",
         "Stopped",
         "Needs attention",
+        "Status unknown",
     ]
 
 

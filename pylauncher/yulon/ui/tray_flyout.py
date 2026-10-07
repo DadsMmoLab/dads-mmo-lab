@@ -237,7 +237,11 @@ class ServerCard(QFrame):
         self.dot.setToolTip(words)
         # A dot is colour; a screen reader gets the words (cold review).
         self.dot.setAccessibleName(
-            {"up": "Online", "attention": "Needs attention", "down": "Stopped"}.get(tone, words)
+            words
+            if realm_tone(status) == "unknown"  # grey like stopped, but not known to be (Codex)
+            else {"up": "Online", "attention": "Needs attention", "down": "Stopped"}.get(
+                tone, words
+            )
         )
         verdict = getattr(view, "last_verdict", None)
         counts = row_detail(verdict) if tone == "up" else ""
