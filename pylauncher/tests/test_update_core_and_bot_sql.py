@@ -63,12 +63,23 @@ def test_a_core_move_that_adds_a_database_update_is_refused_before_anything_is_b
     assert db.rows == {}, "nothing was written to the world either"
 
 
-def test_a_core_move_that_only_changes_an_existing_update_file_is_not_refused(
+def test_a_core_move_that_changes_an_existing_update_file_is_refused_too(
     tmp_path: Path,
 ) -> None:
+    """Codex on T533: an edited migration the server already ran is never applied either,
+    so a new core could meet an older schema. Fail closed on any change to the chain."""
     rec, server_dir, db, world = _installed(tmp_path)
     core = server_dir / CORE.dest
-    rec.diffs[(core, OLD, NEW)] = (("M", "sql/updates/mangos/0002.sql"), ("A", "src/x.cpp"))
+    rec.diffs[(core, OLD, NEW)] = (("M", "sql/updates/mangos/0002.sql"),)
+    with pytest.raises(InstallerError, match="database update"):
+        _press(rec, server_dir, db, world)
+    assert "build" not in rec.calls
+
+
+def test_a_core_move_that_changes_only_code_is_not_refused(tmp_path: Path) -> None:
+    rec, server_dir, db, world = _installed(tmp_path)
+    core = server_dir / CORE.dest
+    rec.diffs[(core, OLD, NEW)] = (("M", "src/game/x.cpp"), ("A", "sql/base/other.sql"))
     _press(rec, server_dir, db, world)
     assert "build" in rec.calls
 
@@ -142,6 +153,30 @@ def test_a_bot_file_the_database_refuses_is_named_and_the_others_still_load(
     assert db.rows[("playerbots world", BOT_FILES[0])][1] == "applied"
     assert any("refused" in line and BOT_FILES[1] in line for line in lines), lines
     assert "recreate" in rec.calls
+    # Codex on T534: a whole-table file that failed (or stopped) part-way may have left
+    # its table empty, and re-running it is safe, so the next update loads it again.
+    rec.failing_sql = ""
+    rec.sql_calls.clear()
+    _press(rec, server_dir, db, world)
+    assert _sent(rec, BOT_FILES[1]) == 1 and _sent(rec, BOT_FILES[0]) == 0
+    assert db.rows[("playerbots world", BOT_FILES[1])][1] == "applied"
+
+
+def test_an_index_file_whose_indexes_are_there_is_recorded_and_not_retried(
+    tmp_path: Path,
+) -> None:
+    """ai_playerbot_indexes.sql is only CREATE INDEX: on a server that has them the client
+    refuses the first one, which means they are there, not that the table is damaged."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    index = BOT_FILES[0]
+    _lay(server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\n")
+    rec.failing_sql = "create index"
+    lines = _press(rec, server_dir, db, world)
+    assert db.rows[("playerbots world", index)][1] == "applied"
+    assert any(index in line and "already there" in line for line in lines), lines
+    rec.sql_calls.clear()
+    _press(rec, server_dir, db, world)
+    assert _sent(rec, index) == 0
 
 
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise", "wow-wotlk"])
@@ -174,6 +209,9 @@ def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_gener
         ("INSERT INTO t VALUES (1);\n", "it writes t without emptying it first"),
         ("DELETE FROM t WHERE a = 1;\nINSERT INTO t VALUES (1);\n", "it writes t without emptying"),
         ("UPDATE t SET a = a + 1;\n", "it writes t without emptying"),
+        ("DELETE FROM t LIMIT 1;\nINSERT INTO t VALUES (1);\n", "not safe to repeat"),
+        ("DELETE FROM t ORDER BY a LIMIT 1;\nINSERT INTO t VALUES (1);\n", "not safe to repeat"),
+        ("DELETE t FROM t JOIN u ON t.a = u.a;\nINSERT INTO t VALUES (1);\n", "not safe to repeat"),
         ("ALTER TABLE t ADD COLUMN b int;\n", "not safe to repeat"),
         ("/*!50000 ALTER TABLE t ADD COLUMN b int */;\n", "not safe to repeat"),
         ("INSERT INTO t VALUES ('x;DROP TABLE IF EXISTS t');\n", "it writes t without emptying"),
@@ -187,6 +225,9 @@ def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_gener
         "insert",
         "where",
         "update",
+        "delete-limit",
+        "delete-order-limit",
+        "delete-join",
         "alter",
         "exec-alter",
         "quoted-drop",

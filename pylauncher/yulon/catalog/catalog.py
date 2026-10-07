@@ -640,7 +640,7 @@ class SqlPhase(_Strict):
             "again WHOLE, in the same window -- only for whole-table files (every table they "
             "write is dropped or emptied first in the same file, `sqlplan.whole_table_problem`), "
             "so a re-run leaves what a fresh install leaves; a file of any other shape is named "
-            "and not run. `refuse_new` (T533): a move that ADDS a file under this phase's globs "
+            "and not run. `refuse_new` (T533): a move that adds or changes a file under its globs "
             "refuses the whole press before the compile -- for a chain the route cannot apply "
             "safely to an existing server. Not in `digest()`: it does not change what an import "
             "applies."

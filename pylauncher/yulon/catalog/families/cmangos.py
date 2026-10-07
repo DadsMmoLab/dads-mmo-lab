@@ -449,14 +449,15 @@ class CmangosInstaller(StagedInstaller):
         *,
         to_pin: bool,
     ) -> None:
-        """Refuse a move that ADDS a file to a `refuse_new` phase -- the core's update chain (T533).
+        """Refuse a move that adds or changes a file of a `refuse_new` phase (T533).
 
         Those files are the core's database migrations, for the characters, accounts
         and logs as well as the world; a new core refuses a database that has not had
         them, and a rollback after applying them would leave the old core refusing it
         instead. So the press stops here, before anything is built, and every moved
-        source goes back (the lead's call (d), 2026-10-07). Fail-closed: git that
-        cannot say what changed refuses too.
+        source goes back (the lead's call (d), 2026-10-07). A CHANGED migration refuses
+        as well (Codex): the server ran the old bytes and is never given the new ones.
+        Only a removal passes. Fail-closed: git that cannot say what changed refuses too.
         """
         new = self._seams.head_sha(dest)
         if new is None or new == old:
@@ -474,14 +475,15 @@ class CmangosInstaller(StagedInstaller):
         added = [
             path
             for status, path in pairs
-            if status.startswith("A") and any(_glob_names(g, path) for g in globs)
+            if not status.startswith("D") and any(_glob_names(g, path) for g in globs)
         ]
         if added:
             shown = ", ".join(posixpath.basename(p) for p in added[:3])
             more = f" and {len(added) - 3} more" if len(added) > 3 else ""
             raise InstallerError(
-                f"{where[0].upper()}{where[1:]} in {source.repo} adds {len(added)} database "
-                f"update(s) for your characters, accounts or world ({shown}{more}), and Yu'lon "
+                f"{where[0].upper()}{where[1:]} in {source.repo} adds or changes {len(added)} "
+                f"database update(s) for your characters, accounts or world ({shown}{more}), and "
+                "Yu'lon "
                 "cannot yet apply those to a server that already exists. Nothing was built or "
                 "changed: your server stays on the code it runs. A fresh install of this server "
                 "gets them."
@@ -844,7 +846,9 @@ class CmangosInstaller(StagedInstaller):
                 continue
             sha = sqlplan.file_digest(run.path)
             row = ledger.get((run.phase.name, run.rel))
-            if row is None or row.sha256 != sha:
+            # Anything but a clean load of these exact bytes is owed again: a whole-table
+            # file that failed or stopped may have left its table empty (Codex, T534).
+            if row is None or row.sha256 != sha or row.state != sqlplan.FILE_APPLIED:
                 due.append((run, sha))
         if not due:
             return
@@ -881,13 +885,17 @@ class CmangosInstaller(StagedInstaller):
                 cancel=None,
                 stage="world-updates",
             )
-            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            there = bool(refused) and sqlplan.only_creates_indexes(run.path)
+            state = sqlplan.FILE_FAILED if refused and not there else sqlplan.FILE_APPLIED
             self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
+            if there:
+                yield f"{run.rel}: its indexes are already there; recorded, not run again."
+                loaded += 1
+                continue
             if refused:
                 yield (
                     f"The database refused {run.rel}; that bot table is as the file left it. "
-                    "The next update loads it again only if the file changes; a fresh install "
-                    "loads it."
+                    "The next update loads it again; a fresh install loads it too."
                 )
                 continue
             loaded += 1

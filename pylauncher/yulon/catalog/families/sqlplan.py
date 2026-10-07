@@ -1765,9 +1765,14 @@ def whole_table_problem(path: Path) -> str | None:
             continue
         match = re.match(rf"(?i)(?:DELETE FROM|TRUNCATE(?: TABLE)?) {_TABLE}(.*)$", sql)
         if match:
-            if "WHERE" not in match.group(2).upper():
+            rest = match.group(2).strip().upper()
+            if not rest:
+                # Only the plain whole-table form empties it (Codex, T534).
                 emptied.add(match.group(1).lower())
-            continue
+                continue
+            if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
+                continue  # deletes the same rows however often it runs
+            return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
         if re.match(r"(?i)(REPLACE INTO|INSERT IGNORE INTO) ", sql):
             continue
         match = re.match(rf"(?i)(?:INSERT INTO|UPDATE) {_TABLE}", sql)
@@ -1777,6 +1782,24 @@ def whole_table_problem(path: Path) -> str | None:
             continue
         return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
     return None
+
+
+def only_creates_indexes(path: Path) -> bool:
+    """Is this file nothing but `CREATE [UNIQUE] INDEX` statements (and `SET`s)?
+
+    The bots' `ai_playerbot_indexes.sql`: on a server that has the indexes the
+    client refuses the first one, which says they are there, not that a table
+    was harmed (T534).
+    """
+    seen = False
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        head = " ".join(raw.split()).upper()
+        if not head or head.startswith("SET "):
+            continue
+        if not head.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
+            return False
+        seen = True
+    return seen
 
 
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:
