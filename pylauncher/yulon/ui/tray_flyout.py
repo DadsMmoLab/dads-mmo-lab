@@ -1,38 +1,42 @@
-"""The tray's left-click flyout (T540, the owner's Option B).
+"""The tray's left-click panel: design C, the compact status list (T551; was T540's cards, B).
 
-A small charcoal sheet by the tray icon: "Yu'lon — N of M servers online" and a
-gear at the top, one card per server, **Open Yu'lon** and **Quit tray…** at the
-foot. A card is the server's name, a status pill in the badge's colours, the
-players, bots and uptime when the realm is up and they are known, and one
-button: **Play** when the realm is online, **Start** when it is stopped (greyed,
-with the tab's own reason, whenever the tab's Start is), **Open** when it needs
-attention (a crash loop, partly up) -- its Server tab says what and offers the fix.
+"Servers" and "N online" at the top. One 44 px row per server: a status dot
+(green online, amber ring starting or stopping, grey stopped, red when it needs
+attention), the name, a second line (players · bots when up, else its state),
+and one small square icon button: **Play** when the realm is online, **Start**
+when it is stopped (greyed, with the tab's own reason, whenever the tab's Start
+is), **Open** when it needs attention (its Server tab says what), none while it
+starts or stops. A Tortoise row has a second icon for its bot dashboard, in the
+three states T540 gave it. Then the tray's two switches, live (`TraySwitches`,
+the Settings dialog's own), and **Open Yu'lon** | **Quit tray…**.
 
 Every button goes through `YulonTray`, which goes through the window: Play is the
-sidebar ▶'s `open_launcher`, Start is the tab's `start_server`. The cards are
-rebuilt from the tabs' badges each time the tray hears one change, so a Start
+sidebar ▶'s `open_launcher`, Start is the tab's `start_server`. The rows are
+refilled from the tabs' badges each time the tray hears one change, so a Start
 reads "Starting" the moment it is pressed (T188's held badge).
 
 **A controller reaches it** with no gamepad code here: it is an ordinary active
 window, so `gamepad.Navigator` finds it as its context, the D-pad moves between
 its buttons, A presses, and B closes it (`BACK_CLOSES`). Focus starts on the
-first card's button. Nothing opens it from the pad while Yu'lon is hidden: a
+first row's button. Nothing opens it from the pad while Yu'lon is hidden: a
 global pad button would fire in the middle of a game.
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -40,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from yulon import dashboard
 from yulon.ui.gamepad import BACK_CLOSES
+from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import (
     COLOR_BG_CONTAINER,
     COLOR_BG_PANEL,
@@ -53,18 +58,21 @@ from yulon.ui.theme import (
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
-FLYOUT_WIDTH = 400
-"""Wide enough for "WoW WotLK — DadsMmoLab", a pill and a button on one row."""
+FLYOUT_WIDTH = 340
+"""Design C's narrow panel: a name and its second line beside one or two icons."""
 FLYOUT_MAX_HEIGHT = 560
-"""Past this the cards scroll: six servers fit, a seventh scrolls."""
+"""Past this the rows scroll (eight fit); under the 800 px of a Steam Deck."""
+ROW_HEIGHT = 44
+"""One server, one row: design C's 44 px."""
+ICON_BUTTON = 28
+"""The row's square icon buttons."""
 GAP = 8
 """Between the icon (or the cursor) and the flyout's edge."""
 
-PILL_COLOURS = {
+DOT_COLOURS = {
     "up": COLOR_UNCOMMON,
     "between": COLOR_GOLD_BRIGHT,
-    "restarting": COLOR_DANGER,
-    "unknown": COLOR_TEXT_MUTED,
+    "attention": COLOR_DANGER,
     "down": COLOR_TEXT_MUTED,
 }
 
@@ -87,6 +95,31 @@ def card_detail(verdict: Any) -> str:
     if parts and verdict.uptime is not None:
         parts.append(dashboard.uptime_text(verdict.uptime))
     return " · ".join(parts)
+
+
+def row_detail(verdict: Any) -> str:
+    """ "3 players · 500 bots": design C's second line for a realm that is up (None is unread)."""
+    if not isinstance(verdict, dashboard.Verdict):
+        return ""
+    parts: list[str] = []
+    if verdict.players is not None:
+        parts.append(f"{verdict.players} player{'' if verdict.players == 1 else 's'}")
+    if verdict.bots is not None:
+        parts.append(f"{verdict.bots} bot{'' if verdict.bots == 1 else 's'}")
+    return " · ".join(parts)
+
+
+def dot_tone(status: str) -> str:
+    """The row's dot: "up", "between", "attention" or "down" (unknown claims nothing: grey)."""
+    word = status.lower()
+    if word in ("loop", "partial"):
+        return "attention"
+    tone = realm_tone(word)
+    if tone == "up":
+        return "up"
+    if tone in ("between", "restarting"):
+        return "between"
+    return "down"
 
 
 def flyout_position(
@@ -112,118 +145,180 @@ def flyout_position(
     return QPoint(x, y)
 
 
-class ServerCard(QFrame):
-    """One server: title, status pill, the count line, one button."""
+class StatusDot(QWidget):
+    """The row's status dot: filled green, an amber ring, filled grey, or filled red."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("tray-card")
+        self.tone = "down"
+        self.setFixedSize(14, 14)
+
+    def set_tone(self, tone: str) -> None:
+        self.tone = tone
+        self.update()
+
+    def paintEvent(self, _event: object) -> None:  # noqa: N802 - Qt's own name
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        colour = QColor(DOT_COLOURS.get(self.tone, COLOR_TEXT_MUTED))
+        if self.tone == "between":
+            painter.setPen(QPen(colour, 2.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QRectF(3, 3, 8, 8))
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(colour)
+            painter.drawEllipse(QRectF(2, 2, 10, 10))
+        painter.end()
+
+
+def _icon_button(parent: QWidget) -> QToolButton:
+    button = QToolButton(parent)
+    button.setFixedSize(ICON_BUTTON, ICON_BUTTON)
+    button.setIconSize(QSize(14, 14))
+    button.setObjectName("tray-row-button")
+    return button
+
+
+class ServerCard(QFrame):
+    """One server, one 44 px row: dot, name over a second line, and its icon buttons."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("tray-row")
+        self.setFixedHeight(ROW_HEIGHT)
         self.view: Any = None
-        # One row: the name (with the count line under it), the pill, the button.
-        # A second row only for the count, so a stopped server's card is one line.
-        # A Tortoise server's dashboard entry is a row of its own under them, the
-        # card's whole width: in the name's column it was cut to "Turn on the
-        # bot dashb" (yulon-ubuntu, 2026-10-07).
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 6, 8, 6)
-        outer.setSpacing(2)
-        row = QHBoxLayout()
+        self.which = ""
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 2, 6, 2)
         row.setSpacing(8)
+        self.dot = StatusDot(self)
+        row.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
         words = QVBoxLayout()
-        words.setSpacing(2)
+        words.setSpacing(0)
         self.title = QLabel(self)
-        self.title.setObjectName("tray-card-title")
+        self.title.setObjectName("tray-row-title")
         self.detail = QLabel(self)
-        self.detail.setObjectName("tray-card-detail")
-        # The words give way, never the buttons: a long name or count line wraps
-        # inside the card instead of pushing Play past the flyout's edge
-        # (yulon-win11, 2026-10-07: "0 players · 345 bots · up 4m" did).
+        self.detail.setObjectName("tray-row-detail")
         for label in (self.title, self.detail):
-            label.setWordWrap(True)
+            # The words give way, never the buttons (T540: Play was pushed off the edge).
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         words.addWidget(self.title)
         words.addWidget(self.detail)
         row.addLayout(words, 1)
-        self.pill = QLabel(self)
-        self.pill.setObjectName("tray-pill")
-        row.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.action = QPushButton(self)
-        self.action.setMinimumWidth(72)
-        row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
-        outer.addLayout(row)
-        self.dashboard = QPushButton(self)
-        self.dashboard.setFlat(True)
-        self.dashboard.setObjectName("tray-card-dashboard")
+        # A Tortoise server's TortoiseBots dashboard (T540), a second icon.
+        self.dashboard = _icon_button(self)
+        self.dashboard.setIcon(dadcraft_icon("robot"))
         self.dashboard.setVisible(False)
         self.dashboard_kind = ""
-        outer.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignLeft)
+        row.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.action = _icon_button(self)
+        row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    armed: tuple[Any, str] | None = None
+    """(server, action) as they were when the icon button was pressed."""
+
+    dashboard_armed: tuple[Any, str] | None = None
+    """(server, dashboard kind) as they were when the dashboard icon was pressed."""
+
+    def arm(self) -> None:
+        self.armed = (self.view, self.which)
+
+    def arm_dashboard(self) -> None:
+        self.dashboard_armed = (self.view, self.dashboard_kind)
 
     def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
-        """Fill the card; answers which button it shows (PLAY, START, OPEN or "")."""
+        """Fill the row; answers which button it shows (PLAY, START, OPEN or "")."""
         self.view = view
         self.title.setText(title)
-        self.title.setToolTip(str(view.services.controller.server_dir))
-        tone = realm_tone(status)
-        colour = PILL_COLOURS.get(tone, COLOR_TEXT_MUTED)
-        if status.lower() == "partial":
-            colour = COLOR_DANGER
-        self.pill.setText(words)
-        self.pill.setStyleSheet(
-            f"color: {colour}; border: 1px solid {colour}; border-radius: 8px; padding: 1px 8px;"
+        self.title.setToolTip(f"{title}\n{view.services.controller.server_dir}")
+        tone = dot_tone(status)
+        self.dot.set_tone(tone)
+        self.dot.setToolTip(words)
+        # A dot is colour; a screen reader gets the words (cold review).
+        self.dot.setAccessibleName(
+            words
+            if realm_tone(status) == "unknown"  # grey like stopped, but not known to be (Codex)
+            else {"up": "Online", "attention": "Needs attention", "down": "Stopped"}.get(
+                tone, words
+            )
         )
-        detail = card_detail(getattr(view, "last_verdict", None)) if tone == "up" else ""
-        if entry is not None and not entry.enabled and entry.reason and not detail:
-            detail = entry.reason  # why the dashboard is greyed, on the card itself
-        self.detail.setText(detail)
-        self.detail.setVisible(bool(detail))
+        verdict = getattr(view, "last_verdict", None)
+        counts = row_detail(verdict) if tone == "up" else ""
+        self.detail.setText(counts or words)
+        self.detail.setToolTip(card_detail(verdict) if tone == "up" else words)
+        which, enabled, why = "", False, ""
+        if tone == "up":
+            which, enabled, why = PLAY, True, f"Play {title}"
+        elif tone == "attention" or realm_tone(status) == "unknown":
+            which, enabled, why = OPEN, True, f"Open {title}"
+        elif tone == "down":
+            # The tab's own Start, greyed whenever the tab's is, with its reason (T195).
+            gate = view.start_button
+            which, enabled = START, gate.isEnabled()
+            why = f"Start {title}" if enabled else gate.toolTip()
+        self.which = which
+        self.action.setVisible(bool(which))
+        self.action.setEnabled(enabled)
+        self.action.setToolTip(why)
+        # Which server, not only the verb (cold review): "Play WoW WotLK".
+        self.action.setAccessibleName(f"{which} {title}" if which else "")
+        if which == START:
+            self.action.setIcon(power_icon())
+        else:
+            self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
         self.dashboard.setVisible(entry is not None)
         self.dashboard_kind = ""
         if entry is not None:
-            self.dashboard.setText(entry.label)
+            self.dashboard.setAccessibleName(f"{entry.label} ({title})")
             self.dashboard.setEnabled(entry.enabled)
-            self.dashboard.setToolTip(entry.reason)
+            self.dashboard.setToolTip(entry.reason or entry.label)
             self.dashboard_kind = entry.kind
-        if tone == "up":
-            which = PLAY
-            enabled, why = True, f"Open the game launcher for {title}"
-        elif tone in ("restarting",) or status.lower() == "partial":
-            which = OPEN
-            enabled, why = True, f"Open Yu'lon on {title}'s Server tab"
-        elif tone == "unknown":
-            which = OPEN
-            enabled, why = True, f"Open Yu'lon on {title}'s Server tab"
-        else:
-            # Down or in between: the tab's own Start, greyed whenever the tab's
-            # is, with the tab's own reason (T195).
-            which = START
-            gate = view.start_button
-            enabled = tone == "down" and gate.isEnabled()
-            why = gate.toolTip() if tone == "down" and not gate.isEnabled() else ""
-            if tone == "between":
-                why = f"{title} is {words.lower()}"
-        self.action.setText(which)
-        self.action.setEnabled(enabled)
-        self.action.setToolTip(why)
-        self.action.setProperty("primary", which == PLAY)
-        self.action.style().unpolish(self.action)
-        self.action.style().polish(self.action)
         return which
 
 
+_ICONS = {PLAY: "play", OPEN: "wrench"}
+"""Play is the sidebar ▶'s icon and Open a wrench; Start is `power_icon()`."""
+
+
+@functools.cache
+def power_icon() -> QIcon:
+    """Start's icon: the power symbol, an open ring with a line through its top (lead,
+    T551: the server glyph's two bars did not read as Start, and ▶ is Play's)."""
+    icon = QIcon()
+    for size in (16, 24, 32, 48):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(COLOR_GOLD_BRIGHT), max(1.5, size * 0.11))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        inset = size * 0.14
+        ring = QRectF(inset, inset + size * 0.04, size - 2 * inset, size - 2 * inset)
+        # Qt angles are in 1/16 degree, counter-clockwise from 3 o'clock: leave
+        # a 60° gap at the top for the line.
+        painter.drawArc(ring, 120 * 16, 300 * 16)
+        painter.drawLine(QPointF(size / 2, size * 0.1), QPointF(size / 2, size * 0.48))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 class TrayFlyout(QWidget):
-    """The flyout window. `YulonTray` fills it (`show_servers`) and acts on its signals."""
+    """The panel window. `YulonTray` fills it (`show_servers`) and acts on its signals."""
 
     play_requested = Signal(object)
     start_requested = Signal(object)
     open_server_requested = Signal(object)
     open_requested = Signal()
     quit_requested = Signal()
-    settings_requested = Signal()
     dashboard_requested = Signal(object, str)
-    """(view, kind): a card's bot dashboard entry was pressed."""
+    """(view, kind): a row's bot dashboard icon was pressed."""
     dismissed = Signal()
     """It closed itself because something else took the focus (a click elsewhere)."""
 
-    def __init__(self) -> None:
+    def __init__(self, switches: QWidget | None = None) -> None:
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -240,48 +335,44 @@ class TrayFlyout(QWidget):
                 background: {COLOR_BG_PANEL};
                 border: 1px solid {COLOR_GOLD_BRASS};
             }}
-            QFrame#tray-card {{
+            QFrame#tray-row {{
                 background: {COLOR_BG_CONTAINER};
                 border: 1px solid {COLOR_BRASS_DARK};
                 border-radius: 4px;
             }}
             QLabel#tray-header {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
-            QLabel#tray-card-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
-            QLabel#tray-card-detail {{ color: {COLOR_TEXT_MUTED}; }}
-            QPushButton#tray-card-dashboard {{
-                color: {COLOR_GOLD_BRIGHT};
-                border: none;
-                background: transparent;
+            QLabel#tray-count {{ color: {COLOR_TEXT_MUTED}; }}
+            QLabel#tray-row-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
+            QLabel#tray-row-detail {{ color: {COLOR_TEXT_MUTED}; font-size: 11px; }}
+            QToolButton#tray-row-button {{
+                border: 2px solid {COLOR_BRASS_DARK};
+                border-radius: 4px;
                 padding: 0;
-                text-align: left;
+                min-width: {ICON_BUTTON}px;
+                max-width: {ICON_BUTTON}px;
+                min-height: {ICON_BUTTON}px;
+                max-height: {ICON_BUTTON}px;
             }}
-            QPushButton#tray-card-dashboard:disabled {{ color: {COLOR_TEXT_MUTED}; }}
-            QToolButton {{
-                color: {COLOR_GOLD_BRIGHT};
-                font-size: 16px;
-                font-family: "Segoe UI Symbol", "DejaVu Sans", "Apple Symbols";
+            /* Where the pad or the keyboard is (cold review): the theme's focus gold. */
+            QToolButton#tray-row-button:focus {{
+                border: 2px solid {COLOR_GOLD_BRIGHT};
             }}
             """)
         column = QVBoxLayout(self)
-        column.setContentsMargins(12, 10, 12, 12)
-        column.setSpacing(8)
+        column.setContentsMargins(10, 8, 10, 10)
+        column.setSpacing(6)
         top = QHBoxLayout()
-        self.header = QLabel(self)
+        self.header = QLabel("Servers", self)
         self.header.setObjectName("tray-header")
-        self.settings_button = QToolButton(self)
-        # U+FE0E asks for the text glyph, so it takes the amber like the rest.
-        self.settings_button.setText("⚙\ufe0e")
-        self.settings_button.setToolTip("Settings")
-        self.settings_button.setAccessibleName("Settings")
-        self.settings_button.setAutoRaise(True)
-        self.settings_button.clicked.connect(self.settings_requested)
+        self.count = QLabel(self)
+        self.count.setObjectName("tray-count")
         top.addWidget(self.header, 1)
-        top.addWidget(self.settings_button)
+        top.addWidget(self.count, 0, Qt.AlignmentFlag.AlignRight)
         column.addLayout(top)
         self._list = QWidget()
         self._cards_box = QVBoxLayout(self._list)
         self._cards_box.setContentsMargins(0, 0, 0, 0)
-        self._cards_box.setSpacing(6)
+        self._cards_box.setSpacing(4)
         self._cards_box.addStretch(1)
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
@@ -290,32 +381,39 @@ class TrayFlyout(QWidget):
         self._scroll.setWidget(self._list)
         column.addWidget(self._scroll, 1)
         self.empty = QLabel("No servers yet: install one from the Catalog.", self)
-        self.empty.setObjectName("tray-card-detail")
+        self.empty.setObjectName("tray-row-detail")
         self.empty.setWordWrap(True)
         column.addWidget(self.empty)
+        self.switches = switches
+        if switches is not None:
+            switches.setParent(self)
+            column.addWidget(switches)
         foot = QHBoxLayout()
         self.open_button = QPushButton(OPEN_YULON, self)
         self.open_button.setProperty("primary", True)
         self.open_button.clicked.connect(self.open_requested)
         self.quit_button = QPushButton(QUIT_TRAY, self)
         self.quit_button.clicked.connect(self.quit_requested)
+        # Split in two, as design C draws it.
         foot.addWidget(self.open_button, 1)
-        foot.addWidget(self.quit_button)
+        foot.addWidget(self.quit_button, 1)
         column.addLayout(foot)
         self._cards: list[ServerCard] = []
 
     def cards(self) -> list[ServerCard]:
         return [card for card in self._cards if not card.isHidden()]
 
-    def show_servers(self, header: str, servers: Sequence[tuple[Any, str, str, str, Any]]) -> None:
-        """(view, title, badge word, pill words, dashboard entry) per server. Cards are reused.
+    def show_servers(self, count: str, servers: Sequence[tuple[Any, str, str, str, Any]]) -> None:
+        """("N online", then (view, title, badge word, state words, dashboard entry) per server).
 
-        Reused so a card the pad's focus is on keeps it across a refresh.
+        Rows are reused, so a row the pad's focus is on keeps it across a refresh.
         """
-        self.header.setText(header)
+        self.count.setText(count)
         while len(self._cards) < len(servers):
             card = ServerCard(self._list)
+            card.action.pressed.connect(card.arm)
             card.action.clicked.connect(lambda _c=False, c=card: self._pressed(c))
+            card.dashboard.pressed.connect(card.arm_dashboard)
             card.dashboard.clicked.connect(lambda _c=False, c=card: self._dashboard_pressed(c))
             self._cards_box.insertWidget(len(self._cards), card)
             self._cards.append(card)
@@ -329,36 +427,45 @@ class TrayFlyout(QWidget):
         self._fit()
 
     def _fit(self) -> None:
-        self._list.adjustSize()
-        wanted = self._list.sizeHint().height() + 4
-        self._scroll.setFixedHeight(min(wanted, FLYOUT_MAX_HEIGHT - 120))
+        rows = len(self.cards())
+        wanted = rows * ROW_HEIGHT + max(0, rows - 1) * self._cards_box.spacing() + 2
+        room = FLYOUT_MAX_HEIGHT - 200  # header, switches and footer
+        self._scroll.setFixedHeight(max(0, min(wanted, room)))
         self.adjustSize()
 
     def _dashboard_pressed(self, card: ServerCard) -> None:
+        # The same press-time check as the row's own button (Codex on 4e3549e9).
+        if card.dashboard_armed != (card.view, card.dashboard_kind):
+            return
         if card.view is not None and card.dashboard_kind:
             self.dashboard_requested.emit(card.view, card.dashboard_kind)
 
     def _pressed(self, card: ServerCard) -> None:
         view = card.view
-        if view is None:
+        if view is None or card.armed != (view, card.which):
+            # Rows are reused by position: a refresh between the press and the
+            # release made this row another server's (T551 adversarial). The
+            # click goes nowhere rather than to a server it was not begun on.
             return
-        which = card.action.text()
-        if which == PLAY:
+        if card.which == PLAY:
             self.play_requested.emit(view)
-        elif which == START:
+        elif card.which == START:
             self.start_requested.emit(view)
-        elif which == OPEN:
+        elif card.which == OPEN:
             self.open_server_requested.emit(view)
 
     def first_button(self) -> QWidget:
-        """Where the pad's focus starts: the first card's button, else Open Yu'lon."""
+        """Where the pad's focus starts: the first row's button, else Open Yu'lon."""
         for card in self.cards():
-            if card.action.isEnabled():
+            if not card.action.isHidden() and card.action.isEnabled():
                 return card.action
         return self.open_button
 
     def pop_up(self, anchor: QRect) -> None:
         """Show by the icon (or the cursor), activated, with focus on the first button."""
+        reread = getattr(self.switches, "read", None)
+        if callable(reread):
+            reread()
         self.adjustSize()
         cursor = QCursor.pos()
         screen = QGuiApplication.screenAt(cursor) or QGuiApplication.primaryScreen()

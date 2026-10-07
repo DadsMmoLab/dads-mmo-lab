@@ -1,4 +1,5 @@
-"""The tray's left-click flyout (T540, Option B): one card per server, Play and Start.
+"""The tray's left-click panel's window mechanics (T540; its rows are design C since T551,
+see `test_tray_panel.py`, which replaced the card tests that stood here).
 
 Uses `test_tray.py`'s stand-ins: a window carrying what `main.build_window()`
 puts on the real one, and tabs that are badges and two buttons.
@@ -93,64 +94,12 @@ def test_the_flyout_sits_by_the_icon_and_inside_the_screen() -> None:
 # ----------------------------------------------------------------- the cards
 
 
-def test_one_card_per_server_with_play_only_when_online(
-    tray: YulonTray, window: FakeWindow
-) -> None:
-    up = _add(window, FakeView("WotLK", "/srv/a", "running"))
-    up.last_verdict = dashboard.Verdict("up", players=2, bots=10, uptime=timedelta(minutes=7))
-    _add(window, FakeView("TBC", "/srv/b", "starting"))
-    _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
-    flyout = _open(tray)
-    assert flyout.header.text() == "Yu'lon — 1 of 3 servers online"
-    wotlk = _card(flyout, "WotLK")
-    assert wotlk.pill.text() == "Realm online"
-    assert wotlk.detail.text() == "2 players · 10 bots · up 7m"
-    assert _visible_buttons(wotlk) == {"Play": True}
-    tbc = _card(flyout, "TBC")
-    assert tbc.pill.text() == "Starting"
-    assert tbc.detail.isHidden()
-    assert _visible_buttons(tbc) == {"Start": False}
-    assert _visible_buttons(_card(flyout, "Vanilla")) == {"Start": True}
-
-
 def test_play_opens_that_servers_client_launcher(tray: YulonTray, window: FakeWindow) -> None:
     _add(window, FakeView("WotLK", "/srv/a", "running"))
     flyout = _open(tray)
     _card(flyout, "WotLK").action.click()
     assert window.opened == [("game-wotlk", Path("/srv/a"))]
     assert not flyout.isVisible(), "the flyout stayed over the launcher it opened"
-
-
-def test_start_presses_the_tabs_start_and_the_card_says_starting_at_once(
-    tray: YulonTray, window: FakeWindow
-) -> None:
-    view = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
-    flyout = _open(tray)
-    _card(flyout, "Vanilla").action.click()
-    assert view.starts == 1
-    card = _card(flyout, "Vanilla")
-    assert card.pill.text() == "Starting"
-    assert _visible_buttons(card) == {"Start": False}
-    assert tray.state == "between"
-
-
-def test_start_is_greyed_with_the_tabs_own_reason(tray: YulonTray, window: FakeWindow) -> None:
-    view = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
-    view.start_button.setEnabled(False)
-    view.start_button.setToolTip("Waiting for the module install to finish")
-    card = _card(_open(tray), "Vanilla")
-    assert _visible_buttons(card) == {"Start": False}
-    assert card.action.toolTip() == "Waiting for the module install to finish"
-
-
-def test_a_server_needing_attention_opens_its_tab(tray: YulonTray, window: FakeWindow) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "loop"))
-    flyout = _open(tray)
-    card = _card(flyout, "WotLK")
-    assert card.pill.text() == "Crash loop"
-    assert _visible_buttons(card) == {"Open": True}
-    card.action.click()
-    assert window.shown_tabs == [("game-wotlk", Path("/srv/a"))]
 
 
 def test_the_footer_opens_yulon_and_quits(tray: YulonTray, window: FakeWindow) -> None:
@@ -162,13 +111,6 @@ def test_the_footer_opens_yulon_and_quits(tray: YulonTray, window: FakeWindow) -
     asked: list[int] = []
     tray.ask_to_quit = lambda: asked.append(1)  # type: ignore[method-assign]
     _open(tray).quit_button.click()
-    assert asked == [1]
-
-
-def test_the_settings_button_asks_for_the_settings(tray: YulonTray) -> None:
-    asked: list[int] = []
-    tray.open_settings = lambda: asked.append(1)  # type: ignore[method-assign]
-    _open(tray).settings_button.click()
     assert asked == [1]
 
 
