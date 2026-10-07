@@ -5063,8 +5063,10 @@ class Applier:
                 raise ApplyError(
                     f"{link} became a link to another place while {manifest.id} was being "
                     f"installed, so the copy into your game client stopped there: writing "
-                    f"through it would have changed what it points to. Replace it with a real "
-                    f"folder or file, or remove it, then install {manifest.id} again."
+                    f"through it would have changed what it points to. Anything copied before "
+                    f"that stays in your game client: Remove takes back what it can prove is its "
+                    f"own and names the rest. Replace the link with a real folder or file, or "
+                    f"remove it, then install {manifest.id} again."
                 )
 
         claimed = self._claimed_asides(log)
@@ -5078,6 +5080,7 @@ class Applier:
             if src.is_dir():
                 _copy_onto(src, target, place, check)
             elif src.is_file():
+                check(target, False)
                 target.mkdir(parents=True, exist_ok=True)
                 dest = target / (client_names.match(os.listdir(target), src.name) or src.name)
                 check(dest, True)

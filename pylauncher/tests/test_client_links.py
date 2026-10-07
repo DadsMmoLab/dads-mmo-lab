@@ -38,7 +38,7 @@ from tests.test_server_dbc import (
 from yulon import apply as apply_module
 from yulon import links, play_client
 from yulon.apply import ApplyError, ApplyRefusal
-from yulon.manifest import Manifest
+from yulon.manifest import ClientFile, Manifest
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
 
@@ -378,3 +378,76 @@ def test_a_link_above_a_folder_the_copy_must_make_stops_it_before_making_it(
 
     assert str(play / "Interface") in str(failed.value), str(failed.value)
     assert _snapshot(elsewhere) == before
+
+
+def test_a_single_file_step_under_a_linked_folder_makes_nothing_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review: a step that copies one file asks about its folder before making it.
+
+    An addon step whose source is one file lands in `Interface/AddOns/<name>/`, which
+    the copy makes. With `Interface/` turned into a link after the check, making that
+    folder first would make it in the place the link points to.
+    """
+    shipped = _manifest("kegs/bmah.json")
+    one_file = ClientFile(src="BlackMarketUI.toc", dest="addons", name="BlackMarketUI")
+    manifest = shipped.model_copy(update={"client": [one_file]})
+    elsewhere = _elsewhere(tmp_path)
+    before = _snapshot(elsewhere)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest)
+    applier.sql = _LinkAppearsDuringSql(play / "Interface", elsewhere)
+
+    with pytest.raises(ApplyError) as failed:
+        applier.install(manifest)
+
+    assert str(play / "Interface") in str(failed.value), str(failed.value)
+    assert _snapshot(elsewhere) == before
+
+
+@pytest.mark.parametrize("linked", ["the client folder itself", "a folder above it"])
+def test_a_ready_to_play_client_reached_through_a_link_is_installed_into(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked: str
+) -> None:
+    """Cold review: the client folder is where the player keeps it, link or not.
+
+    Only links from the client folder down are Yu'lon's business; one that leads to
+    the folder (moved to another drive and linked back) is followed, both by the check
+    before the install and by the one at the copy.
+    """
+    manifest = _manifest(ARAC)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest)
+    if linked == "the client folder itself":
+        real = tmp_path / "other drive" / play.name
+        real.parent.mkdir()
+        play.rename(real)
+        _symlink(real, play)
+    else:
+        real_parent = tmp_path / "other drive"
+        real_parent.mkdir()
+        real = real_parent / play.name
+        play.rename(real)
+        _symlink(real_parent, tmp_path / "linked parent")
+        applier.client_dir = tmp_path / "linked parent" / play.name
+
+    applier.install(manifest)
+
+    landed = real / "Data" / "Patch-A.MPQ"
+    assert landed.is_file() and not landed.is_symlink()
+
+
+def test_the_copy_names_the_outermost_link_on_the_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a link inside a linked folder, the one to replace is the folder nearest the client."""
+    manifest = _manifest(ARAC)
+    applier, play = _ready_to_play(monkeypatch, tmp_path, manifest)
+    elsewhere, further = tmp_path / "elsewhere", tmp_path / "further"
+    elsewhere.mkdir()
+    further.mkdir()
+    shutil.rmtree(play / "Data")
+    _symlink(elsewhere, play / "Data")
+    _symlink(further, elsewhere / "enUS")
+
+    found = applier._link_on_the_way(play / "Data" / "enUS" / "x.MPQ", True, file=True)
+
+    assert found == play / "Data"
