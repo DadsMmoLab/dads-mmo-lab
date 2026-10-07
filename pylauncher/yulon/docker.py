@@ -7497,6 +7497,22 @@ class ClaimHeld:
 
     name: str
     lost: threading.Event
+    confirm: Callable[[], bool] = field(default=lambda: True, compare=False)
+    """Asks Docker NOW whether the claim still runs as this press's own (by its nonce)."""
+
+    def held(self) -> bool:
+        """Is the claim still this press's, asked now (Codex reviews of T549)? False sets `lost`.
+
+        The watcher's `lost` comes a moment after the CLI ends, from another thread, so
+        a press about to change the folder asks this instead: Docker itself, before each
+        change. An unanswered question is not a claim held.
+        """
+        if self.lost.is_set():
+            return False
+        if self.confirm():
+            return True
+        self.lost.set()
+        return False
 
 
 @contextmanager
@@ -7546,10 +7562,16 @@ def folder_claim(
         target=_watch_claim, args=(held, lost, letting_go), name="yulon-claim-watch", daemon=True
     ).start()
     try:
-        yield ClaimHeld(held.name, lost)
+        yield ClaimHeld(held.name, lost, lambda: _claim_still_ours(held))
     finally:
         letting_go.set()  # before the release ends the CLI: that end is not a loss
         _release_claim(held)
+
+
+def _claim_still_ours(held: _Claim) -> bool:
+    """Does Docker say the claim `held` still runs, carrying this press's nonce? (T549)"""
+    facts = _claim_facts(held.name, timeout=_CLAIM_LOOK_TIMEOUT)
+    return facts is not None and facts.nonce == held.nonce and facts.status == "running"
 
 
 def _watch_claim(held: _Claim, lost: threading.Event, letting_go: threading.Event) -> None:

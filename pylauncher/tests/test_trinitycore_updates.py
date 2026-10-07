@@ -3500,6 +3500,80 @@ def test_a_press_whose_folder_claim_ended_before_anything_moved_changes_nothing(
     box.world.running = False
     with pytest.raises(InstallerError) as raised:
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
-    assert "Nothing was moved aside" in str(raised.value), raised.value
+    assert "was not touched" in str(raised.value), raised.value
     assert box.m.tools.seen == {}, "a tool ran after the claim was lost"
     assert data_files(box) == before
+
+
+def _claim_asked_of_docker(answers: Callable[[], bool]) -> object:
+    """A folder-claim stand-in whose `held()` is asked of `answers`, as of Docker (T549)."""
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", threading.Event(), answers)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    return lambda folder, image, cancel=None: _Claim()
+
+
+def test_a_failing_press_asks_docker_before_it_puts_the_old_map_data_back(box: Box) -> None:
+    """Codex adversarial review of fe565941: the watcher's `lost` comes from another thread a
+    moment late, so a tool that fails on the same Docker trouble reached the put-back first.
+    The put-back asks Docker itself whether the claim is still this press's.
+
+    Mutation this catches: the failure path reading only `lost`.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(
+        lambda: "vmap4extractor" not in box.m.tools.seen
+    )
+    box.m.tools.fail_tool = "vmap4extractor"
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "put back under a lost claim"
+
+
+def test_a_press_asks_docker_before_it_deletes_the_old_map_data(box: Box) -> None:
+    """Codex adversarial review of fe565941: lost after the last tool, the press deleted the
+    old map data and finished in a folder another press may hold by then.
+
+    Mutation this catches: no look at the claim before `extract.supersede()`.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(
+        lambda: "vmap4assembler" not in box.m.tools.seen
+    )
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "the old data was deleted"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+
+
+def test_a_press_asks_docker_before_it_settles_an_earlier_press(box: Box) -> None:
+    """Codex review of fe565941: what an earlier press left is put back or deleted -- a change
+    to the folder -- so it is not done once the claim is gone.
+
+    Mutation this catches: `_settle_an_earlier_press()` not asking first.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    extract.set_aside(data, ("maps",))  # an earlier press that died part way
+    before = data_files(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: False)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert data_files(box) == before, "the earlier press's data was settled under a lost claim"

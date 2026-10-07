@@ -164,6 +164,12 @@ REEXTRACT_KEPT_ASIDE_CLAIM_LOST = (
 )
 """What a `reextract()` whose folder claim ended mid-press ends with (T549)."""
 
+REEXTRACT_FINISH_AGAIN = (
+    "The new map data is in place, but this press did not finish: press "
+    f"\u201c{REEXTRACT_BUTTON}\u201d again to finish it."
+)
+"""What a `reextract()` whose claim ended after the old map data was deleted ends with (T549)."""
+
 
 def reextract_claim_lost(data_dir: Path, name: str) -> str:
     """Why a Re-extract stopped when its folder claim ended before it did (T549)."""
@@ -2206,11 +2212,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             if stopped is not None:
                 yield stopped
+        self._still_claimed(claim, data_dir, f"{data_dir} was not touched.")
         yield from self._settle_an_earlier_press(server_dir, data_dir)
-        if claim is not None and claim.lost.is_set():
-            raise InstallerError(
-                f"{reextract_claim_lost(data_dir, claim.name)} Nothing was moved aside."
-            )
+        self._still_claimed(claim, data_dir, "Nothing was moved aside.")
         plan = self._tc().extract
         extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
         ctx = replace(probe, client_dir=client)
@@ -2224,12 +2228,13 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "folders; it is put back if this extraction does not finish."
             )
             yield from self._staged((stage,), ctx)
-            if claim is not None and claim.lost.is_set():
-                # Lost as the last tool finished: the new data is in, but nothing more
-                # is done in a folder another press may hold now.
-                raise InstallerError(reextract_claim_lost(data_dir, claim.name))
+            # Asked of Docker before the old map data is deleted (Codex adversarial
+            # review): lost as the last tool finished, nothing more is done here.
+            self._still_claimed(claim, data_dir, "")
         except BaseException as failure:
-            if claim is not None and claim.lost.is_set():
+            # Asked of Docker, not only of the watcher (Codex adversarial review): a tool
+            # failing on the same Docker trouble can get here before the watcher has.
+            if claim is not None and not claim.held():
                 # Not put back (T549): another Yu'lon may be pressing in the folder now.
                 if not isinstance(failure, Exception):
                     raise  # a stream closed or an interrupt goes on as it came
@@ -2265,6 +2270,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"later “{REEXTRACT_BUTTON}” may put it back if the map data in place no longer "
                 "matches the server's files by then."
             )
+        self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         if background:
             # After the new map data is in, so a failure here must not fail the press
             # (scoped re-review of e457b29e): the map data is done; this is said.
@@ -2284,6 +2290,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     "The pathfinding data made from the old map data was removed, and "
                     "pathfinding is off until it has been made again."
                 )
+        self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -2291,11 +2298,25 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"warning: {server_dir / REEXTRACT_FILE} could not be removed ({exc}); the "
                 "Server tab will go on asking for an extraction that has been done."
             )
+        self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         yield from self.after_ready(server_dir)
         yield (
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."
         )
+
+    def _still_claimed(
+        self, claim: docker.ClaimHeld | None, data_dir: Path, nothing_done: str
+    ) -> None:
+        """Before each change to the folder: is its claim still this press's? (T549)
+
+        Asked of Docker (`ClaimHeld.held()`), not only of the watcher. Gone, the press
+        stops here with why, and `nothing_done` says what that left.
+        """
+        if claim is None or claim.held():
+            return
+        said = reextract_claim_lost(data_dir, claim.name)
+        raise InstallerError(f"{said} {nothing_done}".rstrip())
 
     def _settle_an_earlier_press(self, server_dir: Path, data_dir: Path) -> Iterator[str]:
         """What an earlier press left under `data/`: replaced data deleted, kept data put back.
