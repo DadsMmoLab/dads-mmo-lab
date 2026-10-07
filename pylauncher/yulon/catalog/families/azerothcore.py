@@ -26,7 +26,7 @@ from typing import ClassVar
 
 from yulon import git
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.installer import InstallerError, InstallStopped
+from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -40,6 +40,7 @@ from yulon.catalog.native import (
     StagedInstaller,
     _listing,
     build_cancel_note,
+    download_left_sentence,
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -496,6 +497,11 @@ class AzerothCoreInstaller(StagedInstaller):
         if not service:
             yield "This server has no separate client-data step."
             return
+        # T539 (re-review of 7312223b): a download a Stop or a closed Yu'lon left running
+        # is ended before another starts into the same data.
+        left = self._seams.end_one_shot(service, ctx.server_dir)
+        if left is not None:
+            raise OneShotLeftRunning(download_left_sentence(left, earlier=True))
         yield f"Fetching server data ({service}). The download resumes if it is interrupted."
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(
@@ -504,6 +510,11 @@ class AzerothCoreInstaller(StagedInstaller):
             cancel=ctx.cancel,
             stage="import",
         )
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            # Not read as a clean Stop until nothing of the download is still running.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."
 

@@ -202,7 +202,14 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
             f"removing a database importer a Stop or a retry could not end (T539): {_TYPED}",
             frozenset({"docker rm -f {…}"}),
         )
-        for owner in ("_one_shot_left_sentence", "stage_import")
+        for owner in ("_one_shot_left_sentence", "stage_import", "download_left_sentence")
+    },
+    **{
+        ("yulon/docker.py", owner): (
+            f"removing a database importer Repair could not end (T539): {_TYPED}",
+            frozenset({"docker rm -f {…}"}),
+        )
+        for owner in ("importer_left_sentence", "repair_import", "DockerRefusal.__init__")
     },
     **{
         # The line is built in `_claimed_note()` and raised in `reextract()`; the walk

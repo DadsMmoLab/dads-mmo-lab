@@ -13495,6 +13495,26 @@ def _one_shot_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
     return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
+def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
+    """`_one_shot_left_sentence` for the server-data download (re-review of 7312223b)."""
+    names = ", ".join(left.names)
+    who = f"its container ({names})" if names else "its container"
+    if earlier:
+        said = (
+            f"A server-data download from an earlier run may still be running, and {who} could "
+            f"not be ended: {left.reason}. Nothing was downloaded."
+        )
+    else:
+        said = (
+            f"The server-data download was stopped, but {who} could not be ended: "
+            f"{left.reason}. It may still be writing the server data, and Install again will "
+            "not start another while it runs."
+        )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+
+
 def _cancelled_message(what: str, note: str = "") -> str:
     """ "<what> was stopped", plus whatever is TRUE of the stage that was stopped.
 

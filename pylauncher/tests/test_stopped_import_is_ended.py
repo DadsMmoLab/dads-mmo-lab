@@ -171,7 +171,7 @@ def test_a_stopped_import_ends_its_importer_before_it_says_stopped(tmp_path: Pat
             )
         )
     # Once before the import (nothing left from an earlier run) and once after its Stop.
-    assert rec.ended_one_shots == [IMPORTER, IMPORTER]
+    assert [s for s in rec.ended_one_shots if s == IMPORTER] == [IMPORTER, IMPORTER]
 
 
 def test_a_stopped_import_whose_importer_would_not_end_says_so_after_the_stop(
@@ -220,7 +220,7 @@ def test_a_retry_ends_a_leftover_importer_before_it_clears(tmp_path: Path) -> No
     """One that CAN be ended is ended first; then the reset and the import run as before."""
     rec = Recorder(probe_answers=[PARTIAL, IMPORTED])
     list(engine(rec).run(InstallOptions(server_dir=tmp_path / "s")))
-    assert rec.ended_one_shots == [IMPORTER]
+    assert [s for s in rec.ended_one_shots if s == IMPORTER] == [IMPORTER]
     assert rec.calls.index("reset") < rec.calls.index(f"one-shot:{IMPORTER}"), rec.calls
 
 
@@ -490,3 +490,120 @@ def test_a_cancelled_one_shot_is_ended_again_once_its_cli_is_gone(
     assert not worker.is_alive()
     assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
     assert calls and calls[-1] is True, f"never ended after the CLI had exited: {calls}"
+
+
+# ---------------------------------------------------------------- Repair the database
+
+
+def test_repair_ends_a_leftover_importer_before_it_reads_the_databases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Re-review of 7312223b (MUST): Repair is offered in exactly the half-written state an
+    orphaned importer leaves (Yu'lon closed mid-import; Docker Desktop keeps the container),
+    and it read, cleared and re-imported under it.
+
+    Mutation this catches: `repair_import()` without the guard, or with it after the probe.
+    """
+    from yulon.controller_wow_wotlk.docker_ctl import SPEC
+
+    order: list[str] = []
+    monkeypatch.setattr(docker, "install_project", lambda *a, **k: "wow-server")
+    monkeypatch.setattr(docker, "_running", lambda *a, **k: docker.Running())
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: order.append("start-db"))
+    monkeypatch.setattr(
+        docker, "end_one_shot", lambda service, *a, **k: order.append(f"end-one-shot:{service}")
+    )
+    monkeypatch.setattr(docker, "run_one_shot", lambda *a, **k: docker.AttachedRun(0))
+    monkeypatch.setattr(docker, "verify_import", lambda *a, **k: None)
+
+    def probe() -> docker.ImportState:
+        order.append("probe")
+        return ABSENT
+
+    assert docker.repair_import(SPEC, tmp_path, probe) is True
+    assert f"end-one-shot:{SPEC.import_service}" in order, order
+    assert order.index(f"end-one-shot:{SPEC.import_service}") < order.index("probe"), order
+
+
+def test_repair_refuses_while_an_importer_it_could_not_end_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing is read, cleared or run under it; the sentence names it and how to end it."""
+    from yulon.controller_wow_wotlk.docker_ctl import SPEC
+
+    asked: list[str] = []
+    monkeypatch.setattr(docker, "install_project", lambda *a, **k: "wow-server")
+    monkeypatch.setattr(docker, "_running", lambda *a, **k: docker.Running())
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: None)
+    monkeypatch.setattr(
+        docker,
+        "end_one_shot",
+        lambda *a, **k: docker.OneShotLeft((IMPORTER,), "Docker would not kill it"),
+    )
+    monkeypatch.setattr(docker, "run_one_shot", lambda *a, **k: asked.append("import"))
+
+    with pytest.raises(docker.DockerRefusal) as refused:
+        docker.repair_import(SPEC, tmp_path, lambda: asked.append("probe") or PARTIAL)
+    assert asked == [], asked
+    assert f"docker rm -f {IMPORTER}" in str(refused.value), refused.value
+
+
+# ---------------------------------------------------------------- the server-data download
+
+DOWNLOADER = "ac-client-data-init"
+
+
+def test_a_download_left_running_is_ended_before_another_starts_and_refused_if_not(
+    tmp_path: Path,
+) -> None:
+    """Re-review of 7312223b (SHOULD): the client-data stage had no guard of its own.
+
+    Mutation this catches: the download started without asking `end_one_shot()` first.
+    """
+    from tests.support_native import ENTRY
+
+    assert ENTRY.containers.client_data == DOWNLOADER
+    rec = Recorder()
+
+    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        rec.ended_one_shots.append(service)
+        if service == DOWNLOADER:
+            return docker.OneShotLeft((DOWNLOADER,), "Docker would not kill it")
+        return None
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, end_one_shot=end_one_shot).run(InstallOptions(server_dir=tmp_path / "s")))
+    assert f"one-shot:{DOWNLOADER}" not in rec.calls, rec.calls
+    assert "server-data download" in str(raised.value), raised.value
+    assert f"docker rm -f {DOWNLOADER}" in str(raised.value), raised.value
+
+
+def test_a_stopped_download_whose_container_would_not_end_is_not_a_clean_stop(
+    tmp_path: Path,
+) -> None:
+    """A surviving download container read as a clean Stop (re-review of 7312223b).
+
+    Mutation this catches: the Stop's result of `end_one_shot()` thrown away.
+    """
+    rec = Recorder()
+    cancel = threading.Event()
+
+    def one_shot(service: str, server_dir: Path, **_kw: object) -> docker.AttachedRun:
+        rec.calls.append(f"one-shot:{service}")
+        cancel.set()
+        return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("downloading maps",))
+
+    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        if service == DOWNLOADER and cancel.is_set():
+            return docker.OneShotLeft((DOWNLOADER,), "it was still running 30 s after the kill")
+        return None
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, one_shot=one_shot, end_one_shot=end_one_shot).run(
+                InstallOptions(server_dir=tmp_path / "s"), cancel=cancel
+            )
+        )
+    assert isinstance(raised.value, TrueAfterStop), type(raised.value)
+    assert not isinstance(raised.value, InstallStopped), raised.value
+    assert DOWNLOADER in str(raised.value), raised.value

@@ -2260,6 +2260,12 @@ def repair_import(
         spec, server_dir, timeout=db_timeout, because="nothing was imported", wsl_distro=wsl_distro
     )
 
+    # T539 (re-review of 7312223b): Repair is offered in exactly the half-written state
+    # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
+    # the container -- so that importer is ended before the databases are even read.
+    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
+    if left is not None:
+        raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
     if before.state == "populated":
@@ -2927,6 +2933,22 @@ def _folder_spellings(server_dir: Path, *, wsl_distro: str | None = None) -> set
         if inside is not None:
             found.add(_spelled(inside))
     return found
+
+
+def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
+    """A database importer from an earlier run that could not be ended, and how to end it (T539).
+
+    `nothing_done` says what was therefore not done ("the import was not re-run").
+    """
+    names = ", ".join(left.names)
+    who = f"A database import ({names})" if names else "A database import"
+    said = (
+        f"{who} from an earlier run may still be running, and it could not be ended: "
+        f"{left.reason}. The databases were not touched, and {nothing_done}."
+    )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
 def end_one_shot(
