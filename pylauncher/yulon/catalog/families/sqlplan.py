@@ -1578,25 +1578,31 @@ def record_world_files(
     )
 
 
-_SQL_COMMENTS = re.compile(r"/\*.*?\*/|--[^\n]*|#[^\n]*", re.S)
+_SYSTEM_SCHEMAS = ("mysql", "information_schema", "performance_schema", "sys")
+"""Schemas no world update has business naming, beside the server's own non-world ones."""
 
 
 def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
-    """Which of `others` a world update's text reaches, plus `USE` if it switches schema.
+    """What in a world update's text could reach past the world schema; empty when nothing.
 
     The update runs with `into` as the client's DEFAULT schema only -- the account
     can reach every schema -- so a file that says `USE characters` or
-    `characters.x` would write there (Codex, T531). Read as text, comments
-    stripped; a false alarm costs a file named and not applied, never a write.
+    `characters.x` would write there (Codex, T531). Read as RAW text, comments
+    included: MySQL executes `/*! ... */`, and a quote can hide a `#` or `--`, so
+    stripping comments would hide statements (Codex, T531 round 3). A false alarm
+    costs a file named and not applied, never a write; measured 2026-10-07, none of
+    tbc-db 86672361's 44 or classic-db ec4f5961's 357 Updates/*.sql files trips it.
     """
-    text = _SQL_COMMENTS.sub(" ", path.read_text(encoding="utf-8", errors="replace"))
+    text = path.read_text(encoding="utf-8", errors="replace")
     found = [
         name
-        for name in sorted(others)
+        for name in sorted({*others, *_SYSTEM_SCHEMAS})
         if re.search(rf"`?\b{re.escape(name)}\b`?\s*\.\s*`?[A-Za-z_]", text, re.I)
     ]
-    if re.search(r"(?im)^\s*USE\s", text):
+    if re.search(r"(?im)(^|;)\s*USE\s", text):
         found.append("USE")
+    if "/*!" in text:
+        found.append("an executable comment")
     return tuple(found)
 
 

@@ -670,13 +670,22 @@ def test_a_world_update_that_reaches_characters_or_accounts_is_never_applied(
     assert any(U3 in line and "reaches outside mangos" in line for line in lines), lines
 
 
-def test_the_schema_scan_reads_statements_not_comments(tmp_path: Path) -> None:
-    path = _lay(
-        tmp_path,
-        "x.sql",
-        "-- fixes characters.lua text\n/* realmd.conf note */\n# logs.x\n"
-        "UPDATE creature_template SET Name = 'x' WHERE entry = 1;\n",
+def test_the_schema_scan_flags_what_could_reach_another_schema_and_not_a_table_column(
+    tmp_path: Path,
+) -> None:
+    """Raw text, comments included (MySQL runs `/*! */`); `table.column` is not a schema."""
+    others = {"characters", "realmd", "logs"}
+
+    def scan(text: str) -> tuple[str, ...]:
+        path = _lay(tmp_path, "x.sql", text)
+        return sqlplan.foreign_schemas(path, others)
+
+    assert scan("UPDATE gameobject SET a=0 WHERE gameobject.id=gameobject_template.entry;\n") == ()
+    assert scan("UPDATE logs.logs_x SET a = 1;\n") == ("logs",)
+    assert scan("/*!50000 INSERT INTO characters.foo VALUES (1) */;\n") == (
+        "characters",
+        "an executable comment",
     )
-    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ()
-    path.write_text("UPDATE logs.logs_x SET a = 1;\n", encoding="utf-8")
-    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ("logs",)
+    assert scan("SELECT 1; use realmd;\n") == ("USE",)
+    assert scan("DELETE FROM mysql.user;\n") == ("mysql",)
+    assert scan("INSERT INTO t VALUES ('#'); UPDATE `characters`.c SET x=1;\n") == ("characters",)
