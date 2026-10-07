@@ -30,7 +30,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -673,6 +674,15 @@ class ApplyError(RuntimeError):
 
 class ApplyRefusal(ApplyError, SaidByYulon):
     """An `ApplyError` whose message is Yu'lon's own sentence, shown as written (T214)."""
+
+
+_STARTED_DB_LINE = "started the database alone; the world server was left stopped"
+
+DATABASE_LEFT_UP = (
+    "Yu'lon started the database to check your answers, and it is still running; "
+    "press Stop if you do not need it."
+)
+"""What a stopped install adds when its exists check had to start the database (T476)."""
 
 
 def _kept(cause: BaseException, message: str) -> ApplyError:
@@ -2030,7 +2040,9 @@ class ApplyReport:
     deleted because the game can be told to ignore it instead.
     """
     world_stopped: bool = False
-    """This run's running-world guard asked, and was told explicitly "not running" (T130).
+    """This run read the world and was told explicitly "not running" (T130; T397).
+
+    Read by the SQL guard, or, for a conf-only run that sent no SQL, once by the report.
 
     Only ever set from a reading, never from the manifest. `False` covers three
     things that are not the same: "running" and "could not ask" (both refuse,
@@ -2076,6 +2088,9 @@ class _Log:
     # was reached at all, which `_record_database()` needs and the `done` lines
     # cannot be counted for (a skipped step is not a line there either).
     sql_sent: int = 0
+    # T476. Set by `_check_exists()` when IT had to start the database alone:
+    # `Applier._says_the_database_is_up()` then names it if the install stops early.
+    database_started: bool = False
 
 
 def take_back_file(
@@ -2859,6 +2874,41 @@ class Applier:
         release: upstream.Release | None = None,
         expect_head: str | None = None,
     ) -> ApplyReport:
+        """`_install()`, saying so when it stops with a database it started still up (T476).
+
+        An install that stops early -- a refused answer, a conflict, a missing
+        requirement, or a failure further on -- after `_check_exists()` started
+        the database alone says the database is still running
+        (`_says_the_database_is_up()`). A finished install says it in its
+        report's "started the database alone" line instead.
+        """
+        log = _Log()
+        with self._says_the_database_is_up(log):
+            return self._install(
+                manifest,
+                values,
+                log,
+                folder=folder,
+                complete=complete,
+                replacing=replacing,
+                first_configure_sql=first_configure_sql,
+                release=release,
+                expect_head=expect_head,
+            )
+
+    def _install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None,
+        log: _Log,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+        replacing: bool = False,
+        first_configure_sql: bool = True,
+        release: upstream.Release | None = None,
+        expect_head: str | None = None,
+    ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
         `first_configure_sql` is False from `update()` only: a fresh deploy
@@ -2895,7 +2945,6 @@ class Applier:
         does not reach.
         """
         vals = self._values(manifest, values)
-        log = _Log()
         self._check_values(manifest, "install", vals, log)
         # T115, before anything is written: a relative install run again over
         # values nobody can read would compound them, so it is refused here.
@@ -3751,6 +3800,30 @@ class Applier:
 
     # -- the answers -------------------------------------------------------
 
+    @contextmanager
+    def _says_the_database_is_up(self, log: _Log) -> Iterator[None]:
+        """Say so when an install stops after its exists check started the database (T476).
+
+        T396 starts a stopped database alone so the answer is really checked.
+        An install refused after that said "Nothing was changed" and left the
+        database running, with only the header to show it. So an `ApplyError`
+        raised in this block, after `_check_exists()` had to start it
+        (`log.database_started`), ends with `DATABASE_LEFT_UP`; one that was
+        already up adds nothing. The same exception is raised again, its type
+        and detail kept, so `_module_failed()` reads it as before.
+
+        Said, not stopped (cold review): stopping it here took no hold, so it
+        could take the database from under a Start or a Backup pressed while
+        the check ran -- neither waits for a module job. Any other exception
+        passes through untouched.
+        """
+        try:
+            yield
+        except ApplyError as exc:
+            if log.database_started:
+                exc.args = (f"{exc} {DATABASE_LEFT_UP}", *exc.args[1:])
+            raise
+
     def _check_values(
         self, manifest: Manifest, action: When, vals: Mapping[str, str], log: _Log
     ) -> None:
@@ -3767,6 +3840,7 @@ class Applier:
         Nothing here writes, and the two things it reads are the answers it was
         handed and (through `_check_exists`) the server's own database.
         """
+        db_asked = [False]  # the database is started for the checks at most once
         for prompt in required_prompts(manifest, action):
             value = vals.get(prompt.key)
             if value is None:
@@ -3780,10 +3854,15 @@ class Applier:
                     f"{manifest.id}: {prompt.question} — {problem}, and {value!r} is not. "
                     f"Nothing was changed."
                 )
-            self._check_exists(manifest, prompt, vals, log)
+            self._check_exists(manifest, prompt, vals, log, db_asked)
 
     def _check_exists(
-        self, manifest: Manifest, prompt: Prompt, vals: Mapping[str, str], log: _Log
+        self,
+        manifest: Manifest,
+        prompt: Prompt,
+        vals: Mapping[str, str],
+        log: _Log,
+        db_asked: list[bool] | None = None,
     ) -> None:
         """Ask the database whether the thing this answer names is really there.
 
@@ -3799,6 +3878,13 @@ class Applier:
           refuse. A database is legitimately stopped while a module is being
           installed, and an install that a stopped server can veto would be a
           worse defect than the one this check is here for.
+
+        T396: where the caller handed over a way to start the database, it is
+        started alone first (once, before the first question), so a stopped
+        database is no longer a reason to skip the check. If it will not start
+        the install is refused before anything is written: a check that cannot
+        be made, over a module whose answer a wrong value silently breaks, is
+        not one to wave through and then run again on the next press.
         """
         check = prompt.exists
         if check is None:
@@ -3820,6 +3906,20 @@ class Applier:
                 f"like a module that does nothing"
             )
             return
+        if db_asked is not None and not db_asked[0] and self._start_database is not None:
+            db_asked[0] = True
+            try:
+                started = self._start_database()
+            except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
+                raise _kept(
+                    exc,
+                    f"{manifest.id}: the database could not be started to check "
+                    f"{prompt.question!r}. {exc} Nothing was changed.",
+                ) from exc
+            if started:
+                log.database_started = True
+                if _STARTED_DB_LINE not in log.done:
+                    log.done.append(_STARTED_DB_LINE)
         statement = _render(check.query, vals, f"prompt {prompt.key}")
         try:
             rows = self.sql.query(check.db, statement)
@@ -4471,8 +4571,9 @@ class Applier:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
 
         Returns whether it ASKED and was told "not running" (T130), which is
-        `ApplyReport.world_stopped`'s only source. Every early return below is
-        `False`, because none of them read anything about the world.
+        the SQL route's source of `ApplyReport.world_stopped` (a conf-only run reads it in
+        `_report`, T397). Every early return below is `False`, because none of them read
+        anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
         direct writes to `characters`/`world` while running; reads are fine* —
@@ -4640,8 +4741,8 @@ class Applier:
                 f"{manifest.id}: the database could not be started, so no SQL was run and no "
                 f"rows were written: {steps}. {exc}",
             ) from exc
-        if started:
-            log.done.append("started the database alone; the world server was left stopped")
+        if started and _STARTED_DB_LINE not in log.done:
+            log.done.append(_STARTED_DB_LINE)
         return True
 
     def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:
@@ -5722,6 +5823,22 @@ class Applier:
                 f"so the next Update of {manifest.id} will offer the defaults instead"
             )
 
+    def _world_read_stopped_for_a_conf_write(self, log: _Log) -> bool:
+        """Whether a conf write that asks for a restart found the world already stopped (T397).
+
+        A conf-only install sends no SQL, so the SQL guard never read the world and the
+        report said "Stop and then Start" to a player who had stopped it first. One read,
+        only when a conf write is what asks for the restart; only an explicit "not running"
+        counts, a running world or a seam that cannot answer leave the old line.
+        """
+        if log.world_stopped or not log.conf_restart or self._world_running is None:
+            return log.world_stopped
+        try:
+            return self._world_running() is False
+        except Exception as exc:  # noqa: BLE001 - could not ask is not "stopped"
+            logger.warning(f"could not tell whether the world is running: {exc}")
+            return False
+
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(
             action=action,
@@ -5756,7 +5873,7 @@ class Applier:
             left_behind=(
                 _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
             ),
-            world_stopped=log.world_stopped,
+            world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "

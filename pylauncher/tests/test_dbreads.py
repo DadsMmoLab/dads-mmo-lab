@@ -273,6 +273,126 @@ def test_a_query_that_fails_is_reported_and_never_counted_as_zero(tmp_path: Path
     assert counts.players is None and counts.bots is None
 
 
+def test_a_schema_the_world_has_not_made_yet_is_not_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T424: the poll ran before the world created its schema; the next tick asks again."""
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+
+    class _Early:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError("ERROR 1049 (42000): Unknown database 'acore_playerbots'")
+
+    with caplog.at_level("INFO"):
+        counts = dbreads.population(_Early(), WOTLK, answer.marker)
+    assert counts.problem != ""
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_playerbots_table_the_world_has_not_made_yet_is_not_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T425: ERROR 1146 on a playerbots table just after the world started is the early poll."""
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+
+    class _Early:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError(
+                "ERROR 1146 (42S02): Table 'acore_playerbots.playerbots_account_type' doesn't exist"
+            )
+
+    with caplog.at_level("INFO"):
+        counts = dbreads.population(_Early(), WOTLK, answer.marker)
+    assert counts.problem != ""
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+class _Table1146:
+    """A reader whose playerbots table is missing until `present` is set."""
+
+    def __init__(self) -> None:
+        self.present = False
+
+    def query(self, db: str, statement: str) -> str:
+        if not self.present:
+            raise RuntimeError(
+                "ERROR 1146 (42S02): Table 'acore_playerbots.playerbots_account_type' doesn't exist"
+            )
+        return "1\t2\t3\t4\n"
+
+
+def _levels(caplog: pytest.LogCaptureFixture, level: str) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == level]
+
+
+def test_a_playerbots_table_still_missing_after_two_minutes_warns_exactly_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T437: a young world is INFO only; an old one says it once, not every poll."""
+    from datetime import timedelta
+
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+    reader, said = _Table1146(), dbreads.MissingTableSaid()
+
+    with caplog.at_level("INFO"):
+        for seconds in (5, 30, 100):  # the world is young
+            dbreads.population(
+                reader, WOTLK, answer.marker, world_up=timedelta(seconds=seconds), said=said
+            )
+        assert not _levels(caplog, "WARNING")
+        for seconds in range(125, 500, 5):  # the world is old, the table is still gone
+            dbreads.population(
+                reader, WOTLK, answer.marker, world_up=timedelta(seconds=seconds), said=said
+            )
+    warnings = _levels(caplog, "WARNING")
+    assert len(warnings) == 1
+    assert warnings[0].startswith("The bots' tables are still missing")
+    assert "Stop and Start" in warnings[0] and "Save logs for support…" in warnings[0]
+
+
+def test_the_missing_table_warning_comes_again_after_the_table_returns_or_the_world_restarts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from datetime import timedelta
+
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+    reader, said = _Table1146(), dbreads.MissingTableSaid()
+    old = timedelta(minutes=5)
+
+    with caplog.at_level("INFO"):
+        dbreads.population(reader, WOTLK, answer.marker, world_up=old, said=said, run="a")
+        dbreads.population(reader, WOTLK, answer.marker, world_up=old, said=said, run="a")
+        assert len(_levels(caplog, "WARNING")) == 1
+        # A restarted world is a new run: it is young again, then old again.
+        dbreads.population(reader, WOTLK, answer.marker, world_up=old, said=said, run="b")
+        assert len(_levels(caplog, "WARNING")) == 2
+        # The table appears, then goes missing again: that is said afresh.
+        reader.present = True
+        dbreads.population(reader, WOTLK, answer.marker, world_up=old, said=said, run="b")
+        reader.present = False
+        dbreads.population(reader, WOTLK, answer.marker, world_up=old, said=said, run="b")
+    assert len(_levels(caplog, "WARNING")) == 3
+
+
+def test_a_missing_table_that_is_not_a_playerbots_one_is_still_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    answer = dbreads.resolve_marker(WOTLK, _install(tmp_path))
+    assert answer.marker is not None
+
+    class _Broken:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError("ERROR 1146 (42S02): Table 'acore_characters.x' doesn't exist")
+
+    with caplog.at_level("INFO"):
+        dbreads.population(_Broken(), WOTLK, answer.marker)
+    assert [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 def test_an_answer_that_is_not_four_numbers_is_reported_rather_than_parsed_optimistically(
     tmp_path: Path,
 ) -> None:

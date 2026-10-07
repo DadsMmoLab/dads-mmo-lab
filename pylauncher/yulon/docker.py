@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import inspect
 import io
 import json
@@ -162,6 +163,10 @@ class SaveFirst:
     command: str
     queue_command: str = ""
     queue_pattern: str = ""
+    first: tuple[str, ...] = ()
+    """Typed before `command` so nothing new joins the save queue (T498): Centurion's bots out."""
+    if_given_up: tuple[str, ...] = ()
+    """Typed when the stop is given up before its signal, to undo `first` (T498)."""
     prompt: str = "AC>"
     prompt_precedes_answer: bool = True
 
@@ -3232,6 +3237,13 @@ WORLD_SAVING = (
 WORLD_SAVED = "The world server saved every character and closed."
 """Said when a world that `WORLD_SAVING` was said of has exited by itself (T384)."""
 
+WORLD_CLOSED = "The world server closed without an error."
+"""`WORLD_SAVED`'s place when the save asked for first did not happen or did not finish (T496).
+
+Live, yulon-win11-gate, 2026-10-06: one Stop said `SAVE_FIRST_NOT_ASKED` and then
+`WORLD_SAVED`, which contradict each other. The warning before it says what may be missing; this
+says only what was seen, a clean exit."""
+
 _WORLD_SAVE_FAILED_START = "The world server stopped with an error"
 
 
@@ -3343,6 +3355,16 @@ SAVE_FIRST_NOT_ASKED = (
 )
 """Said when the console the save is typed at could not be reached (T410, T411); outlives it."""
 
+SAVE_FIRST_NOT_ASKED_HERE = (
+    "Yu'lon could not ask the world server to save every character before stopping it. On this "
+    "computer it asks through the command channel, which is not turned on or did not answer, so "
+    "characters may be missing what happened since their last automatic save."
+)
+"""`SAVE_FIRST_NOT_ASKED` where the console needs a terminal this host cannot open (T496).
+
+There the save is asked through the install's command channel (`save_through_channel()`), so
+"its console did not answer" would name a thing that was never tried. Outlives the stop."""
+
 _SAVE_COMMAND_WINDOW_SECONDS = 10.0
 """How long the console is listened to after `saveall` (T410, T411).
 
@@ -3363,6 +3385,7 @@ FORCE_STOP_WARNINGS = frozenset(
         WORLD_SAVE_TOO_LONG,
         SAVE_FIRST_UNFINISHED,
         SAVE_FIRST_NOT_ASKED,
+        SAVE_FIRST_NOT_ASKED_HERE,
     }
 )
 """The sentences that must outlive the stop they were said in: it may have been forced."""
@@ -3512,12 +3535,120 @@ def _console_send(command: str, **kwargs: Any) -> Any:
     return console.send_command(command, **kwargs)
 
 
+def _console_reaches(wsl_distro: str | None) -> bool:
+    """Can this host type at a world's console at all? The shared transport's own answer (T496).
+
+    False on Windows with Docker Desktop: `docker attach` to a tty container needs a terminal,
+    and this process has none to give it. A WSL-resident server borrows the distro's.
+    """
+    from yulon.controller_wow_wotlk import console
+
+    return console.can_send(wsl_distro)
+
+
+_save_channels: dict[str, dict[str, Callable[[], object | None]]] = {}
+"""Each install's command channel, for a save asked where its console cannot be typed at (T496).
+
+World container name -> that install's folder -> its `live_channel`. A world's name is the
+game's, the same for every install of it, so the folder says whose channel it is: the one whose
+folder the running world was brought up from (`WORKING_DIR_LABEL`, cold review). Filled by the
+tab's wiring (`save_through_channel()`), read by every stop route through `_type_at_the_world()`.
+"""
+
+
+def save_through_channel(
+    world: str, server_dir: Path, channel_of: Callable[[], object | None]
+) -> None:
+    """Where this host cannot type at `world`'s console, ask its save through this channel (T496).
+
+    `channel_of` is the install's `InstallChannel.live_channel`: asked at the moment of the save,
+    it hands back a channel on the saved credential (an object whose `send(command)` returns a
+    `channel.Answer`), or None when the channel is not set up. On a host that can type at the
+    console this is never read, so Linux stops are #326's.
+    """
+    _save_channels.setdefault(world, {})[_folder_key(str(server_dir))] = channel_of
+
+
+def _folder_key(folder: str) -> str:
+    """One spelling per folder, for matching an install to a compose working-dir label."""
+    return os.path.normcase(os.path.normpath(folder))
+
+
+def _channel_of_the_running_world(
+    spec: ContainerSpec, wsl_distro: str | None
+) -> Callable[[], object | None] | None:
+    """The registered `live_channel` of the install whose world is running, or None (T496)."""
+    installs = _save_channels.get(spec.world, {})
+    if len(installs) == 1:
+        return next(iter(installs.values()))
+    if not installs:
+        return None
+    folder = container_working_dir(spec.world, wsl_distro=wsl_distro)
+    if folder is None or folder == UNREADABLE:
+        logger.warning(f"could not tell which install {spec.world} belongs to")
+        return None
+    return installs.get(_folder_key(folder))
+
+
+@dataclass(frozen=True)
+class _ChannelReply:
+    """A channel's `yes`, in the shape `_save_everyone_first()` reads a `ConsoleReply` in."""
+
+    lines: tuple[str, ...]
+    prompted: bool = True
+
+
+def _ask_the_channel(
+    spec: ContainerSpec, command: str, wsl_distro: str | None
+) -> _ChannelReply | None:
+    """One command through the world's command channel; None when it was not asked or not run.
+
+    Only a `yes` is an answer: `no` is a refusal, and `unknown` is no answer about it (a timeout
+    may have run it, which is still not a save anyone saw).
+    """
+    channel_of = _channel_of_the_running_world(spec, wsl_distro)
+    if channel_of is None:
+        logger.warning(
+            f"could not ask {spec.world} for {command!r}: its console needs a terminal on this "
+            "computer and no command channel is known for it"
+        )
+        return None
+    try:
+        channel = channel_of()
+        if channel is None:
+            logger.warning(
+                f"could not ask {spec.world} for {command!r}: its console needs a terminal on "
+                "this computer and its command channel is not set up"
+            )
+            return None
+        answer = channel.send(command)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - every channel failure means "not asked" here
+        logger.warning(f"could not ask {spec.world} for {command!r} through its channel: {exc}")
+        return None
+    if getattr(answer, "outcome", "") != "yes":
+        why = getattr(answer, "reason", "") or getattr(answer, "text", "") or "no answer"
+        logger.warning(f"the command channel did not run {command!r} on {spec.world}: {why}")
+        return None
+    lines = tuple(str(getattr(answer, "text", "")).splitlines())
+    logger.info(
+        f"asked {spec.world} for {command!r} through its command channel: "
+        f"{lines[0] if lines else 'answered'}"
+    )
+    return _ChannelReply(lines)
+
+
 def _type_at_the_world(
     spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
 ) -> Any | None:
-    """One console line to this world; its `ConsoleReply`, or None when it could not be typed."""
+    """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
+
+    Where this host cannot type at the console at all (T496), the line goes through the
+    install's command channel instead (`_ask_the_channel()`).
+    """
     save = spec.save_first
     assert save is not None
+    if not _console_reaches(wsl_distro):
+        return _ask_the_channel(spec, command, wsl_distro)
     try:
         return _console_send(
             command,
@@ -3544,7 +3675,7 @@ def _queue_length(spec: ContainerSpec, wsl_distro: str | None) -> int | None:
 
 def _save_everyone_first(
     spec: ContainerSpec, control: StopControl, say: Callable[..., None], wsl_distro: str | None
-) -> None:
+) -> bool:
     """Have a running world whose own close loses saves save everyone, and wait for it (T410, T411).
 
     Before the signal, while the world still runs and its database is up. Typed at
@@ -3566,30 +3697,52 @@ def _save_everyone_first(
 
     * the console did not answer (`SAVE_FIRST_NOT_ASKED`): the close then loses
       what it always lost;
-    * the queue has not got shorter, or could not be read, for
-      `WORLD_SAVE_STALL_SECONDS`, or the wait reaches `WORLD_SAVE_CEILING_SECONDS`
-      (`SAVE_FIRST_UNFINISHED`). Unlike the wait after the signal, an unreadable
-      look is not given the benefit of the doubt: the world is RUNNING here, and
-      a wait that cannot see anything would hold a live server for half an hour.
+    * no look has found the queue shorter than the look before it (or none could be
+      read) for `WORLD_SAVE_STALL_SECONDS`, or the wait reaches
+      `WORLD_SAVE_CEILING_SECONDS` (`SAVE_FIRST_UNFINISHED`). Unlike the wait after
+      the signal, an unreadable look is not given the benefit of the doubt: the world
+      is RUNNING here, and a wait that cannot see anything would hold a live server
+      for half an hour.
+
+    Before the save, `SaveFirst.first` is typed so nothing new joins the queue (T498):
+    live, 150 Centurion bots autosaving every 90 s kept it at ~1950 for 5 minutes while
+    it drained, and "never below its lowest" was read as stuck. `server debug` prints
+    no count of what was written (`cs_server.cpp:255-257` at the pin), so "still
+    written" is read as a queue shorter than at the look before: a worker that writes
+    nothing never makes it shorter, however much is still added. A `first` line that
+    cannot be typed is logged and the save goes on.
 
     `control.abandon` raises `StopAbandoned`: nothing has been sent, the world is
-    still running, which is what every handler of that type says.
+    still running, which is what every handler of that type says -- after
+    `SaveFirst.if_given_up` is typed, so what `first` closed is open again.
+
+    Returns whether the save was asked for and, for a queue core, seen through: False after
+    `SAVE_FIRST_NOT_ASKED` (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this
+    host cannot open, T496) or `SAVE_FIRST_UNFINISHED`, so the close is not then said to have
+    saved every character.
     """
     save = spec.save_first
     assert save is not None
+    not_asked = SAVE_FIRST_NOT_ASKED if _console_reaches(wsl_distro) else SAVE_FIRST_NOT_ASKED_HERE
     say(SAVE_FIRST_ASKING)
+    for line in save.first:
+        if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+            logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
     reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:
-            say(SAVE_FIRST_NOT_ASKED, warn=True)
-        return
+            say(not_asked, warn=True)
+        return answered
     started = _save_clock()
     last_shrunk = started
-    lowest: int | None = None
+    before: int | None = None
     looked = False
     while True:
         if control.abandon.is_set():
+            for line in save.if_given_up:
+                if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+                    logger.warning(f"{spec.world} was left running without {line!r}")
             raise SaveFirstAbandoned(
                 f"The stop was not sent: it was given up while {spec.world} was writing its "
                 "saves, so the world was left running."
@@ -3604,22 +3757,23 @@ def _save_everyone_first(
                 if answered:
                     logger.info(f"{spec.world}'s save queue could not be read; not waited on")
                 else:
-                    say(SAVE_FIRST_NOT_ASKED, warn=True)
-                return
+                    say(not_asked, warn=True)
+                return answered
             if length > 0:
                 say(SAVE_FIRST_QUEUED.format(count=length))
         if length == 0:
             say(SAVE_FIRST_WRITTEN)
-            return
-        if length is not None and (lowest is None or length < lowest):
-            lowest = length
-            last_shrunk = now
+            return True
+        if length is not None:
+            if before is not None and length < before:
+                last_shrunk = now
+            before = length
         if (
             now - started >= WORLD_SAVE_CEILING_SECONDS
             or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
         ):
             say(SAVE_FIRST_UNFINISHED, warn=True)
-            return
+            return False
         control.abandon.wait(_SAVE_POLL_SECONDS)
 
 
@@ -3661,7 +3815,8 @@ def save_then_stop_the_world(
     bytes still moving mean it is still saving. It ends on the first of:
 
     * the world is no longer running: it exited by itself (`WORLD_SAVED`, if `WORLD_SAVING`
-      was said), or it restarted (a new `StartedAt`), which is left to the ordinary stop that
+      was said; `WORLD_CLOSED` when the save asked for first did not happen or finish, T496),
+      or it restarted (a new `StartedAt`), which is left to the ordinary stop that
       follows -- as is a signal Docker refused;
     * nothing moved for `WORLD_SAVE_STALL_SECONDS` -- killed, `WORLD_SAVE_STALLED`;
     * `WORLD_SAVE_CEILING_SECONDS` since the signal -- killed, `WORLD_SAVE_TOO_LONG`;
@@ -3689,10 +3844,11 @@ def save_then_stop_the_world(
         if before_signal is not None:
             before_signal()
         return
+    saved_first = True
     if spec.save_first is not None:
         state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         if state.settled:
-            _save_everyone_first(spec, control, say, wsl_distro)
+            saved_first = _save_everyone_first(spec, control, say, wsl_distro)
     if before_signal is not None:
         before_signal()
     proc = _docker(["kill", "-s", "TERM", world], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
@@ -3715,6 +3871,10 @@ def save_then_stop_the_world(
             # T414: "saved" only for a clean exit; a crash on the way out is said, whether or
             # not the save was said to have begun.
             ended, warn = _how_the_world_ended(world, wsl_distro)
+            if ended == WORLD_SAVED and not saved_first:
+                # T496: the save asked for first did not happen or did not finish, and the
+                # warning said so; "saved every character" here would take that back.
+                ended = WORLD_CLOSED
             if saying or (warn and ended != WORLD_SAVE_UNREAD):
                 # Before the first look nothing was claimed, so an exit that cannot be
                 # read claims nothing either; a known crash is said either way.
@@ -5482,6 +5642,7 @@ def run_attached(
     keep: int = KEEP_OUTPUT_LINES,
     cancel: threading.Event | None = None,
     merge_stderr: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> AttachedRun:
     """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
@@ -5532,7 +5693,9 @@ def run_attached(
     deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;
-    see `runner.stream()`.
+    see `runner.stream()`. `env` is the child's whole environment, None to
+    inherit; for a WSL install it must already carry its `WSLENV`
+    (`platform.wsl_env()`), and `build_staged()` is its one caller (T376).
     """
     logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
     tail: deque[str] = deque(maxlen=keep)
@@ -5563,7 +5726,7 @@ def run_attached(
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
         with closing(
-            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr)
+            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
         ) as lines:
             for line in lines:
                 if cancel is not None and cancel.is_set():
@@ -5646,6 +5809,35 @@ def build_staged(
     otherwise withholds it until the child exits — which for a two-to-four-hour
     compile is a blank panel for the entire build.
 
+    **More than one built service is built one call per service (T376)**, each
+    on its own buildx config folder (`_buildx_config()`). BuildKit keeps a
+    cached copy of a build context under a key made of the context folder's
+    NAME and the buildx node, and the node is the `.buildNodeID` in the buildx
+    config folder; which files a target reads is not part of the key. WotLK's
+    four services are four targets of one Dockerfile on one folder, built
+    together by compose, so they took each other's copy and re-sent the
+    difference: on yulon-win11-gate a Rebuild with nothing changed sent 2.36 GB
+    in 912 s, and this shape sent 1.1 MB in 21 s (`.notes/plans/2026-10-05-t376-
+    compose-context-resend.md`). Splitting the calls without the folders fixes
+    nothing: the one key then flips between targets call by call. A game with
+    one built service keeps the single call and the user's own buildx config,
+    because it has no race to lose and a new key costs one cold send.
+
+    **The builder a plain build would use is asked first (T413)**, because a
+    builder picked with `docker buildx use` is recorded in the user's buildx
+    config, which the per-service folders are not. A `docker`-driver builder is
+    a docker context's own and buildx finds it by name from any config folder,
+    so the split calls name it in `BUILDX_BUILDER`. Any other driver
+    (docker-container, remote, kubernetes) lives only in the user's
+    `instances/`, and an answer that cannot be read names no builder at all;
+    both get the single call on the user's own config, which is the build
+    before T376: their own builder, without the per-service cache.
+
+    The calls run in the overlay's order and the first that does not exit 0
+    ends the build: its run is returned as it is, so its status and its own
+    lines are what `_check_run()` and `base_image_unreachable()` read. A Stop
+    between two calls starts no further one.
+
     Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
     not). Returns the run rather than raising, so the caller can tell a
     cancellation from a failure.
@@ -5654,10 +5846,167 @@ def build_staged(
     for name in compose_files:
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
-    logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
-    return run_attached(
-        argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
-    )
+    services = _built_services(server_dir, compose_files)
+    builder = _current_builder(wsl_distro) if len(services) >= 2 else None
+    if builder is not None and builder[1] != "docker":
+        logger.info(
+            f"build_staged(): the builder in use is {builder[0]} ({builder[1]} driver), "
+            "which only the user's own buildx config can name; one build call"
+        )
+    if builder is None or builder[1] != "docker":
+        logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
+        return run_attached(
+            argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+        )
+    tail: deque[str] = deque(maxlen=KEEP_OUTPUT_LINES)
+    for service in services:
+        if cancel is not None and cancel.is_set():
+            logger.warning(f"build_staged(): stopped before building {service}")
+            return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+        config = _buildx_config(server_dir, service)
+        extra = {"BUILDX_CONFIG": str(config), "BUILDX_BUILDER": builder[0]}
+        env = (
+            platform.wsl_env(extra, paths=("BUILDX_CONFIG",))
+            if wsl_distro is not None
+            else {**os.environ, **extra}
+        )
+        logger.info(
+            f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
+            f"BUILDX_CONFIG={config} BUILDX_BUILDER={builder[0]}"
+        )
+        run = run_attached(
+            [*argv, service],
+            server_dir,
+            wsl_distro=wsl_distro,
+            sink=sink,
+            cancel=cancel,
+            merge_stderr=True,
+            env=env,
+        )
+        if run.returncode != 0:
+            return run
+        tail.extend(run.tail)
+    return AttachedRun(0, tuple(tail))
+
+
+BUILDER_PROBE_TIMEOUT = 30.0
+"""How long `_current_builder()` waits for `docker buildx inspect`: a bounded probe."""
+
+
+def _current_builder(wsl_distro: str | None = None) -> tuple[str, str] | None:
+    """(name, driver) of the builder a plain build would use; None if buildx will not say (T413).
+
+    Asked with the user's own environment and buildx config, so `docker buildx
+    use`, `BUILDX_BUILDER` and the docker context all count as they would for
+    a `docker compose build` started by hand. A refusal, a missing CLI or a
+    timeout is None: `build_staged()` then builds as it did before T376
+    rather than guess the builder.
+    """
+    proc = _docker(["buildx", "inspect"], timeout=BUILDER_PROBE_TIMEOUT, wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(
+            f"docker buildx inspect exited {proc.returncode}: {proc.stderr.strip()}; "
+            "the builder in use is not known"
+        )
+        return None
+    builder = _builder_in(proc.stdout)
+    if builder is None:
+        logger.warning(f"docker buildx inspect named no builder: {proc.stdout.strip()!r}")
+    return builder
+
+
+def _builder_in(text: str) -> tuple[str, str] | None:
+    """(name, driver) from `docker buildx inspect`'s text, or None when it names neither (T413).
+
+    The builder's own `Name:` and `Driver:` come before the `Nodes:` heading;
+    each node below it has a `Name:` of its own (`<builder>0`), which is not the
+    builder's, so nothing from the node block is read.
+    """
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.strip() == "Nodes:":
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in ("Name", "Driver"):
+            fields[key.strip()] = value.strip()
+    name, driver = fields.get("Name", ""), fields.get("Driver", "")
+    return (name, driver) if name and driver else None
+
+
+def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str, ...]:
+    """The services with a `build:` block in the build overlay, in its order (T376).
+
+    The overlay is the LAST of `compose_files` and is a file Yu'lon writes
+    (`composegen.BUILD_FILE`), so this reads its block shape rather than YAML
+    at large: a service is a key one level under `services:`, and it is built
+    when one of its own keys is `build`. An overlay it cannot read, or one in
+    another shape, answers no services, and the build is then the single
+    call it was before T376.
+    """
+    if not compose_files:
+        return ()
+    overlay = server_dir / compose_files[-1]
+    try:
+        text = overlay.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"the build overlay {overlay} could not be read ({exc}); one build call")
+        return ()
+    found: list[str] = []
+    in_services = False
+    service_indent: int | None = None
+    key_indent: int | None = None
+    service: str | None = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            in_services = line == "services:"
+            service_indent = key_indent = None
+            service = None
+            continue
+        if not in_services:
+            continue
+        if service_indent is None:
+            service_indent = indent
+        if indent == service_indent:
+            service = line.strip()[:-1] if line.endswith(":") else None
+            key_indent = None
+            continue
+        if service is None or indent < service_indent:
+            continue
+        if key_indent is None:
+            key_indent = indent
+        key = line.strip().split(":", 1)[0]
+        if indent == key_indent and key == "build" and service not in found:
+            found.append(service)
+    return tuple(found)
+
+
+def _buildx_config(server_dir: Path, service: str) -> Path:
+    """The buildx config folder one service of one install builds on (T376).
+
+    Under the app's own folder and never under `server_dir`, because the T224
+    fingerprint reads every file in the server folder and buildx writes here.
+    The same install and service get the same folder every time, so its node,
+    and with it BuildKit's cached copy of the context, survives from one build
+    to the next; a folder named per build would make every build a cold send.
+    The install part is a hash of the folder's absolute path, so two installs
+    in folders of the same name do not share one.
+
+    Created here rather than left to buildx, so that WSL has a folder to
+    translate when it crosses as `BUILDX_CONFIG/p`; a folder that cannot be
+    made is logged and left to buildx to try.
+    """
+    where = os.path.normcase(os.path.abspath(server_dir))
+    install = hashlib.sha256(where.encode("utf-8")).hexdigest()[:12]
+    config = platform.config_dir() / "buildx" / install / service
+    try:
+        config.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not make the buildx config folder {config}: {exc}")
+    return config
 
 
 def build_image(

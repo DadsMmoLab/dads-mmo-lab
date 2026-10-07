@@ -356,11 +356,192 @@ def test_settle_on_a_working_channel_checks_it_rather_than_creating_again(
     assert answering.asked == 1
 
 
-def test_settle_leaves_a_channel_that_gave_up_alone(tmp_path: Path) -> None:
-    channel = _channel(tmp_path, answering=_Answering("yes"))
-    channel._state = setup.GaveUp(account="YULON_AB12CD34", reason="three tries")
+def _gave_up_over_a_waiting_row(tmp_path: Path, answering: _Answering) -> setup.InstallChannel:
+    """A row an earlier settle made (its record on disk) and three asks that went unanswered."""
+    channel = _channel(tmp_path, answering=answering)
+    setup.save_pending(
+        setup.Pending(setup.account_name(INSTALL), "row-password"),
+        game=WOTLK.id,
+        install_id=INSTALL,
+        config_dir=tmp_path / "config",
+    )
+    channel._state = setup.GaveUp(account=setup.account_name(INSTALL), reason="three tries")
+    return channel
 
-    assert isinstance(channel.settle(), setup.GaveUp)
+
+def test_a_settle_after_giving_up_asks_the_waiting_row_again_and_never_creates(
+    tmp_path: Path,
+) -> None:
+    """T427/T497: a Start is a person acting, so the gave-up latch ends there.
+
+    It ends on the row the disk keeps, as a relaunch would: the same account
+    and the same password, so `_channel()`'s create refuses and nothing is made.
+    """
+    answering = _Answering("yes")
+    channel = _gave_up_over_a_waiting_row(tmp_path, answering)
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Verified)
+    assert state.password == "row-password"
+    assert answering.asked == 1
+
+
+def test_a_settle_after_giving_up_that_is_not_answered_waits_with_fresh_tries(
+    tmp_path: Path,
+) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Pending) and state.tries == 1
+
+
+def test_a_check_after_giving_up_that_learns_nothing_keeps_the_gave_up_state(
+    tmp_path: Path,
+) -> None:
+    answering = _Answering("unknown")
+    channel = _gave_up_over_a_waiting_row(tmp_path, answering)
+    gave_up = channel.setup_state()
+
+    assert channel.check() is gave_up
+    assert channel.setup_state() is gave_up
+    assert answering.asked == 1, "the look did not ask the row on disk"
+
+
+def test_a_check_after_giving_up_proves_a_row_that_answers_now(tmp_path: Path) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("yes"))
+
+    assert isinstance(channel.check(), setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+class _StartDuringTheLook:
+    """A Refresh's ask that is still out when a Start's settle proves the row (cold review, T427).
+
+    The first ask runs the Start inside it -- the interleave of two workers,
+    made in order -- and then goes unanswered; every later ask answers.
+    """
+
+    def __init__(self, *, start_hears: str = "yes", look_hears: str = "unknown") -> None:
+        self.channel: setup.InstallChannel | None = None
+        self.started: list[object] = []
+        self.start_hears = start_hears
+        self.look_hears = look_hears
+
+    def send(self, command: object) -> object:
+        if self.started:
+            return _Answering(self.start_hears).send(command)
+        assert self.channel is not None
+        self.started.append(None)
+        self.started[0] = self.channel.settle()
+        return _Answering(self.look_hears).send(command)
+
+
+def test_a_look_after_giving_up_keeps_a_proof_a_start_made_meanwhile(tmp_path: Path) -> None:
+    wire = _StartDuringTheLook()
+    channel = _gave_up_over_a_waiting_row(tmp_path, wire)  # type: ignore[arg-type]
+    wire.channel = channel
+
+    looked = channel.check()
+
+    assert isinstance(wire.started[0], setup.Verified), "the ground: the Start proved the row"
+    assert isinstance(looked, setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_a_look_at_a_waiting_row_keeps_a_proof_a_start_made_meanwhile(tmp_path: Path) -> None:
+    """The same interleave from `Pending`: the look's own unanswered ask is the older news."""
+    wire = _StartDuringTheLook()
+    channel = _gave_up_over_a_waiting_row(tmp_path, wire)  # type: ignore[arg-type]
+    channel._state = channel._from_disk()
+    assert isinstance(channel.setup_state(), setup.Pending)
+    wire.channel = channel
+
+    looked = channel.check()
+
+    assert isinstance(looked, setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_a_look_after_giving_up_keeps_its_own_proof_over_a_start_that_heard_nothing(
+    tmp_path: Path,
+) -> None:
+    """The other order (cold review): the Start asked first, the world was still loading.
+
+    The look's ask is the one that got through, and its credential is on the
+    disk already, so it is kept over the Start's unanswered try.
+    """
+    wire = _StartDuringTheLook(start_hears="unknown", look_hears="yes")
+    channel = _gave_up_over_a_waiting_row(tmp_path, wire)  # type: ignore[arg-type]
+    wire.channel = channel
+
+    looked = channel.check()
+
+    assert isinstance(wire.started[0], setup.Pending), "the ground: the Start heard nothing"
+    assert isinstance(looked, setup.Verified)
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_a_look_after_giving_up_leaves_a_start_that_is_still_asking(tmp_path: Path) -> None:
+    """Two workers for real: the look ends while a Start's settle still waits on its ask.
+
+    The look must not put the gave-up state back over the row the Start is
+    proving, or the Start's proof is dropped as older news when it lands.
+    """
+    import threading
+
+    asking = threading.Event()
+    looked = threading.Event()
+    starts: list[object] = []
+
+    class _Wire:
+        channel: setup.InstallChannel
+
+        def send(self, command: object) -> object:
+            if threading.current_thread().name == "start":
+                asking.set()
+                assert looked.wait(10)
+                return _Answering("yes").send(command)
+            start = threading.Thread(
+                target=lambda: starts.append(self.channel.settle()), name="start"
+            )
+            start.start()
+            assert asking.wait(10)
+            self.start = start
+            return _Answering("unknown").send(command)
+
+    wire = _Wire()
+    channel = _gave_up_over_a_waiting_row(tmp_path, wire)  # type: ignore[arg-type]
+    wire.channel = channel
+
+    channel.check()
+    looked.set()
+    wire.start.join(10)
+
+    assert isinstance(starts[0], setup.Verified), "the Start's proof was dropped"
+    assert isinstance(channel.setup_state(), setup.Verified)
+
+
+def test_turn_on_after_giving_up_puts_the_waiting_row_back(tmp_path: Path) -> None:
+    """T497: "it is checked the next time you start the server" has to be true."""
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+
+    channel.enable(world_running=False)
+
+    state = channel.setup_state()
+    assert isinstance(state, setup.Pending) and state.tries == 0
+    assert state.password == "row-password"
+
+
+def test_a_refused_turn_on_after_giving_up_changes_nothing(tmp_path: Path) -> None:
+    channel = _gave_up_over_a_waiting_row(tmp_path, _Answering("unknown"))
+    gave_up = channel.setup_state()
+
+    with pytest.raises(setup.EnableRefused):
+        channel.enable(world_running=True)
+
+    assert channel.setup_state() is gave_up
 
 
 class _Captures:

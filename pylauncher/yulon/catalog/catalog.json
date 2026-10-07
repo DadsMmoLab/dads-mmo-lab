@@ -149,7 +149,24 @@
           }
         }
       },
-      "has_manifests": true
+      "has_manifests": true,
+      "help_places": [
+        {
+          "label": "AzerothCore",
+          "url": "https://github.com/azerothcore/azerothcore-wotlk/issues",
+          "purpose": "Bugs in the WotLK server that also happen without the bots."
+        },
+        {
+          "label": "mod-playerbots",
+          "url": "https://github.com/mod-playerbots/mod-playerbots/issues",
+          "purpose": "Bugs in the bots."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
     },
     {
       "id": "wow-tbc",
@@ -577,7 +594,24 @@
           "A Vanilla client is the wrong version — the installer checks for this."
         ]
       },
-      "has_manifests": true
+      "has_manifests": true,
+      "help_places": [
+        {
+          "label": "cMaNGOS TBC",
+          "url": "https://github.com/cmangos/issues/issues",
+          "purpose": "Bugs in the TBC server."
+        },
+        {
+          "label": "cMaNGOS playerbots",
+          "url": "https://github.com/cmangos/issues/issues",
+          "purpose": "Bugs in the bots."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
     },
     {
       "id": "wow-vanilla",
@@ -997,7 +1031,24 @@
           "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
         ]
       },
-      "has_manifests": true
+      "has_manifests": true,
+      "help_places": [
+        {
+          "label": "cMaNGOS Classic",
+          "url": "https://github.com/cmangos/issues/issues",
+          "purpose": "Bugs in the Vanilla server."
+        },
+        {
+          "label": "cMaNGOS playerbots",
+          "url": "https://github.com/cmangos/issues/issues",
+          "purpose": "Bugs in the bots."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
     },
     {
       "id": "wow-tortoise",
@@ -1024,7 +1075,7 @@
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "6f4d18124a2373d1f312c74faf9be28421e19c54",
+            "rev": "83d88fdc034b224d88a2ecade975e26f8d1d513c",
             "follow": "releases"
           }
         ]
@@ -1074,7 +1125,7 @@
           "save_before_stop": { "command": "saveall" },
           "cmangos": {
             "client": {
-              "required_file": null,
+              "required_file": "Data/dbc.MPQ",
               "archives_any_case": true,
               "min_mpq": 5,
               "mpq_depth": 2,
@@ -1387,7 +1438,34 @@
           "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
         ]
       },
-      "has_manifests": true
+      "has_manifests": true,
+      "help_places": [
+        {
+          "label": "Snapjaw Discord",
+          "url": "https://discord.gg/FQ2WfYD4Tz",
+          "purpose": "Questions about the Tortoise server."
+        },
+        {
+          "label": "TortoiseBots thread (Snapjaw Discord)",
+          "url": "https://discord.com/channels/1496531781149528287/1542647578548772954",
+          "purpose": "Questions about the Tortoise bots (join the Snapjaw Discord first)."
+        },
+        {
+          "label": "tortoise-wow (Penqle)",
+          "url": "https://github.com/tortoise-wow/tortoise-wow/issues",
+          "purpose": "Bugs in the Tortoise server itself."
+        },
+        {
+          "label": "Sagiroth/TortoiseBots",
+          "url": "https://github.com/Sagiroth/TortoiseBots/issues",
+          "purpose": "Bugs in the bots."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
     },
     {
       "id": "wow-centurion",
@@ -1444,7 +1522,9 @@
           "save_before_stop": {
             "command": "saveall",
             "queue_command": "server debug",
-            "queue_pattern": "CharacterDatabase queue size: (\\d+)"
+            "queue_pattern": "CharacterDatabase queue size: (\\d+)",
+            "first": ["playerbot population stop", "server plimit administrator"],
+            "if_given_up": ["server plimit reset", "playerbot population start"]
           },
           "trinitycore": {
             "checkout": "src/centurion",
@@ -2252,7 +2332,24 @@
           "account_prefix": "PLAYERBOT"
         }
       },
-      "has_manifests": false
+      "has_manifests": false,
+      "help_places": [
+        {
+          "label": "Centurion Discord",
+          "url": "https://discord.gg/YberzPtxwb",
+          "purpose": "Questions about the Centurion server and its bots."
+        },
+        {
+          "label": "TrinityCore112 (Centurion)",
+          "url": "https://github.com/thomasjteachey/TrinityCore112/tree/CENTURION",
+          "purpose": "The Centurion server's source code; it has no issue page, so take bugs to the Centurion Discord."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
     }
   ]
 }

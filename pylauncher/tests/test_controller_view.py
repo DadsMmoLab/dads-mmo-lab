@@ -73,6 +73,7 @@ from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
+    ClientSpec,
     ConfigWtf,
     ExePatch,
     Operations,
@@ -136,7 +137,8 @@ WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
 """8.5b's tree: one bot signal, the account prefix, and no registry table."""
 TORTOISE = load_catalog().get("wow-tortoise")
-"""T36's client-folder tests: `required_file=None`, so a bare `Data/` warns rather than refuses."""
+"""T36's client-folder tests. Since T521 its rule names `Data/dbc.MPQ`, so a `Data/` holding
+that and too few other archives is the folder that warns rather than refuses."""
 
 
 @pytest.fixture(autouse=True)
@@ -2754,7 +2756,7 @@ def test_the_custom_install_report_is_the_one_install_selected_prints(
 
 
 def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_a_folder(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real bindings behind the two buttons, driven end to end on a scratch install.
 
@@ -2783,6 +2785,8 @@ def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_
     (source / ".git").mkdir()
     (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
+    # The conf write asks the report to read the world once (T397); no docker here.
+    monkeypatch.setattr(docker, "world_running", lambda *a, **k: None)
     services = ControllerServices.for_entry(WOTLK, server_dir)
     assert services.module_from_link is not None
     assert services.module_from_folder is not None
@@ -8031,6 +8035,11 @@ def test_every_slot_the_controller_view_declares_takes_the_arguments_it_declares
     assert wrong == []
 
 
+def test_the_help_and_forget_buttons_land_on_declared_slots() -> None:
+    """T520: inserting `show_help` took the `@Slot()` that belonged to `forget_install`."""
+    assert {"show_help", "forget_install"} <= set(_declared(ControllerView, "Slot"))
+
+
 def test_the_rebuild_panels_finish_lands_on_a_slot_declared_with_its_own_signature() -> None:
     """T167: the receiver of `run_finished` is declared as the (bool, str) the panel sends."""
     sent = _declared(LogPanel, "Signal")["run_finished"]
@@ -9950,7 +9959,8 @@ def test_a_warned_client_folder_writes_only_after_yes(
     warn_client = tmp_path / "TurtleWoW"
     data = warn_client / "Data"
     data.mkdir(parents=True)
-    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: too few is a WARN, zero is a refusal
+    (data / "dbc.MPQ").write_bytes(b"")  # the archive Tortoise's rule requires (T521)
+    (data / "patch.MPQ").write_bytes(b"")  # 2 of 5: too few is a WARN, zero is a refusal
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
@@ -9975,7 +9985,8 @@ def test_a_warned_client_folder_answered_no_writes_nothing(
     warn_client = tmp_path / "TurtleWoW"
     data = warn_client / "Data"
     data.mkdir(parents=True)
-    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: a WARN this press still has to ASK about
+    (data / "dbc.MPQ").write_bytes(b"")  # the archive Tortoise's rule requires (T521)
+    (data / "patch.MPQ").write_bytes(b"")  # 2 of 5: a WARN this press still has to ASK about
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
@@ -10121,11 +10132,20 @@ def test_a_busy_press_writes_nothing_on_either_handler(
 def test_zero_archives_is_refused_even_after_yes(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 2 review fix 2: an empty `Data/` is not "a few too few", it is nothing to extract."""
+    """Round 2 review fix 2: an empty `Data/` is not "a few too few", it is nothing to extract.
+
+    Under a rule naming no required file, which Tortoise's was until T521: every shipped rule
+    now names an archive, and that archive is itself counted, so its refusal fires first.
+    """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
         "question",
         lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "client_spec_for",
+        lambda _entry: ClientSpec(required_file=None, min_mpq=5, mpq_depth=2),
     )
     empty_client = tmp_path / "TurtleWoW"
     (empty_client / "Data").mkdir(parents=True)
@@ -10142,6 +10162,39 @@ def test_zero_archives_is_refused_even_after_yes(
     # Mutation: in `_mpq_archive_count()`, `return None` unconditionally --
     # the zero-archive refusal never fires, and this folder is written after
     # Yes exactly like `test_a_warned_client_folder_writes_only_after_yes`.
+
+
+def test_a_tortoise_client_with_no_dbc_archive_is_refused_and_never_asked_about(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T521: "Set client folder…" refuses a Turtle client missing `Data/dbc.MPQ`, by name.
+
+    Fifteen archives, so the count rule passes and the zero-archive refusal cannot fire; only
+    the DBC rule can refuse it. A refusal, not "Use it anyway?": the question is never put.
+    """
+    asked: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a)
+        or int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", lambda *a, **k: None)
+    no_dbc = tmp_path / "TurtleWoW"
+    data = no_dbc / "Data"
+    data.mkdir(parents=True)
+    for number in range(15):
+        (data / f"patch-{number}.MPQ").write_bytes(b"")
+    view, fake = _client_dir_view(TORTOISE, tmp_path / "server", pick_client_dir=lambda *_: no_dbc)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a client with no DBC archive was recorded"
+    assert asked == [], "a missing DBC archive was put as a warning"
+    assert failures and f"Data/dbc.MPQ is missing from {no_dbc}" in failures[0]
+    assert "a complete client of the game this server runs, or repair" in failures[0]
 
 
 def test_the_server_folder_or_anything_inside_it_is_refused_before_validation(
@@ -12413,11 +12466,19 @@ def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
     menu = _row_menu(view, "mod-aoe-loot")
 
     labels = [action.text() for action in menu.actions() if action.text()]
-    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    assert labels == ["Install Selected Module", "Copy Module ID"], "T399: not installed here"
 
     next(a for a in menu.actions() if a.text() == "Install Selected Module").trigger()
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
+
+    installed = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-aoe-loot"}))
+    menu = _row_menu(installed, "mod-aoe-loot")
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    next(a for a in menu.actions() if a.text() == "Remove Selected Module").trigger()
+    applier = installed.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-aoe-loot"]
 
 
 def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(
@@ -13565,7 +13626,8 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     )
     view.tuning_recreate_button.click()
     pump_until(
-        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+        lambda: view.tuning_report.toPlainText() == "recreate: the server was started.",
+        "the recreate's report",
     )
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
@@ -18469,8 +18531,8 @@ def _server_with_the_plan_up(
     return view, window, view._tabs.currentWidget()
 
 
-SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Danger zone"]
-"""T189's Server tab, top to bottom, for a game with every part wired."""
+SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Help", "Danger zone"]
+"""T189's Server tab, top to bottom, for a game with every part wired; Help is T520's."""
 
 
 def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
@@ -18550,6 +18612,7 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
             view.enable_channel_button,
             view.repair_channel_button,
         ],
+        "Help": [view.help_button],
         "Danger zone": [
             view.remove_button,
             view.repair_button,
@@ -23328,7 +23391,11 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
         assert after.applier.client_origins == before.applier.client_origins == ()
     assert after.steam is not None and before.steam is not None
     assert after.steam.client_dir == before.steam.client_dir == original
+    # T382: `for_entry()` adds the world wait for every game; no factory does.
+    assert after.ready_after_start is not None and before.ready_after_start is None
     for name in ControllerServices.__dataclass_fields__:
+        if name == "ready_after_start":
+            continue
         a, b = getattr(after, name), getattr(before, name)
         assert (a is None) == (b is None), f"{name} is wired differently"
         assert type(a) is type(b), f"{name} is a different kind of seam"
@@ -27270,7 +27337,10 @@ def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
     assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
     _drain_polls(view, jobs)
 
-    assert view.realm_badge.status == reading, "the hold outlived the failed job"
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == (
+        "starting" if reading == "running" else reading
+    ), "the hold outlived the failed job"
     assert view._badge_held is None
 
 
@@ -27292,7 +27362,8 @@ def test_every_hold_lets_go_when_the_job_is_done(
     _drain_polls(view, jobs)
 
     assert view._badge_held is None
-    assert view.realm_badge.status == ("running" if press in _AFTER else "stopped")
+    # T451: all up reads STARTING until a verdict says the world is ready.
+    assert view.realm_badge.status == ("starting" if press in _AFTER else "stopped")
 
 
 def test_a_stop_goes_from_stopping_to_stopped_and_never_through_running(

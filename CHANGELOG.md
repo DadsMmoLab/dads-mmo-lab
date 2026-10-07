@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **Where to get help…** on the Server tab links each game's server, bots and community, and Yu'lon's issues page.
 - If Docker lost a server's database, **Start** and **Rebuild** say so and offer **Repair the database…**.
 - A Server rates card on the Tuning tab sets XP, gold, item drops, reputation and honor on every game.
 - Delete an account from the Accounts tab; all-digit names are refused on TBC, Vanilla and Tortoise.
@@ -33,6 +34,35 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+- Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
+- A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
+- A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
+- Stopping a Tortoise server with a hired companion online no longer crashes it or asks you to check your characters.
+- On Centurion, **Stop** logs players and bots out first and waits while their saves are written, so no change is lost.
+- Installing a module that asks a question about your characters starts a stopped database to check the answer.
+- A module install refused after Yu'lon started the database to check your answers now says the database is still running.
+- Removing **All Stackables to 200** on WotLK puts every item's stack size and limit back exactly as it was.
+- **Stop** still ends what it was pressed for when your computer is too short of resources to start a helper.
+- On Windows, **Stop** also ends the helper programs a build started on your PC.
+- The worldserver log saved when you stop a server has passwords masked, as the support file does.
+- A failed install is listed once in the support file, however its folder is spelled.
+- After a module install on a stopped server, the report says to press **Start** rather than **Stop** then **Start**.
+- Refusing a client folder now reads as two plain sentences instead of one run-on line.
+- A module's right-click **Remove** is offered only when the module is installed.
+- **Forget Yu'lon's record…** asks in a box that fits small screens and defaults to No.
+- The header says STARTING, not REALM ONLINE, until the world server reports ready, including while Docker restarts it.
+- A database that is a moment slow to answer after a start no longer logs a warning.
+- A brand-new database that is still doing its first setup no longer logs "Access denied", "Can't connect" or a missing-table warning.
+- **Refresh** keeps the sentence beside **Repair the database…** and **Restore a backup…** instead of clearing it.
+- The corrections dialog names each step by what it does instead of "statement 1".
+- After **Stop**, the missing-database sentence stays beside **Repair the database…** and **Restore a backup…**.
+- An empty server database now says it is empty, not that Docker's copy was removed.
+- **Repair the database…** and the adopt button appear even when the database was still starting at the first look.
+- **Restart server…** and **Recreate containers…** say done only once the world is up, and say so plainly if it crash-loops.
+- Once a crash loop is fixed, the Server tab reads up a minute after the world says ready, not ten minutes later.
+- The header reads CRASH LOOP, not REALM ONLINE, while the world server keeps crashing.
+- A rebuild whose rollback did not come up says its containers are still running and to press Stop.
+- A long failure under the rebuild log is shown whole at every window size; its last lines were cut off.
 - The AH bot's GUID, account and items-per-cycle accept 0 to 4294967295 and refuse a negative number.
 - The raw file editor on the Tuning tab warns before saving a whole-number setting the server would read differently.
 - A decimal module question, such as the XP rates, takes only the digits 0 to 9 and one point, and refuses "1_0".
@@ -41,9 +71,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The main window fits a Steam Deck or a small screen instead of hanging off its edges, and scrolls when it is cramped.
 - Long error and warning messages scroll inside their box, so its OK button always stays on screen.
 - After a reinstall or a new data folder, **Repair the command channel** gives Yu'lon's own server account a new password.
+- After **Repair the database…**, the command channel offers **Repair** for its lost account, or turning on if it is off.
+- After the command channel gave up, **Refresh**, **Start** or turning it on checks it again without restarting Yu'lon.
 - The **Apply database corrections…** offer appears even when the database was still starting when Yu'lon looked.
 - A server shutdown typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- On Windows, Centurion and Tortoise's **Stop** asks for that save through the command channel and says when it could not.
 - **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
 - A failed install now shows its servers' last log lines, and **Save logs for support…** keeps them.
 - **Bigger Stacks** on TBC, Vanilla and Tortoise now shows as installed and can be removed.
@@ -103,6 +136,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Questions with long button labels show the whole label, also on a Steam Deck screen.
 - Removing a server while its **Modules** tab is still loading no longer prints an error.
 - An "&" in a label or a server folder's name shows as written.
+- A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
@@ -129,7 +163,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A build that loses Docker, often from too little memory, says so in plain words and what to try.
 - After **PLAY**, the launcher says when the game was started instead of a lasting "is starting".
 - The **Logs** tab colours warnings amber and errors red.
-- Fresh Tortoise installs build TortoiseBots v2026-09-28: bots respawn nearby and travel to zones that fit them.
+- Fresh Tortoise installs build TortoiseBots v2026-10-06: hired companions are deleted when dismissed or on restart.
 - Removing **Bigger Stacks** asks first and says every item's stack size goes back.
 
 ## v0.8.90-Public — 2026-09-26
