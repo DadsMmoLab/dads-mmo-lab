@@ -14,6 +14,7 @@ ends it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -684,14 +685,19 @@ def test_a_tool_container_another_yulon_made_on_the_same_daemon_counts_only_for_
     other.mkdir()
     boxes, labels = state / "containers", state / "labels"
     labels.mkdir(exist_ok=True)
-    named_here, named_elsewhere = docker.folder_labels(out), docker.folder_labels(other)
-    assert named_here is not None and named_elsewhere is not None
-    here, elsewhere = ",".join(named_here), ",".join(named_elsewhere)
+    here, elsewhere = docker.folder_id(out), docker.folder_id(other)
+    assert here is not None and elsewhere is not None
     for name, given in (
-        ("yulon-extract-aaaaaaaaaaaa", ["yulon.owner=someone-else", f"yulon.writes={elsewhere}"]),
+        (
+            "yulon-extract-aaaaaaaaaaaa",
+            ["yulon.owner=someone-else", f"{docker.WRITES_LABEL}={elsewhere}"],
+        ),
         ("yulon-extract-bbbbbbbbbbbb", [f"yulon.owner={docker.owner_id()}"]),
         ("yulon-extract-cccccccccccc", None),
-        ("yulon-extract-dddddddddddd", ["yulon.owner=someone-else", f"yulon.writes={here}"]),
+        (
+            "yulon-extract-dddddddddddd",
+            ["yulon.owner=someone-else", f"{docker.WRITES_LABEL}={here}"],
+        ),
         ("yulon-extract-eeeeeeeeeeee", ["yulon.owner=someone-else"]),
     ):
         (boxes / name).write_text("4242", encoding="utf-8")
@@ -724,9 +730,9 @@ def test_a_tool_container_is_created_with_this_yulons_owner_label(
 
     (create,) = [call for call in fake_calls(state) if call.startswith("create ")]
     assert f"--label {docker.OWNER_LABEL}={docker.owner_id()}" in create, create
-    labelled = docker.folder_labels(out)
+    labelled = docker.folder_id(out)
     assert labelled is not None
-    assert f"--label {docker.WRITES_LABEL}={','.join(labelled)}" in create, create
+    assert f"--label {docker.WRITES_LABEL}={labelled}" in create, create
 
 
 def test_another_yulon_on_this_machine_has_another_owner(
@@ -891,25 +897,40 @@ def _read_only_mkstemp(*_a: object, **_k: object) -> tuple[int, str]:
     raise PermissionError(13, "Permission denied")
 
 
-def test_an_older_yulons_path_label_still_counts_and_ours_still_carries_one(
-    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+@pytest.mark.parametrize("names", ["this-spelling", "another-folder"])
+def test_an_older_yulons_path_label_always_counts(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None, names: str
 ) -> None:
-    """Mixed versions on one daemon: an older Yu'lon labels `writes` with the path hash only.
-    The guard still matches it by the same spelling, and the label written here keeps the path
-    hash beside the id, so an older Yu'lon's guard still matches ours."""
+    """Codex adversarial review: an older Yu'lon labels `yulon.writes` with a path hash. A hash
+    cannot tell an alias of this folder from another folder, so its container counts whatever
+    the hash is -- never left out on a guess."""
     _cli, state = fake_docker
-    folder = tmp_path / "data"
+    folder, other = tmp_path / "data", tmp_path / "other"
     folder.mkdir()
-    _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", docker.folder_label(folder))
+    spelled = os.path.normcase(os.path.abspath(folder if names == "this-spelling" else other))
+    old_hash = hashlib.sha256(spelled.encode("utf-8")).hexdigest()[:16]
+    labels = state / "labels"
+    labels.mkdir(exist_ok=True)
+    (state / "containers" / "yulon-extract-aaaaaaaaaaaa").write_text("4242", encoding="utf-8")
+    (labels / "yulon-extract-aaaaaaaaaaaa").write_text(
+        f"yulon.owner=someone-else\nyulon.writes={old_hash}", encoding="utf-8"
+    )
 
     assert docker.tool_containers_writing_into(folder) == ("yulon-extract-aaaaaaaaaaaa",)
+
+
+def test_an_older_yulon_finds_no_writes_label_on_ours(tmp_path: Path) -> None:
+    """The other way round: an older Yu'lon reads only `yulon.writes`, and would leave out a
+    container whose path hash differs (an alias). Ours carries no such label, so it counts it."""
+    folder = tmp_path / "data"
+    folder.mkdir()
     spec = docker.ContainerRun(
         image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(folder, "/out"),)
     )
-    writes = _writes_label(spec)
-    assert writes is not None
-    assert docker.folder_label(folder) in writes.split(","), writes
-    assert docker.folder_id(folder) in writes.split(","), writes
+    argv = spec.to_create_argv(name="yulon-extract-0123456789ab")
+    assert docker.WRITES_LABEL != "yulon.writes"
+    assert not [arg for arg in argv if arg.startswith("yulon.writes=")], argv
+    assert f"{docker.WRITES_LABEL}={docker.folder_id(folder)}" in argv, argv
 
 
 def test_a_tool_writing_two_folders_names_neither_when_one_has_no_id(tmp_path: Path) -> None:

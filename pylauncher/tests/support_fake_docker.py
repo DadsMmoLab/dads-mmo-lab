@@ -104,7 +104,8 @@ if args[:1] == ["run"]:
 if args[:1] == ["ps"]:
     # `docker ps --filter name=<part> --format '{{{{.Names}}}}<tab>{{{{.Label ...}}}}'` (Codex
     # review of T303): the RUNNING containers only, as the real `ps` lists without `-a` --
-    # not one merely created -- each with its owner label's value (empty without one).
+    # not one merely created -- each with the value of every label its format names, in
+    # that order (empty without one): the keys are read from the format (T536).
     if (state / "no-answer").exists():
         sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
         sys.exit(1)
@@ -114,8 +115,9 @@ if args[:1] == ["ps"]:
             label = state / "labels" / box.name
             given = label.read_text(encoding="utf-8").splitlines() if label.exists() else []
             values = dict(line.split("=", 1) for line in given if "=" in line)
-            owner, writes = values.get("yulon.owner", ""), values.get("yulon.writes", "")
-            sys.stdout.write(box.name + "\\t" + owner + "\\t" + writes + "\\n")
+            fmt = args[args.index("--format") + 1] if "--format" in args else ""
+            keys = [piece.split('"')[1] for piece in fmt.split(".Label ")[1:]]
+            sys.stdout.write("\\t".join([box.name, *(values.get(k, "") for k in keys)]) + "\\n")
     sys.exit(0)
 if args[:1] == ["inspect"]:
     # `docker.container_exit()`'s question (T303): a container still there is running.
