@@ -54,6 +54,47 @@ def attached(box):
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
+if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
+    # T543: a folder claim, `docker run --rm -i --name yulon-claim-<id> ... cat`. The name
+    # is taken atomically (the daemon's arbitration), refused with the daemon's Conflict
+    # when it is in use; it runs until its stdin closes, and `--rm` then removes it.
+    # `claim-refused` makes the daemon refuse it for another reason.
+    name = args[args.index("--name") + 1]
+    box = state / "containers" / name
+    if (state / "claim-refused").exists():
+        sys.stderr.write("docker: Error response from daemon: No such image: nope\\n")
+        sys.exit(125)
+    if (state / "claim-no-daemon").exists():
+        sys.stderr.write("docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
+        sys.exit(125)
+    while (state / "claim-slow").exists():  # the daemon takes its time (cold review of T543)
+        time.sleep(0.02)
+    labels = state / "labels"
+    labels.mkdir(exist_ok=True)
+    given = [args[i + 1] for i, arg in enumerate(args) if arg == "--label"]
+    try:
+        made = os.open(box, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        sys.stderr.write(
+            f'docker: Error response from daemon: Conflict. The container name "/{{name}}" is '
+            f'already in use by container "{{name}}-id". You have to remove (or rename) that '
+            "container to be able to reuse that name.\\n"
+        )
+        sys.exit(125)
+    (labels / name).write_text("\\n".join(given), encoding="utf-8")
+    if (state / "claim-dies").exists():
+        # Created, never running: its command failed to start, and `--rm` takes it.
+        os.write(made, b"created")
+        os.close(made)
+        time.sleep(0.5)
+        box.unlink(missing_ok=True)
+        sys.stderr.write("docker: Error response from daemon: failed to create task\\n")
+        sys.exit(127)
+    os.write(made, str(os.getpid()).encode("ascii"))
+    os.close(made)
+    sys.stdin.read()
+    box.unlink(missing_ok=True)
+    sys.exit(0)
 if args[:1] in (["run"], ["create"]):
     name = args[args.index("--name") + 1] if "--name" in args else "unnamed"
     box = state / "containers" / name
@@ -124,6 +165,20 @@ if args[:1] == ["inspect"]:
     if (state / "no-answer").exists():
         sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
         sys.exit(1)
+    fmt = args[args.index("--format") + 1] if "--format" in args else ""
+    if (state / "containers" / args[1]).exists() and ".Config.Labels" in fmt:
+        # T543: `{{{{.Id}}}}`, `{{{{.State.Status}}}}` when asked, then each
+        # `{{{{index .Config.Labels "<key>"}}}}`, tab-separated.
+        label = state / "labels" / args[1]
+        given = label.read_text(encoding="utf-8").splitlines() if label.exists() else []
+        values = dict(line.split("=", 1) for line in given if "=" in line)
+        keys = [piece.split('"')[1] for piece in fmt.split(".Config.Labels ")[1:]]
+        made = (state / "containers" / args[1]).read_text(encoding="utf-8")
+        status = ["created" if made == "created" else "running"] if ".State.Status" in fmt else []
+        sys.stdout.write(
+            "\\t".join([args[1] + "-id", *status, *(values.get(k, "") for k in keys)]) + "\\n"
+        )
+        sys.exit(0)
     if (state / "containers" / args[1]).exists():
         sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
         sys.exit(0)
@@ -207,6 +262,8 @@ if args[:1] == ["logs"]:
     sys.exit(0)
 if args[:2] == ["rm", "-f"]:
     box = state / "containers" / args[2]
+    if not box.exists() and args[2].endswith("-id"):  # by the id `inspect` answered (T543)
+        box = state / "containers" / args[2][: -len("-id")]
     if (state / "refuse-rm").exists():
         sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
         sys.exit(1)
