@@ -889,7 +889,7 @@ class CmangosInstaller(StagedInstaller):
             refused: list[sqlplan.PhaseRun] = []
             present = 0
             for piece in pieces:
-                said: list[str] = []
+                heard: list[str] = []
                 before = len(refused)
                 for line in self._stream(
                     _apply_one(
@@ -903,12 +903,12 @@ class CmangosInstaller(StagedInstaller):
                     cancel=None,
                     stage="world-updates",
                 ):
-                    said.append(line)
+                    heard.append(line)
                     yield line
                 if (
                     len(refused) > before
                     and piece is not run
-                    and any("ERROR 1061" in line or "Duplicate key name" in line for line in said)
+                    and any("ERROR 1061" in line or "Duplicate key name" in line for line in heard)
                 ):
                     # An index of that name is there, maybe with another definition: it is
                     # dropped and made again from the file, as a fresh install has it
