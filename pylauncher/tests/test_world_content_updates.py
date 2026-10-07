@@ -467,7 +467,9 @@ def test_a_file_a_stopped_press_left_started_is_named_and_nothing_after_it_runs(
     db.rows[("content updates", U3)] = ("0" * 64, "started")
     lines = _press(rec, server_dir, db, world)
     assert _sent(rec, U3) == 0 and _sent(rec, U4) == 0
-    assert any(U3 in line and "cannot tell" in line and "DELETE FROM" in line for line in lines)
+    assert any(
+        U3 in line and "cannot tell" in line and "not in the app yet" in line for line in lines
+    )
     assert any("wait behind it" in line for line in lines), lines
     assert ("content updates", U4) not in db.rows
 
@@ -483,7 +485,9 @@ def test_a_file_that_fails_stops_the_world_updates_there_and_is_never_retried_un
     assert db.state(U3) == "failed"
     assert _sent(rec, U4) == 0, "nothing after the refused file runs"
     stop = [line for line in lines if "refused the world update" in line]
-    assert stop and U3 in stop[0] and "DELETE FROM mangos.yulon_install_file" in stop[0], lines
+    assert (
+        stop and U3 in stop[0] and "mangos.yulon_install_file" in stop[0] and "fresh" in stop[0]
+    ), lines
     assert "recreate" in rec.calls, "the new build still starts"
 
     rec.failing_sql = ""

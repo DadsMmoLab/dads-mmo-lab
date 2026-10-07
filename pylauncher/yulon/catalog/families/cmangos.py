@@ -739,17 +739,20 @@ class CmangosInstaller(StagedInstaller):
         )
 
     def _say_so(self, rel: str) -> str:
-        """How a player lets the next update try a file again: the one path, said in full.
+        """What a player can do about a world update Yu'lon will not run again on its own word.
 
-        Nothing in the app retries it on its own word: the file may have half run,
-        and running it again could put rows in twice. Deleting its ledger row is the
-        player saying it is safe; a fresh install of the server brings every update.
+        Nothing in the app retries it: the file may have half run, and running it again
+        could put rows in twice. A press that retries it with the player's consent is
+        T545 (lead, 2026-10-07); until it exists the sentence says so, and names the
+        fresh install that brings every update. The ledger row is named for whoever
+        administers the database by hand.
         """
         table = f"{self._data().sql.marker_db}.{sqlplan.FILE_TABLE}"
         return (
-            f"Once you have checked what it does, delete its row to have the next update try it "
-            f"and everything after it again (in the database: DELETE FROM {table} WHERE "
-            f"file='{rel}'), or install this server fresh to get every world update."
+            "Yu'lon does not run it again on its own, and a button to retry it is not in "
+            "the app yet; installing this server fresh gets every world update. (For "
+            f"database administrators: deleting its row in {table} has the next update try "
+            "it and everything after it.)"
         )
 
     def _record_world_files(
