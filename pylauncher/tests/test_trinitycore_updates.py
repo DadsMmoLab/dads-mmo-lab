@@ -3577,3 +3577,28 @@ def test_a_press_asks_docker_before_it_settles_an_earlier_press(box: Box) -> Non
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert "reservation" in str(raised.value), raised.value
     assert data_files(box) == before, "the earlier press's data was settled under a lost claim"
+
+
+def test_a_press_whose_claim_ends_as_pathfinding_starts_stops_it_and_does_not_say_done(
+    box: Box,
+) -> None:
+    """Codex reviews of a62f138f: lost while `after_ready()` started the pathfinding job, the
+    press reported success with a writer started in a folder another press may hold.
+
+    Mutation this catches: no look at the claim after `after_ready()`.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    finished_with_pathfinding(box)
+    flagged(box)
+    started = len(fake.started)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: len(fake.started) == started)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert len(fake.started) == started + 1, "the pathfinding job was started"
+    assert "reservation" in str(raised.value), raised.value
+    last_run = max(i for i, call in enumerate(fake.calls) if call.startswith("run:"))
+    after = fake.calls[last_run + 1 :]
+    assert any(
+        call.startswith(("stop:", "remove:")) for call in after
+    ), f"the job started under a lost claim was not stopped: {fake.calls}"
