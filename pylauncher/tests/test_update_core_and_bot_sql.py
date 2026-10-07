@@ -564,3 +564,25 @@ def test_every_vendored_insert_keeps_a_real_first_row() -> None:
             while body.startswith("--"):
                 body = body.split("\n", 1)[1].lstrip()
             assert body.startswith("("), (path.name, match.group(0)[:120])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SET @OLD_SQL_MODE=0x4e4f5f4241434b534c4153485f45534341504553;\n"
+        "/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;\n",
+        "/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;\n"
+        "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n",
+        "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n"
+        "/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;\n"
+        "/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;\n",
+    ],
+    ids=["footer-after-own-assignment", "footer-before-header", "two-footers"],
+)
+def test_the_dump_sql_mode_pair_counts_only_as_one_header_then_one_footer(
+    tmp_path: Path, text: str
+) -> None:
+    """Codex on de3192bc: a footer alone restores whatever the file put in @OLD_SQL_MODE."""
+    path = _lay(tmp_path, "x.sql", text)
+    found = sqlplan.foreign_schemas(path, set(), executable_comments_ok=True)
+    assert "a change of sql_mode" in found, found

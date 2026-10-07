@@ -1667,22 +1667,30 @@ def foreign_schemas(
     found: list[str] = []
     # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
     # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
+    paired = True
     if executable_comments_ok:
         # mysqldump's own pair, and nothing else, may set sql_mode in a bot file: a switch
         # part-way (NO_BACKSLASH_ESCAPES) changes what is a string from there on and can
-        # hide a statement from both readings (re-review of T534).
+        # hide a statement from both readings (re-review of T534). The pair is one header
+        # then one footer, and the saved mode is named nowhere else -- a footer alone
+        # would restore whatever a file put in @OLD_SQL_MODE itself (Codex).
+        kinds = [m.group(1) is not None for m in _DUMP_SQL_MODE.finditer(raw)]
+        paired = kinds in ([], [True], [True, False])
         raw = _DUMP_SQL_MODE.sub(" ", raw)
+        paired = paired and not re.search(r"(?i)OLD_SQL_MODE", raw)
     for escapes in (True, False):
         text, executable = _code_only(raw, backslash_escapes=escapes)
         for reason in _foreign_in(text, executable and not executable_comments_ok, others):
             if reason not in found:
                 found.append(reason)
+    if not paired and "a change of sql_mode" not in found:
+        found.append("a change of sql_mode")
     return tuple(found)
 
 
 _DUMP_SQL_MODE = re.compile(
-    r"/\*!40101\s+SET\s+(?:@OLD_SQL_MODE\s*=\s*@@SQL_MODE\s*,\s*SQL_MODE\s*=\s*"
-    r"'NO_AUTO_VALUE_ON_ZERO'|SQL_MODE\s*=\s*IFNULL\(\s*@OLD_SQL_MODE\s*,\s*''\s*\))\s*\*/",
+    r"/\*!40101\s+SET\s+(?:(@OLD_SQL_MODE\s*=\s*@@SQL_MODE\s*,\s*SQL_MODE\s*=\s*"
+    r"'NO_AUTO_VALUE_ON_ZERO')|SQL_MODE\s*=\s*IFNULL\(\s*@OLD_SQL_MODE\s*,\s*''\s*\))\s*\*/",
     re.I,
 )
 """mysqldump's header and footer SQL_MODE lines, exactly: the only sql_mode a bot file may set."""
