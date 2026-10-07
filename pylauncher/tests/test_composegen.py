@@ -250,8 +250,16 @@ def test_the_build_overlay_is_only_build_blocks_and_names_its_dockerfile(tmp_pat
     plan = render(tmp_path / "wow")
     assert plan.build.count("dockerfile: apps/docker/Dockerfile") == 4
     assert plan.build.count("target:") == 4
-    # Nothing structural: no image refs, no env, no volumes, no ports.
-    assert keys_in(plan.build) <= {"services", "build", "context", "dockerfile", "target"} | {
+    # Nothing structural: no image refs, no env, no volumes, no ports. The one
+    # extra key is Yu'lon's own buildx group (T525), which compose ignores.
+    assert keys_in(plan.build) <= {
+        "services",
+        "build",
+        "context",
+        "dockerfile",
+        "target",
+        "x-yulon-buildx-group",
+    } | {
         "ac-worldserver",
         "ac-authserver",
         "ac-db-import",
@@ -260,6 +268,24 @@ def test_the_build_overlay_is_only_build_blocks_and_names_its_dockerfile(tmp_pat
     # And the base file, which IS auto-loaded, carries no build block at all —
     # or a bare `docker compose up` would start a multi-hour rebuild.
     assert "build" not in keys_in(plan.base)
+
+
+def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) -> None:
+    """They read exactly the same files, so they may keep one cached copy of the context (T525).
+
+    A group shares one BuildKit snapshot, which is synced to whatever the current
+    target reads; db-import also reads `data` and client-data only `apps`, so
+    either in the group would re-send the difference on every call (T376's race,
+    one call at a time).
+    """
+    services = yaml.safe_load(render(tmp_path / "wow").build)["services"]
+    groups = {name: body.get("x-yulon-buildx-group") for name, body in services.items()}
+    assert groups == {
+        "ac-worldserver": "server-source",
+        "ac-authserver": "server-source",
+        "ac-db-import": None,
+        "ac-client-data-init": None,
+    }
 
 
 def test_the_base_file_gives_the_import_its_playerbots_database(tmp_path: Path) -> None:
