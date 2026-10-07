@@ -5880,44 +5880,35 @@ def run_attached(
         return AttachedRun(missing.returncode, (missing.stderr,))
     live = sink
     ended_by_cancel = threading.Event()  # set when the watcher ended this run's CLI
+    after_cancel = _AfterCancel(on_cancel)
     try:
         # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
         stream = runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
-        after_cancel = _AfterCancel(on_cancel)
         with (
             closing(stream) as lines,
             _ended_on_cancel(cancel, lines, ended_by_cancel, after_cancel),
         ):
-            try:
-                for line in lines:
-                    if cancel is not None and cancel.is_set():
-                        logger.warning(
-                            f"docker {' '.join(argv)} was cancelled; abandoning the client"
-                        )
-                        # A line came, so the CLI runs and has made what it makes: end that
-                        # with it, as the watcher would have (T539).
-                        after_cancel.once()
-                        return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
-                    # Colour codes off at the source (T214): this line goes to the
-                    # screen, to Details through `tail` and to the log, and none of
-                    # them draws `ESC[36m`. AzerothCore's importer colours every line.
-                    line = ansi.strip(line)
-                    tail.append(line)
-                    if live is not None:
-                        try:
-                            live(line)
-                        except Exception as exc:  # noqa: BLE001 - a dead sink keeps the child
-                            logger.warning(f"the output sink stopped accepting lines: {exc}")
-                            live = None
-            finally:
+            for line in lines:
                 if cancel is not None and cancel.is_set():
-                    # Set after the last line, before the CLI's exit (Codex adversarial
-                    # review): neither the read nor the watcher saw it. What the run made
-                    # is ended all the same; its exit stays its own (a late Stop).
+                    logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
+                    # A line came, so the CLI runs and has made what it makes: end that
+                    # with it, as the watcher would have (T539).
                     after_cancel.once()
+                    return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+                # Colour codes off at the source (T214): this line goes to the
+                # screen, to Details through `tail` and to the log, and none of
+                # them draws `ESC[36m`. AzerothCore's importer colours every line.
+                line = ansi.strip(line)
+                tail.append(line)
+                if live is not None:
+                    try:
+                        live(line)
+                    except Exception as exc:  # noqa: BLE001 - a dead sink keeps the child
+                        logger.warning(f"the output sink stopped accepting lines: {exc}")
+                        live = None
     except subprocess.CalledProcessError as exc:
         if ended_by_cancel.is_set() or (
             isinstance(exc, runner.StreamEnded) and cancel is not None and cancel.is_set()
@@ -5939,6 +5930,12 @@ def run_attached(
         # `follow_logs()` handles the same case one line above.
         logger.warning(f"{prefix[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    finally:
+        if cancel is not None and cancel.is_set():
+            # Once more, now that the CLI is gone (Codex review of 5b67822c): a CLI that
+            # had started could still create its container after the first ending, and a
+            # cancel set after the last line was seen by neither the read nor the watcher.
+            after_cancel.last()
     if ended_by_cancel.is_set():
         # Ended by the cancel and exited 0 all the same: `compose up` traps SIGTERM,
         # stops what it started and exits cleanly. Still the Stop (cold review of T526).
@@ -7352,6 +7349,14 @@ class _AfterCancel:
             if self._done:
                 return
             self._done = True
+        self._call()
+
+    def last(self) -> None:
+        """After the run's CLI is gone: what it created after `once()` is ended too."""
+        if self._on_cancel is not None:
+            self._call()
+
+    def _call(self) -> None:
         try:
             self._on_cancel()  # type: ignore[misc]
         except Exception as exc:  # noqa: BLE001 - the Stop goes on regardless

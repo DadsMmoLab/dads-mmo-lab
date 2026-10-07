@@ -262,7 +262,8 @@ def test_a_cancelled_one_shot_has_its_container_ended_as_the_stop_lands(
     worker.join(timeout=HANG_BOUND)
     assert not worker.is_alive(), "the cancelled one-shot did not return"
     assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
-    assert ended == [(IMPORTER, tmp_path)], ended
+    # As the Stop lands, and once more after the CLI is gone (Codex review of 5b67822c).
+    assert ended and set(ended) == {(IMPORTER, tmp_path)}, ended
 
 
 def test_a_one_shot_is_ended_only_after_its_cli_was_claimed(
@@ -435,3 +436,57 @@ def test_a_held_claim_does_not_end_the_one_shot_before_its_cli_exists(
     assert not worker.is_alive()
     assert "end-one-shot" in order, order
     assert order.index("spawned") < order.index("end-one-shot"), order
+
+
+# A CLI that takes 1 s to stop on SIGTERM: its container could still appear in that second.
+_SLOW_TO_STOP = (
+    "import signal, sys, time\n"
+    "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(1), sys.exit(0)))\n"
+    "print('Importing acore_world', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+def test_a_cancelled_one_shot_is_ended_again_once_its_cli_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review of 5b67822c: the CLI having started does not mean its container exists,
+    so the ending runs once more after the CLI has exited.
+
+    Mutation this catches: no ending after the CLI is gone (every call sees it running).
+    """
+    from tests.conftest import HANG_BOUND
+
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _SLOW_TO_STOP),
+    )
+    spawned: list[object] = []
+    real_spawn = docker.runner._spawn
+
+    def spawn(start):  # type: ignore[no-untyped-def]
+        proc, job = real_spawn(start)
+        spawned.append(proc)
+        return proc, job
+
+    monkeypatch.setattr(docker.runner, "_spawn", spawn)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        docker,
+        "end_one_shot",
+        lambda *a, **k: calls.append(spawned[0].poll() is not None),  # type: ignore[attr-defined]
+    )
+    cancel = threading.Event()
+    result: list[docker.AttachedRun] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            docker.run_one_shot(IMPORTER, tmp_path, sink=lambda line: cancel.set(), cancel=cancel)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    assert not worker.is_alive()
+    assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+    assert calls and calls[-1] is True, f"never ended after the CLI had exited: {calls}"
