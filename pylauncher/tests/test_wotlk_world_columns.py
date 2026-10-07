@@ -44,10 +44,18 @@ _TABLE = re.compile(
     r"\b(?:DELETE\s+FROM|UPDATE|INSERT\s+(?:IGNORE\s+)?INTO|REPLACE\s+INTO|FROM|JOIN)\s+`?(\w+)`?",
     re.IGNORECASE,
 )
-_COMPARED = re.compile(
-    r"`?(\w+)`?\s*(?:=|<>|!=|<=|>=|<|>|\bIN\b|\bLIKE\b|\bBETWEEN\b|\bIS\b)", re.IGNORECASE
-)
-_INSERT_COLUMNS = re.compile(r"\bINTO\s+`?\w+`?\s*\(([^)]*)\)", re.IGNORECASE)
+_WORD = re.compile(r"`([^`]+)`|@?\w+")
+_STRING = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+_SQL_WORDS = frozenset("""
+    SELECT FROM WHERE AND OR NOT IN IS NULL LIKE BETWEEN EXISTS DELETE UPDATE SET INSERT INTO
+    IGNORE REPLACE VALUES ORDER GROUP BY HAVING LIMIT OFFSET ASC DESC AS ON JOIN LEFT RIGHT
+    INNER OUTER CROSS USING DISTINCT UNION ALL CASE WHEN THEN ELSE END COUNT SUM MIN MAX AVG
+    IF IFNULL COALESCE CONCAT LOWER UPPER TRUE FALSE DUPLICATE KEY DEFAULT INTERVAL
+    """.split())
+"""SQL's own words. Every other identifier in a statement on a pinned table must be a
+column of a table the statement names, or the statement fails: the reader fails closed
+on a shape it does not know (Codex adversarial review: a projection, the right side of a
+SET, an ORDER BY were not seen by the first reader)."""
 
 
 def _wotlk_statements() -> list[tuple[str, str]]:
@@ -64,11 +72,18 @@ def _wotlk_statements() -> list[tuple[str, str]]:
 
 
 def _columns_named(statement: str) -> set[str]:
-    """The identifiers a statement compares, sets, or inserts into."""
-    named = {m.group(1) for m in _COMPARED.finditer(statement)}
-    for m in _INSERT_COLUMNS.finditer(statement):
-        named |= {c.strip(" `") for c in m.group(1).split(",") if c.strip()}
-    return {n for n in named if not n.isdigit() and n.upper() not in {"AND", "OR", "NOT"}}
+    """Each identifier in `statement` but SQL words, numbers, strings, variables and tables."""
+    text = _STRING.sub(" ", statement)
+    tables = {t.lower() for t in _TABLE.findall(text)}
+    named: set[str] = set()
+    for m in _WORD.finditer(text):
+        word = m.group(1) or m.group(0)
+        if word.startswith("@") or word.isdigit() or word.upper() in _SQL_WORDS:
+            continue
+        if word.lower() in tables:
+            continue
+        named.add(word.split(".")[-1])
+    return named
 
 
 def test_the_snapshot_is_of_the_catalogs_wotlk_pin() -> None:
@@ -91,22 +106,39 @@ def test_the_snapshot_is_of_the_catalogs_wotlk_pin() -> None:
 def test_every_statement_on_a_pinned_table_names_columns_it_has(
     manifest: str, statement: str
 ) -> None:
-    tables = [t for t in _TABLE.findall(statement) if t.lower() in PIN_COLUMNS]
-    assert len(set(tables)) == 1, f"{manifest}: one pinned table per statement: {statement}"
-    columns = PIN_COLUMNS[tables[0].lower()]
-    unknown = sorted(_columns_named(statement) - columns - {tables[0]})
+    named = {t.lower() for t in _TABLE.findall(statement)}
+    assert named <= set(PIN_COLUMNS), (
+        f"{manifest}: a statement on a pinned table also names {sorted(named - set(PIN_COLUMNS))}; "
+        f"add that table's columns at the pin to PIN_COLUMNS: {statement}"
+    )
+    tables = sorted(named)
+    columns = frozenset().union(*(PIN_COLUMNS[t] for t in tables))
+    unknown = sorted(_columns_named(statement) - columns)
     assert unknown == [], f"{manifest}: {tables[0]} has no {unknown} at {PIN[:8]}: {statement}"
 
 
-def test_the_column_reader_sees_what_it_must() -> None:
-    """The reader above is the whole check, so it is pinned on the statement that broke."""
-    assert _columns_named("DELETE FROM creature WHERE id1 IN (190000,190001)") == {"id1"}
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DELETE FROM creature WHERE id1 IN (190000,190001)",
+        "SELECT id1 FROM creature",
+        "UPDATE creature SET id = id1",
+        "DELETE FROM creature ORDER BY id1",
+        "SELECT c.id1 FROM creature c WHERE c.guid = 1",
+        "INSERT INTO creature (guid, id1, map) VALUES (1, 2, 0)",
+        "DELETE FROM creature WHERE guid IN (SELECT guid FROM creature WHERE id2 = 5)",
+    ],
+)
+def test_the_column_reader_sees_a_dropped_column_wherever_it_stands(statement: str) -> None:
+    """The reader is the whole check, so it is pinned on every shape a column can take."""
+    assert _columns_named(statement) - PIN_COLUMNS["creature"] - {"c"}, statement
+
+
+def test_the_column_reader_passes_what_the_pin_has() -> None:
+    assert _columns_named("DELETE FROM creature WHERE id IN (190000,190001)") == {"id"}
     assert _columns_named("UPDATE `gameobject` SET `state` = 1 WHERE `id` = 5") == {"state", "id"}
-    assert _columns_named("INSERT INTO creature (guid, id, map) VALUES (1, 2, 0)") >= {
+    assert _columns_named("SELECT guid FROM creature WHERE ScriptName = 'npc_x' AND map = 0") == {
         "guid",
-        "id",
+        "ScriptName",
         "map",
-    }
-    assert {"creature"} == {
-        t.lower() for t in _TABLE.findall("DELETE FROM creature WHERE id1 IN (1)")
     }
