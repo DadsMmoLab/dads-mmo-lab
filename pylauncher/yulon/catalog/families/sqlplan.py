@@ -1582,30 +1582,40 @@ _SYSTEM_SCHEMAS = ("mysql", "information_schema", "performance_schema", "sys")
 """Schemas no world update has business naming, beside the server's own non-world ones."""
 
 
-_SQL_TOKENS = re.compile(
-    r"'(?:[^'\\]|\\.|'')*'?"
-    r'|"(?:[^"\\]|\\.|"")*"?'
-    r"|`[^`]*`?"
-    r"|--(?=[\s\x00-\x1f]|$)[^\n]*|#[^\n]*"
-    r"|/\*M?![0-9]*|\*/"
-    r"|/\*.*?(?:\*/|$)"
-    r"|[^'\"`#/*-]+"
-    r"|.",
-    re.S,
-)
+def _sql_tokens(backslash_escapes: bool) -> re.Pattern[str]:
+    """The tokenizer for one reading of `\\` inside a string (see `_SQL_TOKENS`)."""
+    if backslash_escapes:
+        strings = r"'(?:[^'\\]|\\.|'')*'?" + r'|"(?:[^"\\]|\\.|"")*"?'
+    else:
+        strings = r"'(?:[^']|'')*'?" + r'|"(?:[^"]|"")*"?'
+    return re.compile(
+        strings
+        + r"|`[^`]*`?"
+        + r"|--(?=[\s\x00-\x1f]|$)[^\n]*|#[^\n]*"
+        + r"|/\*M?![0-9]*|\*/"
+        + r"|/\*.*?(?:\*/|$)"
+        + r"|[^'\"`#/*-]+"
+        + r"|.",
+        re.S,
+    )
+
+
+_SQL_TOKENS = _sql_tokens(backslash_escapes=True)
+_SQL_TOKENS_NO_BACKSLASH = _sql_tokens(backslash_escapes=False)
 """SQL read left to right: a string, an identifier, a comment, an executable comment's
 markers, or plain text. Whichever starts first wins, so an apostrophe in a comment is
 the comment's and a `--` in a string is the string's (Codex, T531)."""
 
 
-def _code_only(text: str) -> tuple[str, bool]:
+def _code_only(text: str, *, backslash_escapes: bool = True) -> tuple[str, bool]:
     """The SQL MySQL would execute, and whether it holds an executable comment: string
     bodies emptied, comments made spaces, an executable comment's body kept (only its
     `/*!NNNNN` or MariaDB's `/*M!NNNNN`, and `*/`, go). A marker inside a string or a
     plain comment is text."""
     parts: list[str] = []
     executable = False
-    for match in _SQL_TOKENS.finditer(text):
+    tokens = _SQL_TOKENS if backslash_escapes else _SQL_TOKENS_NO_BACKSLASH
+    for match in tokens.finditer(text):
         token = match.group(0)
         if token[0] == '"' and re.fullmatch(r'"\w+"', token):
             # Under ANSI_QUOTES -- set in the file, globally, or by a client -- this is
@@ -1645,7 +1655,19 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
     """
-    text, executable = _code_only(path.read_text(encoding="utf-8", errors="replace"))
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    found: list[str] = []
+    # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
+    # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
+    for escapes in (True, False):
+        for reason in _foreign_in(*_code_only(raw, backslash_escapes=escapes), others):
+            if reason not in found:
+                found.append(reason)
+    return tuple(found)
+
+
+def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[str]:
+    """`foreign_schemas()` over one reading of the file's SQL."""
     found = [
         name
         for name in sorted({*others, *_SYSTEM_SCHEMAS})
@@ -1661,7 +1683,7 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
         found.append("a change of sql_mode")
     if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
         found.append("a whole-database statement")
-    return tuple(found)
+    return found
 
 
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:

@@ -814,6 +814,7 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         ),
         ('UPDATE "characters"."foo" SET a=1;\n', ("characters",)),
         ("UPDATE`characters`.`foo` SET a=1;\n", ("characters",)),
+        ("UPDATE t SET x='a\\'; UPDATE characters.foo SET x=1;\n", ("characters",)),
     ],
     ids=[
         "apostrophe-in-dash-comment",
@@ -828,6 +829,7 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         "ansi-quotes",
         "ansi-quotes-set-elsewhere",
         "backtick-glued-to-keyword",
+        "no-backslash-escapes",
     ],
 )
 def test_comments_are_separators_and_never_hide_a_statement(
