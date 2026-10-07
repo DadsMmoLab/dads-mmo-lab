@@ -167,11 +167,33 @@ def desktop_entry_path() -> Path:
 def desktop_exec(program: Path) -> str:
     """The `Exec=` value: the program quoted as the Desktop Entry spec says, then `--tray`.
 
-    Inside quotes `"`, `` ` ``, `$` and `\\` are backslash-escaped, and `%` is a
-    field code everywhere, so a literal one is `%%`.
+    Two levels, in this order when read (cold review): `Exec` is a string, so
+    its escapes (`\\\\` for a backslash) are undone first; then, inside the
+    quotes, `"`, `` ` ``, `$` and `\\` are backslash-escaped. So each of those
+    is written with two backslashes and a literal backslash with four. `%` is
+    a field code everywhere: a literal one is `%%`.
     """
     quoted = "".join("\\" + c if c in '"`$\\' else c for c in str(program)).replace("%", "%%")
-    return f'"{quoted}" {TRAY_ARG}'
+    return f'"{_string_escape(quoted)}" {TRAY_ARG}'
+
+
+def _string_escape(text: str) -> str:
+    """The desktop entry spec's string level: a backslash is written `\\\\`."""
+    return text.replace("\\", "\\\\")
+
+
+def _string_unescape(text: str) -> str:
+    """Undo the string level: `\\s` `\\n` `\\t` `\\r` `\\\\` (the spec's five escapes)."""
+    out, i = [], 0
+    names = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in names:
+            out.append(names[text[i + 1]])
+            i += 2
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
 
 
 def _desktop_text(program: Path) -> str:
@@ -197,7 +219,7 @@ def _desktop_program() -> Path | None:
             return None
     for line in text.splitlines():
         if line.startswith("Exec="):
-            value = line[len("Exec=") :].strip()
+            value = _string_unescape(line[len("Exec=") :].strip())
             if value.startswith('"'):
                 out, i = [], 1
                 while i < len(value) and value[i] != '"':

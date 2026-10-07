@@ -2416,12 +2416,13 @@ def test_a_restart_that_lost_the_lock_quits_for_real_even_with_the_tray(
         quits.append(1)
         return True
 
-    window.yulon_quit = quit_for_real  # type: ignore[attr-defined]
+    window.yulon_quit = lambda: quits.append(0) or True  # type: ignore[attr-defined]
+    window.yulon_quit_for_good = quit_for_real  # type: ignore[attr-defined]
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
     window.setCentralWidget(view)
     try:
         assert view._offer_a_restart_instead("boom") is True
-        assert quits == [1], "the lost-lock exit closed the window, which the tray hides"
+        assert quits == [1], "the lost-lock exit did not quit for good (cold review)"
     finally:
         window.deleteLater()
 

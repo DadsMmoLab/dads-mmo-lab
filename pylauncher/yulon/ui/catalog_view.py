@@ -1249,7 +1249,11 @@ def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title:
             # T540: `yulon_quit`, not `close()`: with the tray up, a close is a
             # hide, and this copy must GO. A window without one (no tray, a
             # test's) closes as it always did.
-            quit_for_real = getattr(window, "yulon_quit", window.close)
+            # `yulon_quit_for_good` (cold review): an import that refuses this
+            # quit now does not let the next close hide the copy into the tray.
+            quit_for_real = getattr(
+                window, "yulon_quit_for_good", getattr(window, "yulon_quit", window.close)
+            )
             if not quit_for_real():
                 # Refused, because something that cannot be stopped is
                 # running (the database import): force-quitting would

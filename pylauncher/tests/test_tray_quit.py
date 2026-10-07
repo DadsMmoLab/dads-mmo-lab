@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from tests.test_tray import FakeTrayIcon, FakeView, FakeWindow, _add, _close_by_hand
@@ -191,6 +191,7 @@ def test_quit_yulon_instead_asks_the_quit_question(
 ) -> None:
     tray.choose_note = lambda: "quit"  # type: ignore[method-assign]
     _close_by_hand(window)
+    QApplication.processEvents()  # asked on the next turn, not inside the close
     assert quits == [1]
 
 
@@ -507,14 +508,84 @@ def test_a_refused_application_quit_does_not_turn_close_to_tray_off(
 ) -> None:
     """Adversarial review [medium]: Cmd+Q refused by the busy guard latched the quit flag,
     and every later close quit instead of hiding."""
-    from PySide6.QtCore import QEvent
 
     app = QApplication.instance()
     assert isinstance(app, QApplication)
     tray.note_seen = True
-    tray.eventFilter(app, QEvent(QEvent.Type.Quit))
+    tray._application_quitting()  # what `YulonApplication.quit_requested` reaches
     assert not tray.keeping  # the quit is let through while it is being decided
     QApplication.processEvents()  # the quit was refused: the loop runs on
     assert tray.keeping
     assert not _close_by_hand(window)
     assert window.isHidden()
+
+
+# ------------------------------------------------- cold review, 2026-10-07
+
+
+class _RefuseClose(QObject):
+    """`main`'s busy guard as far as a close can see it: every Close refused."""
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self.refused = 0
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() is QEvent.Type.Close:
+            self.refused += 1
+            event.ignore()
+            return True
+        return False
+
+
+@pytest.fixture
+def guarded(qapp: Any, quits: list[int]) -> Iterator[tuple[FakeWindow, YulonTray, _RefuseClose]]:
+    """A window whose busy guard refuses, installed BEFORE the tray, as `main()` does."""
+    win = FakeWindow()
+    win.show()
+    guard = _RefuseClose(win)
+    win.installEventFilter(guard)
+    made = YulonTray(win, icon_factory=FakeTrayIcon, available=lambda: True)
+    made.install()
+    made.quit_app = lambda: quits.append(1)  # type: ignore[method-assign]
+    yield win, made, guard
+    made.uninstall()
+    win.removeEventFilter(guard)
+    win.hide()
+    win.deleteLater()
+
+
+def test_quit_instead_on_the_first_close_still_meets_the_busy_guard(
+    guarded: tuple[FakeWindow, YulonTray, _RefuseClose], quits: list[int]
+) -> None:
+    """Cold review MUST: "Quit Yu'lon instead" quit from INSIDE the close being handled; the
+    nested close() answered True without the guard, and Yu'lon exited mid-import."""
+    window, tray, guard = guarded
+    tray.choose_note = lambda: "quit"  # type: ignore[method-assign]
+    assert window.close() is False  # the real path: the title bar's close
+    QApplication.processEvents()  # the quit runs on the next turn of the loop
+    assert guard.refused == 1, "the quit never asked the busy guard"
+    assert quits == [], "Yu'lon exited past the busy guard"
+    assert window.isVisible()
+
+
+def test_a_copy_that_must_go_never_hides_again_after_a_refused_quit(
+    guarded: tuple[FakeWindow, YulonTray, _RefuseClose], quits: list[int]
+) -> None:
+    """Cold review MUST: the lost-lock exit refused by an import reset the quit flag, and the
+    next close hid this copy into the tray beside the copy that won the lock."""
+    window, tray, guard = guarded
+    tray.note_seen = True
+    assert tray.quit_for_good() is False
+    assert guard.refused == 1 and quits == []
+    window.removeEventFilter(guard)  # the import ended
+    assert window.close() is True, "the close after the import hid instead of quitting"
+    QApplication.processEvents()
+    assert quits == [1]
+
+
+def test_the_lost_lock_exit_asks_for_a_quit_for_good(
+    guarded: tuple[FakeWindow, YulonTray, _RefuseClose],
+) -> None:
+    window, tray, _guard = guarded
+    assert window.yulon_quit_for_good == tray.quit_for_good  # type: ignore[attr-defined]

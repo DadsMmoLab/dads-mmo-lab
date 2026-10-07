@@ -2468,13 +2468,15 @@ def main() -> int:
             pass
 
     from PySide6.QtCore import QEvent, QObject
-    from PySide6.QtWidgets import QApplication, QMainWindow
+    from PySide6.QtWidgets import QMainWindow
 
     from yulon.ui.icons import get_app_icon
     from yulon.ui.single_instance import UNANSWERED_TEXT, UNANSWERED_TITLE, InstanceGuard
     from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.tray import YulonApplication
 
-    app = QApplication(sys.argv)
+    # T540: an application that says when it is asked to quit (the tray's close-to-tray).
+    app = YulonApplication(sys.argv)
     app.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(app)
     # One Yu'lon per user (T152), claimed BEFORE the window: `build_window()`

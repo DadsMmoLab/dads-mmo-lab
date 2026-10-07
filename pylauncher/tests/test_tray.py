@@ -263,7 +263,7 @@ def test_an_application_quit_is_not_turned_into_a_hide(tray: YulonTray, window: 
     app = QApplication.instance()
     assert isinstance(app, QApplication)
     tray.note_seen = True
-    assert tray.eventFilter(app, QEvent(QEvent.Type.Quit)) is False
+    tray._application_quitting()  # what `YulonApplication.quit_requested` reaches
     assert _close_by_hand(window), "the close was swallowed into a hide"
     assert window.isVisible()
 
@@ -483,3 +483,29 @@ def test_the_menu_is_filled_before_anyone_asks_to_show_it(
     assert "Open Yu'lon" in texts and "WotLK — Realm online" in texts
     window.yulon_controllers[0].realm_badge.set_status("stopped")
     assert "WotLK — Stopped" in _texts(tray.icon.menu), "the filled menu went stale"
+
+
+def test_rebuilding_the_menu_leaves_one_play_submenu(tray: YulonTray, window: FakeWindow) -> None:
+    """Cold review SHOULD: every refresh left the old Play submenu behind (200 -> 201)."""
+    from PySide6.QtCore import QCoreApplication
+
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    assert tray._menu is not None
+    for _ in range(50):
+        tray.refresh()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(tray._menu.findChildren(QMenu)) == 1
+
+
+def test_the_application_is_watched_only_while_the_window_is_hidden(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Cold review SHOULD: an application-wide filter puts every event of the app through
+    Python. It is needed only for a dialog that opens while the window is hidden."""
+    assert not tray._watching_app
+    tray.note_seen = True
+    _close_by_hand(window)
+    assert tray._watching_app
+    tray.open_window()
+    QApplication.processEvents()
+    assert not tray._watching_app, "still watching the whole app with the window back"

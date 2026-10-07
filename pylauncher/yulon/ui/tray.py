@@ -257,6 +257,24 @@ class TrayIcon(Protocol):
     def geometry(self) -> QRect: ...
 
 
+class YulonApplication(QApplication):
+    """The app, saying when it is asked to quit (T540).
+
+    Qt 6 closes every window when the application gets `QEvent.Quit` (macOS
+    Cmd+Q, a session ending), and the tray must not turn that close into a hide.
+    The event reaches the application object itself, so only that object's own
+    `event()` is overridden: an application-wide event filter would put every
+    event of every widget through Python to see it (cold review).
+    """
+
+    quit_requested = Signal()
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() is QEvent.Type.Quit:
+            self.quit_requested.emit()
+        return super().event(event)
+
+
 def server_titles(views: Sequence[Any]) -> list[str]:
     """Each server's name, with its folder only where two servers share a name.
 
@@ -323,6 +341,10 @@ class YulonTray(QObject):
         self.flyout: TrayFlyout | None = None
         self._flyout_timer: QTimer | None = None
         self._stop_deadline: QTimer | None = None
+        self._must_quit = False
+        self._ended = False
+        """This copy has to go (the lost-lock exit): a refused quit is not forgotten."""
+        self._watching_app = False
         self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
@@ -344,6 +366,7 @@ class YulonTray(QObject):
             and self.keep_in_tray
             and self.icon.isVisible()
             and not self._quitting
+            and not self._must_quit
         )
 
     def install(self) -> None:
@@ -354,9 +377,16 @@ class YulonTray(QObject):
         app = QApplication.instance()
         if isinstance(app, QApplication):
             self._was_quit_on_last = QApplication.quitOnLastWindowClosed()
-            app.installEventFilter(self)
+            # Not an application-wide event filter (cold review: every event of
+            # the app through Python): `YulonApplication` says when the app is
+            # asked to quit, and the app is watched only while the window is
+            # hidden (`_watch_app`).
+            quit_requested = getattr(app, "quit_requested", None)
+            if quit_requested is not None:
+                quit_requested.connect(self._application_quitting)
         self.window.installEventFilter(self)
         self.window.yulon_quit = self.quit  # type: ignore[attr-defined]
+        self.window.yulon_quit_for_good = self.quit_for_good  # type: ignore[attr-defined]
         changed = getattr(self.window, "servers_changed", None)
         if changed is not None:
             changed.connect(self.follow_servers)
@@ -387,8 +417,14 @@ class YulonTray(QObject):
             return
         self._installed = False
         app = QApplication.instance()
+        self._watch_app(False)
         if isinstance(app, QApplication):
-            app.removeEventFilter(self)
+            quit_requested = getattr(app, "quit_requested", None)
+            if quit_requested is not None:
+                try:
+                    quit_requested.disconnect(self._application_quitting)
+                except (RuntimeError, TypeError):  # pragma: no cover - never connected
+                    pass
             QApplication.setQuitOnLastWindowClosed(self._was_quit_on_last)
         if shiboken6.isValid(self.window):
             self.window.removeEventFilter(self)
@@ -655,13 +691,23 @@ class YulonTray(QObject):
         self._quitting = True
         closed = self.window.close()
         if not closed:
+            # A copy that must go (`quit_for_good`) stays going: its next close
+            # is a quit too, never a hide.
             self._quitting = False
             self.open_window()
             return False
-        if self.icon is not None:
-            self.icon.hide()
-        self.quit_app()
+        self._end()
         return True
+
+    def quit_for_good(self) -> bool:
+        """`quit()` for a copy that must not stay: the lost-lock exit (cold review).
+
+        Refused now (an import is running), it is not forgotten: every later
+        close is a real quit, never a hide into the tray beside the copy that
+        won the lock.
+        """
+        self._must_quit = True
+        return self.quit()
 
     def quit_app(self) -> None:
         """End the event loop. A seam: a test must not end its own process's loop."""
@@ -933,6 +979,8 @@ class YulonTray(QObject):
         """
         if menu is None:
             menu = QMenu()
+        for old in menu.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            old.deleteLater()  # clear() keeps a submenu that is a child (cold review)
         menu.clear()
         servers = self.servers()
         header = menu.addAction(header_text([status for _, _, status in servers]))
@@ -1066,16 +1114,13 @@ class YulonTray(QObject):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt's name
         kind = event.type()
-        if kind is QEvent.Type.Quit:
-            # Qt 6 closes every window when the application is asked to quit
-            # (macOS Cmd+Q, a session ending): that close is not a hide. Only
-            # while it is decided: a quit the busy guard refused leaves the
-            # loop running, and the next turn of it puts close-to-tray back
-            # (adversarial review).
-            self._quitting = True
-            QTimer.singleShot(0, self, self._quit_was_refused)
-            return False
+        if self._watching_app and not self.window.isHidden():
+            self._watch_app(False)  # the window is back: nothing to watch for
         if watched is self.window and kind is QEvent.Type.Close:
+            if self._must_quit:
+                # Accepted or refused is decided after this filter (the busy
+                # guard, then the window): look on the next turn of the loop.
+                QTimer.singleShot(0, self, self._quit_if_closed)
             if not self.keeping:
                 return False
             event.ignore()
@@ -1085,7 +1130,10 @@ class YulonTray(QObject):
                 if choice == NOTE_NEVER:
                     ui_settings.remember_tray(tray_note=NOTE_NEVER)
                 elif choice == "quit":
-                    self.ask_to_quit()
+                    # Not from inside this close (cold review MUST): a close
+                    # nested in it answered True without the busy guard or the
+                    # window's closeEvent. On the next turn it is a close of its own.
+                    QTimer.singleShot(0, self, self.ask_to_quit)
                     return True
             self.hide_window()
             return True
@@ -1107,13 +1155,50 @@ class YulonTray(QObject):
             box.deleteLater()
 
     @Slot()
+    def _application_quitting(self) -> None:
+        """`YulonApplication.quit_requested`: Qt 6 closes every window on a quit
+        (macOS Cmd+Q, a session ending), and that close is not a hide. Only while
+        it is decided: a quit the busy guard refused leaves the loop running, and
+        the next turn of it puts close-to-tray back (adversarial review)."""
+        self._quitting = True
+        QTimer.singleShot(0, self, self._quit_was_refused)
+
+    @Slot()
     def _quit_was_refused(self) -> None:
         self._quitting = False
+
+    @Slot()
+    def _quit_if_closed(self) -> None:
+        if self._must_quit and self.window.isHidden():
+            self._end()
+
+    def _end(self) -> None:
+        """The window closed for real: the icon goes and the loop ends, once."""
+        if self._ended:
+            return
+        self._ended = True
+        if self.icon is not None:
+            self.icon.hide()
+        self.quit_app()
+
+    def _watch_app(self, on: bool) -> None:
+        """The application-wide event filter, only while the window is hidden (cold review)."""
+        if on == self._watching_app:
+            return
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            return
+        if on:
+            app.installEventFilter(self)
+        else:
+            app.removeEventFilter(self)
+        self._watching_app = on
 
     def hide_window(self) -> None:
         """Into the tray. The window's jobs, pollers and launchers carry on."""
         logger.info("tray: the window was closed; Yu'lon keeps running in the tray")
         self.window.hide()
+        self._watch_app(True)  # a dialog opening now must bring the window back
 
     def _a_window_showed(self, widget: QWidget) -> None:
         """A modal box or dialog opening while the window is hidden brings the window back.

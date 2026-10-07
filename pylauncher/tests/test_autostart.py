@@ -147,7 +147,25 @@ def test_linux_writes_an_xdg_autostart_entry(
 
 
 def test_linux_quotes_what_the_desktop_spec_reserves(tmp_path: Path) -> None:
-    assert autostart.desktop_exec(Path('/a b/$x"y`z\\w%')) == '"/a b/\\$x\\"y\\`z\\\\w%%" --tray'
+    """Two levels (cold review): inside quotes `"`, backtick, `$` and backslash take a
+    backslash, and then the string rule doubles every backslash, so a literal backslash
+    is four of them in the file, and `%` is `%%`."""
+    assert autostart.desktop_exec(Path('/a b/$x"y`z\\w%')) == (
+        '"/a b/\\\\$x\\\\"y\\\\`z\\\\\\\\w%%" --tray'
+    )
+
+
+def test_linux_reads_back_the_program_it_quoted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    odd = tmp_path / 'we$ird "dir` \\ 100%'
+    odd.mkdir()
+    program = odd / "Yulon-x86_64.AppImage"
+    program.write_text("")
+    install = Install(InstallKind.APPIMAGE, program, "", True)
+    autostart.set_enabled(True, install, platform_id="linux")
+    assert autostart.is_enabled(install, platform_id="linux")
 
 
 def test_linux_falls_back_to_dot_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
