@@ -426,3 +426,29 @@ def test_a_stop_is_not_held_up_by_a_slow_docker_question(
     assert not worker.is_alive()
     assert len(outcome) == 1 and isinstance(outcome[0], docker.ClaimStopped), outcome
     assert took < 5.0, f"the Stop waited {took:.1f} s on a Docker question"
+
+
+def test_every_docker_question_a_claim_asks_is_short(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the folds: a hung daemon must not hold a Stop, or a press, for a
+    20 s question anywhere in the claim -- held, refused by another's, given up on."""
+    asked: list[tuple[str, float | None]] = []
+    real = docker._docker
+
+    def recorded(argv: list[str], *args: object, **kwargs: object) -> object:
+        timeout = kwargs.get("timeout")
+        asked.append((argv[0], timeout if isinstance(timeout, float | int) else None))
+        return real(argv, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "_docker", recorded)
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE):
+        pass
+    name = _claim_name(folder)
+    _running(fake_docker, name, ["yulon.owner=someone-else", f"{docker.CLAIM_LABEL}=theirs"])
+    with pytest.raises(docker.FolderClaimed):
+        with docker.folder_claim(folder, IMAGE):
+            pass
+    assert asked and all(t is not None and t <= 5.0 for _a, t in asked), asked

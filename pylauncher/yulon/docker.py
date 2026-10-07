@@ -7241,6 +7241,10 @@ _CLAIM_RELEASE_TIMEOUT = 15.0
 
 _CLAIM_POLL_SECONDS = 0.1
 
+_CLAIM_ASK_TIMEOUT = 5.0
+"""How long any one Docker question about a claim may take (Codex review of the folds):
+a hung daemon must not hold a press, or a Stop, for `_ASK_AGAIN_TIMEOUT`."""
+
 _CLAIM_LOOK_TIMEOUT = 1.0
 """How long one look at a coming-up claim may take, so a Stop is seen between looks."""
 
@@ -7396,7 +7400,7 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
         facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
         if facts is not None and facts.nonce == nonce:
-            _remove_claim(facts.container)
+            _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
         raise
 
 
@@ -7458,7 +7462,7 @@ def _claim_in_use(name: str, image: str, cancel: threading.Event | None, *, agai
     """The daemon said `name` is taken: say whose; never remove it (T543)."""
     facts = _claim_facts(name)
     if facts is None:
-        if again:  # it ended between the refusal and the question
+        if again:  # it ended between the refusal and the question (a Stop is seen there)
             return _take_claim(name, image, cancel, again=False)
         # Refused twice, and twice no answer about whose (cold review): not "another's".
         raise FolderClaimed(name, ours=False, known=False)
@@ -7474,7 +7478,7 @@ class _ClaimFacts(NamedTuple):
     owner: str
 
 
-def _claim_facts(name: str, timeout: float = _ASK_AGAIN_TIMEOUT) -> _ClaimFacts | None:
+def _claim_facts(name: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> _ClaimFacts | None:
     """The claim `name`'s container id, state, nonce and owner; None when none (or no answer)."""
     fmt = (
         f'{{{{.Id}}}}\t{{{{.State.Status}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
@@ -7511,9 +7515,9 @@ def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEAS
         proc.stderr.close()
 
 
-def _remove_claim(container: str) -> None:
+def _remove_claim(container: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> None:
     """`docker rm -f` a claim by its container id; one already gone is not a failure."""
-    proc = _docker(["rm", "-f", container], timeout=_ASK_AGAIN_TIMEOUT)
+    proc = _docker(["rm", "-f", container], timeout=timeout)
     if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
         logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
 
