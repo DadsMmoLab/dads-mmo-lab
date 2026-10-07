@@ -594,3 +594,23 @@ def test_both_confirmations_say_the_world_content_fixes_go_in_exactly_where_they
     ):
         said = "world content fixes" in text and "stay applied" in text
         assert said is brings, (game, text)
+
+
+@pytest.mark.parametrize("how", ["edits", "commits"])
+def test_a_world_database_checkout_with_the_players_own_work_is_refused_before_the_compile(
+    tmp_path: Path, how: str
+) -> None:
+    """Codex on T531: the catch-up moves the `*-db` checkout, so it gets the route's own
+    refusals first -- a file the player edited there, or a commit of theirs, is never what
+    the move throws away. Refused before anything is built, every moved source back."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    db_dest = server_dir / TBC_DB.dest
+    if how == "edits":
+        rec.edits[db_dest] = ("Updates/0001.sql",)
+    else:
+        rec.diverged.add(db_dest)
+    with pytest.raises(InstallerError, match="tbc-db"):
+        _press(rec, server_dir, db, world)
+    assert "build" not in rec.calls
+    assert rec.heads[db_dest] == OLD and _sent(rec, U3) == 0 and db.rows == {}
+    assert {rec.heads[server_dir / s.dest] for s in TBC.emulator.sources} == {OLD}

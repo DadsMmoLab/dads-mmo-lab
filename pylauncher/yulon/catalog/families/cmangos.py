@@ -414,6 +414,18 @@ class CmangosInstaller(StagedInstaller):
         What is returned is what `servers_down_work()` acts on.
         """
         catch_up = self._world_catch_up_plan()
+        if catch_up.applying():
+            # The `*-db` checkouts the catch-up will move get the route's own three
+            # refusals (origin, edits of the player's own, local commits) here, before
+            # the compile, where a refusal still puts every moved source back
+            # (Codex, T531): the catch-up's checkout must never be what discards them.
+            behind = [
+                source
+                for source in catch_up.held()
+                if source.rev and self._seams.head_sha(server_dir / source.dest) != source.rev
+            ]
+            if behind:
+                self._refuse_unless_updatable(server_dir, behind)
         for source, dest, old in moved:
             reports = catch_up.reporting(source)
             if reports:
