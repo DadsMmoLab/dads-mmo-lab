@@ -5836,13 +5836,21 @@ def build_staged(
 
     **The builder a plain build would use is asked first (T413)**, because a
     builder picked with `docker buildx use` is recorded in the user's buildx
-    config, which the per-service folders are not. A `docker`-driver builder is
-    a docker context's own and buildx finds it by name from any config folder,
-    so the split calls name it in `BUILDX_BUILDER`. Any other driver
-    (docker-container, remote, kubernetes) lives only in the user's
-    `instances/`, and an answer that cannot be read names no builder at all;
-    both get the single call on the user's own config, which is the build
-    before T376: their own builder, without the per-service cache.
+    config, which the per-service folders are not. A per-service folder holds
+    no `current`, so buildx falls back to the current docker context's own
+    builder, a `docker`-driver builder named after the context. The split calls
+    are made only when that IS the builder in use (`_current_context()`), and
+    they name no builder at all (T527): compose refuses a `BUILDX_BUILDER` that
+    names a docker context other than `default`, the current one included, so
+    on a stock Docker Desktop (context and builder both `desktop-linux`) naming
+    it failed every WotLK build within a second. Any other builder, a
+    `docker`-driver one of another context or one of another driver
+    (docker-container, remote, kubernetes), lives only in the user's own
+    config, and an answer that cannot be read is not a builder; all of them get
+    the single call on the user's own config, which is the build before T376:
+    their own builder, without the per-service cache. `BUILDX_BUILDER` is taken
+    out of the split calls' environment, so one the user set reaches no call
+    that would refuse it.
 
     The calls run in the overlay's order and the first that does not exit 0
     ends the build: its run is returned as it is, so its status and its own
@@ -5860,12 +5868,21 @@ def build_staged(
     built = _built_services(server_dir, compose_files)
     services = tuple(service.name for service in built)
     builder = _current_builder(wsl_distro) if len(services) >= 2 else None
+    context = (
+        _current_context(wsl_distro) if builder is not None and builder[1] == "docker" else None
+    )
     if builder is not None and builder[1] != "docker":
         logger.info(
             f"build_staged(): the builder in use is {builder[0]} ({builder[1]} driver), "
             "which only the user's own buildx config can name; one build call"
         )
-    if builder is None or builder[1] != "docker":
+    elif builder is not None and context != builder[0]:
+        logger.info(
+            f"build_staged(): the builder in use is {builder[0]}, and the current docker "
+            f"context is {context or 'not known'}; only the user's own buildx config reaches "
+            "that builder, so one build call"
+        )
+    if builder is None or builder[1] != "docker" or context != builder[0]:
         logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
         return run_attached(
             argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
@@ -5878,15 +5895,16 @@ def build_staged(
             return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
         folder = service if group is None else first_of_group.setdefault(group, service)
         config = _buildx_config(server_dir, folder)
-        extra = {"BUILDX_CONFIG": str(config), "BUILDX_BUILDER": builder[0]}
+        extra = {"BUILDX_CONFIG": str(config)}
         env = (
             platform.wsl_env(extra, paths=("BUILDX_CONFIG",))
             if wsl_distro is not None
             else {**os.environ, **extra}
         )
+        env.pop("BUILDX_BUILDER", None)
         logger.info(
             f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
-            f"BUILDX_CONFIG={config} BUILDX_BUILDER={builder[0]}"
+            f"BUILDX_CONFIG={config}, on the {context} context's own builder"
         )
         run = run_attached(
             [*argv, service],
@@ -5927,6 +5945,25 @@ def _current_builder(wsl_distro: str | None = None) -> tuple[str, str] | None:
     if builder is None:
         logger.warning(f"docker buildx inspect named no builder: {proc.stdout.strip()!r}")
     return builder
+
+
+def _current_context(wsl_distro: str | None = None) -> str | None:
+    """The docker context a plain command would use; None if docker will not say (T527).
+
+    `docker context show` reads `DOCKER_CONTEXT`, `DOCKER_HOST` and the user's
+    `docker context use` exactly as `docker compose` does. Bounded like
+    `_current_builder()`, and None on any refusal: `build_staged()` then makes
+    the single call rather than guess which builder a split call would reach.
+    """
+    proc = _docker(["context", "show"], timeout=BUILDER_PROBE_TIMEOUT, wsl_distro=wsl_distro)
+    name = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not name or "\n" in name:
+        logger.warning(
+            f"docker context show exited {proc.returncode}: {proc.stderr.strip()!r} "
+            f"{proc.stdout.strip()!r}; the current context is not known"
+        )
+        return None
+    return name
 
 
 def _builder_in(text: str) -> tuple[str, str] | None:

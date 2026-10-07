@@ -32,6 +32,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- On Windows with Docker Desktop, a WotLK build no longer fails within a second of starting.
+- A Tortoise server installed before the dbc.MPQ check learns that archive on its next Install, so a later swap is noticed.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
 - A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
@@ -138,6 +140,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 - A WotLK install keeps one copy of the shared server source in Docker's build cache instead of two, saving about 1.5 GB.
+- New TBC, Vanilla and Centurion servers build from their projects' newest code of October 2026.
 - **Uninstall** now takes every module's files out of your client and puts your own files back.
 - A module whose client file has the same name as another module's is refused until the other is removed.
 - Failure messages say in plain words what went wrong, with the technical detail under **Details**.
