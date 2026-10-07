@@ -29,6 +29,9 @@ call spellings here were chosen against a specific way of being wrong:
 * `record_phases` is the fifth, for the same reason (T129): one function, one
   spelling, and a button on it -- the Server tab's corrections press records
   which version of each install-plan step the databases now have.
+* `record_world_files` is the sixth (T531), one function again: the world database's
+  ledger of which update files an existing server has, written by "Update the server
+  to latest…" around each world update it brings.
 
 `os.open` counts without its flags being inspected. It is how a file gets a
 private mode at creation time, and over-inclusive is the safe direction for a
@@ -56,7 +59,14 @@ _PATH_METHODS = {
     "symlink_to",
     "chmod",
 }
-_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases", "execute"}
+_SQL_WRITE_METHODS = {
+    "run_statement",
+    "run_file",
+    "write_marker",
+    "record_phases",
+    "record_world_files",
+    "execute",
+}
 _WINDOWS_ACL_WRITES = {"SetNamedSecurityInfoW"}
 """A `ctypes` call that changes who may read a path: Windows' `chmod` (T151, `winacl`)."""
 _QUALIFIED = {

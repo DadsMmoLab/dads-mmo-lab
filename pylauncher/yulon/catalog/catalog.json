@@ -390,6 +390,7 @@
                 },
                 {
                   "name": "content updates",
+                  "on_update": "apply_new",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/Updates/*.sql"
@@ -399,6 +400,7 @@
                 },
                 {
                   "name": "instance updates",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/Updates/Instances/[0-9]*.sql"
@@ -413,6 +415,7 @@
                 },
                 {
                   "name": "ACID",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/ACID/*.sql"
@@ -459,6 +462,7 @@
                 },
                 {
                   "name": "playerbots world",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/mangos-tbc/src/modules/Bots/sql/world/*.sql",
@@ -847,6 +851,7 @@
                 },
                 {
                   "name": "content updates",
+                  "on_update": "apply_new",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/Updates/*.sql"
@@ -856,6 +861,7 @@
                 },
                 {
                   "name": "instance updates",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/Updates/Instances/[0-9]*.sql"
@@ -870,6 +876,7 @@
                 },
                 {
                   "name": "ACID",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/ACID/acid_classic.sql"
@@ -907,6 +914,7 @@
                 },
                 {
                   "name": "playerbots world",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/mangos-classic/src/modules/Bots/sql/world/*.sql",

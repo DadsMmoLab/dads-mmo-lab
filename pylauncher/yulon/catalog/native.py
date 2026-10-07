@@ -1138,7 +1138,25 @@ def update_to_latest_confirmation(
         f"This builds code nobody has tested with this app. It takes as long as your first "
         f"build ({MEASURED_BUILD_TIMES}) and it can fail — a module may no longer compile, or "
         f"the new server may refuse your database. If the build fails, the build you have now "
-        f"is put back.{database}{said}"
+        f"is put back.{database}{world_updates_note(entry)}{said}"
+    )
+
+
+def world_updates_note(entry: CatalogEntry) -> str:
+    """The update's world-content clause, for an entry whose plan brings new world updates (T531).
+
+    Read off the catalog (an `on_update: apply_new` phase), never off an id, and
+    empty for every other entry. Said in both confirmations, because both presses
+    move the world-database repository to the commit this app was tested with.
+    """
+    block = entry.install.native
+    data = block.cmangos if block is not None else None
+    if data is None or not any(phase.on_update == "apply_new" for phase in data.sql.phases):
+        return ""
+    return (
+        f" It also applies the world content fixes this Yu'lon was tested with that your "
+        f"{entry.databases.world} database does not have yet, each once, with the servers "
+        "stopped; they stay applied even if the new build is put back."
     )
 
 
@@ -1164,7 +1182,8 @@ def return_to_pin_confirmation(entry: CatalogEntry, server_dir: Path, repo: str)
         f"This compiles the server again from that commit — the same wait as the update "
         f"({MEASURED_BUILD_TIMES}) — and your server is down while its containers are "
         f"replaced. It does NOT undo anything the newer server already wrote into your "
-        f"databases; only the backup you took covers that. Say no and nothing happens at all."
+        f"databases; only the backup you took covers that.{world_updates_note(entry)} Say no "
+        "and nothing happens at all."
     )
 
 

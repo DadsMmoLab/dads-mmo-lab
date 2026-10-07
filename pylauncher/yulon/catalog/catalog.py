@@ -623,6 +623,23 @@ class SqlPhase(_Strict):
         ),
     )
 
+    on_update: Literal["leave", "apply_new", "report"] = Field(
+        default="leave",
+        description=(
+            "What the server update route (to the newest code, and back to the tested pin) "
+            "does with this phase on a server that already exists (T531). `leave`: nothing. "
+            "`apply_new`: each file its globs match that the world database's file ledger "
+            "(`sqlplan.FILE_TABLE`) does not hold is applied ONCE, in the phase's order, with "
+            "the servers stopped before the new build starts; a file the ledger holds with "
+            "other content is named and never run again. Only for a phase into the world "
+            "schema whose files live in a `*-db` source (`native.held_at_its_pin`), which "
+            "nothing moves but this route, to its pin -- so what the install applied is "
+            "knowable; the family refuses anything else as a catalog error before the compile. "
+            "`report`: the files this press's move added or changed are named, never applied. "
+            "Not in `digest()`: it does not change what an import applies."
+        ),
+    )
+
     same_columns: tuple[tuple[str, str], ...] = Field(
         default=(),
         description=(
@@ -698,6 +715,18 @@ class SqlPhase(_Strict):
             raise ValueError(
                 f"phase {self.name!r}: `same_columns` is asked by the corrections press only, "
                 "and `rerun_on_marked` is not that press"
+            )
+        if self.on_update != "leave" and (self.statements or self.into is None):
+            # The ledger keys a FILE, and the route checks the one schema it writes;
+            # a statement has no file and `into_each` names more than one schema.
+            raise ValueError(
+                f"phase {self.name!r}: `on_update` reads files into one schema, so it needs "
+                "`files` and `into`"
+            )
+        if self.on_update != "leave" and self.rerun_on_marked:
+            raise ValueError(
+                f"phase {self.name!r}: `rerun_on_marked` already applies it on every press; "
+                "`on_update` would apply its files a second time"
             )
         if self.same_columns and self.into is None:
             # The tables are named without a schema; `into` is the one they are in.
