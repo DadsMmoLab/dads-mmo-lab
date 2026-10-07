@@ -14,6 +14,8 @@ ends it.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 import threading
@@ -678,15 +680,24 @@ def test_a_tool_container_another_yulon_made_on_the_same_daemon_counts_only_for_
     Yu'lons may share a server folder), or says nothing of where it writes. An unlabelled one
     (made before the labels) still counts, so one user is no less guarded."""
     _cli, state = fake_docker
-    out = tmp_path / "data"
+    out, other = tmp_path / "data", tmp_path / "other"
+    out.mkdir()
+    other.mkdir()
     boxes, labels = state / "containers", state / "labels"
     labels.mkdir(exist_ok=True)
-    here, elsewhere = docker.folder_label(out), docker.folder_label(tmp_path / "other")
+    here, elsewhere = docker.folder_id(out), docker.folder_id(other)
+    assert here is not None and elsewhere is not None
     for name, given in (
-        ("yulon-extract-aaaaaaaaaaaa", ["yulon.owner=someone-else", f"yulon.writes={elsewhere}"]),
+        (
+            "yulon-extract-aaaaaaaaaaaa",
+            ["yulon.owner=someone-else", f"{docker.WRITES_LABEL}={elsewhere}"],
+        ),
         ("yulon-extract-bbbbbbbbbbbb", [f"yulon.owner={docker.owner_id()}"]),
         ("yulon-extract-cccccccccccc", None),
-        ("yulon-extract-dddddddddddd", ["yulon.owner=someone-else", f"yulon.writes={here}"]),
+        (
+            "yulon-extract-dddddddddddd",
+            ["yulon.owner=someone-else", f"{docker.WRITES_LABEL}={here}"],
+        ),
         ("yulon-extract-eeeeeeeeeeee", ["yulon.owner=someone-else"]),
     ):
         (boxes / name).write_text("4242", encoding="utf-8")
@@ -719,7 +730,8 @@ def test_a_tool_container_is_created_with_this_yulons_owner_label(
 
     (create,) = [call for call in fake_calls(state) if call.startswith("create ")]
     assert f"--label {docker.OWNER_LABEL}={docker.owner_id()}" in create, create
-    labelled = docker.folder_label(out)
+    labelled = docker.folder_id(out)
+    assert labelled is not None
     assert f"--label {docker.WRITES_LABEL}={labelled}" in create, create
 
 
@@ -754,3 +766,225 @@ def test_a_run_of_this_app_changing_while_docker_is_asked_is_not_called_left(
     monkeypatch.setattr(docker, "_docker", ps)
 
     assert docker.tool_containers_left_running(tmp_path) == ()
+
+
+# ------------------------------------- T536: one folder, two spellings, one identity
+
+
+def _another_yulons_tool(state: Path, name: str, writes: str | None) -> None:
+    """A running tool container another Yu'lon on this daemon made, labelled `writes`."""
+    labels = state / "labels"
+    labels.mkdir(exist_ok=True)
+    (state / "containers" / name).write_text("4242", encoding="utf-8")
+    given = ["yulon.owner=someone-else"]
+    if writes is not None:
+        given.append(f"{docker.WRITES_LABEL}={writes}")
+    (labels / name).write_text("\n".join(given), encoding="utf-8")
+
+
+def _writes_label(spec: docker.ContainerRun) -> str | None:
+    """The `yulon.writes-ids` value `docker create` would carry for `spec`; None without one."""
+    argv = spec.to_create_argv(name="yulon-extract-0123456789ab")
+    values = [
+        argv[i + 1].split("=", 1)[1]
+        for i, arg in enumerate(argv)
+        if arg == "--label" and argv[i + 1].startswith(f"{docker.WRITES_LABEL}=")
+    ]
+    return values[0] if values else None
+
+
+def test_one_server_folder_reached_by_two_spellings_is_one_writer(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+) -> None:
+    """T536: a Windows Yu'lon names a folder `C:\\...` and a WSL one `/mnt/c/...`; a symlink
+    alias is the same thing on one host. The path hashes differ, so another Yu'lon extracting
+    into the folder under the other spelling was left out and both wrote into one `data/`.
+    The folder's own identity file names it the same way under every spelling."""
+    _cli, state = fake_docker
+    real = tmp_path / "srv" / "data"
+    real.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "srv", target_is_directory=True)
+    other = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(alias / "data", "/out"),)
+    )
+    writes = _writes_label(other)
+    assert writes is not None
+    _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", writes)
+
+    assert docker.tool_containers_writing_into(real) == ("yulon-extract-aaaaaaaaaaaa",)
+
+
+def test_another_yulons_tool_writing_a_different_folder_is_still_left_out(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+) -> None:
+    """The identity does not turn every other Yu'lon's run into ours: another folder, another id."""
+    _cli, state = fake_docker
+    here, there = tmp_path / "a" / "data", tmp_path / "b" / "data"
+    here.mkdir(parents=True)
+    there.mkdir(parents=True)
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(there, "/out"),)
+    )
+    _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", _writes_label(spec))
+
+    assert docker.tool_containers_writing_into(here) == ()
+
+
+def test_the_folder_id_is_made_once_and_then_read(tmp_path: Path) -> None:
+    """Created on first use (an older install has none), and every later ask reads that one."""
+    assert not (tmp_path / docker.FOLDER_ID_FILE).exists()
+    first = docker.folder_id(tmp_path)
+    assert first is not None and re.fullmatch(r"[0-9a-f]{32}", first), first
+    assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="utf-8").strip() == first
+    if os.name != "nt":  # another user's Yu'lon on the daemon has to read it
+        assert (tmp_path / docker.FOLDER_ID_FILE).stat().st_mode & 0o044 == 0o044
+    assert docker.folder_id(tmp_path) == first
+    assert [p.name for p in tmp_path.iterdir()] == [docker.FOLDER_ID_FILE], "no temp file left"
+
+
+def test_a_folder_id_made_by_the_other_yulon_meanwhile_is_the_one_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two Yu'lons making the file at once end with one id: the publish never replaces."""
+    theirs = "f" * 32
+    real_link = docker.os.link
+
+    def raced(src: str, dst: str) -> None:
+        (tmp_path / docker.FOLDER_ID_FILE).write_text(theirs + "\n", encoding="utf-8")
+        real_link(src, dst)
+
+    monkeypatch.setattr(docker.os, "link", raced)
+    assert docker.folder_id(tmp_path) == theirs
+    assert [p.name for p in tmp_path.iterdir()] == [docker.FOLDER_ID_FILE], "no temp file left"
+
+
+@pytest.mark.parametrize("why", ["missing", "garbage", "no-link", "read-only"])
+def test_a_folder_without_a_readable_id_falls_back_to_the_safe_side(
+    fake_docker: tuple[Path, Path],
+    tmp_path: Path,
+    real_left_tool_read: None,
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+) -> None:
+    """No id to read or make: the writer says nothing of where it writes (every guard counts
+    it), and the guard leaves out no other Yu'lon's run, whatever its label names."""
+    _cli, state = fake_docker
+    folder = tmp_path / "data"
+    if why != "missing":
+        folder.mkdir()
+    if why == "garbage":
+        (folder / docker.FOLDER_ID_FILE).write_text("not an id\n", encoding="utf-8")
+    if why == "no-link":
+
+        def refused(*_a: object) -> None:
+            raise PermissionError(1, "Operation not permitted")  # vfat
+
+        monkeypatch.setattr(docker.os, "link", refused)
+    if why == "read-only":
+        monkeypatch.setattr(docker.tempfile, "mkstemp", _read_only_mkstemp)
+    assert docker.folder_id(folder) is None
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(folder, "/out"),)
+    )
+    assert _writes_label(spec) is None
+    _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", "0" * 32)
+
+    assert docker.tool_containers_writing_into(folder) == ("yulon-extract-aaaaaaaaaaaa",)
+
+
+def _read_only_mkstemp(*_a: object, **_k: object) -> tuple[int, str]:
+    raise PermissionError(13, "Permission denied")
+
+
+@pytest.mark.parametrize("names", ["this-spelling", "another-folder"])
+def test_an_older_yulons_path_label_always_counts(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None, names: str
+) -> None:
+    """Codex adversarial review: an older Yu'lon labels `yulon.writes` with a path hash. A hash
+    cannot tell an alias of this folder from another folder, so its container counts whatever
+    the hash is -- never left out on a guess."""
+    _cli, state = fake_docker
+    folder, other = tmp_path / "data", tmp_path / "other"
+    folder.mkdir()
+    spelled = os.path.normcase(os.path.abspath(folder if names == "this-spelling" else other))
+    old_hash = hashlib.sha256(spelled.encode("utf-8")).hexdigest()[:16]
+    labels = state / "labels"
+    labels.mkdir(exist_ok=True)
+    (state / "containers" / "yulon-extract-aaaaaaaaaaaa").write_text("4242", encoding="utf-8")
+    (labels / "yulon-extract-aaaaaaaaaaaa").write_text(
+        f"yulon.owner=someone-else\nyulon.writes={old_hash}", encoding="utf-8"
+    )
+
+    assert docker.tool_containers_writing_into(folder) == ("yulon-extract-aaaaaaaaaaaa",)
+
+
+def test_an_older_yulon_finds_no_writes_label_on_ours(tmp_path: Path) -> None:
+    """The other way round: an older Yu'lon reads only `yulon.writes`, and would leave out a
+    container whose path hash differs (an alias). Ours carries no such label, so it counts it."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(folder, "/out"),)
+    )
+    argv = spec.to_create_argv(name="yulon-extract-0123456789ab")
+    assert docker.WRITES_LABEL != "yulon.writes"
+    assert not [arg for arg in argv if arg.startswith("yulon.writes=")], argv
+    assert f"{docker.WRITES_LABEL}={docker.folder_id(folder)}" in argv, argv
+
+
+def test_a_tool_writing_two_folders_names_neither_when_one_has_no_id(tmp_path: Path) -> None:
+    """A label naming only the folder with an id would say the tool writes there alone, and
+    a guard on the other folder would leave it out. So it names none: every guard counts it."""
+    named, missing = tmp_path / "data", tmp_path / "gone"
+    named.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image,
+        argv=SPEC.argv,
+        mounts=(docker.Mount(named, "/out"), docker.Mount(missing, "/more")),
+    )
+    assert docker.folder_id(named) is not None
+    assert _writes_label(spec) is None
+
+
+@pytest.mark.parametrize("published", [True, False])
+def test_a_temp_file_that_will_not_go_never_escapes_the_id_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Cold review: on Windows a sharing violation (another Yu'lon reading) can refuse the temp
+    file's removal. That must not raise out of `folder_id()` into `docker create` or the press:
+    the id that was published is the answer, and with none the safe side's None."""
+    real_unlink = Path.unlink
+
+    def locked(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".yulon-new"):
+            raise PermissionError(13, "The process cannot access the file")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    if not published:
+
+        def refused(*_a: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(docker.os, "link", refused)
+    found = docker.folder_id(tmp_path)
+    if published:
+        assert found is not None
+        assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found
+    else:
+        assert found is None
+
+
+def test_an_id_whose_mode_cannot_be_set_is_still_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused chmod costs other users' reads at most; the id is still made and used."""
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(docker.os, "chmod", refused)
+    found = docker.folder_id(tmp_path)
+    assert found is not None
+    assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found
