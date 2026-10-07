@@ -220,7 +220,11 @@ class TrayFlyout(QWidget):
             QLabel#tray-header {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-detail {{ color: {COLOR_TEXT_MUTED}; }}
-            QToolButton {{ color: {COLOR_GOLD_BRIGHT}; font-size: 16px; }}
+            QToolButton {{
+                color: {COLOR_GOLD_BRIGHT};
+                font-size: 16px;
+                font-family: "Segoe UI Symbol", "DejaVu Sans", "Apple Symbols";
+            }}
             """)
         column = QVBoxLayout(self)
         column.setContentsMargins(12, 10, 12, 12)

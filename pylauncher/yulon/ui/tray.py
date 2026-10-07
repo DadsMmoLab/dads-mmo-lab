@@ -28,6 +28,7 @@ did before this existed.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
@@ -917,10 +918,14 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
 def note_box() -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """The first close: "Yu'lon stays in the tray"."""
     box = QMessageBox(QMessageBox.Icon.Information, "Yu'lon stays in the tray", "")
-    box.setText(
+    text = (
         "Yu'lon keeps running in the system tray, so your servers' status and Play are one "
         "click away. Quit tray… in its menu closes it for good."
     )
+    if sys.platform == "win32":
+        # Windows 11 puts a new tray icon under the ^ beside the clock (seen on yulon-win11).
+        text += "\n\nNo icon by the clock? Look under the ^ arrow, and drag it out to keep it."
+    box.setText(text)
     got_it = box.addButton("Got it", QMessageBox.ButtonRole.AcceptRole)
     quit_instead = box.addButton("Quit Yu'lon instead", QMessageBox.ButtonRole.DestructiveRole)
     never = box.addButton("Don't show again", QMessageBox.ButtonRole.RejectRole)

@@ -341,3 +341,21 @@ def test_a_sign_in_start_with_no_tray_at_all_shows_the_window(window: FakeWindow
         assert window.isVisible(), "no tray came, and nothing was shown"
     finally:
         made.uninstall()
+
+
+def test_on_windows_the_note_says_where_a_hidden_icon_is(
+    qapp: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 11 puts a new tray icon under the ^ beside the clock (yulon-win11, 2026-10-07)."""
+    monkeypatch.setattr(tray_module.sys, "platform", "win32")
+    box, _buttons = tray_module.note_box()
+    try:
+        assert "^" in box.text()
+    finally:
+        box.deleteLater()
+    monkeypatch.setattr(tray_module.sys, "platform", "linux")
+    box, _buttons = tray_module.note_box()
+    try:
+        assert "^" not in box.text()
+    finally:
+        box.deleteLater()
