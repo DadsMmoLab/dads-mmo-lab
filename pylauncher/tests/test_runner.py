@@ -2628,7 +2628,7 @@ def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns()
     worker.start()
     grandchild = int(fragments.get(timeout=HANG_BOUND))
     try:
-        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        assert runner.end_stream(generator) is True  # this stream alone: thread idents are reused
         worker.join(timeout=HANG_BOUND)
         assert not worker.is_alive(), "the read waited on a grandchild the Stop never reached"
         assert isinstance(outcome[0], runner.StreamEnded), outcome
@@ -2741,12 +2741,12 @@ def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited
     grandchild = int(fragments.get(timeout=HANG_BOUND))
     try:
         with runner._LIVE_STREAMS_LOCK:
-            root = next(
-                c.proc for c in runner._LIVE_STREAMS.values() if c.started_on == worker.ident
-            )
+            # This stream's own child: a stale stream an earlier test left can carry
+            # the same (reused) thread ident (T546, fork CI flake on py3.11).
+            root = runner._LIVE_STREAMS[generator].proc
         assert root is not None
         root.wait(timeout=HANG_BOUND)  # the leader is gone; its child reads on
-        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        assert runner.end_stream(generator) is True  # this stream alone: thread idents are reused
         worker.join(timeout=HANG_BOUND)
         assert not worker.is_alive(), "the Stop never reached the group of a root that had exited"
         assert isinstance(outcome[0], runner.StreamEnded), outcome
@@ -2832,7 +2832,7 @@ def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> No
     said.discard("ignoring")
     grandchild = int(said.pop())
     try:
-        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        assert runner.end_stream(generator) is True  # this stream alone: thread idents are reused
         worker.join(timeout=HANG_BOUND)
         assert not worker.is_alive(), "a member that ignored SIGTERM kept the read going"
         assert _gone(grandchild), f"{grandchild} ignored SIGTERM and was never killed"
@@ -3042,7 +3042,9 @@ def test_a_stop_that_lands_while_the_child_is_being_started_is_not_lost(
 
     def spawn_then_stop(start):  # type: ignore[no-untyped-def]
         started = real_spawn(start)
-        stops.append(runner.end_streams_started_on(threading.get_ident()))
+        # This stream alone (`generator`, bound before it is iterated): thread idents
+        # are reused, and an earlier test's stream may carry this one's (T546).
+        stops.append(int(runner.end_stream(generator)))
         return started
 
     monkeypatch.setattr(runner, "_spawn", spawn_then_stop)
@@ -3092,7 +3094,7 @@ def test_a_held_stop_ends_the_group_of_a_root_that_exited_while_it_was_held(
         # The leader exits (a zombie: not reaped, as nothing has polled it yet); its
         # child holds the pipe.
         os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
-        runner.end_streams_started_on(threading.get_ident())
+        runner.end_stream(generator)  # this stream alone: thread idents are reused
         return proc, job
 
     monkeypatch.setattr(runner, "_spawn", spawn_exit_then_stop)
@@ -3136,7 +3138,7 @@ def test_a_child_that_could_not_be_started_leaves_no_claim_behind(
     """
 
     def stop_then_fail(start):  # type: ignore[no-untyped-def]
-        runner.end_streams_started_on(threading.get_ident())
+        runner.end_stream(generator)  # this stream alone: thread idents are reused
         raise FileNotFoundError(2, "No such file or directory: 'docker'")
 
     monkeypatch.setattr(runner, "_spawn", stop_then_fail)
