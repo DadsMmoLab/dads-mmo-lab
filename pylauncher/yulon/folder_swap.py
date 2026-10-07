@@ -10,8 +10,10 @@ place that fails puts the old copy back.
 `GetModuleSourceList()` takes every directory `file(GLOB … "${BASE_PATH}/*")`
 finds, and CMake's glob lists dot-names too (measured with CMake 3.28: a
 `.mod-a.yulon-old` beside `mod-a` came back as a module), so a leftover there
-would be compiled beside the module. `<server>/.yulon-module-staging/` is on the
-same file system as `modules/`, so each rename is still one atomic step.
+would be compiled beside the module. It is `.yulon-module-staging/` beside the
+real `modules/` folder (normally in the server folder; beside the link's target
+when `modules/` is a link), so it shares that folder's file system and each
+rename is one atomic step; `prepare()` refuses, before copying, where it does not.
 
 **A stopped swap is settled before anything reads the module's claim**
 (`settle()`, called by `Applier.install()` and `Applier.remove()`): a crash, or a
@@ -39,10 +41,43 @@ _sleep = time.sleep  # a seam: tests do not wait
 
 
 def places(dest: Path) -> tuple[Path, Path]:
-    """`(partial, aside)`: where the new copy of `dest` is made, and where the old one waits."""
-    base = dest.parent.parent / STAGING
-    stem = f"{dest.parent.name}-{dest.name}"
+    """`(partial, aside)`: where the new copy of `dest` is made, and where the old one waits.
+
+    Beside the REAL folder `dest` is in (`os.path.realpath`), not beside the server
+    folder's own `modules/` entry: a `modules/` linked to another drive would put
+    staging on another file system, where no rename into it can be made (EXDEV,
+    T538 cold re-review).
+    """
+    real = Path(os.path.realpath(dest.parent))
+    base = real.parent / STAGING
+    stem = f"{real.name}-{dest.name}"
     return base / f"{stem}.partial", base / f"{stem}.old"
+
+
+def prepare(dest: Path) -> Path:
+    """Make the staging folder for a new copy of `dest`; the path the copy goes to.
+
+    Raises:
+        OSError: staging is not on `dest`'s file system (a `modules/` that is a
+            mount point of its own), so the copy could never be renamed into place.
+            Raised before anything is copied, with nothing changed.
+    """
+    partial, _aside = places(dest)
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if _device(partial.parent) != _device(dest.parent):
+        tidy(partial.parent)
+        raise OSError(
+            f"{dest.parent} is not on the same drive as {partial.parent}, the folder beside "
+            f"it where Yu'lon makes a whole copy before it replaces the module, so the copy "
+            f"could not be moved into place. Nothing was copied"
+        )
+    return partial
+
+
+def _device(path: Path) -> int:
+    """The file system `path` is on (`st_dev`); a seam for the test of a mount point."""
+    return os.stat(path).st_dev
 
 
 def settle(dest: Path) -> None:

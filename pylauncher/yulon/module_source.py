@@ -525,7 +525,8 @@ def copy_folder(src: Path, dest: Path) -> None:
     The chosen folder itself may be a link: that is where the player keeps it.
 
     **The old copy stays until the new one is whole** (T538, `folder_swap`). The
-    copy is made in `<server>/.yulon-module-staging/` and swapped in by two
+    copy is made in `.yulon-module-staging/` beside the real `modules/` folder
+    (`folder_swap.places()`) and swapped in by two
     renames, the old copy aside first; a copy that fails is removed and the old
     one is untouched, and a rename into place that fails puts the old one back,
     so `Applier._copy_folder()`'s "Nothing was changed" is true. The staging
@@ -540,9 +541,8 @@ def copy_folder(src: Path, dest: Path) -> None:
     link = _first_link(src)
     if link is not None:
         raise DeriveError(_link_refusal(link))
-    partial, _aside = folder_swap.places(dest)
     folder_swap.settle(dest)
-    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial = folder_swap.prepare(dest)
     try:
         shutil.copytree(src, partial, ignore=_git_and_links)
     except BaseException:

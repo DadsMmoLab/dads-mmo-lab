@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -1016,3 +1019,63 @@ def test_an_install_after_a_stopped_swap_carries_the_old_receipts_forward(
     applier.remove(manifest)
 
     assert sorted(p.name for p in (client / "Data").iterdir()) == []
+
+
+@pytest.fixture
+def _modules_on_another_drive(tmp_path: Path) -> Iterator[Path]:
+    """`<server>/modules` a link to a folder on tmpfs (`/dev/shm`), another file system."""
+    shm = Path("/dev/shm")
+    if not shm.is_dir() or not hasattr(os, "symlink"):
+        pytest.skip("no /dev/shm")
+    elsewhere = Path(tempfile.mkdtemp(dir=shm, prefix="yulon-t538-"))
+    if os.stat(elsewhere).st_dev == os.stat(tmp_path).st_dev:
+        shutil.rmtree(elsewhere)
+        pytest.skip("/dev/shm is on the same file system as the test folder here")
+    try:
+        (elsewhere / "modules").mkdir()
+        server = tmp_path / "server"
+        server.mkdir()
+        os.symlink(elsewhere / "modules", server / "modules", target_is_directory=True)
+        yield server
+    finally:
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+def test_a_modules_folder_linked_to_another_drive_is_staged_beside_its_real_folder(
+    tmp_path: Path, _modules_on_another_drive: Path
+) -> None:
+    """Cold re-review SHOULD: staging in the server folder put it on another file system
+    from a linked `modules/`, and every rename into place failed (EXDEV)."""
+    server = _modules_on_another_drive
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "a.cpp").write_text("// a\n", encoding="utf-8")
+    dest = server / "modules" / "mod-my-thing"
+
+    module_source.copy_folder(src, dest)
+    (src / "src" / "b.cpp").write_text("// b\n", encoding="utf-8")
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/a.cpp": b"// a\n", "src/b.cpp": b"// b\n"}
+    real_modules = Path(os.path.realpath(server / "modules"))
+    assert not (real_modules.parent / folder_swap.STAGING).exists()
+    assert not (server / folder_swap.STAGING).exists()
+
+
+def test_staging_on_another_file_system_is_refused_before_anything_is_copied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`modules/` a mount point of its own: no folder beside it shares its file system."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = folder_swap._device
+    monkeypatch.setattr(
+        folder_swap,
+        "_device",
+        lambda path: real(path) + (1 if Path(path).name == folder_swap.STAGING else 0),
+    )
+
+    with pytest.raises(OSError, match="not on the same drive"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
