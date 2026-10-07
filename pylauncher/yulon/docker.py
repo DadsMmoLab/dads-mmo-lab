@@ -841,6 +841,8 @@ def _env_value(raw: str) -> str:
 
 PROJECT_LABEL = "com.docker.compose.project"
 WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
+SERVICE_LABEL = "com.docker.compose.service"
+"""The compose service a container was made for: an `up` one and a `run` one alike (T539)."""
 
 
 UNREADABLE = "\x00unreadable"
@@ -2254,6 +2256,13 @@ def repair_import(
             "whatever it finds. Press Stop first, then try again."
         )
 
+    # T539 (re-review of 7312223b): Repair is offered in exactly the half-written state
+    # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
+    # the container -- so that importer is ended before anything else: before the
+    # database it writes to is started (Codex review), and before it is read.
+    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
+    if left is not None:
+        raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     start_database(
         spec, server_dir, timeout=db_timeout, because="nothing was imported", wsl_distro=wsl_distro
     )
@@ -2636,6 +2645,9 @@ def run_one_shot(
         wsl_distro=wsl_distro,
         sink=sink,
         cancel=cancel,
+        # T539: the container goes with a Stop at once, `up` and `run` alike. See
+        # `end_one_shot()`; the caller asks it again before it reports the Stop.
+        on_cancel=lambda: end_one_shot(service, server_dir, wsl_distro=wsl_distro),
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -2876,6 +2888,154 @@ def apply_module_sql(
             detail="\n".join(importer_last_words(run.tail)),
         )
     return run
+
+
+ONE_SHOT_END_SECONDS = 30.0
+"""How long `end_one_shot()` waits for a killed one-shot to be seen gone (T539).
+
+`docker kill` sends SIGKILL, which no importer can trap, so the wait is for the
+daemon to report the exit: seconds. A container still running at the end of it is
+one the daemon would not end, and the caller says so rather than going on."""
+
+_ONE_SHOT_POLL_SECONDS = 0.5
+"""How often `end_one_shot()` asks again whether a killed one-shot is gone. Not a deadline."""
+
+_ONE_SHOT_ASK_TIMEOUT = 30.0
+"""The bound on each `docker ps`/`docker kill` it sends: a wedged daemon is an answer too."""
+
+
+@dataclass(frozen=True)
+class OneShotLeft:
+    """What `end_one_shot()` could not end: the containers by name (empty if Docker would not
+    say which), and why, in words for the sentence that names them."""
+
+    names: tuple[str, ...]
+    reason: str
+
+
+def _spelled(folder: str) -> str:
+    """A folder as `end_one_shot()` compares it: separators and case as this OS reads them."""
+    return os.path.normcase(os.path.normpath(folder.strip()))
+
+
+def _folder_spellings(server_dir: Path, *, wsl_distro: str | None = None) -> set[str]:
+    """Every spelling of `server_dir` compose may have stamped as a container's folder.
+
+    As given and resolved (compose may have followed a link), and for a server inside
+    a WSL distro the distro's own path, which is what compose saw there.
+    """
+    found = {_spelled(str(server_dir))}
+    try:
+        found.add(_spelled(str(server_dir.resolve())))
+    except OSError:
+        pass
+    if wsl_distro is not None:
+        inside = platform.wsl_linux_path(server_dir)
+        if inside is not None:
+            found.add(_spelled(inside))
+    return found
+
+
+def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
+    """A database importer from an earlier run that could not be ended, and how to end it (T539).
+
+    `nothing_done` says what was therefore not done ("the import was not re-run").
+    """
+    names = ", ".join(left.names)
+    who = f"A database import ({names})" if names else "A database import"
+    said = (
+        f"{who} from an earlier run may still be running, and it could not be ended: "
+        f"{left.reason}. The databases were not touched, and {nothing_done}."
+    )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+
+
+def end_one_shot(
+    service: str, server_dir: Path, *, wsl_distro: str | None = None
+) -> OneShotLeft | None:
+    """End every running container of this install's one-shot `service`; None once none runs.
+
+    T539. The install's import is `compose up --no-deps <importer>`, attached, and a
+    Stop ends the CLI. Whether the importer goes with it is not this app's to
+    choose: on Linux compose stops it when its CLI is signalled (yulon-ubuntu,
+    2026-10-07), on Windows the Stop ends compose itself with docker.exe
+    (T246/T299) and Docker Desktop keeps a container whose CLI is gone (T303), and
+    a `compose run --rm` one outlives its CLI everywhere (measured the same day).
+    An importer left running is under the next Install's `partial` branch, which
+    DROPs the half-written schemas it is still writing. So the Stop ends it here,
+    and the retry asks here before it clears anything.
+
+    Found by its labels, not a name: this install's compose project (the pin, or
+    the folder's own, as `install_project()` reads it) and the service, which
+    covers an `up` container and any `run` one. Killed, then asked again until
+    none runs or `ONE_SHOT_END_SECONDS` pass. Never raises.
+    """
+    project = pinned_project_name(server_dir) or compose_project_name(
+        server_dir, wsl_distro=wsl_distro
+    )
+    if project is None:
+        return OneShotLeft((), "this install's compose project could not be read")
+    ask = [
+        "ps",
+        "--filter",
+        f"label={PROJECT_LABEL}={project}",
+        "--filter",
+        f"label={SERVICE_LABEL}={service}",
+        "--format",
+        '{{.Names}}\t{{.Label "' + WORKING_DIR_LABEL + '"}}',
+    ]
+    ours = _folder_spellings(server_dir, wsl_distro=wsl_distro)
+    deadline = time.monotonic() + ONE_SHOT_END_SECONDS
+    killed: tuple[str, ...] = ()
+    settled = False
+    while True:
+        listed = _docker(ask, timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+        if listed.returncode != 0:
+            said = " ".join((listed.stderr or listed.stdout or "no answer").split())
+            return OneShotLeft(killed, f"Docker would not say whether it is still running ({said})")
+        running: list[str] = []
+        for row in listed.stdout.splitlines():
+            name, _, folder = row.partition("\t")
+            if not name.strip():
+                continue
+            if not folder.strip():
+                # Compose stamps every container with its folder; one without is not
+                # provably this install's, and is not killed (adversarial review).
+                return OneShotLeft(
+                    (name.strip(),), "Docker did not say which folder it was started from"
+                )
+            if _spelled(folder) in ours:
+                running.append(name.strip())
+            else:
+                # Same project and service, another folder: another install's. Not ours.
+                logger.info(f"end_one_shot(): {name.strip()} belongs to {folder.strip()}; left")
+        if not running:
+            if settled:
+                if killed:
+                    logger.info(f"end_one_shot(): {', '.join(killed)} ended")
+                return None
+            # One more look a settle later, after a kill too: a create the daemon
+            # received before a Stop can finish after this look (T321's bound,
+            # Codex's adversarial reviews).
+            settled = True
+            time.sleep(container_end.LATE_CREATE_SETTLE)
+            continue
+        settled = False
+        fresh = [name for name in running if name not in killed]
+        if fresh:
+            # Each container is killed once; one that appears later (a create the
+            # daemon finished late) is killed when it is first seen.
+            logger.warning(f"end_one_shot(): {', '.join(fresh)} still running; killing")
+            killed = (*killed, *fresh)
+            _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+        if time.monotonic() >= deadline:
+            return OneShotLeft(
+                tuple(running),
+                f"it was still running {ONE_SHOT_END_SECONDS:g} s after it was told to stop",
+            )
+        time.sleep(_ONE_SHOT_POLL_SECONDS)
 
 
 _MYSQL_ERROR = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
@@ -5648,6 +5808,7 @@ def run_attached(
     cancel: threading.Event | None = None,
     merge_stderr: bool = False,
     env: Mapping[str, str] | None = None,
+    on_cancel: Callable[[], object] | None = None,
 ) -> AttachedRun:
     """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
@@ -5707,6 +5868,12 @@ def run_attached(
     `native.build_cancel_note()` and its neighbours. `repair_import()`
     deliberately passes no cancel at all; see there.
 
+    `on_cancel`, when given, is called once, on the watcher's thread, right after
+    the cancel has ended the CLI: what else of the run must end with it (T539:
+    `run_one_shot()` ends its container, because a `compose up` sent one SIGTERM
+    stops it gracefully and slowly, and an orphaned compose held the importer
+    and the pipe for 46 s live).
+
     `merge_stderr` is for the build, whose entire progress output is stderr;
     see `runner.stream()`. `env` is the child's whole environment, None to
     inherit; for a WSL install it must already carry its `WSLENV`
@@ -5736,20 +5903,23 @@ def run_attached(
         return AttachedRun(missing.returncode, (missing.stderr,))
     live = sink
     ended_by_cancel = threading.Event()  # set when the watcher ended this run's CLI
+    after_cancel = _AfterCancel(on_cancel)
     try:
         # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
+        stream = runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
         with (
-            closing(
-                runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
-            ) as lines,
-            _ended_on_cancel(cancel, lines, ended_by_cancel),
+            closing(stream) as lines,
+            _ended_on_cancel(cancel, lines, ended_by_cancel, after_cancel),
         ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
+                    # A line came, so the CLI runs and has made what it makes: end that
+                    # with it, as the watcher would have (T539).
+                    after_cancel.once()
                     return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
                 # Colour codes off at the source (T214): this line goes to the
                 # screen, to Details through `tail` and to the log, and none of
@@ -5759,7 +5929,7 @@ def run_attached(
                 if live is not None:
                     try:
                         live(line)
-                    except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
+                    except Exception as exc:  # noqa: BLE001 - a dead sink keeps the child
                         logger.warning(f"the output sink stopped accepting lines: {exc}")
                         live = None
     except subprocess.CalledProcessError as exc:
@@ -5783,6 +5953,12 @@ def run_attached(
         # `follow_logs()` handles the same case one line above.
         logger.warning(f"{prefix[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    finally:
+        if cancel is not None and cancel.is_set():
+            # Once more, now that the CLI is gone (Codex review of 5b67822c): a CLI that
+            # had started could still create its container after the first ending, and a
+            # cancel set after the last line was seen by neither the read nor the watcher.
+            after_cancel.last()
     if ended_by_cancel.is_set():
         # Ended by the cancel and exited 0 all the same: `compose up` traps SIGTERM,
         # stops what it started and exits cleanly. Still the Stop (cold review of T526).
@@ -7594,11 +7770,40 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
     )
 
 
+class _AfterCancel:
+    """A cancelled run's `on_cancel`, run once, by whichever of its two paths sees the cancel
+    first: the watcher, once it has claimed the CLI, or the read, when a line arrives (T539)."""
+
+    def __init__(self, on_cancel: Callable[[], object] | None) -> None:
+        self._on_cancel = on_cancel
+        self._lock = threading.Lock()
+        self._done = on_cancel is None
+
+    def once(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+        self._call()
+
+    def last(self) -> None:
+        """After the run's CLI is gone: what it created after `once()` is ended too."""
+        if self._on_cancel is not None:
+            self._call()
+
+    def _call(self) -> None:
+        try:
+            self._on_cancel()  # type: ignore[misc]
+        except Exception as exc:  # noqa: BLE001 - the Stop goes on regardless
+            logger.warning(f"ending what a cancelled run left failed: {exc!r}")
+
+
 @contextmanager
 def _ended_on_cancel(
     cancel: threading.Event | None,
     stream: Generator[str, None, None],
     ended: threading.Event,
+    after_cancel: _AfterCancel | None = None,
 ) -> Iterator[None]:
     """While inside, a set `cancel` ends the docker CLI of `stream`, and nothing else (T303, T526).
 
@@ -7607,8 +7812,10 @@ def _ended_on_cancel(
     the CLI through `runner.end_stream()` -- the panel's own Stop, for this one
     stream -- and the read returns. One stream and not the thread's (Codex's
     adversarial review): a thread can hold an outer job's stream while it runs
-    this one, and a run's cancel is about the run. It keeps ending while it
-    watches, for a CLI the lazy stream starts a moment after the token was set.
+    this one, and a run's cancel is about the run. It claims the CLI once (T541),
+    and polls until it has: a claim made while the lazy stream is still starting
+    its CLI is held for it and ended as it starts (T546). `after_cancel` runs once
+    the claimed CLI exists, never before what it makes can exist.
     Ending the CLI does not end the container on Docker Desktop;
     `run_container()` does that next, by its name. `ended` is set once it has
     ended the CLI, so `run_attached()` reads the run as the Stop even when the
@@ -7622,8 +7829,13 @@ def _ended_on_cancel(
     def watch() -> None:
         while not done.is_set():
             if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
+                # Claimed first, so the run reads as the Stop however its CLI exits.
                 if runner.end_stream(stream):
                     ended.set()
+                # Only once the CLI has been claimed AND started: before it starts, what
+                # it is about to make does not exist yet (Codex review; a held claim, T546).
+                if after_cancel is not None and ended.is_set() and runner.stream_started(stream):
+                    after_cancel.once()
                 done.wait(_STOP_POLL_SECONDS)
 
     watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)

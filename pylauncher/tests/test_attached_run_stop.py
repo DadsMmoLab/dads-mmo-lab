@@ -190,3 +190,58 @@ def test_a_cli_the_cancel_ended_reads_as_cancelled_even_when_it_exits_zero(
         if worker.is_alive():
             runner.end_streams_started_on(worker.ident or 0)
         worker.join(timeout=HANG_BOUND)
+
+
+# A CLI that takes 2 s to stop on SIGTERM and writes one line per SIGTERM it gets.
+_SLOW_TO_STOP = (
+    "import signal, sys, time\n"
+    "def stop(*_a):\n"
+    "    open(sys.argv[1], 'a').write('TERM\\n')\n"
+    "    time.sleep(2)\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "print('#12 RUN cmake --build .', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a Windows Stop ends a job, not a signal")
+def test_a_cancel_signals_a_slow_to_stop_cli_once_and_then_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T541: the watcher claims the run once; its later polls wait for that ending.
+
+    It polled every 0.1 s and each poll claimed the CLI again: a new SIGTERM, a new
+    5 s SIGKILL timer, a new thread. `docker compose up` reads a second SIGTERM as
+    "force", so a compose stopping its containers cleanly was forced within 0.1 s.
+
+    Mutation this catches: `_end_chosen` claiming a child that a Stop already claimed.
+    """
+    said_term = tmp_path / "terms.txt"
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _SLOW_TO_STOP, str(said_term)),
+    )
+    said = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_attached([], tmp_path, sink=lambda line: said.set(), cancel=cancel)
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t541-once")
+    worker.start()
+    try:
+        assert said.wait(HANG_BOUND), "the child never printed its line"
+        cancel.set()
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the cancelled run did not return"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+        assert said_term.read_text().splitlines() == ["TERM"], said_term.read_text()
+    finally:
+        if worker.is_alive():
+            runner.end_streams_started_on(worker.ident or 0)
+        worker.join(timeout=HANG_BOUND)
