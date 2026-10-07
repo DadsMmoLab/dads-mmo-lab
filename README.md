@@ -36,6 +36,7 @@ spell out the settings the installer writes into existing config files.
 |---|---|---|
 | `core-patch/unbound-core-access.patch` | The AzerothCore core patch: 6 files (`Player.h`, `Player.cpp`, `PlayerQuest.cpp`, `PlayerStorage.cpp`, `Trainer.cpp`, `ConditionMgr.cpp`). It adds `Player::m_unboundClassMask` with `Get`/`SetUnboundClassMask()` and ORs it into the class checks for trainers, spells, quests, items and `CONDITION_CLASS`. The worldserver does not compile with `mod-unbound` unless this patch is applied. | `modules/mod-unbound/unbound-core-access.patch`, then `git apply` at the server root |
 | `modules/mod-unbound/src/` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped) and its loader `UnboundSystem_loader.cpp` (`Addmod_unboundScripts()`). AzerothCore picks a module up from its `src/` folder; the release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
+| `modules/mod-multiclass-summons/` | bdodroid's `mod-multiclass-summons` C++ module, used with permission (see Credits). It fixes Warlock, Mage and Death Knight pet and mount conflicts for multi-class characters and lets them field several guardians at once; playerbots are excluded at runtime. Its `data/sql/db-world/base/multiclass_summons.sql` registers the `spell_summon_pet_override` spell script on spells 688, 697, 712, 691, 30146, 70907, 70908, 46584 and 52150. The five files are the release's copy, byte-identical to `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915` (that commit's `README.md` was not part of the release and is not here). | `modules/mod-multiclass-summons/` |
 | `lua_scripts/` | The ALE (Eluna) Lua scripts: `unbound_mentor.lua` (the Mentor and the Mentor Stone), `unbound_addon_sync.lua` (the bridge to the client talent addon; it creates `unbound_character_talents` itself) and `unbound_talent_data.lua` (talent data). On a successful start the world log prints `[UNBOUND] Prereq map built.` | `env/dist/etc/modules/lua_scripts/` |
 | `sql/world/` | SQL for the world database (`acore_world`). | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
 | `sql/characters/` | SQL for the characters database (`acore_characters`). | `modules/mod-unbound/data/sql/db-characters/` |
@@ -52,6 +53,10 @@ There is no auth-database SQL in this release.
 The installer pipes each file into `mysql` in this order (it does not rely on AzerothCore's
 own updater for module SQL). Within each folder, file-name order is the installer's order.
 
+0. World: `modules/mod-multiclass-summons/data/sql/db-world/base/multiclass_summons.sql`,
+   applied when the installer stages that module. It sits where AzerothCore's updater also
+   applies module SQL at start-up, and it is safe to re-run (`DELETE` then `INSERT` of its
+   own rows).
 1. World: `01_unbound_world.sql`, `02_fix_catalog_req_level.sql`, `03_creation_gift_spells.sql`,
    `04_catalog_druid_forms.sql`, `05_individual_purchase_prereqs.sql`,
    `06_universal_skill_access.sql`, `07_mentor_stone.sql`, `08_catalog_additions.sql`,
@@ -77,14 +82,15 @@ After the first start, a GM spawns the Mentor once in game with `.npc add 900001
   (`git apply --check` passes).
 - **mod-ale** (the Lua engine): `azerothcore/mod-ale` at
   `1cb86c9600260c3731c96dc3c98d25b4fc3f2153`, the commit the installer clones.
-- **mod-multiclass-summons**, by bdodroid: not on this branch, because its repository has no
-  license. The release embeds an exact copy of
-  `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915`; a server clones
-  it from there at that commit into `modules/mod-multiclass-summons/`. Its own SQL registers
-  the `spell_summon_pet_override` spell script.
 
 ## Credits
 
-Wrath Unbound is by DaddyCool, Dad's MMO Lab. `UnboundSpellbook/DATA_CREDITS.txt` credits
+Wrath Unbound is by DaddyCool, Dad's MMO Lab.
+
+`modules/mod-multiclass-summons/` is by bdodroid, used with permission:
+<https://github.com/bdodroid/mod-multiclass-summons>, commit
+[`6001603bfe038204b73d0d5878ac3e1f24dda915`](https://github.com/bdodroid/mod-multiclass-summons/commit/6001603bfe038204b73d0d5878ac3e1f24dda915).
+
+`UnboundSpellbook/DATA_CREDITS.txt` credits
 the trainer data to "What's Training? WotLK" by anhility (MIT) and the talent ranks to
 Talented_WoTLK by bkader.
