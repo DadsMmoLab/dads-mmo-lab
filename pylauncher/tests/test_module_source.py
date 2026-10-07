@@ -22,6 +22,7 @@ clause inside another one:
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -535,3 +536,79 @@ def test_copy_folder_refuses_a_source_inside_the_destination(tmp_path: Path) -> 
         )
 
     assert not dest.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param("conf/mod_my_thing.conf.dist", id="a conf template"),
+        pytest.param("src/deep/down/secret.cpp", id="deep down"),
+        pytest.param("data/sql/db-world/home", id="a folder"),
+    ],
+)
+def test_copy_folder_refuses_a_link_before_anything_is_replaced(tmp_path: Path, link: str) -> None:
+    """T530: a link in the chosen folder is never copied through, into the server's modules.
+
+    `copytree` follows a symlink and copies what it points to, so a folder holding
+    `conf/x.conf.dist -> ~/.ssh/id_rsa` (a repository the player cloned with git
+    keeps its links) put the private key into `modules/<id>`, where the install's
+    conf step and the build both read it. Refused before the old copy is removed,
+    naming the link; a link inside `.git` is git's own and never copied.
+    """
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_bytes(b"the player's private key")
+    src = tmp_path / "mod-my-thing"
+    for folder in ("conf", "src", "data/sql/db-world", ".git"):
+        (src / folder).mkdir(parents=True)
+    (src / "src" / "kept.cpp").write_text("new\n", encoding="utf-8")
+    os.symlink("objects", src / ".git" / "a-link-git-keeps")
+    where = src / link
+    where.parent.mkdir(parents=True, exist_ok=True)
+    target = home / ".ssh" if link.endswith("home") else home / ".ssh" / "id_rsa"
+    os.symlink(target, where, target_is_directory=target.is_dir())
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+    dest.mkdir(parents=True)
+    (dest / "earlier.cpp").write_text("the copy made before\n", encoding="utf-8")
+
+    message = _refused(lambda: module_source.copy_folder(src, dest))
+
+    assert str(where) in message and str(target) in message, message
+    assert message.endswith(NOTHING_CHANGED)
+    assert sorted(p.name for p in dest.iterdir()) == ["earlier.cpp"]
+    assert (home / ".ssh" / "id_rsa").read_bytes() == b"the player's private key"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_copy_folder_stops_at_a_link_made_after_the_look(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The belt: the copy itself never goes through a link, even one the look did not see."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "secret").write_bytes(b"secret")
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    os.symlink(home / "secret", src / "src" / "secret.cpp")
+    monkeypatch.setattr(module_source, "_first_link", lambda _src: None)
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+
+    with pytest.raises((DeriveError, OSError)):
+        module_source.copy_folder(src, dest)
+
+    assert not (dest / "src" / "secret.cpp").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_copy_folder_stops_in_a_folder_that_became_a_link_after_its_parent_was_listed(
+    tmp_path: Path,
+) -> None:
+    """`copytree` enters a child folder by its path after the parent's look; the folder is asked."""
+    home = tmp_path / "home"
+    home.mkdir()
+    src = tmp_path / "mod-my-thing"
+    src.mkdir()
+    os.symlink(home, src / "swapped", target_is_directory=True)
+    with pytest.raises(OSError, match="became a link"):
+        module_source._git_and_links(str(src / "swapped"), ["secret"])
