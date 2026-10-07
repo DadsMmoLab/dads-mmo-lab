@@ -6660,7 +6660,7 @@ def test_a_game_that_knows_where_its_levels_live_gets_the_accounts_surface(
 
 @pytest.mark.parametrize("game", [e.id for e in load_catalog().games])
 def test_the_gm_level_controls_offer_what_this_tree_actually_accepts(
-    game: str, tmp_path: Path
+    qapp: object, game: str, tmp_path: Path
 ) -> None:
     """A hard-coded 0-to-3 was drawn for every game until 8.3d.
 
