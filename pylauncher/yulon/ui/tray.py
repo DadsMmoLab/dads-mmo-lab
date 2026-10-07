@@ -579,28 +579,57 @@ class YulonTray(QObject):
     def open_window(self) -> None:
         self._bring_forward(self.window)
 
+    def _current(self, view: Any) -> Any:
+        """The server's tab as it is NOW, found by its (game, server folder), or None.
+
+        An action can outlive the tab it was built for: a menu left open while
+        the tab was rebuilt or removed (adversarial review). Pressing on that
+        object would act on a superseded tab or a deleted one, so every action
+        looks its server up again when it runs.
+        """
+        try:
+            key = (view.entry.id, view.services.controller.server_dir)
+        except (AttributeError, RuntimeError):
+            return None
+        for live in self.views():
+            if (live.entry.id, live.services.controller.server_dir) == key:
+                return live
+        return None
+
     def start(self, view: Any) -> None:
         """Start one server through its own tab's Start: the same job, guards and badge."""
-        view.start_server()
+        live = self._current(view)
+        if live is None:
+            self.open_window()
+            return
+        live.start_server()
 
     def play(self, view: Any) -> None:
         """Open this server's client launcher window, the sidebar ▶'s way (T187)."""
+        live = self._current(view)
         opener = getattr(self.window, "yulon_open_launcher", None)
-        if opener is not None:
-            opener(view.entry.id, view.services.controller.server_dir)
+        if live is None or opener is None:
+            self.open_window()
+            return
+        opener(live.entry.id, live.services.controller.server_dir)
 
     def dashboard(self, view: Any, kind: str) -> None:
         """The bot dashboard entry: open it (the Bots tab's own Open), or go to its switch."""
+        live = self._current(view)
+        if live is None:
+            self.open_window()
+            return
         if kind == "open":
-            view.open_bot_dashboard()
+            live.open_bot_dashboard()
         elif kind == "switch":
-            self.show_server(view)
-            view.show_bot_dashboard_switch()
+            self.show_server(live)
+            live.show_bot_dashboard_switch()
 
     def show_server(self, view: Any) -> None:
+        live = self._current(view)
         shower = getattr(self.window, "yulon_show_server_tab", None)
-        if shower is not None:
-            shower(view.entry.id, view.services.controller.server_dir)
+        if live is not None and shower is not None:
+            shower(live.entry.id, live.services.controller.server_dir)
         else:  # pragma: no cover - the real window always has one
             self.open_window()
 

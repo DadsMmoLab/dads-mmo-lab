@@ -192,3 +192,34 @@ def test_the_cards_dashboard_entry_is_never_cut_short(tray: YulonTray, window: F
     finally:
         app.setStyleSheet("")
         app.setPalette(palette)
+
+
+def test_an_open_menus_actions_reach_the_tab_there_is_now(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Adversarial review [high]: a menu left open while a tab is rebuilt kept the old tab
+    and pressed on it; actions resolve the server's current tab when they run."""
+    from PySide6.QtWidgets import QApplication
+
+    old = _add(window, TortoiseView("running", switch_on=True))
+    menu = tray.build_menu()  # open on screen, so not rebuilt under the player
+    window.yulon_controllers.remove(old)
+    new = TortoiseView("running", switch_on=True)
+    _add(window, new)
+    old.deleteLater()
+    QApplication.processEvents()
+    _dash_action(menu).trigger()
+    assert new.opened_dashboard == 1
+
+
+def test_an_action_for_a_server_that_is_gone_opens_yulon_instead(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    gone = _add(window, TortoiseView("running", switch_on=True))
+    menu = tray.build_menu()
+    window.yulon_controllers.remove(gone)
+    window.servers_changed.emit()
+    window.hide()
+    _dash_action(menu).trigger()
+    assert gone.opened_dashboard == 0
+    assert window.isVisible()
