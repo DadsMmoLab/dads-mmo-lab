@@ -102,8 +102,10 @@ def test_each_tool_container_is_named_by_yulon() -> None:
     assert argv[:4] == ["run", "--rm", "--name", "yulon-extract-0123456789ab"]
     assert argv.index("--name") < argv.index(SPEC.image)
     # T321: what `run_container()` runs is the same container, created and then started.
+    # Labelled with whose Yu'lon made it (cold review); SPEC writes nowhere, so no writes label.
     created = SPEC.to_create_argv(name="yulon-extract-0123456789ab")
-    assert created == ["create", *argv[1:]]
+    owner = ["--label", f"{docker.OWNER_LABEL}={docker.owner_id()}"]
+    assert created == ["create", *owner, *argv[1:]]
 
 
 def test_a_tool_container_is_created_before_it_is_started(
@@ -667,27 +669,35 @@ def test_a_tool_docker_would_not_start_and_would_not_remove_is_still_known_to_wr
     assert docker.tool_containers_writing_into(out) == (name,)
 
 
-def test_a_tool_container_another_yulon_made_on_the_same_daemon_is_not_counted(
+def test_a_tool_container_another_yulon_made_on_the_same_daemon_counts_only_for_its_folder(
     fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
 ) -> None:
     """Cold review: a second Linux user, or a Windows and a WSL Yu'lon, share one daemon. A
-    running tool labelled by another Yu'lon is that one's live run, not one left by ours; an
-    unlabelled one (made before the label) still counts, so one user is no less guarded."""
+    running tool labelled by another Yu'lon is that one's live run, not one left by ours, and
+    it is left out -- unless it writes into this very folder (Codex review of that fix: two
+    Yu'lons may share a server folder), or says nothing of where it writes. An unlabelled one
+    (made before the labels) still counts, so one user is no less guarded."""
     _cli, state = fake_docker
+    out = tmp_path / "data"
     boxes, labels = state / "containers", state / "labels"
     labels.mkdir(exist_ok=True)
-    for name, owner in (
-        ("yulon-extract-aaaaaaaaaaaa", "someone-else"),
-        ("yulon-extract-bbbbbbbbbbbb", docker.owner_id()),
+    here, elsewhere = docker.folder_label(out), docker.folder_label(tmp_path / "other")
+    for name, given in (
+        ("yulon-extract-aaaaaaaaaaaa", ["yulon.owner=someone-else", f"yulon.writes={elsewhere}"]),
+        ("yulon-extract-bbbbbbbbbbbb", [f"yulon.owner={docker.owner_id()}"]),
         ("yulon-extract-cccccccccccc", None),
+        ("yulon-extract-dddddddddddd", ["yulon.owner=someone-else", f"yulon.writes={here}"]),
+        ("yulon-extract-eeeeeeeeeeee", ["yulon.owner=someone-else"]),
     ):
         (boxes / name).write_text("4242", encoding="utf-8")
-        if owner is not None:
-            (labels / name).write_text(f"{docker.OWNER_LABEL}={owner}", encoding="utf-8")
+        if given is not None:
+            (labels / name).write_text("\n".join(given), encoding="utf-8")
 
-    assert docker.tool_containers_writing_into(tmp_path) == (
+    assert docker.tool_containers_writing_into(out) == (
         "yulon-extract-bbbbbbbbbbbb",
         "yulon-extract-cccccccccccc",
+        "yulon-extract-dddddddddddd",
+        "yulon-extract-eeeeeeeeeeee",
     )
 
 
@@ -695,15 +705,22 @@ def test_a_tool_container_is_created_with_this_yulons_owner_label(
     fake_docker: tuple[Path, Path], tmp_path: Path
 ) -> None:
     _cli, state = fake_docker
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
 
     def interrupted(_line: str) -> None:
         raise KeyboardInterrupt  # the create is what is read; the fake tool need not run on
 
     with pytest.raises(KeyboardInterrupt):
-        docker.run_container(SPEC, sink=interrupted, cancel=None)
+        docker.run_container(spec, sink=interrupted, cancel=None)
 
     (create,) = [call for call in fake_calls(state) if call.startswith("create ")]
     assert f"--label {docker.OWNER_LABEL}={docker.owner_id()}" in create, create
+    labelled = docker.folder_label(out)
+    assert f"--label {docker.WRITES_LABEL}={labelled}" in create, create
 
 
 def test_another_yulon_on_this_machine_has_another_owner(
@@ -736,4 +753,4 @@ def test_a_run_of_this_app_changing_while_docker_is_asked_is_not_called_left(
 
     monkeypatch.setattr(docker, "_docker", ps)
 
-    assert docker.tool_containers_left_running() == ()
+    assert docker.tool_containers_left_running(tmp_path) == ()

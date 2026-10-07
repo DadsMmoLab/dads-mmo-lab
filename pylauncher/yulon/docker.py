@@ -6706,12 +6706,11 @@ class ContainerRun:
         it with `docker start -a <name>`, so the name exists before anything can be
         stopped (`container_end`'s module docstring has why).
         """
-        return [
-            "create",
-            "--label",
-            f"{OWNER_LABEL}={owner_id()}",
-            *self.to_argv(name=name)[1:],
-        ]
+        writes = [folder_label(mount.host) for mount in self.mounts if not mount.read_only]
+        labels = ["--label", f"{OWNER_LABEL}={owner_id()}"]
+        if writes:
+            labels += ["--label", f"{WRITES_LABEL}={','.join(writes)}"]
+        return ["create", *labels, *self.to_argv(name=name)[1:]]
 
     def to_detached_argv(self, name: str) -> list[str]:
         """`to_argv()` for a job that outlives this process: `-d --name <name>`, and NO `--rm`.
@@ -6955,11 +6954,11 @@ def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
             _ended(name)
         else:
             still.append(name)
-    return tuple(still) + tool_containers_left_running()
+    return tuple(still) + tool_containers_left_running(folder)
 
 
-def tool_containers_left_running() -> tuple[str, ...]:
-    """Running extraction tool containers this process did not start, by name.
+def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
+    """Running extraction tool containers this process did not start that may write `folder`.
 
     Codex review of the stop-paths branch: `_UNENDED` is this process's memory and
     goes with it. A container whose removal Docker refused, followed by the player
@@ -6971,7 +6970,9 @@ def tool_containers_left_running() -> tuple[str, ...]:
     read: a bind's source is spelled the daemon's way (a Docker Desktop VM path on
     Windows), so a tool nobody here started is counted as writing into any server's
     `data/`, the safe side. Another Yu'lon's -- a second user, or a WSL one beside
-    Windows, on the same daemon -- is its own live run and is left out (cold review).
+    Windows, on the same daemon -- is its own live run and is left out (cold review),
+    unless its `WRITES_LABEL` names `folder` or names nothing: two Yu'lons may share a
+    server folder, and that one may be writing into it (Codex review of that fix).
 
     A Docker that does not answer adds none. The guard's question is "could a tool
     still be writing?", and a daemon that is down runs nothing; the press asks Docker
@@ -6985,7 +6986,7 @@ def tool_containers_left_running() -> tuple[str, ...]:
             "--filter",
             f"name={TOOL_CONTAINER_PREFIX}",
             "--format",
-            f'{{{{.Names}}}}\t{{{{.Label "{OWNER_LABEL}"}}}}',
+            f'{{{{.Names}}}}\t{{{{.Label "{OWNER_LABEL}"}}}}\t{{{{.Label "{WRITES_LABEL}"}}}}',
         ],
         timeout=_ASK_AGAIN_TIMEOUT,
     )
@@ -6996,21 +6997,38 @@ def tool_containers_left_running() -> tuple[str, ...]:
     # started, while Docker answered is this app's own and not one left behind.
     with _UNENDED_LOCK:
         known |= set(_UNENDED)
-    mine = owner_id()
+    mine, here = owner_id(), folder_label(folder)
     left = []
     for row in proc.stdout.splitlines():
-        name, _tab, owner = row.strip().partition("\t")
+        name, owner, writes = ([*row.strip().split("\t"), "", ""])[:3]
         if not name.startswith(TOOL_CONTAINER_PREFIX) or name in known:
             continue
-        # Another Yu'lon's live run is not ours to count. One with no label was made
-        # before the label was, so it still counts: one user is no less guarded.
-        if owner.strip() and owner.strip() != mine:
+        # Another Yu'lon's live run is not ours to count, unless it says it writes
+        # here or says nothing of where. One with no label was made before the label
+        # was, so it still counts: one user is no less guarded.
+        others = owner.strip() and owner.strip() != mine
+        if others and writes.strip() and here not in writes.strip().split(","):
             continue
         left.append(name)
     left.sort()
     for name in left:
         logger.warning(f"the extraction tool container {name} was left running by an earlier run")
     return tuple(left)
+
+
+WRITES_LABEL = "yulon.writes"
+"""The label `docker create` puts on an extraction tool container: the folders it writes,
+each as `folder_label()`, comma-separated (Codex review of the owner label)."""
+
+
+def folder_label(folder: Path) -> str:
+    """A folder as `WRITES_LABEL` names it: a hash of its normalised path on this host.
+
+    Hashed rather than spelled, so a label never carries a player's paths, and so two
+    spellings of one folder (case on Windows, a trailing separator) name it once.
+    """
+    path = os.path.normcase(os.path.abspath(folder))
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
 
 
 OWNER_LABEL = "yulon.owner"

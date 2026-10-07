@@ -79,10 +79,12 @@ if args[:1] == ["create"]:
         sys.exit(125)
     box.write_text("created", encoding="utf-8")
     if "--label" in args:
-        # Cold review of the stop-paths branch: whose Yu'lon made it, read back by `ps`.
+        # Cold review of the stop-paths branch: whose Yu'lon made it and which folders it
+        # writes, one `key=value` per line, read back by `ps`.
         labels = state / "labels"
         labels.mkdir(exist_ok=True)
-        (labels / name).write_text(args[args.index("--label") + 1], encoding="utf-8")
+        given = [args[i + 1] for i, arg in enumerate(args) if arg == "--label"]
+        (labels / name).write_text("\\n".join(given), encoding="utf-8")
     sys.stdout.write(name + "-id\\n")
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
@@ -110,8 +112,10 @@ if args[:1] == ["ps"]:
     for box in sorted((state / "containers").iterdir()):
         if part in box.name and box.read_text(encoding="utf-8") != "created":
             label = state / "labels" / box.name
-            owner = label.read_text(encoding="utf-8").split("=", 1)[-1] if label.exists() else ""
-            sys.stdout.write(box.name + "\\t" + owner + "\\n")
+            given = label.read_text(encoding="utf-8").splitlines() if label.exists() else []
+            values = dict(line.split("=", 1) for line in given if "=" in line)
+            owner, writes = values.get("yulon.owner", ""), values.get("yulon.writes", "")
+            sys.stdout.write(box.name + "\\t" + owner + "\\t" + writes + "\\n")
     sys.exit(0)
 if args[:1] == ["inspect"]:
     # `docker.container_exit()`'s question (T303): a container still there is running.
