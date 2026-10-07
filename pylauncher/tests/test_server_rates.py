@@ -245,7 +245,7 @@ WOTLK_RATES = (
     "Rate.Drop.Money                 = 5\n"
 )
 TBC_RATES = (
-    # cmangos/mangos-tbc @75f9ae68, mangosd.conf.dist.in:1560-1594 (an excerpt)
+    # cmangos/mangos-tbc @15b6ddb4 (conf and World.cpp byte-identical to 75f9ae68), mangosd.conf.dist.in:1560-1594 (an excerpt)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -305,7 +305,7 @@ TORTOISE_RATES = (
     "Rate.Reputation.Gain = 11\n"
 )
 CENTURION_RATES = (
-    # thomasjteachey/TrinityCore112 @faac5fc9, worldserver.conf.dist:2492-2520,2585,2606
+    # thomasjteachey/TrinityCore112 @56fe34fa, worldserver.conf.dist:2525-2553,2618,2639
     "Rate.Drop.Item.Poor             = 6\n"
     "Rate.Drop.Item.Normal           = 7\n"
     "Rate.Drop.Item.Uncommon         = 8\n"

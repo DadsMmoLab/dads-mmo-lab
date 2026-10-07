@@ -27,8 +27,8 @@ wow-tortoise   etc/mangosd.conf             tortoise-wow/tortoise-wow:
                                               `mangosd.conf.dist.in:1702-1716,1744,1776`;
                                               `World.cpp:999-1012,1042`
 wow-centurion  etc/worldserver.conf         thomasjteachey/TrinityCore112:
-                                              `worldserver.conf.dist:2492-2520,2585,2606`;
-                                              `World/World.cpp:569-582,593,620`
+                                              `worldserver.conf.dist:2525-2553,2618,2639`;
+                                              `World/World.cpp:570-583,594,621`
 =============  ===========================  ======================================
 
 All eleven keys exist under the same names on all five forks, and every fork's

@@ -275,9 +275,12 @@ T500 (2026-10-06) moved them again, to upstream's heads of that day:
 `mangos-tbc` 75f9ae68 -> 15b6ddb4, `tbc-db` ba4755de -> 86672361, the shared
 `playerbots` bc67a2eb -> 76b97537; `mangos-classic` 8ec338a1 and `classic-db`
 ec4f5961 were still upstream's heads and did not move. None of the three
-touches `contrib/`, a `.conf.dist`, `sql/` of the core, CMake or `InstallFullDB.sh`;
-`tbc-db` adds `Updates/0035`-`0043`, and `playerbots` changes the hunters' boot
-enchant in its TBC seed.
+touches `contrib/`, `mangosd.conf.dist.in`, `sql/` of the core, CMake or
+`InstallFullDB.sh`; `tbc-db` adds `Updates/0035`-`0043`, and `playerbots` changes
+the hunters' boot enchant in its TBC seed. Its `aiplayerbot.conf.dist.in` files
+changed comments only, among them the commented default of
+`AiPlayerbot.SyncLevelNoPlayer` (1 -> 5); that line is still the
+`# Key =` shape Vanilla's `match_commented` writes its own value into.
 The gate was one fresh TBC and one fresh Vanilla install through the app's
 engine on `yulon-fedora-gate`, each read back from its own `src/` checkout.
 """
