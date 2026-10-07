@@ -1587,7 +1587,7 @@ _SQL_TOKENS = re.compile(
     r'|"(?:[^"\\]|\\.|"")*"?'
     r"|`[^`]*`?"
     r"|--(?=[\s\x00-\x1f]|$)[^\n]*|#[^\n]*"
-    r"|/\*![0-9]*|\*/"
+    r"|/\*M?![0-9]*|\*/"
     r"|/\*.*?(?:\*/|$)"
     r"|[^'\"`#/*-]+"
     r"|.",
@@ -1601,14 +1601,15 @@ the comment's and a `--` in a string is the string's (Codex, T531)."""
 def _code_only(text: str) -> tuple[str, bool]:
     """The SQL MySQL would execute, and whether it holds an executable comment: string
     bodies emptied, comments made spaces, an executable comment's body kept (only its
-    `/*!NNNNN` and `*/` go). A `/*!` inside a string or a plain comment is text."""
+    `/*!NNNNN` or MariaDB's `/*M!NNNNN`, and `*/`, go). A marker inside a string or a
+    plain comment is text."""
     parts: list[str] = []
     executable = False
     for match in _SQL_TOKENS.finditer(text):
         token = match.group(0)
         if token[0] in "'\"":
             parts.append(" '' ")
-        elif token.startswith("/*!"):
+        elif token.startswith(("/*!", "/*M!")):
             executable = True
             parts.append(" ")
         elif token == "*/":

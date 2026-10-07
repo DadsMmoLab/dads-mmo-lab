@@ -807,6 +807,7 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         ("SET @v=@v--1; UPDATE characters.foo SET a=1;\n", ("characters",)),
         ("UPDATE characters . quest SET a=1;\n", ("characters",)),
         ("UPDATE `realmd` .`account` SET a=1;\n", ("realmd",)),
+        ("/*M!100100 UPDATE characters.foo SET a=1 */;\n", ("characters", "an executable comment")),
     ],
     ids=[
         "apostrophe-in-dash-comment",
@@ -817,6 +818,7 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         "minus-minus-is-not-a-comment",
         "spaced-dot",
         "spaced-backticked-dot",
+        "mariadb-executable-comment",
     ],
 )
 def test_comments_are_separators_and_never_hide_a_statement(
