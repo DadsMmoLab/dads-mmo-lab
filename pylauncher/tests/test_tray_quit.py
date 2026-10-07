@@ -479,3 +479,42 @@ def test_the_first_close_note_sits_over_the_window(
     monkeypatch.setattr(tray_module, "note_box", spy)
     tray.choose_note()
     assert seen == [window]
+
+
+def test_a_stop_that_never_ends_ends_the_wait_after_its_deadline(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """Adversarial review [high] on e76f5175: no status and no failure ever came; the wait
+    now has a deadline past the Stop's own (docker.STOP_PROCESS_DEADLINE_SECONDS)."""
+    up = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    told: list[str] = []
+    tray.tell = lambda title, text: told.append(text)  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: "stop"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert up.realm_badge.status == "stopping"
+    assert tray._stop_deadline is not None and tray._stop_deadline.isActive()
+    assert tray._stop_deadline.interval() > tray_module.docker.STOP_PROCESS_DEADLINE_SECONDS * 1000
+    tray._stop_deadline.timeout.emit()
+    assert quits == []
+    assert told and "WotLK" in told[0]
+    tray.choose_quit = lambda count: "leave"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert quits == [1], "the wait did not end"
+
+
+def test_a_refused_application_quit_does_not_turn_close_to_tray_off(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Adversarial review [medium]: Cmd+Q refused by the busy guard latched the quit flag,
+    and every later close quit instead of hiding."""
+    from PySide6.QtCore import QEvent
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    tray.note_seen = True
+    tray.eventFilter(app, QEvent(QEvent.Type.Quit))
+    assert not tray.keeping  # the quit is let through while it is being decided
+    QApplication.processEvents()  # the quit was refused: the loop runs on
+    assert tray.keeping
+    assert not _close_by_hand(window)
+    assert window.isHidden()

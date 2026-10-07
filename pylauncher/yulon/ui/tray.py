@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import autostart, ui_settings
+from yulon import autostart, docker, ui_settings
 from yulon.log import get_logger
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
@@ -65,6 +65,9 @@ STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention"
 """The dot per icon state: the theme's online green, amber accent and danger red."""
 
 NOTE_NEVER = "never"
+
+STOP_WAIT_MS = (docker.STOP_PROCESS_DEADLINE_SECONDS + 300) * 1000
+"""How long Stop-then-quit waits for its Stops: their own deadline and five minutes."""
 
 FLYOUT_REFRESH_MS = 5000
 """How often an open flyout re-reads the tabs' counts: the Server tab's own poll."""
@@ -319,6 +322,7 @@ class YulonTray(QObject):
         self._was_quit_on_last = True
         self.flyout: TrayFlyout | None = None
         self._flyout_timer: QTimer | None = None
+        self._stop_deadline: QTimer | None = None
         self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
@@ -772,6 +776,15 @@ class YulonTray(QObject):
         for view in running:
             view.stop_server()
         logger.info(f"tray: stopping {len(running)} server(s), then quitting")
+        # A Stop's own job ends by `docker.STOP_PROCESS_DEADLINE_SECONDS`; a wait
+        # past that and a margin is a Stop that will not report (adversarial
+        # review): the wait ends, Yu'lon stays open and says so.
+        if self._stop_deadline is None:
+            self._stop_deadline = QTimer(self)
+            self._stop_deadline.setSingleShot(True)
+            self._stop_deadline.setInterval(STOP_WAIT_MS)
+            self._stop_deadline.timeout.connect(self._stop_wait_expired)
+        self._stop_deadline.start()
         self._a_stop_moved("")
 
     @Slot(str)
@@ -806,6 +819,24 @@ class YulonTray(QObject):
             "see why; Quit tray… asks again.",
         )
 
+    @Slot()
+    def _stop_wait_expired(self) -> None:
+        if not self._stopping:
+            return
+        left = [view for view in self._stopping if shiboken6.isValid(view)]
+        self._stop_waiting_to_quit()
+        names = ", ".join(self._title_of(view) for view in left) or "a server"
+        logger.warning(f"tray: no stop before quitting reported in time: {names}")
+        if left:
+            self.show_server(left[0])
+        else:  # pragma: no cover - only live tabs are waited on
+            self.open_window()
+        self.tell(
+            "Yu'lon did not quit",
+            f"{names} did not report its Stop in time. Yu'lon stays open so you can see "
+            "why; Quit tray… asks again.",
+        )
+
     @Slot(str)
     def _a_stop_failed(self, message: str) -> None:
         sender = self.sender()
@@ -830,6 +861,8 @@ class YulonTray(QObject):
                 except (RuntimeError, TypeError):  # pragma: no cover - already gone
                     pass
         self._stopping = []
+        if self._stop_deadline is not None:
+            self._stop_deadline.stop()
 
     # ------------------------------------------------- started at sign-in
 
@@ -1035,8 +1068,12 @@ class YulonTray(QObject):
         kind = event.type()
         if kind is QEvent.Type.Quit:
             # Qt 6 closes every window when the application is asked to quit
-            # (macOS Cmd+Q, a session ending): that close is not a hide.
+            # (macOS Cmd+Q, a session ending): that close is not a hide. Only
+            # while it is decided: a quit the busy guard refused leaves the
+            # loop running, and the next turn of it puts close-to-tray back
+            # (adversarial review).
             self._quitting = True
+            QTimer.singleShot(0, self, self._quit_was_refused)
             return False
         if watched is self.window and kind is QEvent.Type.Close:
             if not self.keeping:
@@ -1068,6 +1105,10 @@ class YulonTray(QObject):
             return "got_it"
         finally:
             box.deleteLater()
+
+    @Slot()
+    def _quit_was_refused(self) -> None:
+        self._quitting = False
 
     def hide_window(self) -> None:
         """Into the tray. The window's jobs, pollers and launchers carry on."""
