@@ -22,14 +22,23 @@
 #
 # The four targets are the multi-stage Dockerfile's stages in the cloned
 # checkout; the context is the server dir, which IS that checkout.
+#
+# `x-yulon-buildx-group` (T525): the world and auth servers read exactly the
+# same files from the context (the `build` stage's sources and the runtime's
+# entrypoint), so they build on one buildx config and keep ONE cached copy of
+# that context between them instead of one each. Only targets whose reads are
+# identical may share a group: a shared copy is synced to whatever the current
+# target reads. Compose ignores `x-` keys; `docker.build_staged()` reads it.
 services:
   ac-worldserver:
+    x-yulon-buildx-group: server-source
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile
       target: worldserver
 
   ac-authserver:
+    x-yulon-buildx-group: server-source
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile
