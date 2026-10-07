@@ -337,9 +337,10 @@ class AzerothCoreInstaller(StagedInstaller):
             yield carried.NONE_CARRIED
             return
         patches = carried.loaded(self.entry.name, self.installers_root, specs)
-        if carried.would_change(patches, ctx.server_dir) and self.build_would_be_skipped(ctx):
+        changing = carried.would_change(patches, ctx.server_dir)
+        if changing is not None and self.build_would_be_skipped(ctx):
             raise InstallerError(
-                f"{self.entry.name} was built before {patches[0][0].file} was carried, so this "
+                f"{self.entry.name} was built before {changing.file} was carried, so this "
                 "press would patch its source and not compile it, and the server would run "
                 "without the change. Nothing was changed. Press "
                 f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}: it "

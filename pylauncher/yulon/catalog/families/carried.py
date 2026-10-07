@@ -66,13 +66,14 @@ def _where(spec: SourcePatch) -> str:
     return "the server's source" if spec.source == "." else spec.source
 
 
-def would_change(patches: Sequence[tuple[SourcePatch, str]], server_dir: Path) -> bool:
-    """Would applying these write any file? A dry resolution; refuses like the real one."""
-    return any(
-        result.applied
-        for spec, text in patches
-        for result in resolve(spec, text, server_dir, dry_run=True)
-    )
+def would_change(
+    patches: Sequence[tuple[SourcePatch, str]], server_dir: Path
+) -> SourcePatch | None:
+    """The first patch that would write a file, resolved dry; None when all are on disk."""
+    for spec, text in patches:
+        if any(result.applied for result in resolve(spec, text, server_dir, dry_run=True)):
+            return spec
+    return None
 
 
 def apply_lines(
