@@ -119,3 +119,18 @@ def test_a_tray_turned_off_says_nothing(tray: YulonTray, window: FakeWindow) -> 
     window.hide()
     view.realm_badge.set_status("loop")
     assert _messages(tray) == []
+
+
+def test_a_world_that_stops_under_a_running_database_is_said(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """The world crashed, the database and login are still up: the badge reads PARTLY UP."""
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.hide()
+    view.realm_badge.set_status("partial")
+    assert _messages(tray) == [
+        (
+            "WotLK is only partly up",
+            "Part of it stopped, and Yu'lon did not stop it. Click to see its Server tab.",
+        )
+    ]

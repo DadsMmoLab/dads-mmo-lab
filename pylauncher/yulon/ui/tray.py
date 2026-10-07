@@ -433,6 +433,13 @@ class YulonTray(QObject):
                 )
             else:
                 self.notify(view, f"{title} is restarting", "Click to see its Server tab.")
+        elif realm_tone(before) == "up" and now == "partial":
+            # The world crashed under a database and login that are still up.
+            self.notify(
+                view,
+                f"{title} is only partly up",
+                "Part of it stopped, and Yu'lon did not stop it. Click to see its Server tab.",
+            )
         elif realm_tone(before) == "up" and realm_tone(now) == "down":
             self.notify(
                 view,
@@ -900,12 +907,18 @@ OWN_DIALOG = "yulonTrayDialog"
 
 def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit tray… with `count` servers running: leave them (default), stop them, or cancel."""
-    noun = "server is" if count == 1 else "servers are"
     box = FittedMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
-    box.setText(
-        f"{count} {noun} running. They keep running after Yu'lon quits: they are Docker "
-        "containers, and Yu'lon picks them up again when it starts."
-    )
+    if count == 1:
+        said = (
+            "1 server is running. It keeps running after Yu'lon quits: it is a set of Docker "
+            "containers, and Yu'lon picks it up again when it starts."
+        )
+    else:
+        said = (
+            f"{count} servers are running. They keep running after Yu'lon quits: they are "
+            "Docker containers, and Yu'lon picks them up again when it starts."
+        )
+    box.setText(said)
     box.setProperty(OWN_DIALOG, True)
     plural = "server" if count == 1 else "servers"
     leave = box.addButton("Quit, leave servers running", QMessageBox.ButtonRole.AcceptRole)
