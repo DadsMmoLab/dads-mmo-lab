@@ -462,3 +462,20 @@ def test_a_sign_in_entry_can_always_be_turned_off(
     finally:
         dialog.deleteLater()
         made.uninstall()
+
+
+def test_the_first_close_note_sits_over_the_window(
+    tray: YulonTray, window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """yulon-ubuntu: a parentless note opened in the screen's corner, away from the window."""
+    seen: list[Any] = []
+    real = tray_module.note_box
+
+    def spy(parent: Any = None) -> Any:
+        box, buttons = real(parent)
+        seen.append(box.parent())
+        return box, buttons
+
+    monkeypatch.setattr(tray_module, "note_box", spy)
+    tray.choose_note()
+    assert seen == [window]

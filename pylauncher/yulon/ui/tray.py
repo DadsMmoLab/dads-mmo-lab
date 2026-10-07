@@ -1026,7 +1026,7 @@ class YulonTray(QObject):
 
     def choose_note(self) -> str:
         """The first-close note, answered: "got_it", "quit" or "never". A seam for the tests."""
-        box, buttons = note_box()
+        box, buttons = note_box(self.window)
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -1102,9 +1102,12 @@ def while_stopping_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButt
     return box, {"wait": wait, "quit": now}
 
 
-def note_box() -> tuple[QMessageBox, dict[str, QAbstractButton]]:
-    """The first close: "Yu'lon stays in the tray"."""
+def note_box(parent: QWidget | None = None) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """The first close: "Yu'lon stays in the tray", over the window being closed."""
     box = FittedMessageBox(QMessageBox.Icon.Information, "Yu'lon stays in the tray", "")
+    if parent is not None:
+        # Over the window, not the screen's corner (yulon-ubuntu, GNOME).
+        box.setParent(parent, box.windowFlags())
     text = (
         "Yu'lon keeps running in the system tray, so your servers' status and Play are one "
         "click away. Quit tray… in its menu closes it for good."
