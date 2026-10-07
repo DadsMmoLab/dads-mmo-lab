@@ -276,3 +276,19 @@ def test_every_cards_button_is_inside_the_flyout_with_a_count_line(
     finally:
         app.setStyleSheet("")
         app.setPalette(palette)
+
+
+def test_an_open_flyout_follows_the_count_line_without_a_badge_change(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Normal review [P2]: players, bots and uptime change under a badge that stays running."""
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    view.last_verdict = dashboard.Verdict("up", players=1, bots=10)
+    flyout = _open(tray)
+    view.last_verdict = dashboard.Verdict("up", players=2, bots=10)
+    tray._refresh_open_flyout()
+    assert _card(flyout, "WotLK").detail.text() == "2 players · 10 bots"
+    assert tray._flyout_timer is not None and tray._flyout_timer.isActive()
+    flyout.hide()
+    tray._refresh_open_flyout()
+    assert not tray._flyout_timer.isActive(), "a hidden flyout kept its timer running"

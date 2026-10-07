@@ -66,6 +66,9 @@ STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention"
 
 NOTE_NEVER = "never"
 
+FLYOUT_REFRESH_MS = 5000
+"""How often an open flyout re-reads the tabs' counts: the Server tab's own poll."""
+
 NOTIFY_MS = 10000
 """How long a notification asks to stay (the desktop may decide otherwise)."""
 
@@ -305,6 +308,7 @@ class YulonTray(QObject):
         self._menu: QMenu | None = None
         self._was_quit_on_last = True
         self.flyout: TrayFlyout | None = None
+        self._flyout_timer: QTimer | None = None
         self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
@@ -387,6 +391,8 @@ class YulonTray(QObject):
         self._stop_waiting_to_quit()
         if self._wait_timer is not None:
             self._wait_timer.stop()
+        if self._flyout_timer is not None:
+            self._flyout_timer.stop()
         if self.icon is not None:
             self.icon.hide()
         if self._menu is not None:
@@ -647,7 +653,12 @@ class YulonTray(QObject):
         containers, they keep running, and Yu'lon picks them up when it starts.
         """
         if self._stopping:
-            self.open_window()
+            if self.choose_while_stopping(len(self._stopping)) == "quit":
+                logger.info("tray: quitting without waiting for the stops")
+                self._stop_waiting_to_quit()
+                self.quit()
+            else:
+                self.open_window()
             return
         running = self.running_servers()
         if not running:
@@ -669,6 +680,16 @@ class YulonTray(QObject):
                 if clicked is button:
                     return name
             return "cancel"
+        finally:
+            box.deleteLater()
+
+    def choose_while_stopping(self, count: int) -> str:
+        """Quit tray… while Stop-then-quit waits: "wait" or "quit". A seam for the tests."""
+        box, buttons = while_stopping_box(count)
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+            return "quit" if clicked is buttons["quit"] else "wait"
         finally:
             box.deleteLater()
 
@@ -710,15 +731,35 @@ class YulonTray(QObject):
 
     @Slot(str)
     def _a_stop_moved(self, _status: str) -> None:
+        """Quit once every Stop has ended with its server down; end the wait if one did not.
+
+        A Stop of ours holds the badge at "stopping" until its job has ended and
+        a reading after it has answered (T188), so a badge that has left
+        "stopping" is a Stop that is over. Over and not down -- Docker went
+        quiet ("unknown"), or the server is still up -- is not waited on for
+        ever (adversarial review): Yu'lon stays open, says which, and the next
+        Quit tray… asks again.
+        """
         if not self._stopping:
             return
-        if all(
-            not shiboken6.isValid(view) or realm_tone(view.realm_badge.status) == "down"
-            for view in self._stopping
-        ):
-            self._stop_waiting_to_quit()
+        live = [view for view in self._stopping if shiboken6.isValid(view)]
+        if any(view.realm_badge.status.lower() == "stopping" for view in live):
+            return
+        left = [view for view in live if realm_tone(view.realm_badge.status) != "down"]
+        self._stop_waiting_to_quit()
+        if not left:
             logger.info("tray: every server Yu'lon stopped is down; quitting")
             self.quit()
+            return
+        names = ", ".join(self._title_of(view) for view in left)
+        logger.warning(f"tray: a stop before quitting ended without its server down: {names}")
+        self.show_server(left[0])
+        self.tell(
+            "Yu'lon did not quit",
+            f"{names} did not read as stopped after its Stop "
+            f"({status_words(left[0].realm_badge.status)}). Yu'lon stays open so you can "
+            "see why; Quit tray… asks again.",
+        )
 
     @Slot(str)
     def _a_stop_failed(self, message: str) -> None:
@@ -885,6 +926,20 @@ class YulonTray(QObject):
             self.flyout = flyout
         self._fill_flyout(self.servers())
         flyout.pop_up(self.icon.geometry() if self.icon is not None else QRect())
+        if self._flyout_timer is None:
+            # The count line changes under a badge that stays "running" (normal
+            # review): re-read the tabs' last verdicts while it shows. No Docker.
+            self._flyout_timer = QTimer(self)
+            self._flyout_timer.setInterval(FLYOUT_REFRESH_MS)
+            self._flyout_timer.timeout.connect(self._refresh_open_flyout)
+        self._flyout_timer.start()
+
+    @Slot()
+    def _refresh_open_flyout(self) -> None:
+        if self.flyout is not None and self.flyout.isVisible():
+            self._fill_flyout(self.servers())
+        elif self._flyout_timer is not None:
+            self._flyout_timer.stop()
 
     def _flyout_dismissed(self) -> None:
         self._flyout_hidden_at = time.monotonic()
@@ -1015,6 +1070,22 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     box.setDefaultButton(leave)
     box.setEscapeButton(cancel)
     return box, {"leave": leave, "stop": stop, "cancel": cancel}
+
+
+def while_stopping_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """Quit tray… again while Yu'lon waits for its Stops: keep waiting (default) or quit now."""
+    noun = "server" if count == 1 else "servers"
+    box = FittedMessageBox(QMessageBox.Icon.Question, "Yu'lon is stopping servers", "")
+    box.setText(
+        f"Yu'lon is stopping {count} {noun} and will quit when they are down. A stop that is "
+        "already running carries on if Yu'lon quits now."
+    )
+    box.setProperty(OWN_DIALOG, True)
+    wait = box.addButton("Keep waiting", QMessageBox.ButtonRole.RejectRole)
+    now = box.addButton("Quit now", QMessageBox.ButtonRole.AcceptRole)
+    box.setDefaultButton(wait)
+    box.setEscapeButton(wait)
+    return box, {"wait": wait, "quit": now}
 
 
 def note_box() -> tuple[QMessageBox, dict[str, QAbstractButton]]:

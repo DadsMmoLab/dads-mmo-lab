@@ -58,7 +58,7 @@ class TraySettingsDialog(QDialog):
         self._said_problem = ""
         has_tray = tray.icon is not None
         self.keep.setChecked(tray.keep_in_tray and has_tray)
-        self.sign_in.setChecked(has_tray and autostart.is_enabled())
+        self.sign_in.setChecked(autostart.is_enabled())
         self.keep.toggled.connect(self._keep_toggled)
         self.sign_in.toggled.connect(self._sign_in_toggled)
         self._settle()
@@ -76,7 +76,9 @@ class TraySettingsDialog(QDialog):
             sign_in_why = NEEDS_KEEP
         else:
             sign_in_why = ""
-        self.sign_in.setEnabled(not sign_in_why)
+        # An entry that is on can always be turned off (normal review): only
+        # turning it ON needs a tray and an installed Yu'lon.
+        self.sign_in.setEnabled(not sign_in_why or self.sign_in.isChecked())
         self.sign_in.setToolTip(sign_in_why)
         # The reason is said on the dialog, not only in a greyed box's tooltip.
         text = self._said_problem or sign_in_why
@@ -86,6 +88,10 @@ class TraySettingsDialog(QDialog):
     def _keep_toggled(self, on: bool) -> None:
         self._said_problem = ""
         self.tray.remember_keep_in_tray(on)
+        if not on and self.sign_in.isChecked():
+            # "Start Yu'lon in the tray" with no tray to start in: the entry goes
+            # with it, rather than staying on behind a greyed box (normal review).
+            self.sign_in.setChecked(False)
         self._settle()
 
     def _sign_in_toggled(self, on: bool) -> None:

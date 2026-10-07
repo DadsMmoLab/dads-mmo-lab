@@ -250,6 +250,7 @@ def test_the_settings_dialog_says_when_there_is_no_tray(
     made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: False)
     made.install()
     monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: False)
     dialog = TraySettingsDialog(made)
     try:
         assert not dialog.keep.isEnabled()
@@ -362,3 +363,102 @@ def test_on_windows_the_note_says_where_a_hidden_icon_is(
         assert "^" not in box.text()
     finally:
         box.deleteLater()
+
+
+# ------------------------------------------------- Codex review, 2026-10-07
+
+
+def test_a_stop_that_ends_without_the_server_down_ends_the_wait_and_says_so(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """Adversarial review [high]: Docker went quiet after the Stop, so the badge read
+    "unknown" and never "stopped"; the wait had no end and every later Quit was refused."""
+    from pathlib import Path
+
+    up = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    told: list[str] = []
+    tray.tell = lambda title, text: told.append(text)  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: "stop"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    up.realm_badge.set_status("unknown")  # the Stop's job ended; its reading did not answer
+    assert quits == []
+    assert told and "WotLK" in told[0]
+    assert window.shown_tabs[-1] == ("game-wotlk", Path("/srv/a"))
+    # The wait is over: Quit tray… asks again, and leaving it running quits.
+    tray.choose_quit = lambda count: "leave"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert quits == [1]
+
+
+def test_quit_tray_again_while_waiting_can_quit_now_or_keep_waiting(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    tray.choose_quit = lambda count: "stop"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    asked: list[int] = []
+    tray.choose_while_stopping = lambda count: asked.append(count) or "wait"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert asked == [1] and quits == []
+    tray.choose_while_stopping = lambda count: "quit"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert quits == [1]
+
+
+def test_the_while_stopping_box_has_its_two_answers(qapp: Any) -> None:
+    box, buttons = tray_module.while_stopping_box(2)
+    try:
+        assert set(buttons) == {"wait", "quit"}
+        assert box.defaultButton() is buttons["wait"]
+        assert box.property(tray_module.OWN_DIALOG) is True
+    finally:
+        box.deleteLater()
+
+
+def test_keep_in_tray_off_also_turns_start_at_sign_in_off(
+    tray: YulonTray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal review [P2]: the sign-in entry stayed on, greyed, with no way to turn it off."""
+    from yulon.ui.tray_settings import TraySettingsDialog
+
+    switched: list[bool] = []
+    on = [True]
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: on[0])
+
+    def set_enabled(value: bool, *a: Any, **k: Any) -> None:
+        switched.append(value)
+        on[0] = value
+
+    monkeypatch.setattr(autostart, "set_enabled", set_enabled)
+    dialog = TraySettingsDialog(tray)
+    try:
+        assert dialog.sign_in.isChecked()
+        dialog.keep.click()
+        assert switched == [False]
+        assert not dialog.sign_in.isChecked()
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_sign_in_entry_can_always_be_turned_off(
+    window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even where it could not be turned on now (no tray here today), an entry that is on
+    can be turned off."""
+    from yulon.ui.tray_settings import TraySettingsDialog
+
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: False)
+    made.install()
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: True)
+    switched: list[bool] = []
+    monkeypatch.setattr(autostart, "set_enabled", lambda v, *a, **k: switched.append(v))
+    dialog = TraySettingsDialog(made)
+    try:
+        assert dialog.sign_in.isChecked() and dialog.sign_in.isEnabled()
+        dialog.sign_in.click()
+        assert switched == [False]
+    finally:
+        dialog.deleteLater()
+        made.uninstall()
