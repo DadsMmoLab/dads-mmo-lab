@@ -405,7 +405,7 @@ class TrinityCoreInstaller(CmangosInstaller):
            DBCs, not the ones the extractor writes" (README.md:174-180).
         4. **The start check**: maps and vmaps for every `required_maps` id, or a
            refusal naming this step, before a server is started that would stop
-           with "Unable to load critical files" (World.cpp:1811-1823).
+           with "Unable to load critical files" (World.cpp:1823-1835 at 6c6472c3, read 2026-10-07).
 
         The player's own client is never written: the copy shares its archives
         by clone or hard link, every change to the copy replaces a NAME (a pack's
