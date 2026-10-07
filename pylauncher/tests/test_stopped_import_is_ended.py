@@ -31,11 +31,21 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 
 
 class _Daemon:
-    """`docker._docker` for `end_one_shot()`: a list of running importers, and what kill does."""
+    """`docker._docker` for `end_one_shot()`: running importers, the folder each was brought
+    up from, and what kill does."""
 
-    def __init__(self, running: list[str], *, kill_works: bool = True) -> None:
+    def __init__(
+        self,
+        running: list[str],
+        folder: Path,
+        *,
+        kill_works: bool = True,
+        foreign: tuple[str, ...] = (),
+    ) -> None:
         self.running = list(running)
+        self.folder = folder
         self.kill_works = kill_works
+        self.foreign = foreign
         self.asked: list[list[str]] = []
 
     def __call__(
@@ -43,7 +53,11 @@ class _Daemon:
     ) -> subprocess.CompletedProcess[str]:
         self.asked.append(list(argv))
         if argv[0] == "ps":
-            return _completed("\n".join(self.running))
+            rows = [
+                f"{name}\t{'/elsewhere/wow-server' if name in self.foreign else self.folder}"
+                for name in self.running
+            ]
+            return _completed("\n".join(rows))
         if argv[0] == "kill":
             if self.kill_works:
                 self.running = [name for name in self.running if name not in argv[1:]]
@@ -61,10 +75,15 @@ def project(monkeypatch: pytest.MonkeyPatch) -> str:
 def test_end_one_shot_with_nothing_running_kills_nothing(
     monkeypatch: pytest.MonkeyPatch, project: str, tmp_path: Path
 ) -> None:
-    daemon = _Daemon([])
+    """Asked twice, a settle apart: a create the daemon finished late is seen too
+    (Codex adversarial review; `container_end.LATE_CREATE_SETTLE`, T321's bound).
+
+    Mutation this catches: answering "nothing runs" on one empty look.
+    """
+    daemon = _Daemon([], tmp_path)
     monkeypatch.setattr(docker, "_docker", daemon)
     assert docker.end_one_shot(IMPORTER, tmp_path) is None
-    assert [argv[0] for argv in daemon.asked] == ["ps"]
+    assert [argv[0] for argv in daemon.asked] == ["ps", "ps"]
     assert f"label={docker.PROJECT_LABEL}={project}" in daemon.asked[0]
     assert f"label={docker.SERVICE_LABEL}={IMPORTER}" in daemon.asked[0]
 
@@ -73,18 +92,34 @@ def test_end_one_shot_kills_this_installs_running_importer_and_sees_it_gone(
     monkeypatch: pytest.MonkeyPatch, project: str, tmp_path: Path
 ) -> None:
     """The `up` container and a `run` one both carry the project and service labels."""
-    daemon = _Daemon([IMPORTER, f"{project}-{IMPORTER}-run-0a1b2c"])
+    daemon = _Daemon([IMPORTER, f"{project}-{IMPORTER}-run-0a1b2c"], tmp_path)
     monkeypatch.setattr(docker, "_docker", daemon)
     assert docker.end_one_shot(IMPORTER, tmp_path) is None
     assert ["kill", IMPORTER, f"{project}-{IMPORTER}-run-0a1b2c"] in daemon.asked
     assert daemon.running == []
 
 
+def test_end_one_shot_never_kills_another_installs_importer(
+    monkeypatch: pytest.MonkeyPatch, project: str, tmp_path: Path
+) -> None:
+    """Codex adversarial review: project and service labels are not proof of ownership.
+
+    Two installs in folders of the same name share a compose project name, so the
+    folder the container was brought up from has to be this install's too.
+
+    Mutation this catches: killing on the project and service labels alone.
+    """
+    daemon = _Daemon([IMPORTER], tmp_path, foreign=(IMPORTER,))
+    monkeypatch.setattr(docker, "_docker", daemon)
+    assert docker.end_one_shot(IMPORTER, tmp_path) is None
+    assert not [argv for argv in daemon.asked if argv[0] == "kill"], daemon.asked
+
+
 def test_end_one_shot_says_which_importer_would_not_go(
     monkeypatch: pytest.MonkeyPatch, project: str, tmp_path: Path
 ) -> None:
     """Still running at the deadline: named, with the command that removes it."""
-    daemon = _Daemon([IMPORTER], kill_works=False)
+    daemon = _Daemon([IMPORTER], tmp_path, kill_works=False)
     monkeypatch.setattr(docker, "_docker", daemon)
     ticks = iter(range(0, 1000, 10))
     monkeypatch.setattr(docker.time, "monotonic", lambda: float(next(ticks)))
@@ -225,3 +260,56 @@ def test_a_cancelled_one_shot_has_its_container_ended_as_the_stop_lands(
     assert not worker.is_alive(), "the cancelled one-shot did not return"
     assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
     assert ended == [(IMPORTER, tmp_path)], ended
+
+
+def test_a_one_shot_is_ended_only_after_its_cli_was_claimed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review: with the cancel set before the lazy CLI starts, the first poll claims
+    nothing, and a container ended then does not exist yet. The ending waits for the CLI:
+    the watcher's claim of it, or its first line.
+
+    Mutation this catches: `on_cancel` consumed on the first poll, claimed or not.
+    """
+    from tests.conftest import HANG_BOUND
+
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    order: list[str] = []
+    polled_unclaimed = threading.Event()
+    real_end_stream = docker.runner.end_stream
+
+    def end_stream(stream: object) -> bool:
+        claimed = real_end_stream(stream)  # type: ignore[arg-type]
+        order.append(f"claim:{claimed}")
+        if not claimed:
+            polled_unclaimed.set()
+        return claimed
+
+    monkeypatch.setattr(docker.runner, "end_stream", end_stream)
+    monkeypatch.setattr(docker, "end_one_shot", lambda *a, **k: order.append("end-one-shot"))
+    real_spawn = docker.runner._spawn
+
+    def held_spawn(start):  # type: ignore[no-untyped-def]
+        # The CLI starts only once the watcher has polled and found nothing to claim.
+        polled_unclaimed.wait(HANG_BOUND)
+        spawned = real_spawn(start)
+        order.append("spawned")
+        return spawned
+
+    monkeypatch.setattr(docker.runner, "_spawn", held_spawn)
+    cancel = threading.Event()
+    cancel.set()
+    result: list[docker.AttachedRun] = []
+    worker = threading.Thread(
+        target=lambda: result.append(docker.run_one_shot(IMPORTER, tmp_path, cancel=cancel)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    assert not worker.is_alive()
+    assert "end-one-shot" in order, order
+    assert order.index("spawned") < order.index("end-one-shot"), order

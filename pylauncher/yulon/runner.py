@@ -73,6 +73,7 @@ class _Child:
         "ended",
         "job",
         "group",
+        "stopping_since",
         "settled",
         "cut_short",
         "answered",
@@ -84,6 +85,15 @@ class _Child:
         self.job: winjob.Job | None = None
         """The Windows Job object `proc` was started in, if it joined one (T299)."""
         self.group: int | None = None
+        self.stopping_since: float | None = None
+        """When a Stop's ending of this child began, under `lock`; None when none is under way.
+
+        A claim stops a watcher's polls from re-sending SIGTERM while an ending
+        runs (T541): `docker compose up` reads a second SIGTERM as "force". It
+        is let go when the ending fails, and it lapses after
+        `_RECLAIM_AFTER_SECONDS`, so a Stop that did not finish can be tried again
+        (Codex's adversarial review of T541).
+        """
         """The process group `proc` leads, off Windows, when it was started as one (T529)."""
         self.settled = False
         """Set under `lock` when `_finish` lets `job` go; a Stop then skips it."""
@@ -652,13 +662,14 @@ def _end_chosen(candidates: list[_Child]) -> int:
         # Only with a job or a group (T529): without one nothing ends a root
         # that has exited, and its exit status is the whole story, as before.
         with child.lock:
-            if child.answered or child.ended:
-                # `ended`: a Stop already claimed it, and its ending is under way (T541).
+            if child.answered or _ending_under_way(child):
+                # A Stop already claimed it and its ending is under way (T541).
                 # Claimed again it got a new SIGTERM on every poll of a watcher, and
                 # `docker compose up` reads a second SIGTERM as "force".
                 continue
             if _still_running(child.proc) or _job_unsettled(child) or _group_unsettled(child):
                 child.ended = True
+                child.stopping_since = time.monotonic()
                 child.cut_short = child.job is not None or child.group is not None
                 children.append(child)
     for child in children:
@@ -666,7 +677,7 @@ def _end_chosen(candidates: list[_Child]) -> int:
         assert proc is not None  # both filters need a started child; narrows for mypy
         try:
             threading.Thread(
-                target=_stop_child,
+                target=_stop_child_claimed,
                 args=(child,),
                 daemon=True,
                 name=f"yulon-end-stream-{proc.pid}",
@@ -680,6 +691,30 @@ def _end_chosen(candidates: list[_Child]) -> int:
             )
             _stop_child_here(child)
     return len(children)
+
+
+_RECLAIM_AFTER_SECONDS = 2 * _SHUTDOWN_TIMEOUT_SECONDS
+"""How long a Stop's claim on a child holds before another Stop may try again (T541).
+
+Twice `_end_child`'s own escalation (SIGTERM, then SIGKILL after the timeout), so a
+graceful ending gets its whole window before anything is sent a second time."""
+
+
+def _ending_under_way(child: _Child) -> bool:
+    """Is a Stop's ending of `child` running now? Read under `child.lock` (T541)."""
+    since = child.stopping_since
+    return since is not None and time.monotonic() - since < _RECLAIM_AFTER_SECONDS
+
+
+def _stop_child_claimed(child: _Child) -> None:
+    """`_stop_child` on its own thread; a failure lets the claim go, so the next Stop retries."""
+    try:
+        _stop_child(child)
+    except Exception as exc:  # noqa: BLE001 - logged; the next Stop tries again
+        proc = child.proc
+        logger.warning(f"ending the stream child pid {proc.pid if proc else None} failed: {exc!r}")
+        with child.lock:
+            child.stopping_since = None
 
 
 def _job_unsettled(child: _Child) -> bool:
@@ -745,6 +780,8 @@ def _stop_child_here(child: _Child) -> None:
         proc = child.proc
         pid = proc.pid if proc is not None else None
         logger.warning(f"could not end the stream child pid {pid}: {exc!r}")
+        with child.lock:
+            child.stopping_since = None  # the next Stop tries again (T541)
 
 
 def _answer(child: _Child) -> bool:

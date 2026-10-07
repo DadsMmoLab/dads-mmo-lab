@@ -2871,3 +2871,39 @@ def test_an_undrained_close_ends_the_group_when_its_root_exits_as_the_close_chec
 
     assert ended_groups == [424242]
     assert child.settled
+
+
+def test_a_stop_whose_ending_failed_can_be_claimed_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T541, Codex adversarial review: claiming once must not make a failed ending final.
+
+    The claim stops a watcher's polls from re-sending SIGTERM while an ending is under
+    way. An ending that RAISED is not under way: the next Stop claims it again.
+
+    Mutation this catches: the claim kept after `_stop_child` failed (the second call
+    finds the child claimed and returns 0).
+    """
+    failed = threading.Event()
+
+    def broken(child: object, **kw: object) -> None:
+        failed.set()
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(runner, "_stop_child", broken)
+
+    class _Running:
+        pid = 4321
+        returncode = None
+
+        def poll(self) -> int | None:
+            return None
+
+    child = runner._Child()
+    child.proc = _Running()  # type: ignore[assignment]
+    assert runner._end_chosen([child]) == 1
+    assert failed.wait(HANG_BOUND), "the ending never ran"
+    deadline = time.monotonic() + HANG_BOUND
+    while child.stopping_since is not None and time.monotonic() < deadline:
+        time.sleep(POLL_PACE)
+    # Let go, not lapsed: the claim's own window is shorter than this wait could be.
+    assert child.stopping_since is None, "the claim of a failed ending was kept"
+    assert runner._end_chosen([child]) == 1, "a Stop whose ending failed could not be retried"

@@ -2905,6 +2905,29 @@ class OneShotLeft:
     reason: str
 
 
+def _spelled(folder: str) -> str:
+    """A folder as `end_one_shot()` compares it: separators and case as this OS reads them."""
+    return os.path.normcase(os.path.normpath(folder.strip()))
+
+
+def _folder_spellings(server_dir: Path, *, wsl_distro: str | None = None) -> set[str]:
+    """Every spelling of `server_dir` compose may have stamped as a container's folder.
+
+    As given and resolved (compose may have followed a link), and for a server inside
+    a WSL distro the distro's own path, which is what compose saw there.
+    """
+    found = {_spelled(str(server_dir))}
+    try:
+        found.add(_spelled(str(server_dir.resolve())))
+    except OSError:
+        pass
+    if wsl_distro is not None:
+        inside = platform.wsl_linux_path(server_dir)
+        if inside is not None:
+            found.add(_spelled(inside))
+    return found
+
+
 def end_one_shot(
     service: str, server_dir: Path, *, wsl_distro: str | None = None
 ) -> OneShotLeft | None:
@@ -2937,20 +2960,44 @@ def end_one_shot(
         "--filter",
         f"label={SERVICE_LABEL}={service}",
         "--format",
-        "{{.Names}}",
+        '{{.Names}}\t{{.Label "' + WORKING_DIR_LABEL + '"}}',
     ]
+    ours = _folder_spellings(server_dir, wsl_distro=wsl_distro)
     deadline = time.monotonic() + ONE_SHOT_END_SECONDS
     killed: tuple[str, ...] = ()
+    settled = False
     while True:
         listed = _docker(ask, timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
         if listed.returncode != 0:
             said = " ".join((listed.stderr or listed.stdout or "no answer").split())
             return OneShotLeft(killed, f"Docker would not say whether it is still running ({said})")
-        running = tuple(name for name in listed.stdout.split() if name)
+        running: list[str] = []
+        for row in listed.stdout.splitlines():
+            name, _, folder = row.partition("\t")
+            if not name.strip():
+                continue
+            if not folder.strip():
+                # Compose stamps every container with its folder; one without is not
+                # provably this install's, and is not killed (adversarial review).
+                return OneShotLeft(
+                    (name.strip(),), "Docker did not say which folder it was started from"
+                )
+            if _spelled(folder) in ours:
+                running.append(name.strip())
+            else:
+                # Same project and service, another folder: another install's. Not ours.
+                logger.info(f"end_one_shot(): {name.strip()} belongs to {folder.strip()}; left")
         if not running:
             if killed:
                 logger.info(f"end_one_shot(): {', '.join(killed)} ended")
-            return None
+                return None
+            if settled:
+                return None
+            # One more look a settle later: a create the daemon received before a
+            # Stop can finish after the first look (T321's bound, adversarial review).
+            settled = True
+            time.sleep(container_end.LATE_CREATE_SETTLE)
+            continue
         fresh = [name for name in running if name not in killed]
         if fresh:
             # Each container is killed once; one that appears later (a create the
@@ -2960,7 +3007,7 @@ def end_one_shot(
             _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
         if time.monotonic() >= deadline:
             return OneShotLeft(
-                running,
+                tuple(running),
                 f"it was still running {ONE_SHOT_END_SECONDS:g} s after it was told to stop",
             )
         time.sleep(_ONE_SHOT_POLL_SECONDS)
@@ -5836,15 +5883,18 @@ def run_attached(
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
+        stream = runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
+        after_cancel = _AfterCancel(on_cancel)
         with (
-            closing(
-                runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
-            ) as lines,
-            _ended_on_cancel(cancel, lines, ended_by_cancel, on_cancel),
+            closing(stream) as lines,
+            _ended_on_cancel(cancel, lines, ended_by_cancel, after_cancel),
         ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
+                    # A line came, so the CLI runs and has made what it makes: end that
+                    # with it, as the watcher would have (T539).
+                    after_cancel.once()
                     return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
                 # Colour codes off at the source (T214): this line goes to the
                 # screen, to Details through `tail` and to the log, and none of
@@ -7193,12 +7243,32 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
     )
 
 
+class _AfterCancel:
+    """A cancelled run's `on_cancel`, run once, by whichever of its two paths sees the cancel
+    first: the watcher, once it has claimed the CLI, or the read, when a line arrives (T539)."""
+
+    def __init__(self, on_cancel: Callable[[], object] | None) -> None:
+        self._on_cancel = on_cancel
+        self._lock = threading.Lock()
+        self._done = on_cancel is None
+
+    def once(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+        try:
+            self._on_cancel()  # type: ignore[misc]
+        except Exception as exc:  # noqa: BLE001 - the Stop goes on regardless
+            logger.warning(f"ending what a cancelled run left failed: {exc!r}")
+
+
 @contextmanager
 def _ended_on_cancel(
     cancel: threading.Event | None,
     stream: Generator[str, None, None],
     ended: threading.Event,
-    on_cancel: Callable[[], object] | None = None,
+    after_cancel: _AfterCancel | None = None,
 ) -> Iterator[None]:
     """While inside, a set `cancel` ends the docker CLI of `stream`, and nothing else (T303, T526).
 
@@ -7220,18 +7290,15 @@ def _ended_on_cancel(
     done = threading.Event()
 
     def watch() -> None:
-        called = on_cancel is None
         while not done.is_set():
             if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
                 # Claimed first, so the run reads as the Stop however its CLI exits.
                 if runner.end_stream(stream):
                     ended.set()
-                if not called:
-                    called = True
-                    try:
-                        on_cancel()  # type: ignore[misc]
-                    except Exception as exc:  # noqa: BLE001 - the Stop goes on regardless
-                        logger.warning(f"ending what a cancelled run left failed: {exc!r}")
+                # Only once the CLI has been claimed: before it starts, what it is
+                # about to make does not exist yet (Codex review).
+                if after_cancel is not None and ended.is_set():
+                    after_cancel.once()
                 done.wait(_STOP_POLL_SECONDS)
 
     watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)
