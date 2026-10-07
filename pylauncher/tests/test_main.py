@@ -5973,3 +5973,121 @@ def test_the_self_update_quits_through_the_trays_real_quit(update_host: Any, win
 
 def test_without_a_tray_the_windows_quit_is_its_close(window: Any) -> None:
     assert window.yulon_quit == window.close
+
+
+_TRAY_ENTRY_POINT = """\
+import os, sys
+
+sys.argv = ["yulon", *os.environ["YULON_T540_ARGS"].split()]
+from yulon import platform, update
+
+update.check_with_cache = lambda *a, **k: None
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMainWindow
+
+import main
+from yulon.ui import message_box, single_instance, tray
+
+main._regain_docker_group = lambda: None
+
+
+def say(_parent, title, text, *a, **k):
+    print(f"T540 box {title}", flush=True)
+
+
+message_box.show_warning = say
+message_box.show_information = say
+if os.environ.get("YULON_T540_UNANSWERED"):
+    single_instance.InstanceGuard.claim = lambda self, **k: "unanswered"
+if os.environ.get("YULON_T540_TRAY"):
+    real_init = tray.YulonTray.__init__
+
+    def with_a_tray(self, window, **kwargs):
+        kwargs["available"] = lambda: True
+        real_init(self, window, **kwargs)
+
+    tray.YulonTray.__init__ = with_a_tray
+
+
+def build_window():
+    window = QMainWindow()
+
+    def look():
+        print(f"T540 visible={window.isVisible()}", flush=True)
+        QApplication.exit(0)
+
+    QTimer.singleShot(400, look)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+print(f"T540 main returned {code}", flush=True)
+raise SystemExit(code)
+"""
+
+
+def _run_t540_child(tmp_path: Path, args: str, **extra: str) -> str:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env.update(
+        {
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / "config"),
+            "QT_QPA_PLATFORM": "offscreen",
+            "YULON_T540_ARGS": args,
+            **extra,
+        }
+    )
+    for name in ("YULON_PROVISION", "YULON_SMOKE_TEST"):
+        env.pop(name, None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+    done = subprocess.run(
+        [sys.executable, "-c", _TRAY_ENTRY_POINT],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return done.stdout + done.stderr
+
+
+def test_a_sign_in_start_opens_in_the_tray_and_shows_no_window(tmp_path: Path) -> None:
+    out = _run_t540_child(tmp_path, "--tray", YULON_T540_TRAY="1")
+    assert "T540 visible=False" in out, out
+    assert "T540 main returned 0" in out, out
+
+
+def test_an_ordinary_start_shows_the_window_with_the_tray_up(tmp_path: Path) -> None:
+    out = _run_t540_child(tmp_path, "", YULON_T540_TRAY="1")
+    assert "T540 visible=True" in out, out
+
+
+def test_a_sign_in_start_that_finds_yulon_stuck_leaves_without_a_box(tmp_path: Path) -> None:
+    """At sign-in nobody asked for a window: an "already open" box would be noise."""
+    quiet = _run_t540_child(tmp_path, "--tray", YULON_T540_UNANSWERED="1")
+    assert "T540 box" not in quiet, quiet
+    assert "T540 main returned 0" in quiet, quiet
+    loud = _run_t540_child(tmp_path, "", YULON_T540_UNANSWERED="1")
+    assert "T540 box Yu'lon is already open" in loud, loud
+
+
+def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: Any) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    button = window.findChild(QPushButton, "yulon-settings")
+    assert button is not None, "no Settings… in the header"
+    assert button.text() == "Settings…"
+    assert button.parent() is window.property("header")
+    real = window.yulon_open_settings
+    opened: list[int] = []
+    window.yulon_open_settings = lambda: opened.append(1)
+    try:
+        button.click()
+    finally:
+        window.yulon_open_settings = real
+    assert opened == [1]

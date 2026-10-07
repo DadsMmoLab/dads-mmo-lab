@@ -33,10 +33,18 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QApplication,
+    QMenu,
+    QMessageBox,
+    QSystemTrayIcon,
+    QWidget,
+)
 
+from yulon import ui_settings
 from yulon.log import get_logger
 from yulon.ui.tab_titles import controller_tab_titles
 from yulon.ui.theme import COLOR_DANGER, COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
@@ -52,6 +60,12 @@ QUIT_TRAY = "Quit tray…"
 
 STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention": COLOR_DANGER}
 """The dot per icon state: the theme's online green, amber accent and danger red."""
+
+NOTE_NEVER = "never"
+
+TRAY_WAIT_MS = 500
+TRAY_WAIT_TRIES = 30
+"""A sign-in start waits up to 15 s for the desktop's tray before it shows the window."""
 
 REOPEN_GUARD_S = 0.3
 """A left click within this of the flyout closing (by losing focus to that same click)
@@ -214,18 +228,23 @@ class YulonTray(QObject):
         icon_factory: Callable[[QObject], TrayIcon] | None = None,
         available: Callable[[], bool] = QSystemTrayIcon.isSystemTrayAvailable,
         bring_forward: Callable[[QWidget], None] = _bring_forward,
-        keep_in_tray: bool = True,
+        keep_in_tray: bool | None = None,
     ) -> None:
         super().__init__(window)
         self.window = window
         self._icon_factory = icon_factory or (lambda parent: QSystemTrayIcon(parent))
         self._available = available
         self._bring_forward = bring_forward
-        self.keep_in_tray = keep_in_tray
+        saved = ui_settings.load_ui_settings()
+        self.keep_in_tray = saved.keep_in_tray if keep_in_tray is None else keep_in_tray
         self.icon: TrayIcon | None = None
         self.state = "plain"
-        self.note_seen = False
-        """Whether the "Yu'lon stays in the tray" note was shown this run (step 3)."""
+        self.note_seen = saved.tray_note == NOTE_NEVER
+        """Whether "Yu'lon stays in the tray" was said: this run, or "Don't show again"."""
+        self._stopping: list[Any] = []
+        """The tabs Stop-then-quit pressed Stop on and is waiting for (empty: not waiting)."""
+        self._wait_tries = 0
+        self._wait_timer: QTimer | None = None
         self._quitting = False
         self._installed = False
         self._followed: list[Any] = []
@@ -269,17 +288,24 @@ class YulonTray(QObject):
         changed = getattr(self.window, "servers_changed", None)
         if changed is not None:
             changed.connect(self.follow_servers)
+        previous = getattr(self.window, "yulon_open_settings", None)
+        self._previous_settings = previous
+        self.window.yulon_open_settings = self.open_settings  # type: ignore[attr-defined]
         if self.has_tray:
-            icon = self._icon_factory(self)
-            self.icon = icon
-            self._menu = QMenu()
-            self._menu.aboutToShow.connect(self._refill_menu)
-            icon.setContextMenu(self._menu)
-            icon.activated.connect(self._activated)
+            self._make_icon()
         else:
             logger.info("tray: this desktop has no system tray; closing Yu'lon quits it")
         self.follow_servers()
         self.set_keep_in_tray(self.keep_in_tray)
+
+    def _make_icon(self) -> None:
+        icon = self._icon_factory(self)
+        self.icon = icon
+        self._menu = QMenu()
+        self._menu.aboutToShow.connect(self._refill_menu)
+        icon.setContextMenu(self._menu)
+        icon.activated.connect(self._activated)
+        icon.messageClicked.connect(self._message_clicked)
 
     def uninstall(self) -> None:
         """Undo `install()`: the close quits again, the icon goes. For a test's teardown."""
@@ -299,7 +325,12 @@ class YulonTray(QObject):
                 except (RuntimeError, TypeError):  # pragma: no cover - never connected
                     pass
             self.window.yulon_quit = self.window.close  # type: ignore[attr-defined]
+            if self._previous_settings is not None:
+                self.window.yulon_open_settings = self._previous_settings  # type: ignore[attr-defined]
         self._let_go_of_servers()
+        self._stop_waiting_to_quit()
+        if self._wait_timer is not None:
+            self._wait_timer.stop()
         if self.icon is not None:
             self.icon.hide()
         if self._menu is not None:
@@ -431,12 +462,185 @@ class YulonTray(QObject):
         QApplication.exit(0)
 
     def open_settings(self) -> None:
-        """The tray's settings (step 3 gives them a dialog of their own)."""
-        self.open_window()
+        """The tray's Settings: keep running in the tray, start at sign-in."""
+        from yulon.ui.tray_settings import TraySettingsDialog
+
+        dialog = getattr(self, "_settings_dialog", None)
+        if dialog is None or not shiboken6.isValid(dialog):
+            dialog = TraySettingsDialog(self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def remember_keep_in_tray(self, keep: bool) -> None:
+        """The Settings switch: applied now, and kept in `ui.json` for the next start."""
+        self.set_keep_in_tray(keep)
+        ui_settings.remember_tray(keep_in_tray=keep)
+
+    # ------------------------------------------------------------ quitting
+
+    def running_servers(self) -> list[Any]:
+        """The tabs whose realm is up, starting, stopping, partly up or looping."""
+        return [
+            view
+            for view, _title, status in self.servers()
+            if realm_tone(status) in ("up", "between", "restarting")
+        ]
 
     def ask_to_quit(self) -> None:
-        """Quit tray… (step 3 asks about running servers first)."""
-        self.quit()
+        """Quit tray…: with servers running, ask whether to leave them or stop them first.
+
+        Leaving them is the default and loses nothing: they are Docker
+        containers, they keep running, and Yu'lon picks them up when it starts.
+        """
+        if self._stopping:
+            self.open_window()
+            return
+        running = self.running_servers()
+        if not running:
+            self.quit()
+            return
+        choice = self.choose_quit(len(running))
+        if choice == "leave":
+            self.quit()
+        elif choice == "stop":
+            self.stop_then_quit(running)
+
+    def choose_quit(self, count: int) -> str:
+        """The quit box, answered: "leave", "stop" or "cancel". A seam for the tests."""
+        box, buttons = quit_box(count)
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+            for name, button in buttons.items():
+                if clicked is button:
+                    return name
+            return "cancel"
+        finally:
+            box.deleteLater()
+
+    def tell(self, title: str, text: str) -> None:
+        """A short box with OK (a seam for the tests)."""
+        from yulon.ui.message_box import show_information
+
+        show_information(self.window, title, text)
+
+    def stop_then_quit(self, running: Sequence[Any]) -> None:
+        """Press each running server's own Stop (it saves characters), quit when all are down.
+
+        The window comes forward: a stop can take minutes, and the Server tab is
+        where "Stop now anyway" and any failure are. A server whose Stop is
+        greyed (another job of its tab is running) refuses the whole quit, with
+        the tab's own reason, rather than quitting with it still up.
+        """
+        titles = dict(zip(self.views(), server_titles(self.views()), strict=True))
+        blocked = [view for view in running if not view.stop_button.isEnabled()]
+        if blocked:
+            view = blocked[0]
+            why = view.stop_button.toolTip() or "it is busy"
+            self.tell(
+                "Yu'lon cannot stop that server yet",
+                f"{titles.get(view, view.entry.name)} cannot be stopped right now: {why}\n\n"
+                "Yu'lon has not quit. Try again when it has finished.",
+            )
+            self.open_window()
+            return
+        self.open_window()
+        self._stopping = list(running)
+        for view in running:
+            view.realm_badge.status_changed.connect(self._a_stop_moved)
+            view.action_failed.connect(self._a_stop_failed)
+        for view in running:
+            view.stop_server()
+        logger.info(f"tray: stopping {len(running)} server(s), then quitting")
+        self._a_stop_moved("")
+
+    @Slot(str)
+    def _a_stop_moved(self, _status: str) -> None:
+        if not self._stopping:
+            return
+        if all(
+            not shiboken6.isValid(view) or realm_tone(view.realm_badge.status) == "down"
+            for view in self._stopping
+        ):
+            self._stop_waiting_to_quit()
+            logger.info("tray: every server Yu'lon stopped is down; quitting")
+            self.quit()
+
+    @Slot(str)
+    def _a_stop_failed(self, message: str) -> None:
+        sender = self.sender()
+        failed = next((view for view in self._stopping if view is sender), None)
+        self._stop_waiting_to_quit()
+        logger.warning(f"tray: a stop before quitting failed ({message}); Yu'lon stays open")
+        if failed is not None and shiboken6.isValid(failed):
+            self.show_server(failed)
+        else:  # pragma: no cover - only a stopping tab is connected
+            self.open_window()
+
+    def _stop_waiting_to_quit(self) -> None:
+        for view in self._stopping:
+            if not shiboken6.isValid(view):
+                continue
+            for signal, slot in (
+                (view.realm_badge.status_changed, self._a_stop_moved),
+                (view.action_failed, self._a_stop_failed),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):  # pragma: no cover - already gone
+                    pass
+        self._stopping = []
+
+    # ------------------------------------------------- started at sign-in
+
+    def start_hidden(self) -> None:
+        """`--tray` (the sign-in entry): no window, the icon only.
+
+        A desktop can bring its tray up after the programs it starts at sign-in,
+        so a missing tray is waited for, a try every `TRAY_WAIT_MS`; if none
+        comes, the window opens after all rather than Yu'lon running unseen.
+        """
+        if self.keeping:
+            logger.info("tray: started at sign-in; Yu'lon is in the tray")
+            return
+        if not self.keep_in_tray:
+            self.open_window()
+            return
+        self._wait_tries = 0
+        timer = QTimer(self)
+        timer.setInterval(TRAY_WAIT_MS)
+        timer.timeout.connect(self._wait_for_the_tray)
+        self._wait_timer = timer
+        timer.start()
+
+    def _wait_for_the_tray(self) -> None:
+        self._wait_tries += 1
+        if self.icon is None and self.has_tray:
+            self._make_icon()
+            self.follow_servers()
+            self.set_keep_in_tray(self.keep_in_tray)
+        if self.keeping:
+            logger.info("tray: the tray came up; Yu'lon is in it")
+            self._end_the_wait()
+            return
+        if self._wait_tries >= TRAY_WAIT_TRIES:
+            logger.info("tray: no tray came up after sign-in; showing the window")
+            self._end_the_wait()
+            self.open_window()
+
+    def _end_the_wait(self) -> None:
+        if self._wait_timer is not None:
+            self._wait_timer.stop()
+            self._wait_timer.deleteLater()
+            self._wait_timer = None
+
+    @Slot()
+    def _message_clicked(self) -> None:
+        """A notification was clicked (step 4 says which server)."""
+        self.open_window()
 
     # ----------------------------------------------------------------- menu
 
@@ -564,11 +768,32 @@ class YulonTray(QObject):
             if not self.keeping:
                 return False
             event.ignore()
+            if not self.note_seen:
+                self.note_seen = True
+                choice = self.choose_note()
+                if choice == NOTE_NEVER:
+                    ui_settings.remember_tray(tray_note=NOTE_NEVER)
+                elif choice == "quit":
+                    self.ask_to_quit()
+                    return True
             self.hide_window()
             return True
         if kind is QEvent.Type.Show and isinstance(watched, QWidget):
             self._a_window_showed(watched)
         return False
+
+    def choose_note(self) -> str:
+        """The first-close note, answered: "got_it", "quit" or "never". A seam for the tests."""
+        box, buttons = note_box()
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+            for name, button in buttons.items():
+                if clicked is button:
+                    return name
+            return "got_it"
+        finally:
+            box.deleteLater()
 
     def hide_window(self) -> None:
         """Into the tray. The window's jobs, pollers and launchers carry on."""
@@ -593,3 +818,36 @@ class YulonTray(QObject):
 
 OWN_DIALOG = "yulonTrayDialog"
 """A property on the tray's own boxes: asked from the tray, they need no window behind them."""
+
+
+def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """Quit tray… with `count` servers running: leave them (default), stop them, or cancel."""
+    noun = "server is" if count == 1 else "servers are"
+    box = QMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
+    box.setText(
+        f"{count} {noun} running. They keep running after Yu'lon quits: they are Docker "
+        "containers, and Yu'lon picks them up again when it starts."
+    )
+    box.setProperty(OWN_DIALOG, True)
+    plural = "server" if count == 1 else "servers"
+    leave = box.addButton("Quit, leave servers running", QMessageBox.ButtonRole.AcceptRole)
+    stop = box.addButton(f"Stop {count} {plural}, then quit", QMessageBox.ButtonRole.ActionRole)
+    cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(leave)
+    box.setEscapeButton(cancel)
+    return box, {"leave": leave, "stop": stop, "cancel": cancel}
+
+
+def note_box() -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """The first close: "Yu'lon stays in the tray"."""
+    box = QMessageBox(QMessageBox.Icon.Information, "Yu'lon stays in the tray", "")
+    box.setText(
+        "Yu'lon keeps running in the system tray, so your servers' status and Play are one "
+        "click away. Quit tray… in its menu closes it for good."
+    )
+    got_it = box.addButton("Got it", QMessageBox.ButtonRole.AcceptRole)
+    quit_instead = box.addButton("Quit Yu'lon instead", QMessageBox.ButtonRole.DestructiveRole)
+    never = box.addButton("Don't show again", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(got_it)
+    box.setEscapeButton(got_it)
+    return box, {"got_it": got_it, "quit": quit_instead, NOTE_NEVER: never}

@@ -100,6 +100,9 @@ ABSURD_URL_CHARS = 2000
 PANEL_JOIN_MS = 5000
 """How long the exit waits for each log panel's job after asking it to stop."""
 
+SETTINGS_BUTTON = "yulon-settings"
+"""The header's Settings… button (T540): the tray's two switches."""
+
 UPDATE_JOIN_MS = 8000
 """How long the exit waits for the launch update check's thread."""
 
@@ -657,6 +660,7 @@ def build_window() -> object:
         yulon_show_server_tab: Callable[[str, object], None]
         yulon_show_logs: Callable[[], None]
         yulon_quit: Callable[[], bool]
+        yulon_open_settings: Callable[[], None]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
             """The app is closing: its launcher windows go with it (T187).
@@ -2230,6 +2234,15 @@ def build_window() -> object:
     header = window.property("header")
     if header is not None:
         header.add_action(check_button)
+    # T540: the tray's two switches. `main()`'s `YulonTray` replaces the seam
+    # with its dialog; a window built without one (a test) only says so.
+    window.yulon_open_settings = lambda: logger.info("settings: no tray object in this window")
+    settings_button = QPushButton("Settings…", window)
+    settings_button.setObjectName(SETTINGS_BUTTON)
+    settings_button.setToolTip("Keep Yu'lon in the system tray, and start it when you sign in")
+    settings_button.clicked.connect(lambda _checked=False: window.yulon_open_settings())
+    if header is not None:
+        header.add_action(settings_button)
 
     if in_smoke_test():
         # No launch check: it would ask GitHub and write `update.json` in the
@@ -2474,7 +2487,13 @@ def main() -> int:
     claim = instance.claim()
     if claim == "raised":
         return 0
+    # T540: the sign-in entry (`autostart`) starts Yu'lon with `--tray`: hidden
+    # in the tray, and quiet, because nobody at sign-in asked for a window.
+    start_in_tray = "--tray" in sys.argv[1:]
     if claim == "unanswered":
+        if start_in_tray:
+            logger.warning("single instance: a sign-in start found Yu'lon not answering; left")
+            return 0
         from yulon.ui.message_box import show_warning
 
         show_warning(None, UNANSWERED_TITLE, UNANSWERED_TEXT)
@@ -2552,7 +2571,10 @@ def main() -> int:
 
         tray = YulonTray(window, bring_forward=_bring_to_front)
         tray.install()
-        window.show()
+        if start_in_tray:
+            tray.start_hidden()
+        else:
+            window.show()
         # After show(), so the app is visibly UP before it admits to anything:
         # the log file failing is not a reason to hold the window back.
         _warn_about_the_log_file(window)

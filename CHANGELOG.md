@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
