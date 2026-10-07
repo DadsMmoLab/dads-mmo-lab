@@ -46,7 +46,7 @@ from yulon.git import CloneSpec, RunnerGit
 from yulon.support import runlog
 from yulon.ui import catalog_view
 from yulon.ui.catalog_view import INSTALL_STOPPED_TITLE, CatalogView, Identification
-from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED, LogPanel
+from yulon.ui.widgets.log_panel import STOPPED_PUT_BACK, STOPPED_THEN_FAILED, LogPanel
 
 
 def _completed() -> subprocess.CompletedProcess[str]:
@@ -854,7 +854,10 @@ def test_an_install_stopped_in_its_ready_wait_says_press_install_again_in_the_po
     panel.stop()
     wait_for_panel(panel)
 
-    assert panel.status_text() == "cancelled"
+    # T528: a clean Stop whose header is the engine's own sentence for it.
+    assert panel.status_text().startswith(
+        STOPPED_PUT_BACK + native.READY_WAIT_STOPPED
+    ), panel.status_text()
     assert len(told) == 1, told
     title, said = told[0]
     assert title == INSTALL_STOPPED_TITLE, title

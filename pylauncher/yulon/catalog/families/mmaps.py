@@ -928,6 +928,35 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
     return _finished(job, latest, facts, tail, run, now)
 
 
+def _quoted(tail: str) -> str:
+    """The generator's last words for the pathfinding line, cut at whole words (T304).
+
+    `docker.last_words()` keeps the end of the log, and two cuts can fall inside a
+    word. A log that does not end in a newline ended in the middle of a line --
+    the generator's output reaches the log a block at a time and a crash leaves
+    the last block part-way (`Building t`, yulon-win11 2026-10-05) -- so that
+    line's last word is dropped unless the cut fell on a space, and an ellipsis
+    says the line went on. A quote kept from the end is started at its first
+    whole word. A full stop ends it, so the sentence after it does not run on.
+    """
+    lines = tail.splitlines()[-20:]
+    if not any(line.strip() for line in lines):
+        return f"{docker.last_words(())}."  # nothing said is not a quote cut short
+    cut = not tail.endswith(("\n", "\r"))
+    if cut:
+        last = lines[-1]
+        whole = last.rstrip() if last[-1:].isspace() else last.rpartition(" ")[0].rstrip()
+        if whole or any(line.strip() for line in lines[:-1]):
+            lines[-1] = whole  # a log that is one cut word is quoted as it is
+    words = docker.last_words(tuple(lines))
+    if words.startswith("…") and not words[1:2].isspace():
+        rest = words[1:].partition(" ")[2].lstrip(" /")
+        words = f"…{rest}" if rest else words
+    if cut and not words.endswith("…"):
+        words = f"{words}…"
+    return words if words.endswith((".", "!", "?")) else f"{words}."
+
+
 def _finished(
     job: Job,
     record: Record,
@@ -939,11 +968,10 @@ def _finished(
     """The container exited: complete, and pathfinding switched on, or failed and cleared."""
     plan = job.block.mmaps
     if facts.exit_code not in plan.success_codes:
-        words = docker.last_words(tuple((tail or "").splitlines()[-20:]))
         return _fail(
             job,
             record,
-            f"the generator stopped with exit {facts.exit_code}. {words}",
+            f"the generator stopped with exit {facts.exit_code}. {_quoted(tail or '')}",
             run,
             now,
         )

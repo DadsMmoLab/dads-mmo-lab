@@ -1280,7 +1280,7 @@ def test_a_failed_write_is_a_pack_error_and_leaves_no_temporary_file(
     def full(*args: object, **kwargs: object) -> None:
         raise OSError(errno.ENOSPC, "No space left on device", str(rig.play))
 
-    monkeypatch.setattr(client_packs.shutil, "copyfileobj", full)
+    monkeypatch.setattr(client_packs, "_copy", full)  # every byte copy of a pack (T303)
 
     with pytest.raises(PackError, match="No space left"):
         rig.install(ADDONS, rig.fetched(ADDON_FILES))
@@ -2536,3 +2536,111 @@ def test_switching_a_pack_off_removes_its_file_in_whatever_case(lower_rig: _Rig)
     assert not other.exists()
     assert not (lower_rig.play / "Data" / "patch-T.MPQ").exists()
     lower_rig.untouched()
+
+
+# -- T303: a Stop while a pack is proved or laid ----------------------------------------------
+
+
+class _StopAt:
+    """A Stop pressed at the `at`-th time the pack code asks, and set from then on."""
+
+    def __init__(self, at: int) -> None:
+        self.at = at
+        self.asked = 0
+
+    def __call__(self) -> bool:
+        self.asked += 1
+        return self.asked >= self.at
+
+
+def test_a_stop_while_the_parts_are_joined_stops_the_join_and_keeps_nothing(
+    tmp_path: Path,
+) -> None:
+    """At the second piece. Each piece is one chunk, and so is the joined zip's proof, so a
+    join that did not ask would reach the proof having asked once, and finish."""
+    server = tmp_path / "server"
+    folder = server / "p"
+    folder.mkdir(parents=True)
+    data = _zip()
+    assert len(data) < client_packs.CHUNK_BYTES, "the ground: one chunk per piece"
+    _split(data, folder, "patch-Y.zip", 3)
+    md5 = hashlib.md5(data).hexdigest()
+    stop = _StopAt(2)
+
+    with pytest.raises(client_packs.Cancelled):
+        fetch_checkout(_checkout_pack("p/patch-Y.zip", md5=md5), server, cancelled=stop)
+
+    assert stop.asked == 2
+    assert list((client_packs.cache_dir() / "checkout" / md5).iterdir()) == []
+
+
+def test_a_stop_while_a_plain_checkout_file_is_proved_is_a_stop_not_a_refusal(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server"
+    (server / "p").mkdir(parents=True)
+    data = _zip()
+    (server / "p" / "patch-Y.zip").write_bytes(data)
+    pack = _checkout_pack("p/patch-Y.zip", sha256=hashlib.sha256(data).hexdigest())
+
+    with pytest.raises(PackError) as stopped:
+        fetch_checkout(pack, server, cancelled=lambda: True)
+
+    assert type(stopped.value) is client_packs.Cancelled, stopped.value
+    assert str(stopped.value) == (
+        "Laying World patch was stopped part-way; nothing of it was installed."
+    )
+    assert (server / "p" / "patch-Y.zip").read_bytes() == data, "the server's own file stays"
+
+
+def test_a_stop_while_a_pack_is_laid_leaves_the_client_as_it_was(rig: _Rig) -> None:
+    before = _snapshot(rig.play)
+
+    with pytest.raises(client_packs.Cancelled):
+        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}), cancelled=lambda: True)
+
+    assert _snapshot(rig.play) == before
+    rig.untouched()
+
+
+def test_a_stop_while_a_cached_archive_is_checked_stops_before_it_is_linked_in(
+    rig: _Rig,
+) -> None:
+    """A second laying finds the archive in the cache and reads it to check it: that read
+    asks too, or a Stop waits for a whole cached archive to be read."""
+    fetched = rig.fetched({"patch-Y.MPQ": NEW_Y})
+    rig.install(WORLD, fetched)
+    laid = _snapshot(rig.play)
+    laid_in = rig.play / "Data" / "patch-X.MPQ"
+    laid_in.unlink()  # a hard link to the cached archive: never written through
+    laid_in.write_bytes(STOCK_X)  # as a fresh copy of the player's client holds it
+    before = _snapshot(rig.play)
+    assert before != laid
+
+    with pytest.raises(client_packs.Cancelled):
+        rig.install(WORLD, fetched, cancelled=lambda: True)
+
+    assert _snapshot(rig.play) == before
+
+
+def test_a_stop_after_the_last_file_is_staged_still_installs_nothing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: asked once more between staging and the renames, so a Stop that lands
+    after the last chunk was read is not answered by a pack laid in anyway."""
+    staged: list[bool] = []
+    real_stage = client_packs._stage
+
+    def stage(*args: Any) -> Any:
+        made = real_stage(*args)
+        staged.append(True)  # the Stop lands now: every chunk of this file was read
+        return made
+
+    monkeypatch.setattr(client_packs, "_stage", stage)
+    before = _snapshot(rig.play)
+
+    with pytest.raises(client_packs.Cancelled):
+        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}), cancelled=lambda: bool(staged))
+
+    assert staged == [True], "the ground: the one file was staged before the Stop"
+    assert _snapshot(rig.play) == before

@@ -22,13 +22,17 @@ clause inside another one:
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from yulon import module_source
+from yulon import folder_swap, module_source
 from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, parse_index, parse_manifest
 from yulon.module_source import DeriveError
 
@@ -535,3 +539,543 @@ def test_copy_folder_refuses_a_source_inside_the_destination(tmp_path: Path) -> 
         )
 
     assert not dest.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param("conf/mod_my_thing.conf.dist", id="a conf template"),
+        pytest.param("src/deep/down/secret.cpp", id="deep down"),
+        pytest.param("data/sql/db-world/home", id="a folder"),
+    ],
+)
+def test_copy_folder_refuses_a_link_before_anything_is_replaced(tmp_path: Path, link: str) -> None:
+    """T530: a link in the chosen folder is never copied through, into the server's modules.
+
+    `copytree` follows a symlink and copies what it points to, so a folder holding
+    `conf/x.conf.dist -> ~/.ssh/id_rsa` (a repository the player cloned with git
+    keeps its links) put the private key into `modules/<id>`, where the install's
+    conf step and the build both read it. Refused before the old copy is removed,
+    naming the link; a link inside `.git` is git's own and never copied.
+    """
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_bytes(b"the player's private key")
+    src = tmp_path / "mod-my-thing"
+    for folder in ("conf", "src", "data/sql/db-world", ".git"):
+        (src / folder).mkdir(parents=True)
+    (src / "src" / "kept.cpp").write_text("new\n", encoding="utf-8")
+    os.symlink("objects", src / ".git" / "a-link-git-keeps")
+    where = src / link
+    where.parent.mkdir(parents=True, exist_ok=True)
+    target = home / ".ssh" if link.endswith("home") else home / ".ssh" / "id_rsa"
+    os.symlink(target, where, target_is_directory=target.is_dir())
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+    dest.mkdir(parents=True)
+    (dest / "earlier.cpp").write_text("the copy made before\n", encoding="utf-8")
+
+    message = _refused(lambda: module_source.copy_folder(src, dest))
+
+    assert str(where) in message and str(target) in message, message
+    assert message.endswith(NOTHING_CHANGED)
+    assert sorted(p.name for p in dest.iterdir()) == ["earlier.cpp"]
+    assert (home / ".ssh" / "id_rsa").read_bytes() == b"the player's private key"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_copy_folder_stops_at_a_link_made_after_the_look(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The belt: the copy itself never goes through a link, even one the look did not see."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "secret").write_bytes(b"secret")
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    os.symlink(home / "secret", src / "src" / "secret.cpp")
+    monkeypatch.setattr(module_source, "_first_link", lambda _src: None)
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+
+    with pytest.raises((DeriveError, OSError)):
+        module_source.copy_folder(src, dest)
+
+    assert not (dest / "src" / "secret.cpp").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_copy_folder_stops_in_a_folder_that_became_a_link_after_its_parent_was_listed(
+    tmp_path: Path,
+) -> None:
+    """`copytree` enters a child folder by its path after the parent's look; the folder is asked."""
+    home = tmp_path / "home"
+    home.mkdir()
+    src = tmp_path / "mod-my-thing"
+    src.mkdir()
+    os.symlink(home, src / "swapped", target_is_directory=True)
+    with pytest.raises(OSError, match="became a link"):
+        module_source._git_and_links(str(src / "swapped"), ["secret"])
+
+
+# -- T538: the old copy stays until the new one is whole ---------------------
+
+
+def _a_copy_in_place(tmp_path: Path) -> tuple[Path, Path, dict[str, bytes]]:
+    """A chosen folder, and `modules/<id>` holding an earlier copy of it; that copy's bytes."""
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "new.cpp").write_text("new\n", encoding="utf-8")
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+    (dest / "src").mkdir(parents=True)
+    (dest / "src" / "old.cpp").write_text("the copy that works\n", encoding="utf-8")
+    (dest / "include.sh").write_text("", encoding="utf-8")
+    return src, dest, _bytes_under(dest)
+
+
+def _bytes_under(folder: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()
+    }
+
+
+def _modules_holds_only(dest: Path) -> None:
+    """Nothing beside `modules/<id>` but what was there, and no staging folder left."""
+    assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+    assert not (dest.parent.parent / folder_swap.STAGING).exists()
+
+
+def test_a_copy_that_fails_half_way_leaves_the_old_copy_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T538: the old copy was removed first, so a failed copy left a part of the new one.
+
+    `Applier._copy_folder()` says "Nothing was changed" on any `OSError` from here;
+    the copy now goes into a folder beside the target and is swapped in only whole.
+    """
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = module_source.shutil.copytree
+
+    depth = [0]
+
+    def copy_then_fail(*args: Any, **kwargs: Any) -> Any:
+        # `shutil` itself is patched, so its own recursion comes here too: fail the whole
+        # copy once it is done, never a folder inside it.
+        depth[0] += 1
+        try:
+            done = real(*args, **kwargs)
+        finally:
+            depth[0] -= 1
+        if depth[0] == 0:
+            raise OSError(28, "No space left on device")
+        return done
+
+    monkeypatch.setattr(module_source.shutil, "copytree", copy_then_fail)
+
+    with pytest.raises(OSError, match="No space left"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_swap_that_fails_puts_the_old_copy_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The new copy cannot take the name (Windows: a file in it is open): the old one is back."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = os.rename
+
+    def refuse_the_new_one(old: Any, new: Any) -> None:
+        if Path(new) == dest and "partial" in Path(old).name:
+            raise PermissionError(13, "Access is denied", str(old))
+        real(old, new)
+
+    monkeypatch.setattr(module_source.os, "rename", refuse_the_new_one)
+
+    with pytest.raises(OSError, match="Access is denied"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_successful_copy_leaves_nothing_beside_the_module(tmp_path: Path) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
+
+
+def test_an_old_copy_a_crash_left_aside_is_put_back_when_the_next_copy_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A crash between the two renames leaves the old copy aside and no module at the name."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    aside = folder_swap.places(dest)[1]
+    aside.parent.mkdir(parents=True)
+    os.rename(dest, aside)
+    partial = folder_swap.places(dest)[0]
+    (partial / "half").mkdir(parents=True)
+
+    def fail(*_a: Any, **_k: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(module_source.shutil, "copytree", fail)
+
+    with pytest.raises(OSError):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_stale_old_copy_beside_a_good_module_is_cleared(tmp_path: Path) -> None:
+    """A crash after the swap leaves the old copy aside AND the new one in place: old goes."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    (folder_swap.places(dest)[1] / "src").mkdir(parents=True)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_link_met_while_copying_leaves_the_old_copy_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T530's belt stops the copy; since T538 that no longer costs the copy that worked."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    os.symlink(tmp_path, src / "src" / "up", target_is_directory=True)
+    monkeypatch.setattr(module_source, "_first_link", lambda _src: None)
+
+    with pytest.raises(OSError):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_partial_copy_a_crash_left_does_not_stop_the_next_copy(tmp_path: Path) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    (folder_swap.places(dest)[0] / "half").mkdir(parents=True)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
+
+
+def test_a_swap_whose_roll_back_fails_says_where_the_old_copy_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex adversarial review of 9d83b410: both renames failing left `modules/<id>` empty
+    while the applier said "Nothing was changed". The old copy is kept aside and named."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    aside = folder_swap.places(dest)[1]
+    real = os.rename
+
+    def refuse_into_place(old: Any, new: Any) -> None:
+        if Path(new) == dest:
+            raise PermissionError(13, "Access is denied", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(module_source.os, "rename", refuse_into_place)
+
+    with pytest.raises(OSError) as failed:
+        module_source.copy_folder(src, dest)
+
+    assert str(aside) in str(failed.value), str(failed.value)
+    assert _bytes_under(aside) == before
+    assert list(dest.parent.iterdir()) == []
+
+
+def test_the_applier_does_not_say_nothing_changed_when_the_module_is_gone(
+    tmp_path: Path,
+) -> None:
+    from yulon.apply import Applier, ApplyError, FolderSource, _Log
+
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-my-thing"
+    (clone / "src").mkdir(parents=True)
+
+    def copier(_src: Path, dest: Path) -> None:
+        aside = folder_swap.places(dest)[1]
+        aside.parent.mkdir(parents=True)
+        dest.rename(aside)
+        raise OSError(f"the earlier copy is kept whole as {aside}")
+
+    with pytest.raises(ApplyError) as failed:
+        Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
+
+    assert "Nothing was changed" not in str(failed.value)
+    assert "mod-my-thing.old" in str(failed.value)
+
+
+def test_the_applier_says_nothing_changed_when_the_module_is_still_there(
+    tmp_path: Path,
+) -> None:
+    from yulon.apply import Applier, ApplyError, FolderSource, _Log
+
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-my-thing"
+    (clone / "src").mkdir(parents=True)
+
+    def copier(_src: Path, _dest: Path) -> None:
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(ApplyError) as failed:
+        Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
+
+    assert str(failed.value).endswith("Nothing was changed.")
+
+
+# -- T538 cold review: a stopped swap is settled before the install reads the claim --
+
+
+def _folder_module(tmp_path: Path) -> tuple[Any, Any, Path, Path, Path]:
+    """A sourceless module with a client patch, its folder, the applier, the server, the client."""
+    from yulon.apply import Applier
+
+    manifest = parse_manifest(
+        {
+            "id": "mod-my-thing",
+            "name": "My thing",
+            "type": "module",
+            "game": "wow-wotlk",
+            "client": [{"src": "client-data", "dest": "data"}],
+            "origin": {
+                "kind": "folder",
+                "path": str(tmp_path / "mod-my-thing"),
+                "added": "2026-10-07",
+            },
+        }
+    )
+    folder = tmp_path / "mod-my-thing"
+    (folder / "src").mkdir(parents=True)
+    (folder / "src" / "a.cpp").write_text("// a\n", encoding="utf-8")
+    (folder / "client-data").mkdir()
+    (folder / "client-data" / "Patch-Z.MPQ").write_bytes(b"the module's patch")
+    server = tmp_path / "server"
+    server.mkdir()
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    return manifest, Applier(server, client_dir=client), folder, server, client
+
+
+def _stop_a_swap(monkeypatch: pytest.MonkeyPatch, applier: Any, manifest: Any, source: Any) -> None:
+    """Install again with the new copy AND the roll-back refused: the old copy is left aside."""
+    from yulon.apply import ApplyError
+
+    dest = applier.clone_dir(manifest)
+    real = os.rename
+
+    def refuse_into_place(old: Any, new: Any) -> None:
+        if Path(new) == dest:
+            raise PermissionError(13, "Access is denied", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(os, "rename", refuse_into_place)
+    with pytest.raises(ApplyError):
+        applier.install(manifest, folder=source)
+    monkeypatch.setattr(os, "rename", real)
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("player_had_one", [False, True], ids=["new patch", "player's patch"])
+def test_an_install_after_a_stopped_swap_keeps_the_receipts_so_remove_takes_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, player_had_one: bool
+) -> None:
+    """Cold review MUST 1, through `install()`: the swap stopped with the old copy aside
+    and nothing at `modules/<id>`; the next Install reads the claim only after the stopped
+    swap is settled, so its receipts are there, and Remove takes back what Yu'lon put in."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    patch = client / "Data" / "Patch-Z.MPQ"
+    if player_had_one:
+        patch.write_bytes(b"the player's own patch")
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+
+    applier.install(manifest, folder=source)
+    applier.remove(manifest)
+
+    left = {p.name: p.read_bytes() for p in (client / "Data").iterdir()}
+    assert left == ({"Patch-Z.MPQ": b"the player's own patch"} if player_had_one else {})
+
+
+@pytest.mark.parametrize("player_had_one", [False, True], ids=["new patch", "player's patch"])
+def test_a_remove_after_a_stopped_swap_takes_back_the_client_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, player_had_one: bool
+) -> None:
+    """The same stopped swap, then Remove: the module row reads not installed, so this is
+    the press that finds it. Before, Remove saw no checkout, so no receipts: the patch
+    stayed in the client, and the old copy stayed in the server folder."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    patch = client / "Data" / "Patch-Z.MPQ"
+    if player_had_one:
+        patch.write_bytes(b"the player's own patch")
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+
+    applier.remove(manifest)
+
+    left = {p.name: p.read_bytes() for p in (client / "Data").iterdir()}
+    assert left == ({"Patch-Z.MPQ": b"the player's own patch"} if player_had_one else {})
+    assert [p.name for p in server.rglob("*mod-my-thing*")] == []
+
+
+@pytest.fixture(autouse=True)
+def _no_wait_between_renames(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    waited: list[float] = []
+    monkeypatch.setattr(folder_swap, "_sleep", waited.append)
+    return waited
+
+
+def test_the_copy_is_made_outside_the_modules_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review SHOULD 2: the build takes every folder in `modules/`, dot-names too
+    (AzerothCore's `GetModuleSourceList()`: `file(GLOB … "${BASE_PATH}/*")`, measured with
+    CMake 3.28), so a copy being made, or an old copy left by a failed delete, must not
+    be there."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    real = module_source.shutil.copytree
+    made_in: list[Path] = []
+
+    def record(*args: Any, **kwargs: Any) -> Any:
+        if not made_in:  # the whole copy; `shutil`'s own recursion comes here too
+            made_in.append(Path(args[1]))
+            assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module_source.shutil, "copytree", record)
+    module_source.copy_folder(src, dest)
+
+    assert not made_in[0].is_relative_to(dest.parent)
+    assert made_in[0].parent.parent == dest.parent.parent
+
+
+def test_an_old_copy_that_will_not_delete_is_left_outside_the_modules_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+
+    def locked(path: Any) -> None:
+        raise PermissionError(13, "a file in it is open", str(path))
+
+    monkeypatch.setattr(folder_swap.rmtree, "remove_tree", locked)
+    module_source.copy_folder(src, dest)
+
+    assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+
+
+def test_a_rename_refused_for_a_moment_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _no_wait_between_renames: list[float]
+) -> None:
+    """Cold review SHOULD 3: on Windows an antivirus scan holds a new file for a moment."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    real = os.rename
+    refused = [2]
+
+    def busy(old: Any, new: Any) -> None:
+        if Path(new) == dest and refused[0]:
+            refused[0] -= 1
+            raise PermissionError(32, "being used by another process", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(os, "rename", busy)
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    assert len(_no_wait_between_renames) == 2
+    _modules_holds_only(dest)
+
+
+def test_an_install_after_a_stopped_swap_carries_the_old_receipts_forward(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review MUST 1, where it bites: the new version of the folder no longer ships
+    a patch the old one put into the client. Its receipt is only in the old claim, which
+    the install must read after the stopped swap is settled, or Remove leaves it behind."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+    (folder / "client-data" / "Patch-Z.MPQ").unlink()
+    (folder / "client-data" / "Patch-Y.MPQ").write_bytes(b"the new version's patch")
+
+    applier.install(manifest, folder=source)
+    applier.remove(manifest)
+
+    assert sorted(p.name for p in (client / "Data").iterdir()) == []
+
+
+@pytest.fixture
+def _modules_on_another_drive(tmp_path: Path) -> Iterator[Path]:
+    """`<server>/modules` a link to a folder on tmpfs (`/dev/shm`), another file system."""
+    shm = Path("/dev/shm")
+    if not shm.is_dir() or not hasattr(os, "symlink"):
+        pytest.skip("no /dev/shm")
+    elsewhere = Path(tempfile.mkdtemp(dir=shm, prefix="yulon-t538-"))
+    if os.stat(elsewhere).st_dev == os.stat(tmp_path).st_dev:
+        shutil.rmtree(elsewhere)
+        pytest.skip("/dev/shm is on the same file system as the test folder here")
+    try:
+        (elsewhere / "modules").mkdir()
+        server = tmp_path / "server"
+        server.mkdir()
+        os.symlink(elsewhere / "modules", server / "modules", target_is_directory=True)
+        yield server
+    finally:
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+def test_a_modules_folder_linked_to_another_drive_is_staged_beside_its_real_folder(
+    tmp_path: Path, _modules_on_another_drive: Path
+) -> None:
+    """Cold re-review SHOULD: staging in the server folder put it on another file system
+    from a linked `modules/`, and every rename into place failed (EXDEV)."""
+    server = _modules_on_another_drive
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "a.cpp").write_text("// a\n", encoding="utf-8")
+    dest = server / "modules" / "mod-my-thing"
+
+    module_source.copy_folder(src, dest)
+    (src / "src" / "b.cpp").write_text("// b\n", encoding="utf-8")
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/a.cpp": b"// a\n", "src/b.cpp": b"// b\n"}
+    real_modules = Path(os.path.realpath(server / "modules"))
+    assert not (real_modules.parent / folder_swap.STAGING).exists()
+    assert not (server / folder_swap.STAGING).exists()
+
+
+def test_staging_on_another_file_system_is_refused_before_anything_is_copied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`modules/` a mount point of its own: no folder beside it shares its file system."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = folder_swap._device
+    monkeypatch.setattr(
+        folder_swap,
+        "_device",
+        lambda path: real(path) + (1 if Path(path).name == folder_swap.STAGING else 0),
+    )
+
+    with pytest.raises(OSError, match="not on the same drive"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)

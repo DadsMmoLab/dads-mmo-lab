@@ -20,9 +20,11 @@ import ntpath
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
 import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
@@ -65,12 +67,24 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on", "ended", "job", "settled", "cut_short", "answered", "lock")
+    __slots__ = (
+        "proc",
+        "started_on",
+        "ended",
+        "job",
+        "group",
+        "settled",
+        "cut_short",
+        "answered",
+        "lock",
+    )
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
         self.job: winjob.Job | None = None
         """The Windows Job object `proc` was started in, if it joined one (T299)."""
+        self.group: int | None = None
+        """The process group `proc` leads, off Windows, when it was started as one (T529)."""
         self.settled = False
         """Set under `lock` when `_finish` lets `job` go; a Stop then skips it."""
         self.cut_short = False
@@ -135,6 +149,22 @@ _LIVE_STREAMS: weakref.WeakKeyDictionary[Generator[str, None, None], _Child] = (
 )
 _LIVE_STREAMS_LOCK = threading.Lock()
 
+_STOPS_SENT: dict[int, int] = {}
+"""How many Stops `end_streams_started_on()` was sent per thread ident, under the lock (T321)."""
+
+
+def stops_sent_to(ident: int) -> int:
+    """How many times a Stop was sent to thread `ident`, live stream or not (T321).
+
+    `end_streams_started_on()` ends only what is live, and a Stop that lands while
+    the thread is in a plain `run()` -- `docker create`, which no Stop may cut short
+    (`container_end`) -- finds nothing to end. A caller that must not lose that
+    Stop reads this before such a call and again after it: a different count is a
+    Stop sent in between. A count, not a flag, so nothing has to be reset.
+    """
+    with _LIVE_STREAMS_LOCK:
+        return _STOPS_SENT.get(ident, 0)
+
 
 def _register(generator: Generator[str, None, None], child: _Child) -> None:
     """Put `generator` under the exit hook's eye, with the holder its body reports `proc` in."""
@@ -142,8 +172,17 @@ def _register(generator: Generator[str, None, None], child: _Child) -> None:
         _LIVE_STREAMS[generator] = child
 
 
-def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool = False) -> None:
+def _end_child(
+    proc: _AnyPopen,
+    job: winjob.Job | None = None,
+    *,
+    bounded: bool = False,
+    group: int | None = None,
+) -> bool:
     """End `proc` if it is still running: on Windows its tree first, then terminate, then kill.
+
+    True if it found `proc` running and ended it; False if `proc` had already
+    exited, which a caller with a group to end then has to see to (`_finish`).
 
     **The tree is ended by `proc`'s Job object when it has one (T299)**, and by
     taskkill only when it has none or the job could not be ended. The job holds
@@ -163,9 +202,26 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool 
     terminated its children's parent is gone.
 
     `terminate()`/`kill()` stay after it as the fallback, and are what a
-    taskkill that failed, timed out or could not start leaves in charge. Off
-    Windows nothing changes; T298 is the follow-up that asks whether Linux and
-    macOS need a process group.
+    taskkill that failed, timed out or could not start leaves in charge.
+
+    Off Windows the docker CLI alone is signalled, and on Linux that was
+    measured to be enough (T298, 2026-10-06, yulon-ubuntu and m910q): SIGTERM,
+    and SIGKILL too, left no compose or `buildx bake` process 2 s later, and the
+    stopped build never tagged its image. The CLI closes its plugin's socket and
+    compose ends its bake on that; both plugins ran in the CLI's own process
+    group, so a group signal would also have reached them, had it been needed.
+    macOS was not probed.
+
+    **A host tool's child is another matter, and `group` is for it (T529).**
+    Measured on m910q 2026-10-07: SIGTERM to `git clone` during `Resolving
+    deltas` left `index-pack` running 13.8 s with PPID 1, and a blob-less
+    `git checkout`'s own `git fetch` downloaded on for 36 s; each held the
+    stream's pipe, so the Stop did not end the read until it exited.
+    `stream_progress()` starts its child as the leader of a session of its own,
+    and for such a child `group` is its pid: the whole group gets SIGTERM, and
+    whatever of it is still there `_SHUTDOWN_TIMEOUT_SECONDS` later gets SIGKILL
+    (`_end_group`). `stream()` is not given one: off Windows it only runs the
+    docker CLI, measured above.
 
     `bounded` is for a caller that must not block for long (T365: a Stop on the
     thread that pressed it): the `kill()` is not waited for. Nothing is lost by
@@ -179,11 +235,13 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool 
                 # adversarial review). A root still there is ended as before.
                 try:
                     proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-                    return
+                    return True
                 except subprocess.TimeoutExpired:
                     pass
             else:
                 _end_tree(proc)
+        elif group is not None and _end_group(proc, group, bounded=bounded):
+            return True
         proc.terminate()
         try:
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
@@ -191,16 +249,84 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None, *, bounded: bool 
             proc.kill()
             if not bounded:
                 proc.wait()
+        return True
+    return False
 
 
-def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None) -> None:
+def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
+    """SIGTERM to `proc`'s whole group, and SIGKILL to what is left of it after the timeout (T529).
+
+    The group is `proc`'s own: `_group_led_by()` gave it only for a child this
+    module started as a session leader, so it holds `proc` and what `proc`
+    started, and nothing else. POSIX does not hand out a pid while it is still
+    some group's id, so the id stays this group's while any member lives; the
+    SIGKILL is sent only while a member is still seen. False, having done
+    nothing, for a group that cannot be signalled: `_end_child` then ends
+    `proc` alone, as before T529.
+    """
+    deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+    if not _signal_group(group, signal.SIGTERM):
+        return False
+    try:
+        proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    while _signal_group(group, 0) and time.monotonic() < deadline:
+        time.sleep(_GROUP_POLL_SECONDS)
+    if _signal_group(group, 0):
+        _signal_group(group, getattr(signal, "SIGKILL"))  # noqa: B009 - POSIX-only attribute
+    if proc.poll() is None:
+        proc.kill()
+        if not bounded:
+            proc.wait()
+    return True
+
+
+_GROUP_POLL_SECONDS = 0.05
+"""How often `_end_group` asks whether anything of a group it signalled is still there."""
+
+
+def _signal_group(group: int, sig: int) -> bool:
+    """Send `sig` to process group `group`; False when none of it is left or it cannot be asked."""
+    killpg = getattr(os, "killpg")  # noqa: B009 - POSIX-only attribute; Windows has no groups
+    try:
+        killpg(group, sig)
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        logger.warning(f"could not signal process group {group}: {exc!r}")
+        return False
+    return True
+
+
+_REAL_POPEN = subprocess.Popen
+"""The class a real child is, held before anything can stand in for it (`_group_led_by`)."""
+
+
+def _group_led_by(proc: _AnyPopen) -> int | None:
+    """`proc`'s pid if it is a real child that leads its own process group, else None (T529).
+
+    Asked of the process rather than assumed from the spawn's arguments, so a
+    group signal can never go to a pid that is not a child this module started
+    as a session leader: a stand-in object, or a child whose session was not
+    made, gets None and is ended as before.
+    """
+    if sys.platform == "win32" or not isinstance(proc, _REAL_POPEN):
+        return None
+    try:
+        return proc.pid if os.getpgid(proc.pid) == proc.pid else None
+    except OSError:
+        return None
+
+
+def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None, group: int | None = None) -> None:
     """End a child whose reader could not start, before its stream's `finally` exists.
 
     From both Codex reviews of T299: the reader starts before the `try` whose
     `finally` ends the child, so a `RuntimeError: can't start new thread` left
     the tree running in a job nobody would close.
     """
-    _end_child(proc, job)
+    _end_child(proc, job, group=group)
     if job is not None:
         job.close()
 
@@ -211,6 +337,7 @@ def _finish(
     *,
     stopped: bool = False,
     child: _Child | None = None,
+    drained: bool = True,
 ) -> None:
     """A stream's last word on its child: end it if it is running, then let its job go.
 
@@ -221,6 +348,17 @@ def _finish(
     The job is closed only after it was asked to end the tree, because a
     closed job's handle can no longer end anything.
 
+    **Ran out by itself means the root exited AND its output was read to the
+    end (T495).** `drained` is False for a stream its consumer closed before
+    EOF. Its root may have exited, but something still held the pipe, and that
+    is the command's own work: docker.exe ended by hand while compose and
+    `buildx bake` went on compiling into the pipe (yulon-win11-gate
+    2026-10-06). The Stop reached that stream only as a cancel that closed it
+    (the stream had been started on `native._pump()`'s worker, which the
+    panel's `end_streams_started_on()` does not match), and a release here let
+    the build compile on for 11 minutes. Such a job is closed. `interact()`
+    passes nothing: it stops reading when its child exits, by design.
+
     A Stop overrides `poll()`: if docker.exe exits before the Stop's thread
     runs, a release here would leave the rest of the tree running (Codex's
     second adversarial review). For a registered stream that Stop is
@@ -230,10 +368,23 @@ def _finish(
     it (Codex's fourth). `stopped` is the same for `interact()`, which is not
     registered and whose cancel is its Stop.
     """
-    ran_out = proc.poll() is not None
+    # Read BEFORE `_end_child`: a root it has just ended through its group is
+    # not one that had exited, and must not be sent the group's ending twice.
+    exited = proc.poll() is not None
+    ran_out = drained and exited
+    group = child.group if child is not None else None
     try:
-        _end_child(proc, job)
+        ended_root = False if exited else _end_child(proc, job, group=group)
+        if group is not None and not drained and not ended_root:
+            # T495's rule off Windows (T529): closed before EOF with its root gone --
+            # gone before this looked, or as `_end_child` looked (Codex review) --
+            # something of its group still held the pipe: the command's own work.
+            _end_group(proc, group, bounded=False)
     finally:
+        if child is not None and child.group is not None:
+            # From here a Stop leaves this stream's group alone (`_group_unsettled`).
+            with child.lock:
+                child.settled = True
         # Whatever `_end_child` did, the job is let go (Codex's third review).
         if job is not None:
             if child is not None:
@@ -369,7 +520,7 @@ def _close_abandoned_streams() -> None:
             # `next()`; one whose child is still running does not.
             logger.debug(f"an abandoned stream() is being run by another thread at exit: {exc}")
             if child.proc is not None:
-                _end_child(child.proc, child.job)
+                _end_child(child.proc, child.job, group=child.group)
         except BaseException as exc:  # noqa: BLE001 - exiting; nothing may escape
             # The generator's own `finally` failed. Logged rather than swallowed
             # silently, but never re-raised: an exception here would be reported
@@ -457,14 +608,38 @@ def end_streams_started_on(ident: int) -> int:
     where it is said (`LogPanel._on_finished`).
     """
     with _LIVE_STREAMS_LOCK:
+        _STOPS_SENT[ident] = _STOPS_SENT.get(ident, 0) + 1  # `stops_sent_to()` (T321)
         # Only copied out under the lock, and nothing else done there: the
         # dictionary is weak and every other reader takes the same lock, and a
         # generator can be finalised on this thread inside this very walk (its
         # last reference dropped elsewhere, or a GC pass), running its `finally`
         # here. Nothing that `finally` needs may be held (cold review of T299).
         mine = [child for child in _LIVE_STREAMS.values() if child.started_on == ident]
+    ended = _end_chosen(mine)
+    if ended:
+        logger.debug(f"ending {ended} stream child(ren) started on thread {ident}")
+    return ended
+
+
+def end_stream(generator: Generator[str, None, None]) -> bool:
+    """End the child of the ONE live stream `generator`, as a Stop would (T526). True if it did.
+
+    `end_streams_started_on()` for a caller that holds its own stream and must
+    not reach any other: `docker.run_attached()`'s cancel watcher. A thread can
+    hold more than one live stream -- an outer job's, suspended at a line while
+    it runs a command -- and a run's cancel is about that run alone (Codex's
+    adversarial review). Not a Stop of the thread, so `stops_sent_to()` does not
+    count it.
+    """
+    with _LIVE_STREAMS_LOCK:
+        child = _LIVE_STREAMS.get(generator)
+    return child is not None and _end_chosen([child]) == 1
+
+
+def _end_chosen(candidates: list[_Child]) -> int:
+    """Claim each of `candidates` that is a Stop's to end, and end it off this thread. How many."""
     children = []
-    for child in mine:
+    for child in candidates:
         # Chosen and marked under the child's own lock, so `_finish` cannot
         # decide between release and close in between (Codex's fourth
         # adversarial review of T299). Marked before the end is even asked for,
@@ -474,14 +649,14 @@ def end_streams_started_on(ident: int) -> int:
         # reads it under this lock in `_answer`, so either the Stop claims the
         # stream first and the reader reports a Stop, or the reader answers
         # first and the Stop leaves the stream alone (scoped review of d3252e19).
-        # Only with a job: off Windows nothing ends a root that has exited, and
-        # its exit status is the whole story, as before.
+        # Only with a job or a group (T529): without one nothing ends a root
+        # that has exited, and its exit status is the whole story, as before.
         with child.lock:
             if child.answered:
                 continue
-            if _still_running(child.proc) or _job_unsettled(child):
+            if _still_running(child.proc) or _job_unsettled(child) or _group_unsettled(child):
                 child.ended = True
-                child.cut_short = child.job is not None
+                child.cut_short = child.job is not None or child.group is not None
                 children.append(child)
     for child in children:
         proc = child.proc
@@ -501,8 +676,6 @@ def end_streams_started_on(ident: int) -> int:
                 f"could not start a thread to end pid {proc.pid} ({exc!r}); ending it here"
             )
             _stop_child_here(child)
-    if children:
-        logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
     return len(children)
 
 
@@ -517,19 +690,37 @@ def _job_unsettled(child: _Child) -> bool:
     return child.proc is not None and child.job is not None and not child.settled
 
 
+def _group_unsettled(child: _Child) -> bool:
+    """`_job_unsettled` for a POSIX group (T529, Codex's review): its root may have exited.
+
+    A member that holds the output pipe keeps the stream reading after its leader
+    is gone, so it is still the job a Stop means. Settled by `_finish`, and asked
+    of the group itself: one with no member left is nothing to end.
+    """
+    return (
+        child.proc is not None
+        and child.group is not None
+        and not child.settled
+        and _signal_group(child.group, 0)
+    )
+
+
 def _stop_child(child: _Child, *, bounded: bool = False) -> None:
-    """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299).
+    """A Stop's ending: `_end_child`, or the job (T299) or group (T529) alone after the root exited.
 
     The choice in `end_streams_started_on()` already set `cut_short` for a
-    child with a job, so whatever this ends, the stream reports a Stop.
+    child with a job or a group, so whatever this ends, the stream reports a Stop.
     `bounded` is passed on to `_end_child`.
     """
     proc, job = child.proc, child.job
     assert proc is not None  # chosen streams have started
     if proc.poll() is None:
-        _end_child(proc, job, bounded=bounded)
+        _end_child(proc, job, bounded=bounded, group=child.group)
     elif job is not None:
         job.end()
+    elif child.group is not None:
+        # The leader has exited and something of its group may still read on (T529).
+        _end_group(proc, child.group, bounded=bounded)
 
 
 def _stop_child_here(child: _Child) -> None:
@@ -821,10 +1012,12 @@ def _stream_lines(
             _abandon_unread(proc, job)
             raise
 
+    drained = False  # set at EOF; a stream closed before it did not run out (T495)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             yield line.rstrip("\n")
+        drained = True
 
         if reader is not None:
             reader.join()
@@ -841,7 +1034,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -948,6 +1141,10 @@ def _progress_lines(
     # translation, which rewrites every `\r` as `\n` before this function can
     # see it — and then the carriage returns this exists for are gone, silently,
     # with the split still looking right.
+    # T529: off Windows the child leads a session of its own, so a Stop can end
+    # what it starts (`_end_child`'s `group`); with no terminal, and stdin
+    # closed, a git that asks for input fails instead of waiting.
+    own_session = sys.platform != "win32"
     proc, job = _spawn(
         lambda flags: subprocess.Popen(
             command,
@@ -956,9 +1153,12 @@ def _progress_lines(
             stderr=subprocess.PIPE,
             env=child_env(env),
             creationflags=flags,
+            stdin=subprocess.DEVNULL if own_session else None,
+            start_new_session=own_session,
         )
     )
     child.job = job
+    child.group = _group_led_by(proc)
     child.proc = proc
     child.started_on = threading.get_ident()
     fragments: queue.Queue[str | None] = queue.Queue()
@@ -992,9 +1192,10 @@ def _progress_lines(
         for reader in readers:
             reader.start()
     except BaseException:
-        _abandon_unread(proc, job)
+        _abandon_unread(proc, job, child.group)
         raise
 
+    drained = False  # set once both pipes reached EOF; see `stream()` (T495)
     try:
         done = 0
         while done < len(readers):
@@ -1003,6 +1204,7 @@ def _progress_lines(
                 done += 1
                 continue
             yield item
+        drained = True
         for reader in readers:
             reader.join()
         proc.wait()
@@ -1015,7 +1217,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):

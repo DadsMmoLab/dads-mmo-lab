@@ -2015,7 +2015,7 @@ def test_on_windows_an_error_while_ending_the_child_still_closes_its_job(
     root = _TreeRoot([])
     job = _FakeJob()
 
-    def broken(proc: object, job: object = None) -> None:
+    def broken(proc: object, job: object = None, **kw: object) -> None:
         raise PermissionError(5, "Access is denied")
 
     monkeypatch.setattr(runner, "_end_child", broken)
@@ -2207,6 +2207,142 @@ def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reporte
     finally:
         lines.close()
     assert raised.value.returncode == 1, "a Stop must not read as exit 0"
+
+
+class _JobKillingOnClose(_JobHoldingAPid):
+    """`_JobHoldingAPid` whose `close()` also ends its member, as KILL_ON_JOB_CLOSE does.
+
+    `release()` clears that flag first, so it ends nothing: the member goes on.
+    """
+
+    def close(self) -> None:
+        super().close()
+        if self.member is not None:
+            try:
+                os.kill(self.member, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _gone(pid: int) -> bool:
+    """True once `pid` has exited (a zombie counts: it runs nothing), within `HANG_BOUND`."""
+    deadline = time.monotonic() + HANG_BOUND
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaped before the open, or between the open and the read (ESRCH,
+            # seen once in the mutation runs of 2026-10-07).
+            return True
+        time.sleep(POLL_PACE)
+    return False
+
+
+_ROOT_EXITS_GRANDCHILD_WRITES = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', "
+    "\"import os, time\\nprint('pid', os.getpid(), flush=True)\\n"
+    "while True:\\n    print('compiling', flush=True); time.sleep(0.05)\"], "
+    "stderr=subprocess.DEVNULL); "
+    "print('first', flush=True)"
+)
+"""A root that starts a grandchild on its own output pipe and exits 0 at once.
+
+The grandchild says its pid, then writes a line every 50 ms for as long as it
+lives: docker.exe ended by hand while docker-compose.exe and `buildx bake` go on
+compiling into the pipe (T495, yulon-win11-gate 2026-10-06, step 2).
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads /proc")
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_on_windows_a_stream_closed_before_eof_after_its_root_died_ends_its_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Root gone, tree still writing, consumer closes early: the job is closed, never released.
+
+    T495, seen live on yulon-win11-gate 2026-10-06 (T299 step 2): Rebuild,
+    docker.exe ended by hand, compose and buildx compiling on into the pipe,
+    then Stop. The stream had been started on `native._pump()`'s worker, so the
+    panel's `end_streams_started_on()` did not find it; the cancel event made
+    `docker.run_attached()` return at the next line and close the generator.
+    Its `finally` saw a root that had exited and read that as "ran out by
+    itself": the job was RELEASED and the build compiled on for 11 minutes.
+
+    A stream abandoned before its pipe reached EOF did not run out: somebody
+    is still holding the pipe, and that somebody is the command's own work.
+
+    Mutation this catches: `_finish` deciding "ran out" from `poll()` alone,
+    without asking whether the stream was read to its end.
+    """
+    job = _JobKillingOnClose()
+    spawned = _windows_spawns(monkeypatch, job)
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd(_ROOT_EXITS_GRANDCHILD_WRITES))
+    try:
+        while job.member is None:
+            line = next(lines)
+            if line.startswith("pid "):
+                job.member = int(line.split()[1])
+        proc = spawned[0]["proc"]
+        assert isinstance(proc, _REAL_POPEN)
+        assert proc.wait(timeout=HANG_BOUND) == 0
+        assert next(lines) in ("compiling", "first")  # the tree still writes, root or no root
+
+        lines.close()  # `run_attached()`'s `closing` on a cancel: GeneratorExit at the yield
+
+        assert "release" not in job.events, job.events
+        assert job.events[-1] == "close", job.events
+        assert _gone(job.member), "the job's tree outlived its stream"
+    finally:
+        lines.close()
+        if job.member is not None and not _gone(job.member):
+            os.kill(job.member, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads /proc")
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_off_windows_a_stream_closed_before_eof_after_its_root_died_is_as_before(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """Off Windows T495 changes nothing: no job is made, and nothing signals the leftover tree.
+
+    The same shape as the Windows test above. Off Windows a closed stream ends
+    its root if the root still runs and nothing else; T298 measured on Linux
+    that compose and `buildx bake` end with the docker CLI, so a dead root's
+    leftovers are not this code's to end. The grandchild is still running
+    after the close, as it was before T495.
+
+    Mutation this catches: the early-close ending reaching a POSIX stream
+    (signalling the tree, or making a job off Windows).
+    """
+    _as_windows(monkeypatch, platform)
+    made: list[object] = []
+    monkeypatch.setattr(runner.winjob, "create", lambda: made.append("job"))
+    lines = stream(_python_cmd(_ROOT_EXITS_GRANDCHILD_WRITES))
+    member: int | None = None
+    try:
+        while member is None:
+            line = next(lines)
+            if line.startswith("pid "):
+                member = int(line.split()[1])
+        child = runner._LIVE_STREAMS[lines]
+        assert child.proc is not None
+        assert child.proc.wait(timeout=HANG_BOUND) == 0
+
+        lines.close()
+
+        assert made == []
+        assert child.job is None
+        os.kill(member, 0)  # still there: raises ProcessLookupError if it was ended
+        with open(f"/proc/{member}/stat", encoding="utf-8") as stat:
+            assert stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    finally:
+        lines.close()
+        if member is not None:
+            os.kill(member, signal.SIGKILL)
 
 
 def test_on_windows_a_stop_after_the_stream_gave_its_answer_leaves_it_a_success(
@@ -2448,3 +2584,286 @@ def test_on_windows_a_stream_started_in_a_job_still_gets_the_environment_it_was_
     )
 
     assert lines == ["given"]
+
+
+# ------------------------------------------------- T529: a Stop ends what git started too
+
+# A root that starts a child of its own and lets it hold the output pipe, as `git
+# clone` leaves `index-pack` and `git checkout` its own `git fetch` (T529, m910q
+# 2026-10-07): the grandchild's pid is the first line, then both sleep.
+_GRANDCHILD_HOLDS_THE_PIPE = (
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+    "print(kid.pid, flush=True); time.sleep(600)"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns() -> None:
+    """T529: the Stop reaches the whole clone, not just the `git` it started.
+
+    Measured on m910q 2026-10-07 (`.notes/gates/probe-t529-t526-2026-10-07/`): a
+    Stop during `Resolving deltas` signalled `git clone` alone, `index-pack` ran on
+    for 13.8 s with PPID 1, and because it held the stream's pipe the read -- and
+    so the Stop -- did not end until it did. A blob-less checkout's own `git fetch`
+    kept downloading for 36 s the same way.
+
+    Mutation this catches: `_progress_lines()` started without its own session, or
+    `_end_child()` signalling the root and not its group. The grandchild sleeps
+    600 s and holds the pipe, so the worker is still reading at `HANG_BOUND`.
+    """
+    generator = runner.stream_progress(_python_cmd(_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-worker")
+    worker.start()
+    grandchild = int(fragments.get(timeout=HANG_BOUND))
+    try:
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the read waited on a grandchild the Stop never reached"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+        assert _gone(grandchild), f"the root's own child {grandchild} outlived the Stop"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions; Windows is unchanged")
+def test_only_stream_progress_starts_its_child_in_a_session_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T529's scope: host git gets a session (and no terminal input); docker streams do not.
+
+    `stream()` runs only the docker CLI off Windows, and T298 measured that ending
+    the CLI alone ends compose and its build. A group signal would also reach
+    compose directly, which for `compose run` could stop a container its stage
+    says keeps running, so `stream()` stays root-only until that is probed.
+    `stdin` is closed for the session's child because a git that asks for input
+    must fail, not wait on a terminal it no longer owns.
+
+    Mutation this catches: dropping `start_new_session` from `_progress_lines()`,
+    or adding it to `_stream_lines()`.
+    """
+    asked: list[dict[str, object]] = []
+
+    class _Spy(_Recorded):
+        def __init__(self, *a: object, **kw: object) -> None:
+            asked.append(dict(kw))
+            super().__init__(*a, **kw)
+
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"", 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Spy)
+    list(runner.stream_progress(["git", "clone", "x"]))
+    # Never a real spawn (`_Spy`), and not spelled `docker`: the suite refuses that argv.
+    list(runner.stream(["the-docker-cli", "compose", "build"]))
+
+    git_spawn, docker_spawn = asked
+    assert git_spawn.get("start_new_session") is True
+    assert git_spawn.get("stdin") == subprocess.DEVNULL
+    assert not docker_spawn.get("start_new_session")
+
+
+def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group signal goes only to a group a real child of ours leads (T529 adversarial focus).
+
+    `os.killpg(pid, ...)` reaches every process in group `pid`. The double here has
+    a pid (4321) that may well be some real process's group on the box running the
+    suite; nothing this module spawned leads it, so nothing may be sent to it.
+
+    Mutation this catches: taking the group from `proc.pid` alone, without asking
+    whether `proc` is a child this module started as its session's leader.
+    """
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"Receiving objects:   1%\r" * 50, 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Recorded)
+    generator = runner.stream_progress(["git", "clone", "x"])
+    next(generator)
+    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    generator.close()
+    assert signalled == []
+
+
+# The root has gone and its child still holds the pipe: what a Stop meets when the
+# leader exits a moment before the Stop's thread acts (Codex review of T529).
+_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE = (
+    "import subprocess, sys; "
+    "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+    "print(kid.pid, flush=True)"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited() -> None:
+    """T529, Codex's P1: a leader that exited does not take its group out of the Stop's reach.
+
+    The stream is still reading -- a member of the group holds its pipe -- so it is
+    still the job a Stop means, exactly as an unsettled Windows job is (T299). The
+    group's id cannot belong to anything else while a member is alive.
+
+    Mutation this catches: choosing only streams whose root is still running, or a
+    `_stop_child` that does nothing once the root has exited (the worker is still
+    reading at `HANG_BOUND`: the grandchild sleeps 600 s).
+    """
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-root-gone")
+    worker.start()
+    grandchild = int(fragments.get(timeout=HANG_BOUND))
+    try:
+        with runner._LIVE_STREAMS_LOCK:
+            root = next(
+                c.proc for c in runner._LIVE_STREAMS.values() if c.started_on == worker.ident
+            )
+        assert root is not None
+        root.wait(timeout=HANG_BOUND)  # the leader is gone; its child reads on
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the Stop never reached the group of a root that had exited"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+        assert _gone(grandchild), f"the exited root's child {grandchild} outlived the Stop"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_host_git_stream_closed_before_its_end_ends_the_group_its_exited_root_left() -> None:
+    """T495's rule, on POSIX: a stream closed before EOF did not run out, root gone or not.
+
+    T495 closes a Windows job whose stream was closed while something still held
+    its pipe, though its root had exited. The same stream off Windows has a
+    process group (T529): what holds the pipe is a member of it, and it is the
+    command's own work, so the close ends it.
+
+    Measured before the fix: the close itself took 600 s, the grandchild's whole
+    sleep, because a reader was blocked in the pipe it held.
+
+    Mutation this catches: `_finish` reaching the group only while the root runs
+    (the close is still waiting at `HANG_BOUND`).
+    """
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    grandchild = int(next(generator))
+    try:
+        with runner._LIVE_STREAMS_LOCK:
+            root = runner._LIVE_STREAMS[generator].proc
+        assert root is not None
+        root.wait(timeout=HANG_BOUND)  # the leader is gone; its child holds the pipe
+        # Closed on a thread of its own: without the fix the close waits on a reader
+        # blocked in the grandchild's pipe for the whole 600 s of its sleep.
+        closer = threading.Thread(target=generator.close, daemon=True, name="test-t529-close")
+        closer.start()
+        closer.join(timeout=HANG_BOUND)
+        assert not closer.is_alive(), "closing the stream waited on its root's child"
+        assert _gone(grandchild), f"closing the stream left its root's child {grandchild} running"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+# A root whose child IGNORES SIGTERM and holds the pipe: only the group's SIGKILL ends it.
+_GRANDCHILD_IGNORES_SIGTERM = (
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen([sys.executable, '-c', "
+    "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    'print("ignoring", flush=True); time.sleep(600)\']); '
+    "print(kid.pid, flush=True); time.sleep(600)"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> None:
+    """T529's second step (cold review): what of the group outlives SIGTERM gets SIGKILL.
+
+    Mutation this catches: `_end_group` without its SIGKILL (the member ignores
+    SIGTERM, sleeps 600 s and holds the pipe, so the worker still reads at
+    `HANG_BOUND`).
+    """
+    generator = runner.stream_progress(_python_cmd(_GRANDCHILD_IGNORES_SIGTERM))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-ignores")
+    worker.start()
+    said = {fragments.get(timeout=HANG_BOUND), fragments.get(timeout=HANG_BOUND)}
+    said.discard("ignoring")
+    grandchild = int(said.pop())
+    try:
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "a member that ignored SIGTERM kept the read going"
+        assert _gone(grandchild), f"{grandchild} ignored SIGTERM and was never killed"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)
+
+
+def test_an_undrained_close_ends_the_group_when_its_root_exits_as_the_close_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review of 9b1f04b0: the root can exit between `_finish`'s look and `_end_child`'s.
+
+    `_finish` saw it running, `_end_child` then found it gone and did nothing:
+    the group's member that holds the pipe must still be ended. Driven through
+    doubles, because the interleaving is a window of microseconds; no signal is
+    sent to anything.
+
+    Mutation this catches: `_finish` ending the group only when IT saw the root
+    exited.
+    """
+    ended_groups: list[int] = []
+    monkeypatch.setattr(runner, "_end_child", lambda proc, job=None, **kw: False)
+    monkeypatch.setattr(
+        runner, "_end_group", lambda proc, group, *, bounded: ended_groups.append(group) or True
+    )
+
+    class _Running:
+        returncode = None
+
+        def poll(self) -> int | None:
+            return None
+
+    child = runner._Child()
+    child.group = 424242
+    runner._finish(_Running(), None, child=child, drained=False)  # type: ignore[arg-type]
+
+    assert ended_groups == [424242]
+    assert child.settled

@@ -21,7 +21,9 @@ import copy
 import json
 import os
 import shutil
+import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -29,6 +31,11 @@ from typing import BinaryIO, cast
 
 import pytest
 
+from tests.conftest import HANG_BOUND
+from tests.support_fake_docker import calls as fake_calls
+from tests.support_fake_docker import containers as fake_containers
+from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+from tests.support_fake_docker import running as fake_running
 from tests.support_trinitycore import (
     AUTH,
     CHARS,
@@ -50,7 +57,8 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     known_password,
     machine,
 )
-from yulon import docker
+from yulon import client_packs, container_end, docker, platform
+from yulon.after_stop import stop_took_effect
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
@@ -1020,12 +1028,16 @@ def test_reextract_uses_the_client_the_map_data_was_made_from(box: Box) -> None:
 
 
 def data_files(box: Box) -> dict[str, bytes]:
-    """Every file under the server's `data/`, by relative path: the map data and its record."""
+    """Every file under the server's `data/`, by relative path: the map data and its record.
+
+    Not the folder's id (T536): the first tool's `docker create`, or the press's own
+    question, makes `data/.yulon-folder-id` once, and it names the folder, not its maps.
+    """
     data = box.server_dir / "data"
     return {
         path.relative_to(data).as_posix(): path.read_bytes()
         for path in sorted(data.rglob("*"))
-        if path.is_file()
+        if path.is_file() and path != data / docker.FOLDER_ID_FILE
     }
 
 
@@ -1158,6 +1170,269 @@ def test_reextract_says_a_stop_brings_the_old_map_data_back(box: Box) -> None:
     said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert trinitycore.REEXTRACT_CANCEL_NOTE in said
     assert trinitycore.CLIENT_DATA_CANCEL_NOTE not in said, "finished tools are not kept here"
+
+
+# -- T303: a Stop during Re-extract starts no further tool and ends the tool's container -----
+
+
+def _stop_a_reextract(
+    box: Box, state: Path, monkeypatch: pytest.MonkeyPatch, *, stop_when: str
+) -> tuple[list[BaseException], list[list[str]], float, list[str]]:
+    """Press Re-extract on a worker over the fake docker CLI, and Stop it at `stop_when`.
+
+    `"pack"`: while the first client pack is being laid into the copy (the live case
+    of 2026-10-05); `"proof"`: while its zip is read to prove it, before that.
+    `"tool"`: once the first tool's container runs. Returns the press's
+    outcome, the containers still running each time the old map data was put back, how
+    long the press took to end after the Stop, and how each client pack's laying ended.
+    """
+    cancel = threading.Event()
+    stopped_at: list[float] = []
+    laid: list[str] = []
+    if stop_when == "proof":
+        real_fetch = client_packs.fetch_checkout
+
+        def fetch(*args: object, **kwargs: object) -> client_packs.Fetched:
+            if not cancel.is_set():
+                stopped_at.append(time.monotonic())
+                cancel.set()  # the Stop lands while this pack's zip is being proved
+            try:
+                return real_fetch(*args, **kwargs)  # type: ignore[arg-type]
+            except client_packs.Cancelled:
+                laid.append("stopped while proved")
+                raise
+
+        monkeypatch.setattr(client_packs, "fetch_checkout", fetch)
+    if stop_when == "pack":
+        real_install = client_packs.install
+
+        def install(*args: object, **kwargs: object) -> dict[str, object]:
+            if not cancel.is_set():
+                stopped_at.append(time.monotonic())
+                cancel.set()  # the Stop lands while this pack is being laid
+            try:
+                return real_install(*args, **kwargs)  # type: ignore[arg-type]
+            except client_packs.Cancelled:
+                laid.append("stopped part-way")
+                raise
+            finally:
+                laid.append(str(args[1].id))  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(client_packs, "install", install)
+    seen_at_put_back: list[list[str]] = []
+    real_put_back = extract.put_back
+
+    def put_back(data_dir: Path) -> tuple[str, ...]:
+        seen_at_put_back.append(fake_containers(state))
+        return real_put_back(data_dir)
+
+    monkeypatch.setattr(extract, "put_back", put_back)
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=cancel))
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is asserted
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    if stop_when == "tool":
+        deadline = time.monotonic() + HANG_BOUND
+        while not fake_running(state):
+            assert time.monotonic() < deadline, "the first tool's container never started"
+            time.sleep(0.01)
+        stopped_at.append(time.monotonic())
+        cancel.set()
+    worker.join(HANG_BOUND)
+    assert not worker.is_alive(), "the stopped Re-extract did not end"
+    return outcome, seen_at_put_back, time.monotonic() - stopped_at[0], laid
+
+
+@pytest.mark.parametrize("stop_when", ["proof", "pack", "tool"])
+def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_and_puts_back(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_when: str
+) -> None:
+    """T303, through the real `docker.run_container()` on a docker CLI whose containers
+    outlive it: the old map data comes back only once no tool container is left to write
+    over it."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        before = data_files(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+
+        outcome, seen_at_put_back, took, laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when=stop_when
+        )
+
+        assert took < 10.0, f"the Stop took {took:.1f} s to end the press"
+        assert len(outcome) == 1 and isinstance(outcome[0], InstallerError), outcome
+        # T250 on Yulon: the panel says "cancelled" only for a failure marked as the Stop.
+        assert stop_took_effect(outcome[0]), "the stopped Re-extract would read as a failure"
+        if stop_when == "tool":
+            assert str(outcome[0]).startswith(f"{TOOL_NAMES[0]} was stopped."), outcome[0]
+        else:
+            assert str(outcome[0]).startswith(
+                "Stop was pressed while Centurion world was being laid into the temporary copy"
+            ), outcome[0]
+        assert str(outcome[0]).endswith(trinitycore.REEXTRACT_PUT_BACK)
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
+        if stop_when == "proof":
+            assert runs == [], "a tool was started after the Stop"
+            assert laid == ["stopped while proved"], laid
+        elif stop_when == "pack":
+            assert runs == [], "a tool was started after the Stop"
+            assert laid == ["stopped part-way", "world"], laid
+        else:
+            assert len(runs) == 1, "a further tool was started after the Stop"
+            name = runs[0].split()[runs[0].split().index("--name") + 1]
+            assert f"rm -f {name}" in fake_calls(state)
+        assert fake_containers(state) == [], "a tool container is still running"
+        assert seen_at_put_back == [[]], "the old data came back while a tool could still write"
+        assert data_files(box) == before, "the old map data, its record and the movement maps"
+        assert not trinitycore.extraction_client_dir(box.m.client, box.server_dir).exists()
+        assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+    finally:
+        end_fake_containers(state)
+
+
+def test_a_stopped_reextract_whose_tool_container_will_not_go_leaves_the_old_data_aside(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review: put back only once no tool can write over it. A container
+    Docker would not remove may still be extracting into `data/`, so the old map data stays
+    aside, and the next press settles it once the container is gone."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        (state / "refuse-rm").write_text("", encoding="utf-8")
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+
+        outcome, seen_at_put_back, _took, _laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when="tool"
+        )
+
+        assert len(outcome) == 1 and isinstance(outcome[0], extract.ContainerLeftRunning)
+        (name,) = fake_containers(state)
+        said = str(outcome[0])
+        assert name in said and "docker rm" not in said, said
+        assert said.endswith(trinitycore.REEXTRACT_KEPT_ASIDE), said
+        assert seen_at_put_back == [], "the old data was put back under a running tool"
+        assert (box.server_dir / "data" / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).is_file()
+        assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+    finally:
+        end_fake_containers(state)
+
+
+def _press_one_leaves_a_tool_running(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, dict[str, bytes]]:
+    """Press 1 is stopped mid-tool and Docker refuses to remove the tool's container.
+
+    Returns the fake CLI, its state and `data/` as it was before press 1."""
+    cli, state = lay_fake_docker(tmp_path)
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    box.world.running = False
+    box.seams["run_container"] = docker.run_container
+    outcome, _seen, _took, _laid = _stop_a_reextract(box, state, monkeypatch, stop_when="tool")
+    assert len(outcome) == 1 and isinstance(outcome[0], extract.ContainerLeftRunning)
+    assert len(fake_containers(state)) == 1, "the ground: the tool is still running"
+    return cli, state, before
+
+
+def test_a_second_reextract_is_refused_while_the_first_ones_tool_may_still_write(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: press 2 must not settle, set aside or extract under press 1's orphan."""
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
+        left = data_files(box)
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert name in said and "Nothing was changed." in said, said
+        assert put_back == [], "the earlier press was settled under a running tool"
+        assert data_files(box) == left, "data/ was touched"
+        assert [c for c in fake_calls(state) if c.startswith("create ")] == runs, "a tool ran"
+    finally:
+        end_fake_containers(state)
+
+
+def test_once_the_tool_is_removed_by_hand_the_next_reextract_runs_and_a_stop_puts_back(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: Yu'lon asks Docker again rather than trusting what it remembered, so a
+    container the player removed no longer blocks the press or the put-back."""
+    _cli, state, before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        end_fake_containers(state)  # the player removes it in Docker Desktop
+        (state / "refuse-rm").unlink()
+
+        outcome, seen_at_put_back, _took, _laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when="tool"
+        )
+
+        assert len(outcome) == 1 and isinstance(outcome[0], InstallerError), outcome
+        assert not isinstance(outcome[0], extract.ContainerLeftRunning), outcome[0]
+        assert str(outcome[0]).endswith(trinitycore.REEXTRACT_PUT_BACK), outcome[0]
+        assert seen_at_put_back and all(seen == [] for seen in seen_at_put_back)
+        assert data_files(box) == before, "the map data from before press 1 is back"
+        assert fake_containers(state) == []
+    finally:
+        end_fake_containers(state)
+
+
+def test_a_reextract_closed_while_a_tool_container_will_not_go_leaves_the_old_data_aside(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review, round 2: a press closed part-way (the panel gone, the app
+    quitting) cannot be told of a refused removal by an exception, so it asks Docker's side
+    whether a tool may still write into data/ before putting anything back."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        (state / "refuse-rm").write_text("", encoding="utf-8")
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+        press = box.engine().reextract(
+            InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+        )
+        for line in press:
+            if ": running " in line:
+                break
+        deadline = time.monotonic() + HANG_BOUND
+        while not fake_running(state):
+            assert time.monotonic() < deadline, "the first tool's container never started"
+            time.sleep(0.01)
+
+        press.close()  # type: ignore[attr-defined]
+
+        assert len(fake_containers(state)) == 1, "the ground: Docker refused the removal"
+        assert put_back == [], "the old data was put back under a tool that may still write"
+        assert (box.server_dir / "data" / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).is_file()
+    finally:
+        end_fake_containers(state)
 
 
 def interrupted(box: Box) -> dict[str, bytes]:
@@ -2849,3 +3124,301 @@ def test_a_poll_that_could_not_open_a_tile_keeps_no_count(
 
     assert box.engine().mmaps_status(box.server_dir).kept == 12
     assert len(opened) == 12, "asked again, not served from a count that could not see a tile"
+
+
+def test_a_reextract_after_a_restart_is_refused_while_an_earlier_apps_tool_may_still_write(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_left_tool_read: None
+) -> None:
+    """Codex review of the stop-paths branch: press 1's container outlived the app that
+    remembered it. The next app's press asks Docker, and must not put the old map data back,
+    set it aside or extract under that container."""
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        monkeypatch.setattr(docker, "_UNENDED", {})  # Yu'lon was closed and opened again
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
+        left = data_files(box)
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert name in said and "Nothing was changed." in said, said
+        assert put_back == [], "the earlier press was settled under a running tool"
+        assert data_files(box) == left, "data/ was touched"
+        assert [c for c in fake_calls(state) if c.startswith("create ")] == runs, "a tool ran"
+    finally:
+        end_fake_containers(state)
+
+
+@pytest.mark.parametrize("desktop", [True, False], ids=("docker-desktop", "linux-engine"))
+def test_the_refusal_names_where_this_platform_removes_the_container(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop: bool
+) -> None:
+    """Live on yulon-ubuntu2: a docker.io engine has no Docker Desktop to look in.
+
+    `on_docker_desktop()` is answered rather than `sys.platform` patched: the press runs
+    real child processes, which a pretended win32 would start with Windows-only flags.
+    """
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        monkeypatch.setattr(container_end, "on_docker_desktop", lambda: desktop)
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert ("Docker Desktop's Containers list" in said) is desktop, said
+        assert (f"docker rm -f {name}" in said) is not desktop, said
+    finally:
+        end_fake_containers(state)
+
+
+# ------------------------------------- T543: the press claims its folder first
+
+
+def _bounded_press(box: Box, cancel: threading.Event | None = None) -> list[str]:
+    """`list(reextract())` on a worker, bounded by HANG_BOUND (cold review of T543).
+
+    A press that hangs -- a mutation that drops the claim leaves the fake tool running
+    for ten minutes -- fails here instead of stalling the suite. Its exception is raised.
+    """
+    stop = cancel if cancel is not None else threading.Event()
+    lines: list[str] = []
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            lines.extend(
+                box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=stop)
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    worker.join(HANG_BOUND)
+    if worker.is_alive():
+        stop.set()
+        worker.join(HANG_BOUND)
+        pytest.fail("the Re-extract press did not end in time")
+    if outcome:
+        raise outcome[0]
+    return lines
+
+
+def _another_yulons_claim(cli: Path, data: Path) -> subprocess.Popen[bytes]:
+    """Another Yu'lon on this daemon, pressing on the same folder: its claim, held open."""
+    ident = docker.folder_id(data)
+    assert ident is not None
+    return subprocess.Popen(
+        [
+            str(cli),
+            "run",
+            "--rm",
+            "-i",
+            "--name",
+            docker.CLAIM_PREFIX + ident,
+            "--label",
+            "yulon.owner=someone-else",
+            "--label",
+            f"{docker.CLAIM_LABEL}=theirs",
+            "img",
+            "sh",
+            "-c",
+            "cat >/dev/null",
+        ],
+        stdin=subprocess.PIPE,
+    )
+
+
+def test_a_reextract_while_another_yulon_claims_the_folder_is_refused_before_anything_moves(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T543: two Yu'lons pressing at once both found no tool running yet. The second press
+    now finds the first one's claim, and stops before the old map data is touched."""
+    cli, state = lay_fake_docker(tmp_path)
+    theirs: subprocess.Popen[bytes] | None = None
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        box.seams["folder_claim"] = docker.folder_claim
+        before = data_files(box)
+        data = box.server_dir / "data"
+        theirs = _another_yulons_claim(cli, data)
+        deadline = time.monotonic() + HANG_BOUND
+        while not any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state)):
+            assert time.monotonic() < deadline, "the other Yu'lon's claim never came up"
+            time.sleep(0.01)
+
+        with pytest.raises(InstallerError) as refused:
+            _bounded_press(box)
+
+        said = str(refused.value)
+        name = docker.CLAIM_PREFIX + str(docker.folder_id(data))
+        assert said.startswith(
+            f"Another Yu'lon on this computer is extracting map data into {data} right now "
+            f"({name})."
+        ), said
+        assert "If no other Yu'lon is open on this computer" in said, said
+        assert "Nothing was changed." in said and "docker rm" not in said, said
+        assert not [call for call in fake_calls(state) if call.startswith("create ")]
+        assert data_files(box) == before
+        assert not (data / extract.PREVIOUS_DIR).exists()
+    finally:
+        if theirs is not None and theirs.stdin is not None:
+            theirs.stdin.close()
+            theirs.wait(HANG_BOUND)
+        end_fake_containers(state)
+
+
+def test_a_reextract_claims_its_folder_before_the_first_tool_and_lets_go_after(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        box.seams["folder_claim"] = docker.folder_claim
+
+        cancel = threading.Event()
+        outcome: list[BaseException] = []
+
+        def press() -> None:
+            try:
+                list(
+                    box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=cancel)
+                )
+            except BaseException as exc:  # noqa: BLE001 - the outcome is what is read
+                outcome.append(exc)
+
+        worker = threading.Thread(target=press)
+        worker.start()
+        deadline = time.monotonic() + HANG_BOUND
+        while not any(call.startswith("create ") for call in fake_calls(state)):
+            assert time.monotonic() < deadline, "the first tool was never created"
+            assert worker.is_alive(), outcome
+            time.sleep(0.01)
+        assert any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state))
+        cancel.set()
+        worker.join(HANG_BOUND)
+        assert not worker.is_alive(), "the stopped Re-extract did not end"
+
+        assert len(outcome) == 1 and stop_took_effect(outcome[0]), outcome
+        made = fake_calls(state)
+        claims = [
+            i for i, call in enumerate(made) if call.startswith("run ") and "yulon-claim-" in call
+        ]
+        tools = [i for i, call in enumerate(made) if call.startswith("create ")]
+        assert claims and tools and claims[0] < tools[0], made
+        assert fake_containers(state) == [], "the claim was not let go of"
+    finally:
+        end_fake_containers(state)
+
+
+@pytest.mark.parametrize("case", ["unavailable", "left-by-us"])
+def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Codex adversarial review of T543: the press fails closed. A claim Docker would not
+    make, or one an earlier run of this Yu'lon left (named, with the command, and never
+    removed by the press), stops it before the old map data is touched."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        box.seams["folder_claim"] = docker.folder_claim
+        before = data_files(box)
+        data = box.server_dir / "data"
+        ident = docker.folder_id(data)
+        assert ident is not None
+        name = docker.CLAIM_PREFIX + ident
+        if case == "unavailable":
+            (state / "claim-refused").write_text("", encoding="utf-8")
+        else:
+            (state / "containers" / name).write_text("4242", encoding="utf-8")
+            (state / "labels").mkdir(exist_ok=True)
+            (state / "labels" / name).write_text(
+                f"yulon.owner={docker.owner_id()}\n{docker.CLAIM_LABEL}=old", encoding="utf-8"
+            )
+
+        with pytest.raises(InstallerError) as refused:
+            _bounded_press(box)
+
+        said = str(refused.value)
+        if case == "unavailable":
+            assert said.startswith(f"Yu'lon could not reserve {data} for this extraction"), said
+        else:
+            assert said.startswith("An earlier run of this Yu'lon left its reservation"), said
+            assert said.splitlines()[-1] == f"docker rm -f {name}", said
+            assert not [call for call in fake_calls(state) if call.startswith("rm ")]
+        assert "Nothing was changed." in said, said
+        assert not [call for call in fake_calls(state) if call.startswith("create ")]
+        assert data_files(box) == before
+        assert not (data / extract.PREVIOUS_DIR).exists()
+    finally:
+        end_fake_containers(state)
+
+
+@pytest.mark.parametrize("ends", ["finished", "failed", "closed", "stopped-first"])
+def test_a_reextract_lets_go_of_its_claim_however_it_ends(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ends: str
+) -> None:
+    """Cold review of T543: the claim is released on success, on failure, on a closed
+    stream; and a Stop before it came up ends the press as a Stop, nothing moved."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["folder_claim"] = docker.folder_claim
+        before = data_files(box)
+        if ends == "failed":
+            box.m.tools.fail_tool = "vmap4assembler"
+        if ends == "closed":
+            press = box.engine().reextract(
+                InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+            )
+            for line in press:
+                if line.startswith("vmap assemble: running"):
+                    assert any(
+                        n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state)
+                    ), "the claim is held while the tools run"
+                    break
+            press.close()
+        elif ends == "stopped-first":
+            cancel = threading.Event()
+            cancel.set()
+            with pytest.raises(InstallerError) as stopped:
+                _bounded_press(box, cancel)
+            assert stop_took_effect(stopped.value), stopped.value
+            assert data_files(box) == before
+        elif ends == "failed":
+            with pytest.raises(InstallerError):
+                _bounded_press(box)
+        else:
+            _bounded_press(box)
+            assert "mapextractor" in box.m.tools.seen
+
+        deadline = time.monotonic() + HANG_BOUND
+        while any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state)):
+            assert time.monotonic() < deadline, f"the claim was kept after a press that {ends}"
+            time.sleep(0.02)
+        made = [call for call in fake_calls(state) if call.startswith("run ")]
+        if ends != "stopped-first":
+            assert made and "yulon-claim-" in made[0], made
+    finally:
+        end_fake_containers(state)

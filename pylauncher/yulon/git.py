@@ -34,16 +34,16 @@ import re
 import shutil
 import subprocess
 import sys
-import time
+import threading
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from yulon import platform, rmtree, runner
+from yulon import container_end, platform, rmtree, runner
 from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.ui import lines
@@ -403,6 +403,15 @@ class GitStopped(GitError, StopTookEffect):
     own type because a failure is answered with another way to clone -- host git,
     when the containerized clone fails -- and a Stop must never be: the player
     asked for the clone to end, not to be tried again by other means.
+    """
+
+
+class GitContainerLeft(GitError):
+    """A containerized git whose container could not be removed: it may still write (Codex).
+
+    A failed containerized clone is answered with host git, and host git must not start
+    in a folder a container may still be cloning into. So this is a `GitError` that
+    `_falls_back()` refuses, and the log above it names the container and the command.
     """
 
 
@@ -1167,7 +1176,9 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
     return proc
 
 
-def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> Iterator[str]:
+def _streamed_git(
+    argv: list[str], *, stage: str, cwd: Path | None = None
+) -> Generator[str, None, None]:
     """One long git command, yielding its output as log-panel lines; `GitError` if it fails.
 
     `_run_git()`'s contract for a command worth watching, INCLUDING its
@@ -1197,57 +1208,23 @@ def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> It
 
 
 def _falls_back(exc: GitError) -> bool:
-    """May a failed containerized git be answered with host git? Never after a Stop (T240)."""
-    return not isinstance(exc, GitStopped)
+    """May a failed containerized git be answered with host git? Never after a Stop (T240),
+    and never over a container that could not be removed (`GitContainerLeft`)."""
+    return not isinstance(exc, (GitStopped, GitContainerLeft))
 
 
-def container_left_line(name: str, dest: Path, reason: str) -> str:
-    """The log line for a stopped clone whose container could not be removed (T240)."""
+def container_left_line(name: str, dest: Path, reason: str, *, stopped: bool = True) -> str:
+    """The log line for a clone whose container could not be removed (T240).
+
+    `stopped` False for a clone that failed on its own (a create that timed out, a
+    start Docker refused): nobody pressed Stop, so the line does not say so (cold review).
+    """
+    after = " after Stop" if stopped else ""
     return (
-        f"The clone's container {name} could not be removed after Stop ({reason}), so it may "
-        f"still be writing into {dest}. Remove it in Docker Desktop's Containers list, or run "
-        f"this:\ndocker rm -f {name}"
+        f"The clone's container {name} could not be removed{after} ({reason}), so it may "
+        f"still be writing into {dest}. {container_end.remove_it()}\ndocker rm -f {name}"
     )
 
-
-_REMOVED = "removed"
-_GONE = "gone"
-
-
-def _remove_container(launcher: Sequence[str], name: str) -> str:
-    """One `docker rm -f name`: `_REMOVED`, `_GONE`, or the refusal in words (T240).
-
-    `_GONE` is "No such container", an exit 0 that named nothing (a CLI whose
-    `-f` ignores a missing name), and Moby's "removal of container ... is already
-    in progress", which is `--rm` getting there first: the container is going.
-    """
-    try:
-        done = runner.run([*launcher, "rm", "-f", name], timeout=_END_CONTAINER_TIMEOUT)
-    except OSError as exc:
-        return str(exc)
-    said = done.stderr.lower()
-    if done.returncode == 0:
-        return _REMOVED if done.stdout.strip() else _GONE
-    if "no such container" in said or "already in progress" in said:
-        return _GONE
-    return done.stderr.strip() or f"docker rm exited {done.returncode}"
-
-
-_LATE_CREATE_SETTLE = 1.0
-"""How long a stopped clone waits before asking a second time for a container that was gone.
-
-A create request the daemon received before the Stop killed its CLI finishes
-in milliseconds; a second has room for a slow daemon and costs the player one
-second on a Stop that has already been answered. Not a guarantee, and said as
-a bounded guess rather than a proof.
-"""
-
-_END_CONTAINER_TIMEOUT = 60.0
-"""How long `docker rm -f` of a stopped clone's container may take before it is given up.
-
-A deadlock breaker: the kill and the removal take a second or two on a healthy
-daemon, and a daemon that does not answer must not hold a Stop's run open.
-"""
 
 _KEEP_FRAGMENTS = 5
 """How many of git's last fragments go into a `GitError`.
@@ -2994,7 +2971,8 @@ class ContainerGit:
         try:
             yield from self._streamed_capture(spec.dest, git_args, stage=stage)
         except GitError as exc:
-            if not _is_fresh_mount_race(str(exc)):
+            # Never again over a container that could not be removed (Codex review).
+            if isinstance(exc, GitContainerLeft) or not _is_fresh_mount_race(str(exc)):
                 raise
             logger.warning(
                 f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
@@ -3011,13 +2989,68 @@ class ContainerGit:
         cloning as an orphan for minutes after the run had moved on (yulon-win11,
         2026-10-04). So when the stream was stopped, or abandoned, the container
         is killed and removed by its name (`_end_container()`).
+
+        **Created, then started (T321)**, as `docker.run_container()` does and for
+        its reason (`container_end`'s module docstring): `docker create` runs to its
+        end before anything can be stopped, then `docker start -a <name>` is the
+        stream a Stop ends. A Stop pressed during the create finds no stream to
+        end; the log panel, which reads its Stop between lines, closes this on
+        the start's first line (git says "Cloning into" at once), and the
+        container it ends is one known to exist.
         """
         launcher = self._launcher()
         name = f"yulon-git-{uuid.uuid4().hex[:12]}"
         argv = self._argv(launcher, dest, git_args, writes=True, name=name)
-        logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
+        create = ["create", *argv[len(launcher) + 1 :]]
+        logger.info(
+            f"containerized git (streamed): `{' '.join(create)}`, then `start -a {name}`, "
+            f"into {dest}"
+        )
+        ident = threading.get_ident()
+        stops = runner.stops_sent_to(ident)
         try:
-            yield from _streamed_git(argv, stage=stage)
+            made, refused_late = container_end.create(launcher, create, name, what="clone")
+        except OSError as exc:
+            # The docker CLI gone from under the cached path: `_capture()`'s sentence.
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        except BaseException:
+            # Taken away mid-create: the CLI was ended, so the daemon may still make it.
+            container_end.end_container(launcher, name, what="clone")
+            raise
+        if runner.stops_sent_to(ident) != stops:
+            # The panel's Stop came during the create and found no stream to end.
+            # In an install the panel drains instead of closing this, and nothing
+            # here reads the install's cancel, so the clone would run to its end --
+            # or, had the create failed, fall back to host git (cold review).
+            # A create that timed out was already ended by `create()`, and what it
+            # could not remove comes back as `refused_late` (Codex review).
+            refused = self._end_container(launcher, name) if made.returncode == 0 else refused_late
+            if refused is not None:
+                yield container_left_line(name, dest, refused)
+            raise GitStopped(f"the clone into {dest} was stopped before it started.")
+        if made.returncode != 0:
+            # Nothing was started. A create that timed out had its late container
+            # looked for and removed by `create()`; one it could not remove may
+            # still clone into `dest`, so it is said, and host git is not started.
+            said = (made.stderr or made.stdout).strip() or "no answer"
+            if refused_late is not None:
+                yield container_left_line(name, dest, refused_late, stopped=False)
+                # Only a create that timed out hands back a refusal: a daemon that
+                # hangs, which hung the `rm -f` too (cold review), so it says what helps.
+                raise GitContainerLeft(
+                    f"docker create exited {made.returncode}: {said}; its container {name} "
+                    "could not be removed. Docker did not answer in time: restart Docker, "
+                    "then try again."
+                )
+            raise GitError(f"docker create exited {made.returncode}: {said}")
+        try:
+            with closing(_streamed_git([*launcher, "start", "-a", name], stage=stage)) as lines:
+                for line in lines:
+                    if runner.stops_sent_to(ident) != stops:
+                        # A Stop sent after the check above but before `start -a`
+                        # had a process ended nothing; it is heard here instead.
+                        raise GitStopped(f"the clone into {dest} was stopped.")
+                    yield line
         except GitStopped:
             refused = self._end_container(launcher, name)
             if refused is not None:
@@ -3032,6 +3065,13 @@ class ContainerGit:
             self._end_container(launcher, name)
             raise
         except GitError as exc:
+            # Codex review round 3: `--rm` acts on a container that ran, and one the
+            # daemon would not start stays created. It is removed before anything
+            # answers this failure with host git; one that ran and failed is gone.
+            refused = self._end_container(launcher, name)
+            if refused is not None:
+                yield container_left_line(name, dest, refused, stopped=False)
+                raise GitContainerLeft(f"{exc}; its container {name} could not be removed") from exc
             # The docker CLI's own absence, arriving from `Popen` rather than
             # from `docker_program()`: the resolution cache pins a hit for the
             # life of the process, so Docker uninstalled or self-updated while
@@ -3043,43 +3083,13 @@ class ContainerGit:
 
     @staticmethod
     def _end_container(launcher: Sequence[str], name: str) -> str | None:
-        """Kill the container `name` and remove it: `docker rm -f` (T240). Never raises.
+        """Kill the clone container `name` and remove it (T240): `container_end.end_container()`.
 
-        Returns None once it is gone, or why it could not be removed; a refusal
-        is logged and returned rather than raised, because the Stop it serves has
-        already happened and the run must still end.
-
-        **"Gone" is asked twice (cold review).** It is the usual answer: `--rm`
-        removed a container whose git exited, or Moby is already removing it. But
-        it is also the answer while the daemon is still creating a container
-        whose CLI the Stop killed mid-request: the name is not there yet, and a
-        never-started container appears a moment later. So a "gone" is asked
-        again once, `_LATE_CREATE_SETTLE` later, and the log says what it saw. A
-        container that appears later than that is not caught, and the log does
-        not claim it was ruled out.
+        Never raises; None once it is gone, or why it could not be removed. The
+        recipe is shared with the extraction tools' containers (T303); the
+        container was created before it started (T321), so "gone" is final.
         """
-        first = _remove_container(launcher, name)
-        if first is _REMOVED:
-            logger.info(f"the clone container {name} was ended and removed")
-            return None
-        if first is not _GONE:
-            logger.warning(f"could not remove the clone container {name}: {first}")
-            return first
-        time.sleep(_LATE_CREATE_SETTLE)
-        second = _remove_container(launcher, name)
-        if second is _REMOVED:
-            logger.info(f"the clone container {name} was created after the Stop and was removed")
-            return None
-        if second is not _GONE:
-            logger.warning(f"could not remove the clone container {name}: {second}")
-            return second
-        # Not "gone": a container the daemon creates later than the second look
-        # is not ruled out, and the line says only what was seen.
-        logger.info(
-            f"the clone container {name} was not there when Yu'lon looked, after the Stop "
-            f"and again {_LATE_CREATE_SETTLE:g} s later"
-        )
-        return None
+        return container_end.end_container(launcher, name, what="clone", created=True)
 
     @staticmethod
     def _user_args() -> list[str]:

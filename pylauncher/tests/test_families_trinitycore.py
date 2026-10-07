@@ -560,11 +560,12 @@ STAGES = (
 def test_the_trinitycore_build_stage_says_this_platforms_cancel_note(
     machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On Windows a Stop ends the build at once (T246); elsewhere Docker finishes the step."""
+    """On Windows (T246) and Linux (T298) a Stop ends the build at once; on macOS Docker
+    finishes the step."""
     monkeypatch.setattr(native.sys, "platform", "win32")
     notes = {s.name: s.cancel_note for s in engine(machine).stages()}
-    assert notes["build"] == native.BUILD_CANCEL_NOTE_WINDOWS
-    monkeypatch.setattr(native.sys, "platform", "linux")
+    assert notes["build"] == native.BUILD_CANCEL_NOTE_ENDS
+    monkeypatch.setattr(native.sys, "platform", "darwin")
     notes = {s.name: s.cancel_note for s in engine(machine).stages()}
     assert notes["build"] == native.BUILD_CANCEL_NOTE
 

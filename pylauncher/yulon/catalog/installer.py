@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from yulon import docker, platform, resources, runner
-from yulon.after_stop import StopTookEffect, TrueAfterStop
+from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.catalog.upstream import UpstreamNews
@@ -151,15 +151,15 @@ class InstallerError(RuntimeError):
             self.detail = detail
 
 
-class InstallStopped(InstallerError, StopTookEffect):
+class InstallStopped(InstallerError, StopSaid):
     """The player's Stop, taking effect in an install, a rebuild or a server press (T250).
 
     Raised wherever the engine hears the Stop and ends -- between stages, at a
     run the Stop cancelled, between import runs, at a stop it gave up -- with
     the sentence of what the Stop costs there. An `InstallerError`, so every
-    handler written for one still runs; `StopTookEffect`, so the log panel
-    says "cancelled" for it, and a plain `InstallerError` raised after a Stop
-    is shown as the failure it is.
+    handler written for one still runs; `StopSaid`, so the log panel reads it
+    as the Stop and shows that sentence under "Stopped:" (T528), and a plain
+    `InstallerError` raised after a Stop is shown as the failure it is.
     """
 
 
@@ -802,10 +802,17 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
         f"Stop was pressed, so {entry.name} has NOT been remembered as an install and the app "
         f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
         f"in {server_dir} to see what the installer had got to (a download it was in the "
-        "middle of may have removed its own leftovers; anything already finished stays). If "
-        "the build had started, Docker keeps finishing the step it was on in the background — "
-        "that is deliberate, and the finished pieces are what make a second attempt much "
-        "faster, so do not clear Docker's build cache to tidy up."
+        "middle of may have removed its own leftovers; anything already finished stays). "
+        + (
+            # macOS alone was not measured (T298): said as before there.
+            "If the build had started, Docker keeps finishing the step it was on in the "
+            "background — that is deliberate, and the finished pieces are what make a second "
+            "attempt much faster, so do not clear Docker's build cache to tidy up."
+            if native.build_cancel_note() == native.BUILD_CANCEL_NOTE
+            else "If the build had started, Stop ended it, and the steps it had finished are "
+            "kept: they are what make a second attempt much faster, so do not clear Docker's "
+            "build cache to tidy up."
+        )
     ]
     record = server_dir / native.STATE_FILE
     # This attempt got at least one recorded stage in, or started in a folder
