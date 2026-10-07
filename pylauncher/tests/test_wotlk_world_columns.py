@@ -44,6 +44,7 @@ _TABLE = re.compile(
     r"\b(?:DELETE\s+FROM|UPDATE|INSERT\s+(?:IGNORE\s+)?INTO|REPLACE\s+INTO|FROM|JOIN)\s+`?(\w+)`?",
     re.IGNORECASE,
 )
+_ALIAS = re.compile(r"\b(?:FROM|JOIN|UPDATE|INTO)\s+`?\w+`?\s+(?:AS\s+)?`?(\w+)`?", re.IGNORECASE)
 _WORD = re.compile(r"`([^`]+)`|@?\w+")
 _STRING = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 _SQL_WORDS = frozenset("""
@@ -75,6 +76,9 @@ def _columns_named(statement: str) -> set[str]:
     """Each identifier in `statement` but SQL words, numbers, strings, variables and tables."""
     text = _STRING.sub(" ", statement)
     tables = {t.lower() for t in _TABLE.findall(text)}
+    tables |= {
+        a.lower() for a in _ALIAS.findall(text) if a.upper() not in _SQL_WORDS
+    }  # `FROM creature c`: `c` is the table, not a column
     named: set[str] = set()
     for m in _WORD.finditer(text):
         word = m.group(1) or m.group(0)
@@ -131,10 +135,12 @@ def test_every_statement_on_a_pinned_table_names_columns_it_has(
 )
 def test_the_column_reader_sees_a_dropped_column_wherever_it_stands(statement: str) -> None:
     """The reader is the whole check, so it is pinned on every shape a column can take."""
-    assert _columns_named(statement) - PIN_COLUMNS["creature"] - {"c"}, statement
+    assert _columns_named(statement) - PIN_COLUMNS["creature"], statement
 
 
 def test_the_column_reader_passes_what_the_pin_has() -> None:
+    assert _columns_named("SELECT c.guid FROM creature c WHERE c.id = 1") == {"guid", "id"}
+    assert _columns_named("SELECT g.guid FROM gameobject AS g WHERE g.id = 1") == {"guid", "id"}
     assert _columns_named("DELETE FROM creature WHERE id IN (190000,190001)") == {"id"}
     assert _columns_named("UPDATE `gameobject` SET `state` = 1 WHERE `id` = 5") == {"state", "id"}
     assert _columns_named("SELECT guid FROM creature WHERE ScriptName = 'npc_x' AND map = 0") == {
