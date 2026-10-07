@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import client_names, docker, platform
+from yulon import client_names, container_end, docker, platform
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
@@ -1133,10 +1133,15 @@ def _left_running(what: str, run: docker.AttachedRun, data_dir: Path) -> None:
     """`ContainerLeftRunning` when a Stop could not remove the tool's container."""
     if run.container_left:
         name = run.container_left
+        where = (
+            "Remove it in Docker Desktop's Containers list; the log above also gives the "
+            "command that removes it."
+            if container_end.on_docker_desktop()
+            else "Remove it with the command the log above gives."
+        )
         raise ContainerLeftRunning(
             f"{what} was stopped, but its container {name} could not be removed, so it may "
-            f"still be writing into {data_dir}. Remove it in Docker Desktop's Containers "
-            "list; the log above also gives the command that removes it."
+            f"still be writing into {data_dir}. {where}"
         )
 
 

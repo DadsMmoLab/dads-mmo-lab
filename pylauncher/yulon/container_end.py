@@ -25,6 +25,7 @@ create that did not answer in time and was ended by its timeout.
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 
@@ -32,6 +33,25 @@ from yulon import runner
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def on_docker_desktop() -> bool:
+    """Is the player's Docker the one with a Containers list to remove a container in?
+
+    Windows and macOS run Docker Desktop. On Linux the engine is most often a
+    distribution's own (docker.io, Docker CE) with no window at all: measured on
+    yulon-ubuntu2 2026-10-07, where the sentences below sent the player to a Docker
+    Desktop list that was not there. There the command is the way.
+    """
+    return sys.platform in ("win32", "darwin")
+
+
+def remove_it_or_run(name: str) -> str:
+    """How a player removes the container `name` this app could not: the log line's ending."""
+    if on_docker_desktop():
+        return f"Remove it in Docker Desktop's Containers list, or run this:\ndocker rm -f {name}"
+    return f"Remove it by running this:\ndocker rm -f {name}"
+
 
 REMOVED = "removed"
 GONE = "gone"

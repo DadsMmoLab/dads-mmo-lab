@@ -6837,7 +6837,43 @@ def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
             _ended(name)
         else:
             still.append(name)
-    return tuple(still)
+    return tuple(still) + tool_containers_left_running()
+
+
+def tool_containers_left_running() -> tuple[str, ...]:
+    """Running extraction tool containers this process did not start, by name.
+
+    Codex review of the stop-paths branch: `_UNENDED` is this process's memory and
+    goes with it. A container whose removal Docker refused, followed by the player
+    closing Yu'lon, would be forgotten, and the next press would put old map data
+    back under a tool still writing into `data/` -- the very thing the guard is for.
+    So Docker is asked for every running `yulon-extract-*`; one this process does not
+    know was started by an earlier one. Its mounts are not read: a bind's source is
+    spelled the daemon's way (a Docker Desktop VM path on Windows), and only one Yu'lon
+    runs at a time, so a tool nobody here started is counted as writing into any
+    server's `data/`, the safe side.
+
+    A Docker that does not answer adds none. The guard's question is "could a tool
+    still be writing?", and a daemon that is down runs nothing; the press asks Docker
+    for the tool's own container next and says so if it cannot.
+    """
+    proc = _docker(
+        ["ps", "--filter", f"name={TOOL_CONTAINER_PREFIX}", "--format", "{{.Names}}"],
+        timeout=_ASK_AGAIN_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list the running extraction tool containers: {proc.stderr.strip()}")
+        return ()
+    with _UNENDED_LOCK:
+        known = set(_UNENDED)
+    left = sorted(
+        name
+        for name in proc.stdout.split()
+        if name.startswith(TOOL_CONTAINER_PREFIX) and name not in known
+    )
+    for name in left:
+        logger.warning(f"the extraction tool container {name} was left running by an earlier run")
+    return tuple(left)
 
 
 _ASK_AGAIN_TIMEOUT = 20.0
@@ -6858,8 +6894,8 @@ def tool_container_left_line(name: str, reason: str) -> str:
     """The log line for a stopped tool whose container could not be removed (T303)."""
     return (
         f"The extraction tool's container {name} could not be removed after Stop ({reason}), "
-        "so it may still be writing into the server's data folder. Remove it in Docker "
-        f"Desktop's Containers list, or run this:\ndocker rm -f {name}"
+        "so it may still be writing into the server's data folder. "
+        + container_end.remove_it_or_run(name)
     )
 
 

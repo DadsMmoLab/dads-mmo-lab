@@ -4320,6 +4320,10 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "T303: asks about containers `run_container()` started, which run on the local "
         "daemon for its own reason (above)"
     ),
+    "tool_containers_left_running": (
+        "T303 (Codex review): asks for the tool containers `run_container()` starts, which run "
+        "on the local daemon for its own reason (above)"
+    ),
     "_cli_ended_on": (
         "T303: ends the docker CLI streams THIS thread started (`runner.end_streams_started_on`), "
         "whichever daemon they reach; it addresses no daemon of its own"

@@ -58,7 +58,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
-from yulon import client_names, client_packs, docker, platform, play_client, server_build_presses
+from yulon import (
+    client_names,
+    client_packs,
+    container_end,
+    docker,
+    platform,
+    play_client,
+    server_build_presses,
+)
 from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -2230,10 +2238,15 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         running = docker.tool_containers_writing_into(data_dir)
         if running:
+            where = (
+                "in Docker Desktop's Containers list"
+                if container_end.on_docker_desktop()
+                else f"with docker rm -f {' '.join(running)}"
+            )
             raise InstallerError(
                 f"An earlier extraction is still running in Docker ({', '.join(running)}) and "
                 f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
-                "extracted again. Remove it in Docker Desktop's Containers list, then press "
+                f"extracted again. Remove it {where}, then press "
                 f"\u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
             )
 

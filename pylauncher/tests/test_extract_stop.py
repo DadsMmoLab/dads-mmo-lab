@@ -534,3 +534,89 @@ def test_a_stopped_map_generation_whose_container_was_not_removed_says_so_too(
         )
 
     assert str(left.value).startswith("map generation was stopped, but its container")
+
+
+def test_a_tool_container_an_earlier_app_left_running_is_counted_as_writing(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+) -> None:
+    """Codex review of the stop-paths branch: what this process remembers dies with it. A
+    tool container an earlier Yu'lon left running (a refused removal, then a restart) is
+    asked of Docker by its name prefix, and counted as writing: its mounts are not read."""
+    _cli, state = fake_docker
+    out = tmp_path / "data"
+    out.mkdir()
+    boxes = state / "containers"
+    (boxes / "yulon-extract-0123456789ab").write_text("4242", encoding="utf-8")
+    (boxes / "yulon-extract-created00000").write_text("created", encoding="utf-8")
+    (boxes / "yulon-git-0123456789ab").write_text("4243", encoding="utf-8")
+    # Docker's name filter matches anywhere in the name; only the prefix is ours.
+    (boxes / "mine-yulon-extract-copy").write_text("4244", encoding="utf-8")
+
+    assert docker.tool_containers_writing_into(out) == ("yulon-extract-0123456789ab",)
+
+    # One this process started, into another folder, whose removal was refused: known
+    # here, so it is counted for its own folder only and not as an earlier run's.
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    other = tmp_path / "other-data"
+    other.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(other, "/out"),)
+    )
+
+    def interrupted(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        docker.run_container(spec, sink=interrupted, cancel=threading.Event())
+    (ours,) = set(fake_containers(state)) - {
+        "yulon-extract-0123456789ab",
+        "yulon-extract-created00000",
+        "yulon-git-0123456789ab",
+        "mine-yulon-extract-copy",
+    }
+    assert docker.tool_containers_writing_into(out) == ("yulon-extract-0123456789ab",)
+    assert docker.tool_containers_writing_into(other) == (ours, "yulon-extract-0123456789ab")
+
+    (boxes / "yulon-extract-0123456789ab").unlink()
+    assert docker.tool_containers_writing_into(out) == (), "gone is gone"
+
+
+def test_a_docker_that_will_not_list_its_containers_adds_none(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+) -> None:
+    """No answer is no name: a daemon that is down runs nothing, and the press says so next."""
+    _cli, state = fake_docker
+    (state / "containers" / "yulon-extract-0123456789ab").write_text("4242", encoding="utf-8")
+    (state / "no-answer").write_text("", encoding="utf-8")
+
+    assert docker.tool_containers_writing_into(tmp_path) == ()
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "desktop"),
+    [("win32", True), ("darwin", True), ("linux", False)],
+)
+def test_a_left_container_is_removed_where_this_platform_removes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform_name: str, desktop: bool
+) -> None:
+    """Live on yulon-ubuntu2 (docker.io): the sentences sent a Linux player to Docker
+    Desktop's Containers list, which a docker.io engine does not have. The command does."""
+    from yulon import git
+
+    monkeypatch.setattr(container_end.sys, "platform", platform_name)
+    name = "yulon-extract-0123456789ab"
+    lines = [
+        docker.tool_container_left_line(name, "refused"),
+        git.container_left_line("yulon-git-0123456789ab", tmp_path, "refused"),
+    ]
+    with pytest.raises(extract.ContainerLeftRunning) as left:
+        test_extract.run(
+            test_extract.PLAN, LeftRunning(test_extract.FULL), tmp_path, cancel=threading.Event()
+        )
+    lines.append(str(left.value))
+
+    for line in lines:
+        assert ("Docker Desktop's Containers list" in line) is desktop, line
+    assert f"docker rm -f {name}" in lines[0]
+    assert "docker rm -f yulon-git-0123456789ab" in lines[1]
+    assert "docker rm" not in lines[2], "a command goes in the log, not on the player's line"

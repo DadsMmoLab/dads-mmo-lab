@@ -13,7 +13,8 @@ With `late-create`, `run` makes no container at all until the test calls
 
 Since T321 it also answers `create --rm --name <name>` (the container exists,
 not yet running; `slow-create` holds the answer, `create-refused` refuses it as
-a missing image) and `start -a <name>` (the CLI attached to it, as `run` is).
+a missing image) and `start -a <name>` (the CLI attached to it, as `run` is), and
+`ps --filter name=<part>` lists the running ones.
 
 `compose ... build` (T376) prints one line, records its environment's
 `BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
@@ -85,6 +86,17 @@ if args[:2] == ["start", "-a"]:
     attached(box)
 if args[:1] == ["run"]:
     attached(box)
+if args[:1] == ["ps"]:
+    # `docker ps --filter name=<part> --format {{{{.Names}}}}` (Codex review of T303): the
+    # RUNNING containers only, as the real `ps` lists without `-a` -- not one merely created.
+    if (state / "no-answer").exists():
+        sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
+        sys.exit(1)
+    part = args[args.index("--filter") + 1].split("=", 1)[1] if "--filter" in args else ""
+    for box in sorted((state / "containers").iterdir()):
+        if part in box.name and box.read_text(encoding="utf-8") != "created":
+            sys.stdout.write(box.name + "\\n")
+    sys.exit(0)
 if args[:1] == ["inspect"]:
     # `docker.container_exit()`'s question (T303): a container still there is running.
     if (state / "no-answer").exists():

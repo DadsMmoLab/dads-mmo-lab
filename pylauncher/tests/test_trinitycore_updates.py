@@ -56,7 +56,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     known_password,
     machine,
 )
-from yulon import client_packs, docker, platform
+from yulon import client_packs, container_end, docker, platform
 from yulon.after_stop import stop_took_effect
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
@@ -3119,3 +3119,54 @@ def test_a_poll_that_could_not_open_a_tile_keeps_no_count(
 
     assert box.engine().mmaps_status(box.server_dir).kept == 12
     assert len(opened) == 12, "asked again, not served from a count that could not see a tile"
+
+
+def test_a_reextract_after_a_restart_is_refused_while_an_earlier_apps_tool_may_still_write(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_left_tool_read: None
+) -> None:
+    """Codex review of the stop-paths branch: press 1's container outlived the app that
+    remembered it. The next app's press asks Docker, and must not put the old map data back,
+    set it aside or extract under that container."""
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        monkeypatch.setattr(docker, "_UNENDED", {})  # Yu'lon was closed and opened again
+        runs = [call for call in fake_calls(state) if call.startswith("create ")]
+        left = data_files(box)
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert name in said and "Nothing was changed." in said, said
+        assert put_back == [], "the earlier press was settled under a running tool"
+        assert data_files(box) == left, "data/ was touched"
+        assert [c for c in fake_calls(state) if c.startswith("create ")] == runs, "a tool ran"
+    finally:
+        end_fake_containers(state)
+
+
+@pytest.mark.parametrize("desktop", [True, False], ids=("docker-desktop", "linux-engine"))
+def test_the_refusal_names_where_this_platform_removes_the_container(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop: bool
+) -> None:
+    """Live on yulon-ubuntu2: a docker.io engine has no Docker Desktop to look in.
+
+    `on_docker_desktop()` is answered rather than `sys.platform` patched: the press runs
+    real child processes, which a pretended win32 would start with Windows-only flags.
+    """
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        monkeypatch.setattr(container_end, "on_docker_desktop", lambda: desktop)
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert ("Docker Desktop's Containers list" in said) is desktop, said
+        assert (f"docker rm -f {name}" in said) is not desktop, said
+    finally:
+        end_fake_containers(state)
