@@ -1027,12 +1027,16 @@ def test_reextract_uses_the_client_the_map_data_was_made_from(box: Box) -> None:
 
 
 def data_files(box: Box) -> dict[str, bytes]:
-    """Every file under the server's `data/`, by relative path: the map data and its record."""
+    """Every file under the server's `data/`, by relative path: the map data and its record.
+
+    Not the folder's id (T536): the first tool's `docker create`, or the press's own
+    question, makes `data/.yulon-folder-id` once, and it names the folder, not its maps.
+    """
     data = box.server_dir / "data"
     return {
         path.relative_to(data).as_posix(): path.read_bytes()
         for path in sorted(data.rglob("*"))
-        if path.is_file()
+        if path.is_file() and path != data / docker.FOLDER_ID_FILE
     }
 
 
