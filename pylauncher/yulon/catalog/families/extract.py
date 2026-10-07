@@ -2426,8 +2426,8 @@ def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
 
     The worldserver exits "Unable to load critical files" unless map AND vmap
     files exist for the starting areas of maps 0 and 1, and 530 with
-    `Expansion = 2` (World.cpp:1811-1823, facts §3). This asks the coarser
-    question the stage can answer without the grid maths: for each map, at
+    `Expansion = 2` (World.cpp:1823-1835 at 6c6472c3, read 2026-10-07, facts §3). This
+    asks the coarser question the stage can answer without the grid maths: for each map, at
     least one `.map` file named after it under `maps/`, and its `.vmtree`
     under `vmaps/`. A listing that fails reads as missing, never as there.
     """

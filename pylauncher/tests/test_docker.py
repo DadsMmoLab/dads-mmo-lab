@@ -23,11 +23,13 @@ from pathlib import Path
 import pytest
 
 from tests.support_fake_docker import (
+    add_context,
     build_builders,
     build_env,
     end_fake_containers,
     lay_fake_docker,
     use_builder,
+    use_context,
 )
 from tests.support_fake_docker import calls as fake_calls
 from yulon import docker, runner
@@ -3371,6 +3373,7 @@ def test_build_staged_passes_all_three_compose_files_and_plain_progress(
     """
     monkeypatch.setattr(docker.platform, "config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(docker, "_current_builder", lambda wsl_distro=None: ("default", "docker"))
+    monkeypatch.setattr(docker, "_current_context", lambda wsl_distro=None: "default")
     seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
     run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
     files = ["-f", THREE_FILES[0], "-f", THREE_FILES[1], "-f", THREE_FILES[2]]
@@ -3427,7 +3430,13 @@ def test_each_wotlk_service_builds_on_its_own_buildx_config_outside_the_server_f
     seen = build_env(build_cli)
     assert [inherited for _, _, inherited in seen] == ["yes"] * len(WOTLK_SERVICES)
     configs = [Path(config) for config, _, _ in seen]
-    assert len(set(configs)) == len(WOTLK_SERVICES), configs
+    # T525: the world and auth servers read the same files, so the overlay puts
+    # them in one buildx group and they keep ONE cached copy between them, in
+    # the world server's own folder (its copy stays warm across the upgrade).
+    world, auth, db_import, client_data = configs
+    assert world == auth, configs
+    assert world.name == "ac-worldserver", world
+    assert len({world, db_import, client_data}) == 3, configs
     for config in configs:
         assert config.is_relative_to(tmp_path / "cfg"), config
         assert not config.is_relative_to(server), config
@@ -3464,6 +3473,89 @@ def test_a_one_service_game_keeps_its_single_build_call_and_the_users_buildx_con
     files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
     assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
     assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
+
+
+GROUPED_OVERLAY = (
+    "services:\n"
+    "  alpha:\n"
+    "    x-yulon-buildx-group: shared-source\n"
+    "    build:\n"
+    "      context: .\n"
+    "  beta:\n"
+    "    build:\n"
+    "      context: .\n"
+    "    labels:\n"
+    "      x-yulon-buildx-group: shared-source\n"
+    "  gamma:\n"
+    "    build:\n"
+    "      context: .\n"
+    "    x-yulon-buildx-group: 'shared-source'\n"
+    "  delta:\n"
+    "    build:\n"
+    "      context: .\n"
+    '    x-yulon-buildx-group: "alone"  # a group of one\n'
+)
+"""Four built services: alpha and gamma in one group, beta only LABELLED, delta alone (T525)."""
+
+
+def test_services_that_name_one_buildx_group_build_on_the_first_members_config(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Targets that read the same files can keep ONE cached copy of the context (T525).
+
+    T376 gave every service its own buildx node, so WotLK's world and auth
+    servers kept two identical 1.5 GB copies. A service names its group with
+    `x-yulon-buildx-group` and builds on the folder of the group's first member,
+    so the first member's warm copy is the one the group goes on using. Only a
+    service's OWN key counts; a label of that name does not, and a service with
+    no key keeps its own folder exactly as T376 has it. The calls stay one per
+    service, in the overlay's order.
+    """
+    overlay = tmp_path / "overlay.yml"
+    overlay.write_text(GROUPED_OVERLAY, encoding="utf-8")
+    server = _server_with(tmp_path, overlay)
+    run = docker.build_staged(server, THREE_FILES)
+    assert run.returncode == 0
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+    ]
+    alpha, beta, gamma, delta = (Path(config) for config, _, _ in build_env(build_cli))
+    assert alpha == gamma
+    assert [alpha.name, beta.name, delta.name] == ["alpha", "beta", "delta"]
+    assert len({alpha, beta, delta}) == 3
+    assert alpha.parent == beta.parent == delta.parent
+
+
+@pytest.mark.parametrize("value", ["../elsewhere", "$GROUP", "a b", "", "[a, b]", ".", "..", "-x"])
+def test_a_buildx_group_that_is_not_a_plain_name_is_not_a_group(
+    build_cli: Path, tmp_path: Path, value: str
+) -> None:
+    """A value that is not a plain name joins nothing: each service keeps its own folder.
+
+    The group never becomes a path itself (the folder is the first member's), but a
+    value from the environment, with spaces or with a path in it is not something
+    this engine writes, so it is read as no key rather than guessed at.
+    """
+    overlay = tmp_path / "overlay.yml"
+    overlay.write_text(
+        "services:\n"
+        "  alpha:\n"
+        f"    x-yulon-buildx-group: {value}\n"
+        "    build:\n"
+        "      context: .\n"
+        "  beta:\n"
+        f"    x-yulon-buildx-group: {value}\n"
+        "    build:\n"
+        "      context: .\n",
+        encoding="utf-8",
+    )
+    run = docker.build_staged(_server_with(tmp_path, overlay), THREE_FILES)
+    assert run.returncode == 0
+    alpha, beta = (Path(config) for config, _, _ in build_env(build_cli))
+    assert [alpha.name, beta.name] == ["alpha", "beta"]
 
 
 def test_a_build_key_deeper_in_a_service_does_not_make_it_a_built_service(
@@ -3560,27 +3652,116 @@ def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
     for config, wslenv, inherited in seen:
         assert "BUILDX_CONFIG/p" in wslenv.split(":"), wslenv
         assert inherited == "yes"
-        # The builder the distro's own buildx config picked (T413) has to cross too.
-        assert "BUILDX_BUILDER" in wslenv.split(":"), wslenv
+        # No builder is named (T527): a config folder with no `current` lands on
+        # the distro's current context's own builder, which is the one in use.
+        assert "BUILDX_BUILDER" not in wslenv.split(":"), wslenv
         # WSL turns `C:\\...` into `/mnt/c/...` for a folder that is there.
         assert Path(config).is_dir(), config
 
 
-def test_a_builder_picked_with_buildx_use_is_the_one_each_wotlk_service_builds_on(
+def test_a_stock_docker_desktop_builds_each_wotlk_service_without_naming_its_builder(
     build_cli: Path, tmp_path: Path
 ) -> None:
-    """T413: a per-service BUILDX_CONFIG holds no `current`, so buildx falls back to the context's.
+    """T527: compose refuses BUILDX_BUILDER=desktop-linux, which is Docker Desktop's own builder.
 
-    A builder of the `docker` driver is a docker context's own, and buildx finds
-    one by name in any config folder; naming it in BUILDX_BUILDER keeps the
-    user's pick while each service keeps its own node, which is T376's fix.
+    On a stock Docker Desktop the context and its `docker`-driver builder are both
+    `desktop-linux`, and compose v5.4.0 answered `use docker --context=desktop-linux
+    buildx to switch to context "desktop-linux"` and exit 1 within a second, for
+    every WotLK build split by T376 (yulon-win11-gate, 2026-10-07; the same on
+    docker-ce with a second context). A per-service BUILDX_CONFIG with no builder
+    named lands on the current context's own builder, which is the one in use, so
+    nothing is named and every service still keeps its own folder.
     """
-    use_builder(build_cli, "desktop-linux", "docker")
+    use_context(build_cli, "desktop-linux")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
+    assert build_builders(build_cli) == ["<unset>"] * len(WOTLK_SERVICES)
+    # Four calls on three folders (T525): the world and auth servers share one.
+    assert len({config for config, _, _ in build_env(build_cli)}) == 3
+
+
+def test_a_buildx_builder_the_user_set_reaches_no_split_call(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUILDX_BUILDER in the user's own environment is the same refusal, inherited (T527).
+
+    `_current_builder()` reads it like a hand-typed build would, and it names the
+    current context's builder here, so the split runs; the calls must not carry it.
+    """
+    use_context(build_cli, "desktop-linux")
+    monkeypatch.setenv("BUILDX_BUILDER", "desktop-linux")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert build_builders(build_cli) == ["<unset>"] * len(WOTLK_SERVICES)
+
+
+def test_the_default_contexts_builder_is_not_named_either(build_cli: Path, tmp_path: Path) -> None:
+    """docker-ce's `default` context and builder: the split calls name no builder (T527).
+
+    Compose accepts BUILDX_BUILDER=default, but naming it buys nothing: with no
+    `current` in the folder buildx uses the current context's builder anyway, and
+    one rule for every context is one less way for the next compose to differ.
+    """
     run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
     assert run.returncode == 0
-    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
-    assert build_builders(build_cli) == ["desktop-linux"] * len(WOTLK_SERVICES)
-    assert len({config for config, _, _ in build_env(build_cli)}) == len(WOTLK_SERVICES)
+    assert build_builders(build_cli) == ["<unset>"] * len(WOTLK_SERVICES)
+    # Four calls on three folders (T525): the world and auth servers share one.
+    assert len({config for config, _, _ in build_env(build_cli)}) == 3
+
+
+def test_another_contexts_builder_picked_with_buildx_use_gets_the_single_call(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """A `docker`-driver builder that is NOT the current context's cannot be reached split (T527).
+
+    A per-service folder would land on the current context's builder instead of
+    the one picked, and naming the picked one is what compose refuses. The single
+    call on the user's own config builds where a hand-typed `docker compose build`
+    would, which is T413's promise, without the per-service cache.
+    """
+    use_context(build_cli, "desktop-linux")
+    use_builder(build_cli, "other-context", "docker")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
+    assert build_builders(build_cli) == ["<unset>"]
+
+
+def test_a_buildx_builder_of_another_context_set_by_the_user_fails_as_it_would_by_hand(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's own BUILDX_BUILDER naming ANOTHER context: the single call, compose's own answer.
+
+    Compose refuses that spelling whoever types it (codex adversarial, T527), so a
+    hand-typed `docker compose build` fails the same way, as every build did before
+    T376. Yu'lon neither drops the user's pick nor quietly builds somewhere else:
+    the one call carries it, and compose's own line is the build's last word.
+    """
+    use_context(build_cli, "desktop-linux")
+    add_context(build_cli, "other-context")
+    use_builder(build_cli, "other-context", "docker")
+    monkeypatch.setenv("BUILDX_BUILDER", "other-context")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_builders(build_cli) == ["other-context"]
+    assert run.returncode == 1
+    assert "switch to context" in run.tail[-1]
+
+
+def test_a_context_docker_will_not_name_gets_the_single_call(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Unknown is not "the same": a failed `context show` builds as before T376 (T527)."""
+    (build_cli / "context-show-fails").write_text("", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0
+    files = f"-f {THREE_FILES[0]} -f {THREE_FILES[1]} -f {THREE_FILES[2]}"
+    assert _build_lines(build_cli) == [f"compose {files} build --progress plain"]
+    assert build_env(build_cli) == [("<unset>", "<unset>", "yes")]
 
 
 @pytest.mark.parametrize("driver", ["docker-container", "remote", "kubernetes"])

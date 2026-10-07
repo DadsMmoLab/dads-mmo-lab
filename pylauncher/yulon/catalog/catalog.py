@@ -1256,8 +1256,8 @@ class TrinityCoreData(_Strict):
         min_length=1,
         description=(
             "Map ids whose maps and vmaps must exist before the server is started: without them "
-            "the worldserver exits 'Unable to load critical files' (World.cpp:1811-1823, facts "
-            "§3) -- 0 and 1, and 530 with `Expansion = 2`."
+            "the worldserver exits 'Unable to load critical files' (World.cpp:1823-1835 at "
+            "6c6472c3, read 2026-10-07, facts §3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
     world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
