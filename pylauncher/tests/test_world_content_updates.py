@@ -711,3 +711,31 @@ def test_a_file_upstream_renamed_is_recorded_under_its_new_name_and_never_run_ag
     assert rec.sql_calls.count(f"-- {U2}") == 0, "the renamed file kept U2's bytes, line and all"
     assert db.state(renamed) == "seeded"
     assert any(renamed in line and "another name" in line for line in lines), lines
+
+
+def test_a_copy_beside_its_original_is_new_and_a_gone_stuck_file_is_still_named(
+    tmp_path: Path,
+) -> None:
+    """Codex round 5: a move needs the old path GONE (a copy beside it runs), and a
+    `failed` row whose file upstream removed is still named as what holds the phase."""
+    rels = [f"src/tbc-db/Updates/000{n}.sql" for n in range(1, 4)]
+    runs = [_run(rel, CONTENT, tmp_path) for rel in rels]
+    for run in runs[:2]:
+        _lay(tmp_path, run.rel, "-- same bytes\n")
+    _lay(tmp_path, rels[2], "-- other\n")
+    same = sqlplan.file_digest(tmp_path / rels[0])
+    ledger = {
+        ("content updates", rels[0]): sqlplan.FileRow("content updates", rels[0], same, "seeded")
+    }
+    owed = sqlplan.pending_files(runs, ledger)
+    assert [run.rel for run in owed.new] == [rels[1], rels[2]] and owed.moved == ()
+
+    gone = "src/tbc-db/Updates/0000_removed.sql"
+    ledger[("content updates", gone)] = sqlplan.FileRow("content updates", gone, "1" * 64, "failed")
+    owed = sqlplan.pending_files(runs, ledger)
+    assert owed.failed == (gone,) and owed.new == ()
+
+
+def test_a_whole_database_statement_is_never_applied(tmp_path: Path) -> None:
+    path = _lay(tmp_path, "x.sql", "DROP DATABASE analytics;\n")
+    assert sqlplan.foreign_schemas(path, set()) == ("a whole-database statement",)

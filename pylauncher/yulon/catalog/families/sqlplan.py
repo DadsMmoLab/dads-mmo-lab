@@ -1603,6 +1603,8 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
         found.append("USE")
     if "/*!" in text:
         found.append("an executable comment")
+    if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
+        found.append("a whole-database statement")
     return tuple(found)
 
 
@@ -1654,7 +1656,12 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     stuck = {
         phase for (phase, _file), row in ledger.items() if row.state in (FILE_STARTED, FILE_FAILED)
     }
-    known_bytes = {row.sha256 for row in ledger.values()}
+    here = {(run.phase.name, run.rel) for run in runs}
+    # A move: the same phase, bytes the ledger holds under a path that is GONE now
+    # (Codex, T531 round 5) -- a copy beside its original is new, and runs.
+    gone_bytes = {
+        (phase, row.sha256) for (phase, file), row in ledger.items() if (phase, file) not in here
+    }
     new: list[PhaseRun] = []
     moved: list[PhaseRun] = []
     withheld: list[str] = []
@@ -1664,7 +1671,7 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     for run in runs:
         row = ledger.get((run.phase.name, run.rel))
         if row is None:
-            if run.path is not None and file_digest(run.path) in known_bytes:
+            if run.path is not None and (run.phase.name, file_digest(run.path)) in gone_bytes:
                 moved.append(run)
             elif run.phase.name in stuck:
                 withheld.append(run.rel)
@@ -1676,6 +1683,15 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
             failed.append(run.rel)
         elif run.path is not None and file_digest(run.path) != row.sha256:
             changed.append(run.rel)
+    # A stuck row whose file is gone from the checkout still holds its phase back, so
+    # it is named too, or the player would be told "they wait behind it" about nothing.
+    phases = {run.phase.name for run in runs}
+    for (phase, file), row in sorted(ledger.items()):
+        if phase in phases and (phase, file) not in here:
+            if row.state == FILE_STARTED:
+                unsure.append(file)
+            elif row.state == FILE_FAILED:
+                failed.append(file)
     return PendingFiles(
         new=tuple(new),
         changed=tuple(changed),
