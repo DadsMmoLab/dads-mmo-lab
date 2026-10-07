@@ -168,7 +168,7 @@ def test_the_icon_state_is_the_worst_server_first() -> None:
     assert tray_state(["running", "starting"]) == "between"
     assert tray_state(["running", "stopping"]) == "between"
     assert tray_state(["running", "starting", "loop"]) == "attention"
-    assert tray_state(["restarting"]) == "attention"
+    assert tray_state(["restarting"]) == "between", "a Restart of ours holds this word"
     assert tray_state(["running", "partial"]) == "attention"
 
 

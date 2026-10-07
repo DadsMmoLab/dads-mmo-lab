@@ -49,8 +49,8 @@ def test_a_crash_loop_is_said_while_yulon_is_in_the_tray(
     assert _messages(tray) == [
         ("WotLK is crash-looping", "Its world keeps stopping. Click to see its Server tab.")
     ]
-    # A loop that flips to restarting and back between polls is still one crash loop.
-    view.realm_badge.set_status("restarting")
+    # A loop that reads "starting" for a poll between two crashes is still one crash loop.
+    view.realm_badge.set_status("starting")
     view.realm_badge.set_status("loop")
     assert len(_messages(tray)) == 1, "one crash loop was said more than once"
 
@@ -134,3 +134,36 @@ def test_a_world_that_stops_under_a_running_database_is_said(
             "Part of it stopped, and Yu'lon did not stop it. Click to see its Server tab.",
         )
     ]
+
+
+def test_a_world_that_drops_through_starting_is_still_said(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """yulon-win11 2026-10-07: the verdict lands first and T451 reads the dying world as
+    "starting" for one poll, so the badge goes running, starting, partial."""
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.hide()
+    view.realm_badge.set_status("starting")
+    view.realm_badge.set_status("partial")
+    assert [title for title, _ in _messages(tray)] == ["WotLK is only partly up"]
+
+
+def test_a_restart_of_ours_is_neither_a_crash_nor_red(tray: YulonTray, window: FakeWindow) -> None:
+    """ "restarting" is the hold of the Tuning tab's Restart (T188), not a crash."""
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.hide()
+    view.realm_badge.set_status("restarting")
+    assert tray.state == "between"
+    view.realm_badge.set_status("running")
+    assert _messages(tray) == []
+
+
+def test_a_realm_that_came_up_while_followed_is_watched_from_then(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    view = _add(window, FakeView("WotLK", "/srv/a", "stopped"))
+    window.hide()
+    tray.start(view)
+    view.realm_badge.set_status("running")
+    view.realm_badge.set_status("stopped")
+    assert [title for title, _ in _messages(tray)] == ["WotLK went offline"]

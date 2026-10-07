@@ -110,9 +110,10 @@ def tray_state(statuses: Sequence[str]) -> str:
     """
     words = [status.lower() for status in statuses]
     tones = [realm_tone(word) for word in words]
-    if "restarting" in tones or "partial" in words:
+    if "loop" in words or "partial" in words:
         return "attention"
-    if "between" in tones:
+    # "restarting" is the hold of a Restart of ours (T188), in between like a Start.
+    if "between" in tones or "restarting" in tones:
         return "between"
     if "up" in tones:
         return "up"
@@ -250,8 +251,10 @@ class YulonTray(QObject):
         """The tabs Stop-then-quit pressed Stop on and is waiting for (empty: not waiting)."""
         self._wait_tries = 0
         self._wait_timer: QTimer | None = None
-        self._last_words: dict[int, str] = {}
-        """Each followed tab's last badge word, by id, for what changed (notifications)."""
+        self._was_up: dict[int, bool] = {}
+        """Each tab's realm was last settled up, not taken down by a Stop of ours."""
+        self._looping: dict[int, bool] = {}
+        """A crash loop was said for this tab and has not ended (up or down) since."""
         self._notified: Any = None
         self._quitting = False
         self._installed = False
@@ -384,9 +387,10 @@ class YulonTray(QObject):
             self._followed.append(view)
             # What it says now is where a change is measured from: nothing is
             # said about a tab for the state it opened in.
-            self._last_words.setdefault(id(view), view.realm_badge.status)
+            self._was_up.setdefault(id(view), realm_tone(view.realm_badge.status) == "up")
         live = {id(view) for view in self._followed}
-        self._last_words = {k: v for k, v in self._last_words.items() if k in live}
+        self._was_up = {k: v for k, v in self._was_up.items() if k in live}
+        self._looping = {k: v for k, v in self._looping.items() if k in live}
         self.refresh()
 
     def _let_go_of_servers(self) -> None:
@@ -404,9 +408,7 @@ class YulonTray(QObject):
         badge = self.sender()
         view = next((v for v in self._followed if v.realm_badge is badge), None)
         if view is not None:
-            before = self._last_words.get(id(view), "")
-            self._last_words[id(view)] = status
-            self._notice_change(view, before, status)
+            self._notice_change(view, status)
         self.refresh()
 
     # -------------------------------------------------------- notifications
@@ -416,36 +418,52 @@ class YulonTray(QObject):
         window = self.window
         return window.isVisible() and not window.isMinimized() and window.isActiveWindow()
 
-    def _notice_change(self, view: Any, before: str, now: str) -> None:
-        """A crash loop, or a realm down without a Stop of ours: said from the tray.
+    def _notice_change(self, view: Any, now: str) -> None:
+        """A crash loop, or a realm that fell from up without a Stop of ours: said from the tray.
 
-        A Stop of ours holds the badge at "stopping" first (T188), so up straight
-        to down is something else: a crash, or the server stopped outside Yu'lon.
+        Measured from the last SETTLED word, not the last word: on yulon-win11 a
+        world stopped outside Yu'lon went running, starting, partial, because
+        the verdict landed first and T451 reads a world that is not ready as
+        "starting". So "starting" leaves "was up" as it was; a Stop or Restart
+        of ours holds "stopping" or "restarting" first (T188), which clears it.
         """
-        before, now = before.lower(), now.lower()
+        key = id(view)
+        now = now.lower()
         title = self._title_of(view)
-        if now in ("loop", "restarting") and before not in ("loop", "restarting"):
-            if now == "loop":
+        tone = realm_tone(now)
+        if now == "loop":
+            if not self._looping.get(key):
+                self._looping[key] = True
                 self.notify(
                     view,
                     f"{title} is crash-looping",
                     "Its world keeps stopping. Click to see its Server tab.",
                 )
-            else:
-                self.notify(view, f"{title} is restarting", "Click to see its Server tab.")
-        elif realm_tone(before) == "up" and now == "partial":
-            # The world crashed under a database and login that are still up.
+            return
+        if tone == "up":
+            self._was_up[key] = True
+            self._looping[key] = False
+            return
+        if now in ("stopping", "restarting"):
+            self._was_up[key] = False  # ours (T188's hold)
+            return
+        was_up = self._was_up.get(key, False)
+        if now == "partial" and was_up:
+            self._was_up[key] = False
             self.notify(
                 view,
                 f"{title} is only partly up",
                 "Part of it stopped, and Yu'lon did not stop it. Click to see its Server tab.",
             )
-        elif realm_tone(before) == "up" and realm_tone(now) == "down":
-            self.notify(
-                view,
-                f"{title} went offline",
-                "Yu'lon did not stop it. Click to see its Server tab.",
-            )
+        elif tone == "down":
+            self._looping[key] = False
+            if was_up:
+                self._was_up[key] = False
+                self.notify(
+                    view,
+                    f"{title} went offline",
+                    "Yu'lon did not stop it. Click to see its Server tab.",
+                )
 
     @Slot(str)
     def _server_failed(self, message: str) -> None:
