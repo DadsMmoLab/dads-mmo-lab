@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
-from yulon.after_stop import PutBackAfterStop, TrueAfterStop, stop_took_effect
+from yulon.after_stop import PutBackAfterStop, StopSaid, TrueAfterStop, stop_took_effect
 from yulon.log import get_logger
 from yulon.said import split_details, with_details
 from yulon.support import runlog
@@ -96,7 +96,8 @@ The lead's ruling: a Stop during a rebuild's load that ends in a CLEAN rollback 
 build from before up again and, with T217, its databases back too -- is a plain stop
 whose sentence says what was put back, not a red FAILED. Decided by type
 (`yulon.after_stop.PutBackAfterStop`), never by words. `STOPPED_THEN_FAILED` stays for
-a rollback that left something wrong.
+a rollback that left something wrong. Since T528 it also opens the engine's own sentence
+for a clean Stop (`yulon.after_stop.StopSaid`): what the Stop cost where it landed.
 """
 
 FINISHED_AFTER_A_LATE_STOP = "finished: Stop came too late to change anything; the job finished."
@@ -401,6 +402,7 @@ class _StreamWorker(QObject):
         ok = True
         message = "done"
         put_back = False
+        said_stop = False
         # Published BEFORE the source is touched, because that is the only
         # moment at which this thread's ident is knowable to `request_stop()`
         # while the source can still be reached: everything after this line may
@@ -447,6 +449,12 @@ class _StreamWorker(QObject):
                 # sentence describes, and that sentence is the one the player
                 # needs. Kept as a failure; `_on_finished` puts "Stopped" first.
                 logger.warning(f"log panel job failed after a stop: {raised}")
+            elif self._stop and isinstance(exc, StopSaid):
+                # T528: the engine's own sentence for the Stop -- what it cost at
+                # the stage it landed in. A clean stop, shown under "Stopped:".
+                logger.info(f"log panel job stopped, and said so: {raised}")
+                ok, said_stop = True, True
+                self.stopped_by.emit(type(exc))
             elif self._stop and stop_took_effect(exc):
                 # THE STOP TAKING EFFECT, said so by type (T250). `request_stop()`
                 # ends the job's children, and a terminated child exits non-zero,
@@ -469,7 +477,7 @@ class _StreamWorker(QObject):
                 logger.warning(f"log panel job failed as it was being stopped: {raised}")
             else:
                 logger.warning(f"log panel job failed: {raised}")
-        if self._stop and ok and not put_back:
+        if self._stop and ok and not put_back and not said_stop:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
             # cancel (`runner.interact()`) reached the end of its iterator and
@@ -1228,7 +1236,7 @@ class LogPanel(QWidget):
             if (
                 ok
                 and self._stopped_by is not None
-                and issubclass(self._stopped_by, PutBackAfterStop)
+                and issubclass(self._stopped_by, (PutBackAfterStop, StopSaid))
             ):
                 verdict = STOPPED_PUT_BACK + said
             else:

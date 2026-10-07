@@ -54,6 +54,19 @@ class StopTookEffect(Exception):
     """
 
 
+class StopSaid(StopTookEffect):
+    """A Stop taking effect whose sentence is for the player: shown as "Stopped: <it>" (T528).
+
+    The engine's own `InstallStopped` says what the Stop cost at the stage it
+    landed in -- "the build was stopped." and the note of what is kept -- and the
+    panel used to drop it for a bare "cancelled" (seen live 2026-10-07 on
+    yulon-ubuntu2 and yulon-win11). A Stop that only names what it ended (a
+    stopped git command, a child's exit) is a plain `StopTookEffect` and stays
+    "cancelled". Only the exception's own type counts, not one it was raised
+    `from`: a route that words the Stop again decides what is said.
+    """
+
+
 def stop_took_effect(exc: BaseException) -> bool:
     """Is `exc` the Stop taking effect: marked `StopTookEffect`, or raised `from` one that is?
 
