@@ -302,6 +302,8 @@ class YulonTray(QObject):
     """The tray icon, its menu, and the window's close turned into a hide. See the module doc."""
 
     state_changed = Signal(str)
+    settings_changed = Signal()
+    """A tray switch changed (keep in tray, start at sign-in): every view of them rereads."""
 
     def __init__(
         self,
@@ -737,6 +739,7 @@ class YulonTray(QObject):
         """
         self.set_keep_in_tray(keep)
         saved = ui_settings.remember_tray(keep_in_tray=keep)
+        self.settings_changed.emit()
         if not keep and self.window.isHidden():
             self.hide_flyout()
             self.open_window()

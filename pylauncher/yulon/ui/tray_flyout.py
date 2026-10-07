@@ -217,8 +217,14 @@ class ServerCard(QFrame):
     armed: tuple[Any, str] | None = None
     """(server, action) as they were when the icon button was pressed."""
 
+    dashboard_armed: tuple[Any, str] | None = None
+    """(server, dashboard kind) as they were when the dashboard icon was pressed."""
+
     def arm(self) -> None:
         self.armed = (self.view, self.which)
+
+    def arm_dashboard(self) -> None:
+        self.dashboard_armed = (self.view, self.dashboard_kind)
 
     def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
         """Fill the row; answers which button it shows (PLAY, START, OPEN or "")."""
@@ -364,6 +370,7 @@ class TrayFlyout(QWidget):
             card = ServerCard(self._list)
             card.action.pressed.connect(card.arm)
             card.action.clicked.connect(lambda _c=False, c=card: self._pressed(c))
+            card.dashboard.pressed.connect(card.arm_dashboard)
             card.dashboard.clicked.connect(lambda _c=False, c=card: self._dashboard_pressed(c))
             self._cards_box.insertWidget(len(self._cards), card)
             self._cards.append(card)
@@ -384,6 +391,9 @@ class TrayFlyout(QWidget):
         self.adjustSize()
 
     def _dashboard_pressed(self, card: ServerCard) -> None:
+        # The same press-time check as the row's own button (Codex on 4e3549e9).
+        if card.dashboard_armed != (card.view, card.dashboard_kind):
+            return
         if card.view is not None and card.dashboard_kind:
             self.dashboard_requested.emit(card.view, card.dashboard_kind)
 

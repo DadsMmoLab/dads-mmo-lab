@@ -297,3 +297,43 @@ def test_a_click_begun_on_one_server_never_lands_on_another(
     window.servers_changed.emit()  # the row is now WotLK's
     row.action.clicked.emit()
     assert (first.starts, second.starts) == (0, 0), "the click landed on another server"
+
+
+def test_a_dashboard_click_begun_on_one_server_never_lands_on_another(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Codex on 4e3549e9: the dashboard icon lacked the press-time check Play/Start had."""
+    first = _add(window, TortoiseView("running", switch_on=True))
+    second = TortoiseView("running", switch_on=True)
+    second.entry.id = "game-tortoise-2"
+    second.services.controller.server_dir = Path("/srv/t2")
+    _add(window, second)
+    panel = _open(tray)
+    row = panel.cards()[0]
+    assert row.view is first
+    row.dashboard.pressed.emit()
+    window.yulon_controllers.remove(first)
+    window.servers_changed.emit()  # the row is now the second Tortoise's
+    row.dashboard.clicked.emit()
+    assert (first.opened_dashboard, second.opened_dashboard) == (0, 0)
+
+
+def test_the_panel_and_an_open_settings_dialog_never_disagree(
+    tray: YulonTray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex on 4e3549e9: two TraySwitches, each reading the state only when built."""
+    from yulon.ui.tray_settings import TraySettingsDialog
+
+    on = [False]
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: on[0])
+    monkeypatch.setattr(autostart, "set_enabled", lambda v, *a, **k: on.__setitem__(0, v))
+    dialog = TraySettingsDialog(tray)
+    try:
+        panel = _open(tray)
+        panel.switches.sign_in.click()
+        assert dialog.sign_in.isChecked(), "the dialog kept the old sign-in state"
+        dialog.keep.click()  # off: the sign-in entry goes with it
+        assert not panel.switches.keep.isChecked()
+        assert not panel.switches.sign_in.isChecked()
+    finally:
+        dialog.deleteLater()

@@ -63,6 +63,9 @@ class TraySwitches(QWidget):
         self._said_problem = ""
         self.keep.toggled.connect(self._keep_toggled)
         self.sign_in.toggled.connect(self._sign_in_toggled)
+        # The panel and the Settings dialog are two views of one state (Codex):
+        # a change in either is read again by both.
+        tray.settings_changed.connect(self.read)
         self.read()
 
     def read(self) -> None:
@@ -117,6 +120,7 @@ class TraySwitches(QWidget):
                 self._settle()
                 return
             self._set_quietly(self.sign_in, False)
+            self.tray.settings_changed.emit()
         if not self.tray.remember_keep_in_tray(on):
             self._said_problem = (
                 "This setting could not be saved, so it lasts only until Yu'lon closes."
@@ -141,6 +145,8 @@ class TraySwitches(QWidget):
             self.sign_in.blockSignals(True)
             self.sign_in.setChecked(not on)
             self.sign_in.blockSignals(False)
+        else:
+            self.tray.settings_changed.emit()
         self._settle()
 
 
