@@ -228,12 +228,12 @@ GATE_PINS = {
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
-        "cmangos/playerbots": "76b97537f050d09e4cf021c86884de657b63a1e4",
+        "cmangos/playerbots": "45bed51955bf6b07e750b72ac056d9253ca3cecd",
         "cmangos/tbc-db": "866723612d93791e442fb1b18d642118fa682edd",
     },
     "wow-vanilla": {
         "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
-        "cmangos/playerbots": "76b97537f050d09e4cf021c86884de657b63a1e4",
+        "cmangos/playerbots": "45bed51955bf6b07e750b72ac056d9253ca3cecd",
         "cmangos/classic-db": "ec4f596146be6467ea93c57397858e329e2db852",
     },
 }
@@ -283,6 +283,17 @@ changed comments only, among them the commented default of
 `# Key =` shape Vanilla's `match_commented` writes its own value into.
 The gate was one fresh TBC and one fresh Vanilla install through the app's
 engine on `yulon-fedora-gate`, each read back from its own `src/` checkout.
+
+T524 (2026-10-07) moved the shared `playerbots` once more, 76b97537 -> 45bed519 (one
+commit, the Karazhan Netherspite strategy: eight C++ files under `playerbot/`; no SQL,
+conf, CMake or `contrib/` file). The other four sources were still upstream's heads.
+The gate was one Vanilla install made at the T500 pins (a4c9faa5's code), moved onto
+this commit through "Update the server to latest..." on `yulon-fedora-gate`: playerbots
+76b97537 -> 45bed519 recompiled in a 52-minute rebuild, world ready 54 s after the start,
+500 bots (509 online of the 900 characters), SOAP Verified, SRP6 1.12.1 login ok/wrong/
+unknown, Stop clean. TBC's compile of the new playerbots files was not run live: the
+box's disk could not hold the TBC client and an install without root to format the extra
+disk. The new playerbots commit is C++ only and shared, so the Vanilla build compiled it.
 """
 
 

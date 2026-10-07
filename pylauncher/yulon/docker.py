@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
+from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
 
 from yulon import ansi, platform, runner, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
@@ -5823,15 +5823,34 @@ def build_staged(
     one built service keeps the single call and the user's own buildx config,
     because it has no race to lose and a new key costs one cold send.
 
+    **Services that read the same files can share one folder (T525).** A service
+    whose own `x-yulon-buildx-group` key (`BUILDX_GROUP_KEY`) names the same
+    group as an earlier one builds on that earlier service's folder, so the
+    group keeps ONE cached copy of the context instead of one each. It is only
+    safe for targets that read exactly the same paths, because a shared copy is
+    synced to whatever the current target reads; the overlay's author says
+    which ones do. On the first member's folder rather than a new one, so the
+    copy that member already holds stays warm when an install gains the key.
+    The calls stay one per service and in the overlay's order, and a service
+    without the key keeps its own folder as before.
+
     **The builder a plain build would use is asked first (T413)**, because a
     builder picked with `docker buildx use` is recorded in the user's buildx
-    config, which the per-service folders are not. A `docker`-driver builder is
-    a docker context's own and buildx finds it by name from any config folder,
-    so the split calls name it in `BUILDX_BUILDER`. Any other driver
-    (docker-container, remote, kubernetes) lives only in the user's
-    `instances/`, and an answer that cannot be read names no builder at all;
-    both get the single call on the user's own config, which is the build
-    before T376: their own builder, without the per-service cache.
+    config, which the per-service folders are not. A per-service folder holds
+    no `current`, so buildx falls back to the current docker context's own
+    builder, a `docker`-driver builder named after the context. The split calls
+    are made only when that IS the builder in use (`_current_context()`), and
+    they name no builder at all (T527): compose refuses a `BUILDX_BUILDER` that
+    names a docker context other than `default`, the current one included, so
+    on a stock Docker Desktop (context and builder both `desktop-linux`) naming
+    it failed every WotLK build within a second. Any other builder, a
+    `docker`-driver one of another context or one of another driver
+    (docker-container, remote, kubernetes), lives only in the user's own
+    config, and an answer that cannot be read is not a builder; all of them get
+    the single call on the user's own config, which is the build before T376:
+    their own builder, without the per-service cache. `BUILDX_BUILDER` is taken
+    out of the split calls' environment, so one the user set reaches no call
+    that would refuse it.
 
     The calls run in the overlay's order and the first that does not exit 0
     ends the build: its run is returned as it is, so its status and its own
@@ -5846,33 +5865,46 @@ def build_staged(
     for name in compose_files:
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
-    services = _built_services(server_dir, compose_files)
+    built = _built_services(server_dir, compose_files)
+    services = tuple(service.name for service in built)
     builder = _current_builder(wsl_distro) if len(services) >= 2 else None
+    context = (
+        _current_context(wsl_distro) if builder is not None and builder[1] == "docker" else None
+    )
     if builder is not None and builder[1] != "docker":
         logger.info(
             f"build_staged(): the builder in use is {builder[0]} ({builder[1]} driver), "
             "which only the user's own buildx config can name; one build call"
         )
-    if builder is None or builder[1] != "docker":
+    elif builder is not None and context != builder[0]:
+        logger.info(
+            f"build_staged(): the builder in use is {builder[0]}, and the current docker "
+            f"context is {context or 'not known'}; only the user's own buildx config reaches "
+            "that builder, so one build call"
+        )
+    if builder is None or builder[1] != "docker" or context != builder[0]:
         logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
         return run_attached(
             argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
         )
     tail: deque[str] = deque(maxlen=KEEP_OUTPUT_LINES)
-    for service in services:
+    first_of_group: dict[str, str] = {}
+    for service, group in built:
         if cancel is not None and cancel.is_set():
             logger.warning(f"build_staged(): stopped before building {service}")
             return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
-        config = _buildx_config(server_dir, service)
-        extra = {"BUILDX_CONFIG": str(config), "BUILDX_BUILDER": builder[0]}
+        folder = service if group is None else first_of_group.setdefault(group, service)
+        config = _buildx_config(server_dir, folder)
+        extra = {"BUILDX_CONFIG": str(config)}
         env = (
             platform.wsl_env(extra, paths=("BUILDX_CONFIG",))
             if wsl_distro is not None
             else {**os.environ, **extra}
         )
+        env.pop("BUILDX_BUILDER", None)
         logger.info(
             f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
-            f"BUILDX_CONFIG={config} BUILDX_BUILDER={builder[0]}"
+            f"BUILDX_CONFIG={config}, on the {context} context's own builder"
         )
         run = run_attached(
             [*argv, service],
@@ -5915,6 +5947,25 @@ def _current_builder(wsl_distro: str | None = None) -> tuple[str, str] | None:
     return builder
 
 
+def _current_context(wsl_distro: str | None = None) -> str | None:
+    """The docker context a plain command would use; None if docker will not say (T527).
+
+    `docker context show` reads `DOCKER_CONTEXT`, `DOCKER_HOST` and the user's
+    `docker context use` exactly as `docker compose` does. Bounded like
+    `_current_builder()`, and None on any refusal: `build_staged()` then makes
+    the single call rather than guess which builder a split call would reach.
+    """
+    proc = _docker(["context", "show"], timeout=BUILDER_PROBE_TIMEOUT, wsl_distro=wsl_distro)
+    name = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not name or "\n" in name:
+        logger.warning(
+            f"docker context show exited {proc.returncode}: {proc.stderr.strip()!r} "
+            f"{proc.stdout.strip()!r}; the current context is not known"
+        )
+        return None
+    return name
+
+
 def _builder_in(text: str) -> tuple[str, str] | None:
     """(name, driver) from `docker buildx inspect`'s text, or None when it names neither (T413).
 
@@ -5933,7 +5984,25 @@ def _builder_in(text: str) -> tuple[str, str] | None:
     return (name, driver) if name and driver else None
 
 
-def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str, ...]:
+BUILDX_GROUP_KEY = "x-yulon-buildx-group"
+"""A service's own key in the build overlay naming the buildx group it builds in (T525).
+
+Services of one group build on one buildx config folder and so share one cached
+copy of the context; see `build_staged()`. Compose ignores any `x-` key.
+"""
+
+_BUILDX_GROUP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+"""What a group may be called: a plain name, never a path, a variable or a list."""
+
+
+class BuiltService(NamedTuple):
+    """One service the build overlay builds, and the buildx group it named, if any (T525)."""
+
+    name: str
+    group: str | None
+
+
+def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[BuiltService, ...]:
     """The services with a `build:` block in the build overlay, in its order (T376).
 
     The overlay is the LAST of `compose_files` and is a file Yu'lon writes
@@ -5942,6 +6011,10 @@ def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str
     when one of its own keys is `build`. An overlay it cannot read, or one in
     another shape, answers no services, and the build is then the single
     call it was before T376.
+
+    A built service's own `BUILDX_GROUP_KEY`, at the same depth as its `build`,
+    is its group (T525); one deeper (a label, say) is not. A value that is not
+    a plain name (`_buildx_group()`) is logged and read as no group.
     """
     if not compose_files:
         return ()
@@ -5952,6 +6025,7 @@ def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str
         logger.warning(f"the build overlay {overlay} could not be read ({exc}); one build call")
         return ()
     found: list[str] = []
+    groups: dict[str, str | None] = {}
     in_services = False
     service_indent: int | None = None
     key_indent: int | None = None
@@ -5978,14 +6052,40 @@ def _built_services(server_dir: Path, compose_files: Sequence[str]) -> tuple[str
             continue
         if key_indent is None:
             key_indent = indent
-        key = line.strip().split(":", 1)[0]
-        if indent == key_indent and key == "build" and service not in found:
+        key, _, value = line.strip().partition(":")
+        if indent != key_indent:
+            continue
+        if key == "build" and service not in found:
             found.append(service)
-    return tuple(found)
+        elif key == BUILDX_GROUP_KEY:
+            groups[service] = _buildx_group(service, value)
+    return tuple(BuiltService(name, groups.get(name)) for name in found)
+
+
+def _buildx_group(service: str, value: str) -> str | None:
+    """The group a `BUILDX_GROUP_KEY` value names, or None for one that is not a plain name (T525).
+
+    Read the way Yu'lon writes it: a bare or quoted word, perhaps followed by a
+    `# comment`. Anything else joins no group, so the service keeps its own
+    folder, which is never wrong, only bigger.
+    """
+    text = value.split(" #", 1)[0].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    if _BUILDX_GROUP_NAME.fullmatch(text):
+        return text
+    logger.warning(
+        f"{service}'s {BUILDX_GROUP_KEY} {value.strip()!r} is not a plain name; "
+        "it builds on its own buildx config"
+    )
+    return None
 
 
 def _buildx_config(server_dir: Path, service: str) -> Path:
     """The buildx config folder one service of one install builds on (T376).
+
+    A buildx group (T525) builds on its first member's folder, so `service` is
+    always the name of a built service.
 
     Under the app's own folder and never under `server_dir`, because the T224
     fingerprint reads every file in the server folder and buildx writes here.

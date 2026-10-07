@@ -2452,11 +2452,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "destination (round 1 review, 2026-09-16: listing `<client>/Data` recorded the user's "
         "own archives as this app's). A listing that fails raises, and the install stops"
     ),
-    ("apply.py", "_data_destinations"): (
-        "T262 scoped re-review. Lists the one destination folder of each single-file `dest: "
-        "data` step to name the file it would write, for the refusal of a module whose file "
-        "another module already put there and for the aside of an earlier crash. Read-only; "
-        "it decides a refusal or which aside is put back, never a write of its own"
+    ("apply.py", "_step_destinations"): (
+        "T262 scoped re-review (was `_data_destinations`'; T300 moved it here). Lists the one "
+        "destination folder of each single-file `client` step to name the file it would write, "
+        "for the refusal of a module whose file another module already put there, for the "
+        "aside of an earlier crash, and for the refusal of a file that is a link "
+        "(`_refuse_links`, which asks `links.is_link` of each name, never the listing). "
+        "Read-only; it decides a refusal or which aside is put back, never a write of its own"
     ),
     ("apply.py", "_aside_names"): (
         "T262 scoped re-review. Lists the folder of one client file to find its "

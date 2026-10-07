@@ -184,7 +184,7 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "76b97537f050d09e4cf021c86884de657b63a1e4"
+            "rev": "45bed51955bf6b07e750b72ac056d9253ca3cecd"
           },
           {
             "repo": "cmangos/tbc-db",
@@ -633,7 +633,7 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "76b97537f050d09e4cf021c86884de657b63a1e4"
+            "rev": "45bed51955bf6b07e750b72ac056d9253ca3cecd"
           },
           {
             "repo": "cmangos/classic-db",
@@ -1487,7 +1487,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "56fe34fa8f4ad655d297e132a520b7902feb26c2"
+            "rev": "6c6472c3b6aeb89169d7d49c45af7f7eab326743"
           }
         ]
       },
