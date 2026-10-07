@@ -433,3 +433,29 @@ def test_each_step_looks_again_when_it_uses_the_checkout(
     assert _holds_secret(run.server / "env") == []
     assert _holds_secret(run.client) == []
     assert run.dbc.dirs == []
+
+
+def test_remove_does_not_list_a_deploy_folder_that_became_a_link_after_the_look(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_undeploy()` deletes the names it lists in the deploy source: never names from elsewhere.
+
+    The look before the remove is passed over, as a link made after it would be. The
+    deploy folder's listing through the link would name the outside folder's `notes.lua`,
+    and the player's own script of that name in the server folder would be deleted.
+    """
+    run = _Run(tmp_path, {})
+    run.applier.install(run.manifest)
+    deployed = run.server / LUA / "lua"
+    (deployed / "notes.lua").write_bytes(b"the player's own script")
+    clone = run.applier.clone_dir(run.manifest)
+    shutil.rmtree(clone / "lua")
+    os.symlink(run.outside, clone / "lua", target_is_directory=True)
+    monkeypatch.setattr(Applier, "_refuse_checkout_links", lambda *_a, **_k: None)
+
+    report = run.applier.remove(run.manifest)
+
+    assert (deployed / "notes.lua").read_bytes() == b"the player's own script"
+    assert (deployed / "linked.lua").is_file(), "removed though its source could not be listed"
+    assert any("lua" in line and "link" in line for line in report.skipped), report.skipped
+    assert _snapshot(run.outside) == run.before

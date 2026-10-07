@@ -4594,6 +4594,15 @@ class Applier:
         """
         target = self._deploy_target(step.src, step.dest)
         src = clone / step.src
+        link = _checkout_link(clone, step.src, whole_tree=False)
+        if link is not None:
+            # T530: the names listed through a link are another folder's, and each
+            # is deleted here, so a source that became a link is not listed at all.
+            log.skipped.append(
+                f"{step.src}: {_rel(clone, link)} in the module's files is a link, so the files "
+                f"deployed into {_rel(self.server_dir, target)} are unknown and were left in place"
+            )
+            return
         if src.is_dir():
             # BOTH names of a renamed file (T104 fix wave). A rename added to a
             # manifest after installs exist -- accountwide's Ashen Order script,
