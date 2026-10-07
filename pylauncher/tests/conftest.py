@@ -1247,6 +1247,17 @@ REAL_LEFT_TOOL_READ = docker_module.tool_containers_left_running
 
 
 @pytest.fixture(autouse=True)
+def _no_claim_sweep_outlives_its_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A claim given up while it came up is looked for in the background (T543).
+
+    That thread outlives the test that started it, and would then ask whatever docker
+    the next test has -- or the real one. Unit tests sweep for no time; the test about
+    the sweep sets its own.
+    """
+    monkeypatch.setattr(docker_module, "_CLAIM_SWEEP_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _no_unit_test_asks_for_tool_containers_left_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every Re-extract asks Docker for extraction containers an earlier Yu'lon left (T303).
 

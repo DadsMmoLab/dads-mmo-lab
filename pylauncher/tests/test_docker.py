@@ -4510,6 +4510,7 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
             "folder_claim",
             "_take_claim",
             "_claim_coming_up",
+            "_sweep_late_claim",
             "_claim_in_use",
             "_claim_facts",
             "_release_claim",

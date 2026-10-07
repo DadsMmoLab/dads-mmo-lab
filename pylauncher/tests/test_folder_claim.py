@@ -452,3 +452,70 @@ def test_every_docker_question_a_claim_asks_is_short(
         with docker.folder_claim(folder, IMAGE):
             pass
     assert asked and all(t is not None and t <= 5.0 for _a, t in asked), asked
+
+
+def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the folds: ending the CLI does not cancel a `run` the daemon already
+    has, so the claim can appear after the Stop's one look. It is still removed, by its
+    nonce, without holding the Stop up -- or it would block every later press."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / "claim-slow").write_text("", encoding="utf-8")
+    nonce = "a" * 32
+    monkeypatch.setattr(docker.uuid, "uuid4", lambda: SimpleNamespace(hex=nonce))
+    cancel = threading.Event()
+    looks_after_stop = [0]
+    removed: list[str] = []
+
+    def facts(_name: str, timeout: float = 5.0) -> object:
+        if not cancel.is_set():
+            return None
+        looks_after_stop[0] += 1
+        if looks_after_stop[0] < 3:
+            return None  # not made yet
+        return docker._ClaimFacts("late-id", "created", nonce, docker.owner_id())
+
+    monkeypatch.setattr(docker, "_claim_facts", facts)
+    monkeypatch.setattr(docker, "_remove_claim", lambda c, timeout=5.0: removed.append(c))
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            with docker.folder_claim(folder, IMAGE, cancel):
+                pytest.fail("held a claim that never came up")
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is read
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    time.sleep(0.3)
+    stopped = time.monotonic()
+    cancel.set()
+    worker.join(HANG_BOUND)
+    took = time.monotonic() - stopped
+    (fake_docker / "claim-slow").unlink()
+    assert len(outcome) == 1 and isinstance(outcome[0], docker.ClaimStopped), outcome
+    assert took < 5.0, took
+    deadline = time.monotonic() + HANG_BOUND
+    while not removed:
+        assert time.monotonic() < deadline, "the late claim was left behind"
+        time.sleep(0.02)
+    assert removed == ["late-id"]
+
+
+def test_a_stop_during_the_question_whose_claim_it_is_is_a_stop(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "data"
+    folder.mkdir()
+    name = _claim_name(folder)
+    _running(fake_docker, name, ["yulon.owner=someone-else", f"{docker.CLAIM_LABEL}=theirs"])
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(docker.ClaimStopped):
+        docker._claim_in_use(name, IMAGE, cancel, again=True)

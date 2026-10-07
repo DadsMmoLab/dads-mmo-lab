@@ -7248,6 +7248,11 @@ a hung daemon must not hold a press, or a Stop, for `_ASK_AGAIN_TIMEOUT`."""
 _CLAIM_LOOK_TIMEOUT = 1.0
 """How long one look at a coming-up claim may take, so a Stop is seen between looks."""
 
+_CLAIM_SWEEP_SECONDS = 60.0
+"""How long a claim given up while it came up is looked for, in the background, to remove it."""
+
+_CLAIM_SWEEP_POLL = 0.5
+
 _CLAIM_ABANDON_WAIT = 0.5
 """How long the CLI of a claim given up while it came up gets before it is killed."""
 
@@ -7397,11 +7402,38 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         # Not ours after all, or abandoned while it came up: its CLI goes -- at once,
         # not after the release's wait, for a Stop's sake -- and a claim this press
         # made goes with it (by its nonce, never another's).
+        cut_short = proc.poll() is None
         _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
         facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
         if facts is not None and facts.nonce == nonce:
             _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
+        elif cut_short:
+            # Ending the CLI does not cancel a `run` the daemon already has (Codex review
+            # of the folds): the claim may appear later and would block every press.
+            threading.Thread(
+                target=_sweep_late_claim, args=(name, nonce), name="yulon-claim-sweep", daemon=True
+            ).start()
         raise
+
+
+def _sweep_late_claim(name: str, nonce: str) -> None:
+    """Remove the claim `name` carrying `nonce` if Docker makes it after its press gave up.
+
+    Looked for in the background for `_CLAIM_SWEEP_SECONDS`, so a Stop is not held up.
+    Ends early once the name holds another press's claim: this one can no longer appear.
+    """
+    deadline = time.monotonic() + _CLAIM_SWEEP_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            facts = _claim_facts(name)
+            if facts is not None:
+                if facts.nonce == nonce:
+                    logger.info(f"removing the claim {name}, made after its press gave it up")
+                    _remove_claim(facts.container)
+                return
+            time.sleep(_CLAIM_SWEEP_POLL)
+    except Exception as exc:  # noqa: BLE001 - a background thread has no caller to tell
+        logger.warning(f"stopped looking for the claim {name}: {exc}")
 
 
 def _claim_coming_up(
@@ -7460,7 +7492,9 @@ def _claim_refused(image: str, said: str) -> str:
 
 def _claim_in_use(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
     """The daemon said `name` is taken: say whose; never remove it (T543)."""
-    facts = _claim_facts(name)
+    facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+    if cancel is not None and cancel.is_set():
+        raise ClaimStopped("Stop was pressed before the folder was reserved.")
     if facts is None:
         if again:  # it ended between the refusal and the question (a Stop is seen there)
             return _take_claim(name, image, cancel, again=False)
