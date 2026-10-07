@@ -962,6 +962,7 @@ class CmangosInstaller(StagedInstaller):
             if present and not refused:
                 yield f"{run.rel}: {present} of its indexes were there and were made again."
                 loaded += 1
+                applied[1] += 1
                 continue
             if refused:
                 yield (
@@ -970,7 +971,7 @@ class CmangosInstaller(StagedInstaller):
                 )
                 continue
             loaded += 1
-        applied[1] += loaded
+            applied[1] += 1  # counted as it lands, so a rollback mid-loop says it (Codex)
         yield f"{loaded} of {len(due)} bot table file(s) loaded."
 
     def _other_schemas(self) -> set[str]:

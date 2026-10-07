@@ -443,3 +443,30 @@ def test_the_first_update_says_it_loads_every_bot_table_and_later_ones_only_chan
     text = native.update_to_latest_confirmation(TBC, Path("/srv"), "x/y")
     assert "The first update loads every bot table fresh" in text
     assert "later ones only those whose files changed" in text
+
+
+def test_a_rollback_part_way_through_the_bot_tables_counts_the_ones_already_loaded(
+    tmp_path: Path,
+) -> None:
+    """Codex on the T534 rework: the count is kept per file, so a press that dies on the
+    second bot file still tells the rollback that the first one was loaded."""
+    import io
+
+    from yulon import docker
+
+    rec, server_dir, db, world = _installed(tmp_path)
+    real = db.exec_stdin
+
+    def exec_stdin(container, argv, source, *, env, wsl_distro=None):  # type: ignore[no-untyped-def]
+        data = source.read()
+        if data.startswith(f"-- {BOT_FILES[1]}".encode()):
+            raise docker.DockerCommandError("the database went away")
+        return real(container, argv, io.BytesIO(data), env=env, wsl_distro=wsl_distro)
+
+    db.exec_stdin = exec_stdin  # type: ignore[method-assign]
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir, db, world, said=said)
+    assert any(
+        "The 1 bot table file(s) loaded before the new build started" in line for line in said
+    ), said
