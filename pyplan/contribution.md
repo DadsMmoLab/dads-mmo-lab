@@ -149,7 +149,7 @@ Every change adds one line to `CHANGELOG.md` under `## Unreleased`, in `### New`
 Examples. New: "Set a server's time zone on the Tuning tab with **Server time zone**." Fixed: "Sending gold to a character no longer crashes the app." Changed: "Opening Yu'lon while it is already running brings the open window to the front."
 `pylauncher/tests/test_changelog_style.py` enforces it.
 
-Cutting a release: the commit that bumps the version also renames `## Unreleased` to `## vX.Y.Z-Public — YYYY-MM-DD` and opens a fresh, empty `## Unreleased` above it with the three headings. The release body is still cut from what the tag gained (`pylauncher/build/release_notes.py`), but the update dialog shows at most 16 KiB of one release, and the tests render `## Unreleased` against that cap.
+Cutting a release: the commit that bumps the version also renames `## Unreleased` to `## vX.Y.Z-Public — YYYY-MM-DD` and opens a fresh, empty `## Unreleased` above it with the three headings. The release body is still cut from what the tag gained (`pylauncher/build/release_notes.py`), but the update dialog shows at most 16 KiB of one release, and the tests render `## Unreleased` against that cap. The cut also adds that version's pin to `PINNED` in `pylauncher/tests/test_changelog_released_frozen.py` (`python -m tests.test_changelog_released_frozen vX.Y.Z-Public` prints it, run from `pylauncher/`); that test keeps a released section from changing.
 
 ## Notes
 
