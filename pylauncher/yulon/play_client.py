@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from yulon import client_names, platform
+from yulon import client_names, links, platform
 from yulon.log import get_logger
 from yulon.steam import client_executable
 
@@ -115,24 +115,14 @@ written file for a moment; a refusal that outlives this is a real one."""
 ONEDRIVE_VARIABLES = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
 """The environment variables Windows sets to the folders OneDrive syncs."""
 
-# Windows reparse points. Defined here, not taken from `stat`: there they exist only
-# on Windows builds, and the link test below must be exercisable everywhere.
-FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # a junction
-IO_REPARSE_TAG_SYMLINK = 0xA000000C
-_NAME_SURROGATE = 0x20000000  # winnt.h IsReparseTagNameSurrogate: "this names another file"
+# The link test is the one rule every walk and copy shares (`yulon.links`, T375/T300).
+FILE_ATTRIBUTE_REPARSE_POINT = links.FILE_ATTRIBUTE_REPARSE_POINT
+IO_REPARSE_TAG_MOUNT_POINT = links.IO_REPARSE_TAG_MOUNT_POINT
+IO_REPARSE_TAG_SYMLINK = links.IO_REPARSE_TAG_SYMLINK
 
 _lstat = os.lstat  # a seam: tests stand in Windows' answer for a junction
-
-
-def _stat_is_link(st: os.stat_result) -> bool:
-    """`_is_link` for a look already taken, so the caller acts on the same answer."""
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    if not getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
-        return False
-    tag = getattr(st, "st_reparse_tag", None)
-    return not tag or bool(tag & _NAME_SURROGATE)
+_stat_is_link = links.stat_is_link
+"""`_is_link` for a look already taken, so the caller acts on the same answer."""
 
 
 def _is_link(path: str | os.PathLike[str]) -> bool:

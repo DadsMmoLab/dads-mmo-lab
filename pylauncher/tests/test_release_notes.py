@@ -159,12 +159,37 @@ def test_the_how_to_comment_is_not_an_entry() -> None:
     assert "Example line" not in rn.new_entries("", GROUPED)
 
 
+def newest_release(text: str) -> str | None:
+    """The highest `## v...` section title in `text`: what the next release is measured against.
+
+    T535: this was the literal "v0.8.90-Public", and when v0.9.13 and v0.9.14 were cut
+    under their own headings the "next body" these tests built became every line since
+    v0.8.90 - which is not what the release workflow would publish.
+    """
+    keyed = [
+        (key, section)
+        for section, _, _ in rn.parse_sections(text)
+        if (key := rn.version_key(section)) is not None
+    ]
+    return max(keyed)[1] if keyed else None
+
+
+def test_newest_release_is_the_highest_heading_not_the_first() -> None:
+    text = "## v0.8.7-Public\n\n### New\n- Old.\n\n" + GROUPED
+    assert newest_release(text) == "v0.8.90-Public — 2026-09-26"
+    assert newest_release("## Unreleased\n\n### New\n- One.\n") is None
+
+
 def test_the_real_changelog_cuts_into_new_fixed_and_changed() -> None:
-    """What the next release body holds: Unreleased's lines under the three headings."""
+    """What the next release body holds: Unreleased's lines, under the three headings in order."""
     text = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
-    notes = rn.new_entries("", text, "v0.8.90-Public")
+    notes = rn.new_entries("", text, newest_release(text))
     headings = [line for line in notes.splitlines() if line.startswith("#")]
-    assert headings == ["### New", "### Fixed", "### Changed"]
+    expected: list[str] = []
+    for section, heading, _ in rn.parse_sections(text):
+        if section == "Unreleased" and f"### {heading}" not in expected:
+            expected.append(f"### {heading}")
+    assert headings == expected
     unreleased = [b for s, _, b in rn.parse_sections(text) if s == "Unreleased"]
     assert [line for line in notes.splitlines() if line.startswith("- ")] == unreleased
 

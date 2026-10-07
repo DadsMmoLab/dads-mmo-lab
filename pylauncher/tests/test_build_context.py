@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -494,6 +496,221 @@ def test_a_symlink_counts_by_its_target_and_is_not_followed(tmp_path: Path) -> N
     (root / "src/link").unlink()
     os.symlink("../outside/b.txt", root / "src/link")  # same content, other target
     assert _fp(root) != before
+
+
+# T375: what Windows reports for a junction, stood in over a real POSIX symlink so the
+# target text `os.readlink` gives is real. `FILE_ATTRIBUTE_DIRECTORY | _REPARSE_POINT`.
+_DIR_REPARSE = 0x10 | 0x400
+_MOUNT_POINT = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: a junction
+_CLOUD = 0x9000601A  # IO_REPARSE_TAG_CLOUD_6: a OneDrive files-on-demand folder
+
+
+@dataclass(frozen=True)
+class _WindowsLook:
+    st_mode: int
+    st_file_attributes: int
+    st_reparse_tag: int
+
+
+class _AsWindowsSees:
+    """A real `DirEntry` whose own look (`stat(follow_symlinks=False)`) is Windows' answer.
+
+    On Windows that look comes from the folder listing itself: a junction is a
+    folder (`S_IFDIR`) carrying the reparse-point attribute and its tag, and is a
+    symlink to neither `DirEntry.is_symlink()` nor `stat.S_ISLNK`. Python 3.11,
+    which the Windows build ships, has no `DirEntry.is_junction()`.
+    """
+
+    def __init__(self, real: os.DirEntry[str], tag: int) -> None:
+        self.name = real.name
+        self.path = real.path
+        self._tag = tag
+
+    def stat(self, *, follow_symlinks: bool = True) -> _WindowsLook:
+        assert not follow_symlinks, "the walk looked through the entry"
+        return _WindowsLook(stat.S_IFDIR | 0o777, _DIR_REPARSE, self._tag)
+
+    def is_symlink(self) -> bool:
+        return False
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        return True
+
+
+class _WithIsJunction(_AsWindowsSees):
+    """The same entry on Python 3.12+, where `DirEntry.is_junction()` exists."""
+
+    def is_junction(self) -> bool:
+        return self._tag == _MOUNT_POINT
+
+
+def _windows_listing(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_type: type[_AsWindowsSees],
+    path: Path,
+    tag: int,
+    *,
+    enter_fails: bool,
+) -> None:
+    """`os.scandir` as Windows answers it for the one entry at `path`.
+
+    With `enter_fails`, listing THROUGH that entry raises what Windows raised on
+    yulon-win11 for a junction it could not follow (WinError 1920, live #312).
+    """
+    real_scandir = os.scandir
+
+    class _Listing:
+        def __init__(self, folder: str) -> None:
+            if enter_fails and Path(folder) == path:
+                raise OSError(22, "The file cannot be accessed by the system", folder)
+            with real_scandir(folder) as listed:
+                self.entries = [entry_type(e, tag) if Path(e.path) == path else e for e in listed]
+
+        def __enter__(self) -> Iterator[object]:
+            return iter(self.entries)
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(os, "scandir", _Listing)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+@pytest.mark.parametrize("entry_type", [_AsWindowsSees, _WithIsJunction], ids=["3.11", "3.12+"])
+def test_a_junction_counts_by_its_target_and_is_not_entered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_type: type[_AsWindowsSees]
+) -> None:
+    """T375: one junction in the server folder used to cost the whole fingerprint.
+
+    On 3.11 (the shipped Windows build) the walk entered it as a folder and the
+    listing raised WinError 1920; on 3.12+ it was refused by name. Now it is a
+    link like a symlink: its path, mode and target text count, and what is
+    behind it is never read.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/a/x.txt", "one")
+    _write(root / "outside/b/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    try:
+        os.symlink("../outside/a", root / "src/junction")
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    _windows_listing(monkeypatch, entry_type, root / "src/junction", _MOUNT_POINT, enter_fails=True)
+    before = _fp(root)
+    _write(root / "outside/a/x.txt", "two")  # what is behind it: not entered
+    _write(root / "outside/a/new.txt", "new")
+    assert _fp(root) == before
+    (root / "src/junction").unlink()
+    os.symlink("../outside/b", root / "src/junction")  # same content, other target
+    assert _fp(root) != before
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+@pytest.mark.parametrize("entry_type", [_AsWindowsSees, _WithIsJunction], ids=["3.11", "3.12+"])
+def test_a_junction_the_dockerignore_leaves_out_is_not_looked_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_type: type[_AsWindowsSees]
+) -> None:
+    """A junction in a folder that is walked, at a name the `.dockerignore` leaves out.
+
+    3.12+ refused it by name before asking whether Docker sends it at all.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "src/main.c", "x")
+    _write(root / "outside/x.txt", "one")
+    without = _fp(root)
+    try:
+        os.symlink("outside", root / "junction")
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    _windows_listing(monkeypatch, entry_type, root / "junction", _MOUNT_POINT, enter_fails=True)
+    assert _fp(root) == without
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_reparse_point_with_no_tag_reported_counts_as_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cautious answer: an unknown reparse point is not entered."""
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    try:
+        os.symlink("../outside", root / "src/unknown")
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    _windows_listing(monkeypatch, _AsWindowsSees, root / "src/unknown", 0, enter_fails=True)
+    before = _fp(root)
+    _write(root / "outside/x.txt", "two")
+    assert _fp(root) == before
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_link_whose_target_windows_cannot_read_answers_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WSL symlink: Python on Windows raises ValueError, not OSError, for its target.
+
+    That must be "no answer", never an exception out of the build.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    link = root / "src/wsl-link"
+    try:
+        os.symlink("../outside", link)
+    except OSError:
+        pytest.skip("this account may not make symlinks")
+    assert fingerprint(root) is not None
+    _windows_listing(monkeypatch, _AsWindowsSees, link, 0xA000001D, enter_fails=True)
+    real_readlink = os.readlink
+
+    def readlink(path: str) -> str:
+        if Path(path) == link:
+            raise ValueError("not a symbolic link")  # CPython's words for another tag
+        return real_readlink(path)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+    assert fingerprint(root) is None
+
+
+def test_a_reparse_point_that_names_no_other_file_is_walked_as_a_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A OneDrive files-on-demand folder is a reparse point but no link: its files count.
+
+    Only a tag with the name-surrogate bit (junctions, symlinks, WSL symlinks)
+    stands for another file; treating every reparse point as a link would leave
+    a synced folder's sources out of the fingerprint.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "src/synced/x.txt", "one")
+    _windows_listing(monkeypatch, _WithIsJunction, root / "src/synced", _CLOUD, enter_fails=False)
+    before = _fp(root)
+    _write(root / "src/synced/x.txt", "two")
+    assert _fp(root) != before
+
+
+def test_a_real_junction_counts_by_its_target_and_is_not_entered(tmp_path: Path) -> None:
+    """T375 on Windows itself: a real junction, also once its target is gone."""
+    if sys.platform != "win32":
+        pytest.skip("junctions are Windows'")
+    import _winapi
+
+    root = _plain_server(tmp_path, "*\n!src\n")
+    _write(root / "outside/a/x.txt", "one")
+    _write(root / "outside/b/x.txt", "one")
+    _write(root / "src/main.c", "x")
+    junction = root / "src/junction"
+    _winapi.CreateJunction(str(root / "outside/a"), str(junction))
+    before = _fp(root)
+    _write(root / "outside/a/x.txt", "two")
+    assert _fp(root) == before
+    os.rmdir(junction)  # removes the junction, never its target
+    _winapi.CreateJunction(str(root / "outside/b"), str(junction))
+    retargeted = _fp(root)
+    assert retargeted != before
+    shutil.rmtree(root / "outside/b")  # the junction now names nothing
+    assert _fp(root) == retargeted
 
 
 # --- no answer ---------------------------------------------------------------------------------

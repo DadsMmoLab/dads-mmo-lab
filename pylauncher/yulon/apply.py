@@ -42,6 +42,7 @@ from typing import IO, Any, Literal, Protocol
 from yulon import (
     client_names,
     docker,
+    links,
     module_answers,
     platform,
     play_client,
@@ -947,11 +948,23 @@ def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> 
     by hard link, and `copy2` opens an existing destination and writes into it:
     through a link that is a write into the original. So a linked destination is
     replaced instead, by a copy made beside it and renamed over the name.
+
+    Raises:
+        ApplyError: `dst` is a symlink or junction (`yulon.links`), which `copy2`
+            would write through into the file it points to (T300). The install
+            refuses one before copying (`Applier._refuse_links()`) and the client
+            copy asks again per file (`Applier._link_on_the_way()`); this is the
+            last look at the file itself, for any other caller.
     """
     try:
         st = os.lstat(dst)
     except FileNotFoundError:
         return shutil.copy2(src, dst)
+    if links.stat_is_link(st):
+        raise ApplyError(
+            f"{dst} is a link to another file, so the module's file was not copied onto it: "
+            "that would have changed the file it points to."
+        )
     if not stat.S_ISREG(st.st_mode) or st.st_nlink < 2:
         return shutil.copy2(src, dst)
     target = Path(dst)
@@ -1000,7 +1013,10 @@ def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
 
 
 def _copy_onto(
-    src: Path, target: Path, place: Callable[[Path, Path], object] = _copy_unshared
+    src: Path,
+    target: Path,
+    place: Callable[[Path, Path], object] = _copy_unshared,
+    check: Callable[[Path, bool], None] | None = None,
 ) -> list[Path]:
     """Copy the tree at `src` into `target` as `_plan_onto()` plans it; the names written.
 
@@ -1013,14 +1029,21 @@ def _copy_onto(
     Copies go through `place`, `_copy_unshared()` unless the caller sets a file of
     the player's aside first (`Applier._placer()`), so a hard-linked archive is
     replaced, never written through. One name per file, of what is there last.
+    `check(path, is_file)`, when given, is asked before the target folder and each
+    file's folder are made and before the file is written, and raises to stop the
+    copy (`Applier._link_on_the_way()`, T300).
 
     Raises:
         OSError: a folder could not be made or listed, or a file not copied. What
             was written before it stays, as with `copytree`.
     """
+    if check is not None:
+        check(target, False)
     target.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for source, dest in _plan_onto(src, target):
+        if check is not None:
+            check(dest, True)
         dest.parent.mkdir(parents=True, exist_ok=True)
         place(source, dest)
         if dest not in written:
@@ -3097,6 +3120,7 @@ class Applier:
         if complete is not None:
             manifest = self._completed(manifest, clone, complete)
         self._refuse_a_clash(manifest, clone)
+        self._refuse_links(manifest, clone)
         self._deploy(manifest, clone, log)
         self._patches(manifest, clone, vals, "install", log)
         # Both SQL passes are refused as one, BEFORE either runs: the guard's
@@ -5031,6 +5055,20 @@ class Applier:
         """
         if self.client_dir is not None:
             log.client_ran = True
+        ready = self.client_dir is not None and self._writes_a_ready_client()
+
+        def check(path: Path, file: bool) -> None:
+            link = self._link_on_the_way(path, ready, file=file)
+            if link is not None:
+                raise ApplyError(
+                    f"{link} became a link to another place while {manifest.id} was being "
+                    f"installed, so the copy into your game client stopped there: writing "
+                    f"through it would have changed what it points to. Anything copied before "
+                    f"that stays in your game client: Remove takes back what it can prove is its "
+                    f"own and names the rest. Replace the link with a real folder or file, or "
+                    f"remove it, then install {manifest.id} again."
+                )
+
         claimed = self._claimed_asides(log)
         for step in manifest.client:
             if self.client_dir is None:
@@ -5040,10 +5078,13 @@ class Applier:
             target = self._client_target(step, src)
             place = self._placer(step.src, log, claimed) if step.dest == "data" else _copy_unshared
             if src.is_dir():
-                _copy_onto(src, target, place)
+                _copy_onto(src, target, place, check)
             elif src.is_file():
+                check(target, False)
                 target.mkdir(parents=True, exist_ok=True)
-                place(src, target / (client_names.match(os.listdir(target), src.name) or src.name))
+                dest = target / (client_names.match(os.listdir(target), src.name) or src.name)
+                check(dest, True)
+                place(src, dest)
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             log.done.append(f"client {step.src} → {step.dest}")
@@ -5072,16 +5113,110 @@ class Applier:
             return []
         out: list[tuple[str, Path]] = []
         for step in manifest.client:
-            if step.dest != "data":
-                continue
-            src = clone / step.src
-            target = self._client_target(step, src)
-            if src.is_dir():
-                out.extend((step.src, dest) for _source, dest in _plan_onto(src, target))
-            elif src.is_file():
-                names = os.listdir(target) if target.is_dir() else []
-                out.append((step.src, target / (client_names.match(names, src.name) or src.name)))
+            if step.dest == "data":
+                _target, files = self._step_destinations(step, clone)
+                out.extend((step.src, dest) for dest in files)
         return out
+
+    def _step_destinations(self, step: ClientFile, clone: Path) -> tuple[Path, list[Path]]:
+        """The folder a `client` step copies into, and every file it would write there.
+
+        Reads only (`_plan_onto()`). No files for a source missing from the clone,
+        which `_client()` refuses on its own.
+        """
+        src = clone / step.src
+        target = self._client_target(step, src)
+        if src.is_dir():
+            return target, [dest for _source, dest in _plan_onto(src, target)]
+        if src.is_file():
+            names = os.listdir(target) if target.is_dir() else []
+            return target, [target / (client_names.match(names, src.name) or src.name)]
+        return target, []
+
+    def _refuse_links(self, manifest: Manifest, clone: Path) -> None:
+        """Refuse an install whose client copy would write through a link (T300).
+
+        The rule is `yulon.links`': a walk or a copy never goes through a link it
+        did not choose. A file copied onto a symlink or junction lands in the file
+        it points to, wherever that is, and a folder that is one takes every file
+        under it there. So, before anything of the module is copied or deployed:
+
+        * in a ready-to-play client (its marker, or the origins it was made from),
+          which Yu'lon makes with no link in it, a link anywhere from the client
+          folder down to a file the copy writes is refused;
+        * in the player's own client a linked folder is the player's choice (a
+          `Data/` on another drive) and is followed, but a linked file is refused:
+          writing it would change the file it points to, maybe another client's.
+
+        Raises:
+            ApplyRefusal: naming every such link.
+            OSError: a path on the way could not be looked at.
+        """
+        if self.client_dir is None:
+            return
+        client = self.client_dir
+        ready = self._writes_a_ready_client()
+        found: set[Path] = set()
+        looked: set[Path] = set()
+        for step in manifest.client:
+            target, files = self._step_destinations(step, clone)
+            found.update(dest for dest in files if links.is_link(dest))
+            if not ready:
+                continue
+            for folder in {target, *(dest.parent for dest in files)}:
+                while folder != client and folder.is_relative_to(client) and folder not in looked:
+                    looked.add(folder)
+                    if links.is_link(folder):
+                        found.add(folder)
+                    folder = folder.parent
+        if not found:
+            return
+        named = "; ".join(str(path) for path in sorted(found))
+        if ready:
+            why = (
+                "Yu'lon made this ready-to-play client without links, so something else put "
+                "them there. Replace each with a real folder or file, or remove it, then "
+                f"install {manifest.id} again."
+            )
+        else:
+            why = (
+                "Replace each linked file with a copy of the file it points to, or remove "
+                f"it, then install {manifest.id} again."
+            )
+        raise ApplyRefusal(
+            f"{manifest.id} would write into your game client through a link, which would "
+            f"change what the link points to instead: {named}. {why} Nothing of "
+            f"{manifest.id} was put into your game client or deployed."
+        )
+
+    def _writes_a_ready_client(self) -> bool:
+        """Whether `client_dir` is a ready-to-play client: its marker, or its origins."""
+        assert self.client_dir is not None
+        return bool(self.client_origins) or os.path.lexists(self.client_dir / play_client.MARKER)
+
+    def _link_on_the_way(self, path: Path, ready: bool, *, file: bool) -> Path | None:
+        """The link a write to `path` would now go through, or None: `_refuse_links()` at the copy.
+
+        `_refuse_links()` looks before deploy and SQL, which can take minutes; the
+        copy asks again for each folder and file as it writes it (Codex review of
+        T300), so a link made meanwhile stops the copy at the link. The same rule:
+        in a ready-to-play client the outermost link from the client folder down to
+        `path`; in the player's own client only `path` itself, and only a file.
+        What it does not cover is a link made between this look and the write a
+        moment later, which no path-based copy can rule out.
+
+        Raises:
+            OSError: a path on the way could not be looked at.
+        """
+        client = self.client_dir
+        assert client is not None
+        if not ready:
+            return path if file and links.is_link(path) else None
+        way = [path, *(folder for folder in path.parents if folder.is_relative_to(client))]
+        for folder in reversed(way):
+            if folder != client and links.is_link(folder):
+                return folder
+        return None
 
     def _here(self, path: str) -> Path:
         """A receipt's path in the client this applier writes to (`rebased()`)."""
@@ -5152,7 +5287,8 @@ class Applier:
           player's file set aside the first time stays recorded (carried over);
         * a file shared through a hard link (a ready-to-play client's archive and
           the player's own): replaced as before, its inode untouched;
-        * anything but a plain file, which is left to `_copy_unshared()` (T300).
+        * anything but a plain file: a link is refused before the copy
+          (`_refuse_links()`, T300) and by `_copy_unshared()` itself.
 
         A file written by this same step is overwritten, so two source names that
         land on one name set nothing aside twice. Every receipt goes into
