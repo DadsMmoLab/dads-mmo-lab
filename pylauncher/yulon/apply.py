@@ -1088,14 +1088,33 @@ def _stop_at_links(manifest: Manifest, clone: Path) -> Callable[[str, list[str]]
         for name in sorted(names):
             path = Path(folder) / name
             if links.is_link(path):
-                raise ApplyError(_checkout_link_said(manifest, clone, path, "install"))
+                raise ApplyError(_checkout_link_said(manifest.id, clone, path, None))
         return set()
 
     return ignore
 
 
-def _checkout_link_said(manifest: Manifest, clone: Path, link: Path, action: When) -> str:
-    """The refusal for a link in `manifest`'s checkout: which, where it points, what was kept."""
+def _look_again(clone: Path, rel: str, *, whole_tree: bool = False) -> None:
+    """Stop a step about to use `clone/rel` if a link is on the way to it now, or under it (T530).
+
+    The belt to `Applier._refuse_checkout_links()`, asked by each step right before
+    it reads or writes in the checkout: a link made after that look, while a
+    database was started or a deploy ran, is not gone through either. The
+    checkout's folder is named after the module (`clone_dir()`).
+
+    Raises:
+        ApplyError: naming the link; the steps before this one stay done.
+    """
+    link = _checkout_link(clone, rel, whole_tree=whole_tree)
+    if link is not None:
+        raise ApplyError(_checkout_link_said(clone.name, clone, link, None))
+
+
+def _checkout_link_said(item: str, clone: Path, link: Path, action: When | None) -> str:
+    """The refusal for a link in `item`'s checkout: which, where it points, what was kept.
+
+    `action` `None` is a step that found the link after others ran (`_look_again()`).
+    """
     rel = link.relative_to(clone).as_posix() if link.is_relative_to(clone) else str(link)
     try:
         target = os.readlink(link)
@@ -1115,12 +1134,13 @@ def _checkout_link_said(manifest: Manifest, clone: Path, link: Path, action: Whe
         place = "inside" if inside else "outside"
         where = f"{target}, {place} the module's own files"
     done = {
-        "install": f"Nothing of {manifest.id} was deployed, run or put into your game client.",
-        "configure": f"Nothing of {manifest.id} was changed.",
-        "remove": f"Nothing of {manifest.id} was removed.",
+        "install": f"Nothing of {item} was deployed, run or put into your game client.",
+        "configure": f"Nothing of {item} was changed.",
+        "remove": f"Nothing of {item} was removed.",
+        None: "It became a link after the install began; the steps before this one stay done.",
     }[action]
     return (
-        f"{manifest.id}: {rel} in the module's files is a link to {where}. Yu'lon does not read "
+        f"{item}: {rel} in the module's files is a link to {where}. Yu'lon does not read "
         f"or copy anything of a module through a link, so it stopped before using it. "
         f"{done} The module's author can replace the link with the file or folder it "
         f"points to."
@@ -4548,9 +4568,7 @@ class Applier:
         for step in manifest.deploy:
             src = clone / step.src
             target = self._deploy_target(step.src, step.dest)
-            link = _checkout_link(clone, step.src, whole_tree=False)
-            if link is not None:
-                raise ApplyError(_checkout_link_said(manifest, clone, link, "install"))
+            _look_again(clone, step.src)
             if src.is_dir():
                 shutil.copytree(
                     src, target, dirs_exist_ok=True, ignore=_stop_at_links(manifest, clone)
@@ -4633,6 +4651,8 @@ class Applier:
             spelled = _lua_spelling(manifest, vals) if patch.file.endswith(".lua") else vals
             replacement = _render(patch.replace, spelled, f"patch {patch.file}")
             for path in files:
+                if patch.in_clone:
+                    _look_again(clone, path.relative_to(clone).as_posix())
                 if not path.is_file():
                     raise ApplyError(f"patch target missing: {path}")
                 changed = _apply_patch(path, patch, replacement)
@@ -4941,6 +4961,7 @@ class Applier:
                 continue
             texts: list[str] = []
             for name in names:
+                _look_again(clone, name)
                 try:
                     text = (clone / name).read_bytes().decode("utf-8-sig")
                 except UnicodeDecodeError as exc:
@@ -5003,6 +5024,7 @@ class Applier:
         pattern = _render(step.path, vals, "sql path")
         files = sorted(clone.glob(pattern)) if _is_glob(pattern) else [clone / pattern]
         for path in files:
+            _look_again(clone, path.relative_to(clone).as_posix())
             if not path.is_file():
                 raise ApplyError(f"sql file missing in clone: {path}")
             self.sql.run_file(step.db, path)
@@ -5121,6 +5143,7 @@ class Applier:
                 continue  # Lua/DB-table "conf" is patched or prompted, not key-written
             target = self.server_dir / conf.file
             if conf.template is not None and not target.exists():
+                _look_again(clone, conf.template)
                 template = clone / conf.template
                 if not template.is_file():
                     log.skipped.append(f"conf {conf.file}: template {conf.template} not in clone")
@@ -5209,6 +5232,7 @@ class Applier:
                 log.skipped.append(f"client {step.src}: no client dir configured")
                 continue
             src = clone / step.src
+            _look_again(clone, step.src)  # on the way; `_plan_onto()` never enters one under it
             target = self._client_target(step, src)
             place = self._placer(step.src, log, claimed) if step.dest == "data" else _copy_unshared
             if src.is_dir():
@@ -5353,7 +5377,7 @@ class Applier:
         for rel, ignore in _checkout_paths(manifest, action):
             link = _checkout_link(clone, rel, whole_tree=True, ignore=ignore)
             if link is not None:
-                raise ApplyRefusal(_checkout_link_said(manifest, clone, link, action))
+                raise ApplyRefusal(_checkout_link_said(manifest.id, clone, link, action))
 
     def _writes_a_ready_client(self) -> bool:
         """Whether `client_dir` is a ready-to-play client: its marker, or its origins."""
@@ -5780,6 +5804,7 @@ class Applier:
             if self.dbc is None:
                 log.skipped.append(f"server_dbc {step.src}: no DBC copier configured")
                 continue
+            _look_again(clone, step.src, whole_tree=True)
             self.dbc.copy_dbc_dir(clone / step.src)
             log.done.append(f"server_dbc {step.src} → data/dbc/")
 

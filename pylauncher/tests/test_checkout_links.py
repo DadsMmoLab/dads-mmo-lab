@@ -19,6 +19,7 @@ and nothing of it reached the server folder, the client, or the database.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,9 @@ class _LinkedGit(_FakeGit):
             link = spec.dest / rel
             link.parent.mkdir(parents=True, exist_ok=True)
             here = link.parent / target
-            if os.path.lexists(link):  # a file the module ships, replaced by the link
+            if link.is_dir() and not link.is_symlink():  # a folder of the module, replaced
+                shutil.rmtree(link)
+            elif os.path.lexists(link):  # a file the module ships, replaced by the link
                 link.unlink()
             try:
                 os.symlink(target, link, target_is_directory=here.is_dir())
@@ -64,6 +67,10 @@ def _outside(tmp_path: Path) -> Path:
     (outside / ".ssh").mkdir(parents=True)
     (outside / ".ssh" / "id_rsa").write_bytes(SECRET)
     (outside / "notes.lua").write_bytes(SECRET)
+    # Valid SQL holding the secret, so only the look stops it (a refusal of bad SQL would not).
+    (outside / "stolen.sql").write_bytes(
+        b"UPDATE t SET note = '" + SECRET.replace(b"'", b"''") + b"';\n"
+    )
     return outside
 
 
@@ -352,3 +359,77 @@ def test_the_server_deploy_refuses_a_link_it_meets(tmp_path: Path) -> None:
         applier._deploy(manifest, clone, apply_module._Log())
     assert "ssh" in str(stopped.value)
     assert _holds_secret(tmp_path / "server") == []
+
+
+# ------------------------------------------- a link made after the look (belt)
+
+
+@pytest.mark.parametrize(
+    ("link", "target", "manifest_change"),
+    [
+        pytest.param("conf/linked.conf.dist", "{outside}/notes.lua", {}, id="conf template"),
+        pytest.param("sql/world.sql", "{outside}/notes.lua", {}, id="direct sql"),
+        pytest.param(
+            "sql/world.sql",
+            "{outside}/stolen.sql",
+            {"sql": [{"db": "world", "path": "sql/world.sql", "then": ["sql/then.sql"]}]},
+            id="sql in one transaction",
+        ),
+        pytest.param("dbc/Key.dbc", "{outside}/.ssh/id_rsa", {}, id="dbc"),
+        pytest.param(
+            "single/Linked.lua",
+            "{outside}/notes.lua",
+            {"client": [{"src": "single/Linked.lua", "dest": "addons", "name": "Linked"}]},
+            id="client single file",
+        ),
+        pytest.param(
+            "Interface",
+            "{outside}",
+            {},
+            id="client folder under a linked folder",
+        ),
+        pytest.param(
+            "src/linked.lua",
+            "{outside}/notes.lua",
+            {
+                "patches": [
+                    {
+                        "file": "src/linked.lua",
+                        "find": "the",
+                        "replace": "a",
+                        "in_clone": True,
+                        "when": "install",
+                    }
+                ]
+            },
+            id="in-checkout patch",
+        ),
+    ],
+)
+def test_each_step_looks_again_when_it_uses_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    link: str,
+    target: str,
+    manifest_change: dict[str, Any],
+) -> None:
+    """A link made after the look before the install (`_refuse_checkout_links()` passed over
+    here, as a link made in between would be) stops the step that would use it."""
+    manifest = parse_manifest({**MODULE, **manifest_change})
+    run = _Run(tmp_path, {link: target}, manifest)
+    run.git.files = {**FILES, "single/Linked.lua": "-- one file", "sql/then.sql": "SELECT 2;\n"}
+    if link == "Interface":
+        (run.outside / "AddOns" / "Linked").mkdir(parents=True)
+        (run.outside / "AddOns" / "Linked" / "stolen.lua").write_bytes(SECRET)
+        run.before = _snapshot(run.outside)
+    monkeypatch.setattr(Applier, "_refuse_checkout_links", lambda *_a, **_k: None)
+    with pytest.raises(ApplyError) as stopped:
+        run.applier.install(run.manifest)
+    assert link in str(stopped.value), str(stopped.value)
+    assert _snapshot(run.outside) == run.before
+    if link == "sql/world.sql":  # the module's own SQL ran before a later step's link
+        assert ("world", "world.sql") not in run.sql.files
+    assert all("private key" not in text for _db, text in run.sql.statements)
+    assert _holds_secret(run.server / "env") == []
+    assert _holds_secret(run.client) == []
+    assert run.dbc.dirs == []

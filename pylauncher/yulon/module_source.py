@@ -43,7 +43,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
-from yulon import rmtree
+from yulon import links, rmtree
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -514,6 +514,15 @@ def copy_folder(src: Path, dest: Path) -> None:
     no page names that case, and the smaller thing is to leave it alone rather than
     invent a second rule here; `shutil.copytree` snapshots each directory listing
     before it creates the matching destination, so it terminates.
+
+    **A link in the folder is refused, never copied through** (T530). `copytree`
+    copies what a symlink points to, so a folder holding `conf/x.conf.dist ->
+    ~/.ssh/id_rsa` (a repository the player cloned keeps its links) put that file
+    into `modules/<id>`, where the install's conf step and the build both read it,
+    and `Applier._refuse_checkout_links()` then found a plain file. The whole
+    folder is looked at (`links.walk()`, which knows a junction), `.git` aside,
+    before the old copy is removed; the copy stops at a link it meets as the belt.
+    The chosen folder itself may be a link: that is where the player keeps it.
     """
     modules_dir = dest.parent
     if _is_within(src, modules_dir):
@@ -521,10 +530,49 @@ def copy_folder(src: Path, dest: Path) -> None:
             f"{src} is already inside this server's modules folder — a module is "
             f"copied into it, not from it. {_NOTHING_CHANGED}"
         )
+    link = _first_link(src)
+    if link is not None:
+        raise DeriveError(_link_refusal(link))
     if dest.exists():
         rmtree.remove_tree(dest)  # T49: the dest may be a previous copy holding a .git
-    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
+    shutil.copytree(src, dest, ignore=_git_and_links)
     logger.info(f"copied {src} → {dest}")
+
+
+def _first_link(src: Path) -> Path | None:
+    """The first link under `src` (`.git` aside), outermost and in name order, or `None`."""
+    for folder, dirs, _files, linked in links.walk(src):
+        dirs[:] = [name for name in dirs if name != ".git"]
+        found = sorted(name for name in linked if name != ".git")
+        if found:
+            return Path(folder) / found[0]
+    return None
+
+
+def _git_and_links(folder: str, names: list[str]) -> set[str]:
+    """`copytree`'s `ignore`: leave `.git` behind, and stop at a link (T530).
+
+    An `OSError`, the copier's failure (`apply.FolderCopier`): reached only by a
+    link made after `_first_link()` looked, when the old copy is already gone.
+    """
+    for name in sorted(names):
+        path = os.path.join(folder, name)
+        if name != ".git" and links.is_link(path):
+            raise OSError(f"{path} became a link while it was being copied; it was not copied")
+    return {".git"} & set(names)
+
+
+def _link_refusal(link: Path) -> str:
+    try:
+        target = os.readlink(link)
+    except (OSError, ValueError):
+        target = "somewhere Yu'lon could not read"
+    return (
+        f"{link} is a link to {target}. Yu'lon copies a module's own files and never "
+        f"through a link, which could bring in files from anywhere on this computer. "
+        f"Replace the link with the file or folder it points to, then choose the folder "
+        f"again. {_NOTHING_CHANGED}"
+    )
 
 
 def _is_within(path: Path, directory: Path) -> bool:
