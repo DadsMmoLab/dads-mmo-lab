@@ -147,14 +147,8 @@ class Controller:
         reset_unfinished: docker.ResetUnfinished | None = None,
         pre_stop: Callable[[], object] | None = None,
         start_guard: Callable[[], str | None] | None = None,
-        after_import: Callable[[], None] | None = None,
     ) -> None:
         self.spec = spec
-        # Run after a repair import that finished, before anything can start the
-        # servers on what it wrote (T552): the importer seeds rows a family puts
-        # right at install time, and a repair is the one other route that seeds
-        # them. Raises `docker.DockerCommandError` to fail the repair.
-        self.after_import = after_import
         self.server_dir = server_dir
         # Why this install must not be started now, or None (T179): asked first by
         # `start()` and `stop_conflicting_and_start()`, the one door every Start,
@@ -662,7 +656,7 @@ class Controller:
                 "this game cannot be asked what state its databases are in, so its import will "
                 "not be re-run — an import that cannot be checked afterwards is a guess."
             )
-        done = docker.repair_import(
+        return docker.repair_import(
             self.spec,
             self.server_dir,
             self.import_probe,
@@ -670,9 +664,6 @@ class Controller:
             output=output,
             wsl_distro=self.wsl_distro,
         )
-        if done and self.after_import is not None:
-            self.after_import()
-        return done
 
     # -- polling ---------------------------------------------------------
 

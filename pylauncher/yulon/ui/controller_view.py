@@ -3001,33 +3001,50 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
-def _realm_port_keeper(
-    entry: CatalogEntry, sql: apply_module.SqlRunner
-) -> Callable[[], None] | None:
-    """The repair's step that gives the realm row this server's world port again (T552).
+def _realm_port_guard(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: apply_module.SqlRunner,
+    wsl_distro: str | None,
+) -> Callable[[], str | None] | None:
+    """Before every start, the realm row gets this server's world port; None for 8085 (T552).
 
-    A repair re-runs AzerothCore's importer, which seeds the realm row with
-    8085, WotLK's world port; the install sets it right before its first `up`
-    (`AzerothCoreInstaller._realm_port()`), and nothing else would after a
-    repair, so the next Start would send this server's players to WotLK's
-    world. None for an entry on 8085, whose repair is what it always was.
+    The install sets the row before its first `up` (`AzerothCoreInstaller.
+    _realm_port()`), but AzerothCore's importer seeds it with 8085, WotLK's
+    world port, and a repair import runs that importer again; a statement that
+    failed once must also be tried again, not left behind a repair that now
+    refuses (Codex adversarial review, rounds 1 and 2). So the controller's
+    start guard, the one door every Start, Restart and Play goes through,
+    brings the database up and runs the guarded UPDATE, which changes nothing
+    on a row that is already right. A guard that cannot set it refuses the
+    start: the authserver hands clients the row's port and prints it once, at
+    its start, in the line the ready wait reads. An entry on 8085 gets no guard,
+    so WotLK starts exactly as it did.
     """
     port = entry.ports.world
     if port == azerothcore.SEEDED_WORLD_PORT:
         return None
     statement = networking.realm_port_sql(entry)
 
-    def keep() -> None:
+    def guard() -> str | None:
         try:
+            docker.start_database(
+                spec,
+                server_dir,
+                because="the realm could not be given this server's world port",
+                wsl_distro=wsl_distro,
+            )
             sql.run_statement("auth", statement)
-        except Exception as exc:  # noqa: BLE001 - any failure fails the repair, worded once
-            raise docker.DockerCommandError(
-                f"The databases were imported, but the realm could not be given this server's "
-                f"world port {port} ({exc}). Do not start the server yet: its players would be "
-                "sent to another server's world. Press the repair again."
-            ) from exc
+        except Exception as exc:  # noqa: BLE001 - any failure refuses the start, worded once
+            return (
+                f"The realm could not be given this server's world port {port} ({exc}), so the "
+                "server was not started: its players would be sent to another server's world. "
+                "Press Start again."
+            )
+        return None
 
-    return keep
+    return guard
 
 
 def _for_wotlk(
@@ -3255,7 +3272,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
-            after_import=_realm_port_keeper(entry, sql),
+            start_guard=_realm_port_guard(entry, spec, server_dir, sql, wsl_distro),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of

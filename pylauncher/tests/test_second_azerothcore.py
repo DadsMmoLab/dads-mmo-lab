@@ -440,55 +440,64 @@ def test_a_resumed_install_starts_the_database_before_the_port_statement(tmp_pat
     assert "start-db" in calls and calls.index("start-db") < calls.index("sql"), calls
 
 
-def test_a_repaired_import_gives_the_realm_its_port_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The repair re-runs the importer, which seeds the realm row with 8085 (Codex adversarial).
-
-    So the AzerothCore factory hands its controller a step that runs after a
-    repair that finished, and a repair whose step fails is a failed repair.
-    """
+def _guarded_services(
+    monkeypatch: pytest.MonkeyPatch, entry: object, run_statement: object
+) -> object:
     from yulon import apply, docker
     from yulon.ui import controller_view
 
-    ran: list[tuple[str, str]] = []
+    started: list[str] = []
+    monkeypatch.setattr(apply.DockerSql, "run_statement", run_statement)
     monkeypatch.setattr(
-        apply.DockerSql, "run_statement", lambda self, db, statement: ran.append((db, statement))
+        docker, "start_database", lambda spec, *_a, **_k: started.append(spec.db) or True
     )
-    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
-    entry = second_ac_entry(manifests_from="wow-wotlk")
-    services = controller_view._for_wotlk(entry, Path("/nonexistent/srv"), None, None)
-    assert services.controller.repair_import() is True
+    services = controller_view._for_wotlk(entry, Path("/nonexistent/srv"), None, None)  # type: ignore[arg-type]
+    services.started_dbs = started  # type: ignore[attr-defined]
+    return services
+
+
+def test_every_start_gives_the_realm_its_port_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repair re-runs the importer, which seeds 8085 (Codex adversarial, round 1); so does
+    nothing else on the way to a Start. The guard brings the database up and sets the row."""
+    ran: list[tuple[str, str]] = []
+    services = _guarded_services(
+        monkeypatch,
+        second_ac_entry(manifests_from="wow-wotlk"),
+        lambda self, db, statement: ran.append((db, statement)),
+    )
+    controller = services.controller  # type: ignore[attr-defined]
+    controller.refuse_start()
     assert ran == [("auth", PORT_SQL)]
+    assert services.started_dbs == [SECOND_CONTAINERS["db"]]  # type: ignore[attr-defined]
 
 
-def test_a_repair_whose_port_statement_fails_is_a_failed_repair(
+def test_a_port_that_could_not_be_set_refuses_the_start_and_the_next_one_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from yulon import apply, docker
-    from yulon.ui import controller_view
+    """A failed statement is retried at the next start (Codex adversarial, round 2)."""
+    from yulon import apply, controller
 
-    def refuse(self: object, db: str, statement: str) -> None:
-        raise apply.ApplyError("ERROR 2002: cannot connect")
-
-    monkeypatch.setattr(apply.DockerSql, "run_statement", refuse)
-    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
-    services = controller_view._for_wotlk(
-        second_ac_entry(manifests_from="wow-wotlk"), Path("/nonexistent/srv"), None, None
-    )
-    with pytest.raises(docker.DockerCommandError, match="8086"):
-        services.controller.repair_import()
-
-
-def test_a_wotlk_repair_sends_no_port_statement(monkeypatch: pytest.MonkeyPatch) -> None:
-    from yulon import apply, docker
-    from yulon.ui import controller_view
-
+    answers: list[Exception | None] = [apply.ApplyError("ERROR 2002: cannot connect"), None]
     ran: list[str] = []
-    monkeypatch.setattr(
-        apply.DockerSql, "run_statement", lambda self, db, statement: ran.append(statement)
-    )
-    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: True)
+
+    def flaky(self: object, db: str, statement: str) -> None:
+        ran.append(statement)
+        failure = answers.pop(0)
+        if failure is not None:
+            raise failure
+
+    services = _guarded_services(monkeypatch, second_ac_entry(manifests_from="wow-wotlk"), flaky)
+    ctl = services.controller  # type: ignore[attr-defined]
+    with pytest.raises(controller.StartRefused, match="8086"):
+        ctl.refuse_start()
+    ctl.refuse_start()
+    assert ran == [PORT_SQL, PORT_SQL]
+
+
+def test_a_wotlk_start_has_no_port_guard() -> None:
+    from yulon.ui import controller_view
+
     services = controller_view._for_wotlk(
         load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
     )
-    assert services.controller.repair_import() is True
-    assert ran == []
+    assert services.controller.start_guard is None
