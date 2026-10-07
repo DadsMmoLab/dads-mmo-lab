@@ -7420,16 +7420,16 @@ def _sweep_late_claim(name: str, nonce: str) -> None:
     """Remove the claim `name` carrying `nonce` if Docker makes it after its press gave up.
 
     Looked for in the background for `_CLAIM_SWEEP_SECONDS`, so a Stop is not held up.
-    Ends early once the name holds another press's claim: this one can no longer appear.
+    Another press's claim on the name meanwhile does not end the look (Codex review): it
+    may go before this one's request reaches the daemon. Only `nonce`'s is removed.
     """
     deadline = time.monotonic() + _CLAIM_SWEEP_SECONDS
     try:
         while time.monotonic() < deadline:
             facts = _claim_facts(name)
-            if facts is not None:
-                if facts.nonce == nonce:
-                    logger.info(f"removing the claim {name}, made after its press gave it up")
-                    _remove_claim(facts.container)
+            if facts is not None and facts.nonce == nonce:
+                logger.info(f"removing the claim {name}, made after its press gave it up")
+                _remove_claim(facts.container)
                 return
             time.sleep(_CLAIM_SWEEP_POLL)
     except Exception as exc:  # noqa: BLE001 - a background thread has no caller to tell

@@ -475,6 +475,8 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
         looks_after_stop[0] += 1
         if looks_after_stop[0] < 3:
             return None  # not made yet
+        if looks_after_stop[0] < 6:  # another press held the name for a moment meanwhile
+            return docker._ClaimFacts("theirs-id", "running", "b" * 32, "someone-else")
         return docker._ClaimFacts("late-id", "created", nonce, docker.owner_id())
 
     monkeypatch.setattr(docker, "_claim_facts", facts)
