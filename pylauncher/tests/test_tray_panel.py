@@ -60,8 +60,8 @@ def _row(panel: tray_flyout.TrayFlyout, title: str) -> Any:
 
 
 def _action(row: Any) -> str:
-    """The row's icon button as a player reads it: its accessible name, or "" when none."""
-    return "" if row.action.isHidden() else row.action.accessibleName()
+    """The row's icon button's verb, from its accessible name ("Play WotLK"), or "" when none."""
+    return "" if row.action.isHidden() else row.action.accessibleName().split(" ")[0]
 
 
 def test_the_header_says_servers_and_how_many_are_online(
@@ -155,7 +155,7 @@ def test_tortoise_keeps_its_bot_dashboard_in_three_states(
     view = _add(window, TortoiseView(status, switch_on=switch_on))
     row = _row(_open(tray), "Tortoise")
     assert not row.dashboard.isHidden()
-    assert row.dashboard.accessibleName() == name
+    assert row.dashboard.accessibleName() == f"{name} ({row.title.text()})"
     assert row.dashboard.isEnabled() is enabled
     if not enabled:
         assert row.dashboard.toolTip() == "Start the server first to open its bot dashboard."
@@ -343,7 +343,7 @@ def test_start_is_a_power_symbol_not_the_server_glyph(tray: YulonTray, window: F
     """Lead, 2026-10-07: the server glyph's two bars did not read as Start; Play has ▶."""
     _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     row = _row(_open(tray), "Vanilla")
-    assert row.action.accessibleName() == "Start"
+    assert row.action.accessibleName() == "Start Vanilla"
     assert row.action.toolTip() == "Start Vanilla"
     assert row.action.icon().cacheKey() == tray_flyout.power_icon().cacheKey()
     image = tray_flyout.power_icon().pixmap(32, 32).toImage()
@@ -353,3 +353,79 @@ def test_start_is_a_power_symbol_not_the_server_glyph(tray: YulonTray, window: F
     ]
     assert all(amber), amber
     assert image.pixelColor(16, 22).alpha() == 0, "the ring is open inside"
+
+
+# ------------------------------------------------- cold review, T551
+
+
+def test_the_row_buttons_show_where_the_focus_is(tray: YulonTray, window: FakeWindow) -> None:
+    """MUST: the pad's focus starts on a row's icon button, and nothing showed it."""
+    from PySide6.QtGui import QColor, QPalette
+
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, apply_dadcraft_theme
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    palette = QPalette(app.palette())
+    apply_dadcraft_theme(app)
+    try:
+        _add(window, FakeView("WotLK", "/srv/a", "running"))
+        _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+        panel = _open(tray)
+        focused, other = _row(panel, "WotLK").action, _row(panel, "Vanilla").action
+        assert focused.hasFocus()
+        QApplication.processEvents()
+
+        def edge(button: QToolButton) -> QColor:
+            image = button.grab().toImage()
+            return image.pixelColor(1, image.height() // 2)
+
+        gold = QColor(COLOR_GOLD_BRIGHT)
+        ring = edge(focused)
+        assert (
+            abs(ring.red() - gold.red()) < 30 and abs(ring.green() - gold.green()) < 30
+        ), ring.name()
+        assert edge(other).name() != ring.name(), "every button looks focused"
+    finally:
+        app.setStyleSheet("")
+        app.setPalette(palette)
+
+
+def test_each_icon_button_says_which_server_it_is_for(tray: YulonTray, window: FakeWindow) -> None:
+    """SHOULD: "Play" alone told a screen reader nothing about which server."""
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    _add(window, FakeView("Cata", "/srv/d", "loop"))
+    panel = _open(tray)
+    for title, verb in (("WotLK", "Play"), ("Cata", "Open")):
+        row = _row(panel, title)
+        assert row.action.accessibleName() == f"{verb} {title}"
+        assert row.action.toolTip() == f"{verb} {title}"
+
+
+def test_the_status_dot_says_the_status(tray: YulonTray, window: FakeWindow) -> None:
+    """SHOULD: a dot alone is colour, which a screen reader cannot see."""
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    _add(window, FakeView("TBC", "/srv/b", "starting"))
+    _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+    _add(window, FakeView("Cata", "/srv/d", "partial"))
+    panel = _open(tray)
+    assert [_row(panel, n).dot.accessibleName() for n in ("WotLK", "TBC", "Vanilla", "Cata")] == [
+        "Online",
+        "Starting",
+        "Stopped",
+        "Needs attention",
+    ]
+
+
+def test_the_switches_are_read_again_each_time_the_panel_opens(
+    tray: YulonTray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sign-in entry can change outside Yu'lon (removed by hand, another copy)."""
+    on = [False]
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: on[0])
+    panel = _open(tray)
+    assert not panel.switches.sign_in.isChecked()
+    tray.hide_flyout()
+    on[0] = True
+    panel = _open(tray)
+    assert panel.switches.sign_in.isChecked()

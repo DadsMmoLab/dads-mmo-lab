@@ -235,15 +235,19 @@ class ServerCard(QFrame):
         tone = dot_tone(status)
         self.dot.set_tone(tone)
         self.dot.setToolTip(words)
+        # A dot is colour; a screen reader gets the words (cold review).
+        self.dot.setAccessibleName(
+            {"up": "Online", "attention": "Needs attention", "down": "Stopped"}.get(tone, words)
+        )
         verdict = getattr(view, "last_verdict", None)
         counts = row_detail(verdict) if tone == "up" else ""
         self.detail.setText(counts or words)
         self.detail.setToolTip(card_detail(verdict) if tone == "up" else words)
         which, enabled, why = "", False, ""
         if tone == "up":
-            which, enabled, why = PLAY, True, f"Play: open the game launcher for {title}"
+            which, enabled, why = PLAY, True, f"Play {title}"
         elif tone == "attention" or realm_tone(status) == "unknown":
-            which, enabled, why = OPEN, True, f"Open Yu'lon on {title}'s Server tab"
+            which, enabled, why = OPEN, True, f"Open {title}"
         elif tone == "down":
             # The tab's own Start, greyed whenever the tab's is, with its reason (T195).
             gate = view.start_button
@@ -253,7 +257,8 @@ class ServerCard(QFrame):
         self.action.setVisible(bool(which))
         self.action.setEnabled(enabled)
         self.action.setToolTip(why)
-        self.action.setAccessibleName(which)
+        # Which server, not only the verb (cold review): "Play WoW WotLK".
+        self.action.setAccessibleName(f"{which} {title}" if which else "")
         if which == START:
             self.action.setIcon(power_icon())
         else:
@@ -261,7 +266,7 @@ class ServerCard(QFrame):
         self.dashboard.setVisible(entry is not None)
         self.dashboard_kind = ""
         if entry is not None:
-            self.dashboard.setAccessibleName(entry.label)
+            self.dashboard.setAccessibleName(f"{entry.label} ({title})")
             self.dashboard.setEnabled(entry.enabled)
             self.dashboard.setToolTip(entry.reason or entry.label)
             self.dashboard_kind = entry.kind
@@ -336,11 +341,17 @@ class TrayFlyout(QWidget):
             QLabel#tray-row-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-row-detail {{ color: {COLOR_TEXT_MUTED}; font-size: 11px; }}
             QToolButton#tray-row-button {{
+                border: 2px solid {COLOR_BRASS_DARK};
+                border-radius: 4px;
                 padding: 0;
                 min-width: {ICON_BUTTON}px;
                 max-width: {ICON_BUTTON}px;
                 min-height: {ICON_BUTTON}px;
                 max-height: {ICON_BUTTON}px;
+            }}
+            /* Where the pad or the keyboard is (cold review): the theme's focus gold. */
+            QToolButton#tray-row-button:focus {{
+                border: 2px solid {COLOR_GOLD_BRIGHT};
             }}
             """)
         column = QVBoxLayout(self)

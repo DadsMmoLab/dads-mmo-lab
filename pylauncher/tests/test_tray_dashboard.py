@@ -97,7 +97,7 @@ def test_up_with_the_switch_on_opens_the_dashboard_from_the_card(
     view = _add(window, TortoiseView("running", switch_on=True))
     card = _card(tray)
     assert not card.dashboard.isHidden()
-    assert card.dashboard.accessibleName() == "Bot dashboard"
+    assert card.dashboard.accessibleName() == "Bot dashboard (Tortoise)"
     assert card.dashboard.isEnabled()
     card.dashboard.click()
     assert view.opened_dashboard == 1
@@ -119,7 +119,7 @@ def test_up_with_the_switch_off_offers_to_turn_it_on_at_the_bots_tab(
     assert view.shown_switch == 1
     assert view.opened_dashboard == 0
     card = _card(tray)
-    assert card.dashboard.accessibleName() == "Turn on the bot dashboard…"
+    assert card.dashboard.accessibleName() == "Turn on the bot dashboard… (Tortoise)"
     card.dashboard.click()
     assert view.shown_switch == 2
 
