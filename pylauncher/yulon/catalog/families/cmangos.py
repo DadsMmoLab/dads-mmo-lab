@@ -958,20 +958,19 @@ class CmangosInstaller(StagedInstaller):
                     )
                     present += 1
             state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            if not refused:
+                # Counted the moment the SQL landed, before the ledger write that can still
+                # fail, so a rollback always says this table changed (Codex, T534 rework).
+                loaded += 1
+                applied[1] += 1
             self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
             if present and not refused:
                 yield f"{run.rel}: {present} of its indexes were there and were made again."
-                loaded += 1
-                applied[1] += 1
-                continue
-            if refused:
+            elif refused:
                 yield (
                     f"The database refused {run.rel}; that bot table is as the file left it. "
                     "The next update loads it again; a fresh install loads it too."
                 )
-                continue
-            loaded += 1
-            applied[1] += 1  # counted as it lands, so a rollback mid-loop says it (Codex)
         yield f"{loaded} of {len(due)} bot table file(s) loaded."
 
     def _other_schemas(self) -> set[str]:

@@ -470,3 +470,30 @@ def test_a_rollback_part_way_through_the_bot_tables_counts_the_ones_already_load
     assert any(
         "The 1 bot table file(s) loaded before the new build started" in line for line in said
     ), said
+
+
+def test_a_bot_table_that_landed_counts_even_when_its_ledger_row_cannot_be_written(
+    tmp_path: Path,
+) -> None:
+    """Codex: the table is replaced once its SQL ran; a ledger write that then fails must not
+    hide it from the rollback's sentence."""
+    import io
+
+    from yulon import docker
+
+    rec, server_dir, db, world = _installed(tmp_path)
+    real = db.exec_stdin
+
+    def exec_stdin(container, argv, source, *, env, wsl_distro=None):  # type: ignore[no-untyped-def]
+        data = source.read()
+        if b"'applied'" in data and BOT_FILES[0].encode() in data:
+            raise docker.DockerCommandError("the database went away")
+        return real(container, argv, io.BytesIO(data), env=env, wsl_distro=wsl_distro)
+
+    db.exec_stdin = exec_stdin  # type: ignore[method-assign]
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir, db, world, said=said)
+    assert any(
+        "The 1 bot table file(s) loaded before the new build started" in line for line in said
+    ), said
