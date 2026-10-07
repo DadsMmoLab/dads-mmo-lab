@@ -1612,14 +1612,21 @@ def test_the_changelog_as_released_renders_as_three_headed_lists() -> None:
 
     `### New`, `### Fixed` and `### Changed` come out as heading blocks, every
     Unreleased line as one list item, and no markdown is left showing.
+
+    T535: "the next release body" is measured against the newest release heading
+    in the file, not a fixed tag. When it stops fitting `MAX_BODY_CHARS` the last
+    items are cut and this goes red. First check whether a release already shipped
+    those lines: then the cut in `pyplan/contribution.md` ("The changelog") is owed.
     """
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
     import release_notes
 
+    from tests.test_release_notes import newest_release
+
     changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
-    body = release_notes.new_entries("", changelog, "v0.8.90-Public")
+    body = release_notes.new_entries("", changelog, newest_release(changelog))
     lines = [b for s, _, b in release_notes.parse_sections(changelog) if s == "Unreleased"]
     dialog = UpdateDialog(
         dataclasses.replace(RESULT, notes=(ReleaseNotes("v0.9.0-Public", body, False),))
@@ -1635,6 +1642,10 @@ def test_the_changelog_as_released_renders_as_three_headed_lists() -> None:
         elif block.textList() is not None:
             items.append(block.text())
         block = block.next()
-    assert headings == ["New", "Fixed", "Changed"]
+    expected: list[str] = []
+    for section, heading, _ in release_notes.parse_sections(changelog):
+        if section == "Unreleased" and heading not in expected:
+            expected.append(heading)
+    assert headings == expected
     assert len(items) == len(lines)
     assert not [text for text in items if "**" in text or "#" in text]
