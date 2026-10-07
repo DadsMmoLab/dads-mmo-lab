@@ -1021,21 +1021,28 @@ def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
 _GLOB_OR_FIELD = frozenset("*?[{")
 
 
-def _checkout_paths(manifest: Manifest, action: When) -> list[tuple[str, bool]]:
-    """`(path in the checkout, client copy?)` for everything `action` reads or writes there.
+def _checkout_paths(manifest: Manifest, action: When) -> list[tuple[str, bool, bool]]:
+    """`(path, client copy?, whole tree?)` for everything `action` reads or writes in the checkout.
 
     `install` runs every copy and the install- and configure-time SQL and
     patches (`_whens`); `configure` its own SQL, patches and conf templates;
-    `remove` its own SQL and patches, and the deploy sources `_undeploy()` lists.
-    A glob or a `{key}` path is cut to the fixed folder in front of it, and
-    everything under that folder is looked at. `True` marks a client source,
-    whose copy leaves `.git` and the claim behind (`_NOT_FOR_THE_CLIENT`).
+    `remove` its own SQL and patches. Not `remove`'s deploy sources: `_undeploy()`
+    lists only a source folder's own names, and one that is a link it reports and
+    leaves (cold review MUST 1: refusing them here left a module that an Update
+    had given a link neither installable nor removable).
+
+    A glob or a `{key}` path is cut to the fixed folder in front of it. When the
+    variable part is the file name (`Hearthstone_{cooldown}.sql`), only that
+    folder's own entries can match, and only they are looked at (`False`); a
+    variable folder (`data/sql/db_world/**/*.sql`) has everything under the fixed
+    folder looked at (cold review SHOULD 2). `True` in the second place marks a
+    client source, whose copy leaves `.git` and the claim behind
+    (`_NOT_FOR_THE_CLIENT`); every other walk leaves `.git`, git's own.
     """
     whens = _whens(action)
     named: list[tuple[str, bool]] = []
-    if action in ("install", "remove"):
-        named += [(step.src, False) for step in manifest.deploy]
     if action == "install":
+        named += [(step.src, False) for step in manifest.deploy]
         named += [(step.src, True) for step in manifest.client]
         named += [(step.src, False) for step in manifest.server_dbc]
     if action in ("install", "configure"):
@@ -1043,7 +1050,7 @@ def _checkout_paths(manifest: Manifest, action: When) -> list[tuple[str, bool]]:
     named += [(sql.path, False) for sql in manifest.sql if sql.when in whens and sql.path]
     named += [(name, False) for sql in manifest.sql if sql.when in whens for name in sql.then]
     named += [(p.file, False) for p in manifest.patches if p.in_clone and p.when in whens]
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, bool, bool]] = []
     for rel, client in named:
         parts = PurePosixPath(rel.replace("\\", "/")).parts
         fixed: list[str] = []
@@ -1051,17 +1058,24 @@ def _checkout_paths(manifest: Manifest, action: When) -> list[tuple[str, bool]]:
             if _GLOB_OR_FIELD & set(part):
                 break
             fixed.append(part)
-        out.append(("/".join(fixed) or ".", client))
+        a_file_name_varies = len(fixed) == len(parts) - 1
+        out.append(("/".join(fixed) or ".", client, not a_file_name_varies))
     return out
 
 
-def _checkout_link(clone: Path, rel: str, *, whole_tree: bool, ignore: bool = False) -> Path | None:
+_GIT_ONLY = shutil.ignore_patterns(".git")
+
+
+def _checkout_link(
+    clone: Path, rel: str, *, whole_tree: bool, ignore: bool = False, top: bool = False
+) -> Path | None:
     """The first link met on the way from `clone` to `clone/rel`, or under it; `None` if none.
 
     Never follows one (`links.is_link()`, which knows a Windows junction). With
     `whole_tree`, a folder at `rel` is walked to the bottom (`links.walk()`), in
-    name order, outermost first; `ignore` leaves out what a client copy leaves
-    (`_NOT_FOR_THE_CLIENT`) at every level. A path that is not there has no link.
+    name order, outermost first; with `top` too, only its own entries are looked
+    at. `.git` is left out at every level, and with `ignore` everything a client
+    copy leaves (`_NOT_FOR_THE_CLIENT`). A path that is not there has no link.
     """
     here = clone
     for part in PurePosixPath(rel.replace("\\", "/")).parts:
@@ -1072,9 +1086,10 @@ def _checkout_link(clone: Path, rel: str, *, whole_tree: bool, ignore: bool = Fa
             return here
     if not whole_tree or not here.is_dir():
         return None
+    leave = _NOT_FOR_THE_CLIENT if ignore else _GIT_ONLY
     for folder, dirs, files, linked in links.walk(here):
-        left = _NOT_FOR_THE_CLIENT(folder, [*dirs, *files, *linked]) if ignore else set()
-        dirs[:] = [name for name in dirs if name not in left]
+        left = leave(folder, [*dirs, *files, *linked])
+        dirs[:] = [] if top else [name for name in dirs if name not in left]
         found = sorted(name for name in linked if name not in left)
         if found:
             return Path(folder) / found[0]
@@ -5388,8 +5403,8 @@ class Applier:
         """
         if not clone.is_dir():
             return
-        for rel, ignore in _checkout_paths(manifest, action):
-            link = _checkout_link(clone, rel, whole_tree=True, ignore=ignore)
+        for rel, ignore, whole in _checkout_paths(manifest, action):
+            link = _checkout_link(clone, rel, whole_tree=True, ignore=ignore, top=not whole)
             if link is not None:
                 raise ApplyRefusal(_checkout_link_said(manifest.id, clone, link, action))
 

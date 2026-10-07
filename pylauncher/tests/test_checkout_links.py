@@ -294,24 +294,85 @@ def test_include_sh_that_is_a_dangling_link_is_not_followed_by_the_touch(tmp_pat
 # ---------------------------------------------------- configure and remove
 
 
-def test_remove_does_not_list_a_deploy_folder_through_a_link(tmp_path: Path) -> None:
-    """A checkout that gained a link after the install: Remove refuses, nothing removed."""
+def test_remove_still_works_when_a_deploy_folder_became_a_link(tmp_path: Path) -> None:
+    """A checkout that gained a link after the install (an Update fetched it): Remove works.
+
+    Cold review MUST 1: Remove refused it, and an install refused for the same link
+    left a module that could be neither installed nor removed. The deploy folder is
+    not listed through the link (`_undeploy()`), so its files are named as left in
+    place, and the rest of the remove, the checkout included, goes ahead.
+    """
     run = _Run(tmp_path, {})
-    run.applier.remote_url = lambda _dest: run.manifest.source.url  # type: ignore[union-attr]
     run.applier.install(run.manifest)
     deployed = run.server / LUA / "lua" / "linked.lua"
     assert deployed.is_file()
     clone = run.applier.clone_dir(run.manifest)
-    for child in (clone / "lua").iterdir():
-        child.unlink()
-    (clone / "lua").rmdir()
+    shutil.rmtree(clone / "lua")
     os.symlink(run.outside, clone / "lua", target_is_directory=True)
-    with pytest.raises(ApplyRefusal) as refused:
-        run.applier.remove(run.manifest)
-    assert "lua" in str(refused.value) and "outside the module's own files" in str(refused.value)
-    assert deployed.is_file(), "the refusal removed a file"
-    assert clone.is_dir()
+
+    report = run.applier.remove(run.manifest)
+
+    assert any("lua" in line and "link" in line for line in report.skipped), report.skipped
+    assert deployed.is_file(), "listed through the link"
+    assert not clone.exists()
     assert _snapshot(run.outside) == run.before
+
+
+def test_remove_works_with_a_link_deep_in_a_deploy_folder(tmp_path: Path) -> None:
+    """Cold review MUST 1's probe: `lua/sub/x.lua -> <outside>` refused every Remove.
+
+    `_undeploy()` lists only the deploy folder's own names, so nothing is read
+    through a link under it: the deployed files go, the checkout goes.
+    """
+    run = _Run(tmp_path, {})
+    run.applier.install(run.manifest)
+    deployed = run.server / LUA / "lua" / "linked.lua"
+    clone = run.applier.clone_dir(run.manifest)
+    (clone / "lua" / "sub").mkdir()
+    os.symlink(run.outside / "notes.lua", clone / "lua" / "sub" / "x.lua")
+
+    run.applier.remove(run.manifest)
+
+    assert not deployed.exists()
+    assert not clone.exists()
+    assert _snapshot(run.outside) == run.before
+
+
+def test_a_variable_file_name_at_the_top_looks_only_at_the_top(tmp_path: Path) -> None:
+    """Cold review SHOULD 2: `Hearthstone_{cooldown}.sql` walked the whole checkout, `.git` too.
+
+    A `{key}` or glob in the file name can match only names in its own folder, so
+    only that folder's entries are looked at; a link deeper down, or in `.git`, is
+    where nothing of Yu'lon's reads, and the install goes ahead.
+    """
+    manifest = parse_manifest(
+        {
+            **MODULE,
+            "sql": [{"db": "world", "path": "Hearthstone_{cooldown}.sql"}],
+            "prompts": [{"key": "cooldown", "question": "minutes", "kind": "int", "default": "5"}],
+        }
+    )
+    run = _Run(
+        tmp_path, {"docs/secret": "{outside}/.ssh/id_rsa", ".git/a-link": "objects"}, manifest
+    )
+    run.git.files = {**FILES, "Hearthstone_5.sql": "SELECT 5;\n"}
+
+    run.applier.install(run.manifest)
+
+    assert run.sql.files == [("world", "Hearthstone_5.sql")]
+    assert _snapshot(run.outside) == run.before
+
+
+def test_a_link_beside_a_variable_file_name_is_still_refused(tmp_path: Path) -> None:
+    manifest = parse_manifest(
+        {
+            **MODULE,
+            "sql": [{"db": "world", "path": "Hearthstone_{cooldown}.sql"}],
+            "prompts": [{"key": "cooldown", "question": "minutes", "kind": "int", "default": "5"}],
+        }
+    )
+    run = _Run(tmp_path, {"Hearthstone_5.sql": "{outside}/notes.lua"}, manifest)
+    run.refused("Hearthstone_5.sql", "outside the module's own files")
 
 
 def test_configure_does_not_read_sql_through_a_link(tmp_path: Path) -> None:
@@ -473,3 +534,19 @@ def test_the_deploy_copy_stops_in_a_folder_that_became_a_link_after_its_parent_w
     with pytest.raises(ApplyError) as stopped:
         ignore(str(clone / "lua" / "swapped"), [".ssh", "notes.lua"])
     assert "lua/swapped" in str(stopped.value)
+
+
+def test_a_variable_folder_at_the_top_leaves_git_alone(tmp_path: Path) -> None:
+    """`{kind}/world.sql` walks the whole checkout but `.git`, git's own, where nothing reads."""
+    manifest = parse_manifest(
+        {
+            **MODULE,
+            "sql": [{"db": "world", "path": "{kind}/world.sql"}],
+            "prompts": [{"key": "kind", "question": "which", "kind": "string", "default": "sql"}],
+        }
+    )
+    run = _Run(tmp_path, {".git/a-link": "objects"}, manifest)
+
+    run.applier.install(run.manifest)
+
+    assert run.sql.files == [("world", "world.sql")]
