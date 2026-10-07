@@ -233,6 +233,7 @@ def _finish(
     *,
     stopped: bool = False,
     child: _Child | None = None,
+    drained: bool = True,
 ) -> None:
     """A stream's last word on its child: end it if it is running, then let its job go.
 
@@ -243,6 +244,17 @@ def _finish(
     The job is closed only after it was asked to end the tree, because a
     closed job's handle can no longer end anything.
 
+    **Ran out by itself means the root exited AND its output was read to the
+    end (T495).** `drained` is False for a stream its consumer closed before
+    EOF. Its root may have exited, but something still held the pipe, and that
+    is the command's own work: docker.exe ended by hand while compose and
+    `buildx bake` went on compiling into the pipe (yulon-win11-gate
+    2026-10-06). The Stop reached that stream only as a cancel that closed it
+    (the stream had been started on `native._pump()`'s worker, which the
+    panel's `end_streams_started_on()` does not match), and a release here let
+    the build compile on for 11 minutes. Such a job is closed. `interact()`
+    passes nothing: it stops reading when its child exits, by design.
+
     A Stop overrides `poll()`: if docker.exe exits before the Stop's thread
     runs, a release here would leave the rest of the tree running (Codex's
     second adversarial review). For a registered stream that Stop is
@@ -252,7 +264,7 @@ def _finish(
     it (Codex's fourth). `stopped` is the same for `interact()`, which is not
     registered and whose cancel is its Stop.
     """
-    ran_out = proc.poll() is not None
+    ran_out = drained and proc.poll() is not None
     try:
         _end_child(proc, job)
     finally:
@@ -844,10 +856,12 @@ def _stream_lines(
             _abandon_unread(proc, job)
             raise
 
+    drained = False  # set at EOF; a stream closed before it did not run out (T495)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             yield line.rstrip("\n")
+        drained = True
 
         if reader is not None:
             reader.join()
@@ -864,7 +878,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -1018,6 +1032,7 @@ def _progress_lines(
         _abandon_unread(proc, job)
         raise
 
+    drained = False  # set once both pipes reached EOF; see `stream()` (T495)
     try:
         done = 0
         while done < len(readers):
@@ -1026,6 +1041,7 @@ def _progress_lines(
                 done += 1
                 continue
             yield item
+        drained = True
         for reader in readers:
             reader.join()
         proc.wait()
@@ -1038,7 +1054,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _finish(proc, job, child=child)
+        _finish(proc, job, child=child, drained=drained)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):
