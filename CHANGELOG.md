@@ -32,6 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- On Windows with Docker Desktop, a WotLK build no longer fails within a second of starting.
 - A Tortoise server installed before the dbc.MPQ check learns that archive on its next Install, so a later swap is noticed.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
