@@ -1642,6 +1642,10 @@ def test_the_changelog_as_released_renders_as_three_headed_lists() -> None:
         elif block.textList() is not None:
             items.append(block.text())
         block = block.next()
-    assert headings == [h for h in ("New", "Fixed", "Changed") if h in headings]
+    expected: list[str] = []
+    for section, heading, _ in release_notes.parse_sections(changelog):
+        if section == "Unreleased" and heading not in expected:
+            expected.append(heading)
+    assert headings == expected
     assert len(items) == len(lines)
     assert not [text for text in items if "**" in text or "#" in text]

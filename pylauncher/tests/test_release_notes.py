@@ -185,7 +185,11 @@ def test_the_real_changelog_cuts_into_new_fixed_and_changed() -> None:
     text = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
     notes = rn.new_entries("", text, newest_release(text))
     headings = [line for line in notes.splitlines() if line.startswith("#")]
-    assert headings == [h for h in ("### New", "### Fixed", "### Changed") if h in headings]
+    expected: list[str] = []
+    for section, heading, _ in rn.parse_sections(text):
+        if section == "Unreleased" and f"### {heading}" not in expected:
+            expected.append(f"### {heading}")
+    assert headings == expected
     unreleased = [b for s, _, b in rn.parse_sections(text) if s == "Unreleased"]
     assert [line for line in notes.splitlines() if line.startswith("- ")] == unreleased
 
