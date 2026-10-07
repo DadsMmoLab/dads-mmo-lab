@@ -2068,15 +2068,32 @@ class TrinityCoreInstaller(CmangosInstaller):
                 claim.enter_context(self._seams.folder_claim(data_dir, image))
             except docker.FolderClaimed as claimed:
                 raise InstallerError(self._claimed_note(data_dir, claimed)) from claimed
+            except docker.ClaimUnavailable as exc:
+                raise InstallerError(
+                    f"Yu'lon could not reserve {data_dir} in Docker for this extraction ({exc}), "
+                    f"so {self.entry.name}'s map data was not extracted again. Check that Docker "
+                    f"is running, then press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was "
+                    "changed."
+                ) from exc
             yield from self._reextract_claimed(server_dir, probe, data_dir, client)
 
     def _claimed_note(self, data_dir: Path, claimed: docker.FolderClaimed) -> str:
         """What a press refused by another press's claim on `data_dir` says (T543)."""
         again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
-        if claimed.ours:
+        if claimed.here:
             return (
                 f"{self.entry.name}'s map data is already being extracted again into "
                 f"{data_dir} by this Yu'lon. Wait for it to finish, then {again}"
+            )
+        if claimed.ours:
+            # Yu'lon runs once per user, so this one's own claim it does not hold was
+            # left by an earlier run. Never removed here (Codex adversarial review):
+            # the command, on a line of its own (T296).
+            return (
+                f"An earlier run of this Yu'lon left its reservation of {data_dir} in Docker "
+                f"({claimed.name}), so {self.entry.name}'s map data was not extracted again. "
+                f"Remove it with the command below, then {again}\n"
+                f"docker rm -f {claimed.name}"
             )
         return f"{another_yulon_extracting(data_dir)} Wait for it to finish, then {again}"
 

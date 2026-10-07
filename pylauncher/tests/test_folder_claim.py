@@ -213,38 +213,60 @@ def test_a_claim_this_process_holds_refuses_a_second_press_of_its_own(
         with pytest.raises(docker.FolderClaimed) as refused:
             with docker.folder_claim(folder, IMAGE):
                 pytest.fail("a second press of this Yu'lon went ahead")
-        assert refused.value.ours
+        assert refused.value.ours and refused.value.here
 
 
-def test_a_claim_an_earlier_run_of_this_yulon_left_is_taken_over(
+def test_a_claim_an_earlier_run_of_this_yulon_left_is_named_and_never_removed(
     fake_docker: Path, tmp_path: Path
 ) -> None:
+    """Codex adversarial review: a claim in place is never removed by a press, even one
+    whose owner label is this Yu'lon's; the press names it and the player decides."""
     folder = tmp_path / "data"
     folder.mkdir()
     name = _claim_name(folder)
     _running(fake_docker, name, [f"yulon.owner={docker.owner_id()}", f"{docker.CLAIM_LABEL}=old"])
 
-    with docker.folder_claim(folder, IMAGE) as held:
-        assert held
-    assert f"rm -f {name}-id" in fake_calls(fake_docker)
+    with pytest.raises(docker.FolderClaimed) as refused:
+        with docker.folder_claim(folder, IMAGE):
+            pytest.fail("the press went ahead under a claim it does not hold")
+    assert refused.value.ours and not refused.value.here
+    assert not [c for c in fake_calls(fake_docker) if c.startswith("rm ")]
+    assert name in fake_containers(fake_docker)
 
 
-@pytest.mark.parametrize("why", ["no-id", "refused", "no-cli"])
-def test_a_claim_that_cannot_be_made_lets_the_press_go_on_guarded(
+@pytest.mark.parametrize("why", ["refused", "no-cli"])
+def test_a_claim_that_cannot_be_made_stops_the_press(
     fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, why: str
 ) -> None:
+    """Codex adversarial review: no claim, no press -- it fails closed."""
     folder = tmp_path / "data"
     folder.mkdir()
-    if why == "no-id":
-        monkeypatch.setattr(docker, "folder_id", lambda _f: None)
     if why == "refused":
         (fake_docker / "claim-refused").write_text("", encoding="utf-8")
     if why == "no-cli":
         monkeypatch.setattr(platform, "docker_program", lambda: None)
 
-    with docker.folder_claim(folder, IMAGE) as held:
-        assert held is False
+    with pytest.raises(docker.ClaimUnavailable):
+        with docker.folder_claim(folder, IMAGE):
+            pytest.fail("the press went ahead with no claim")
     assert not [n for n in fake_containers(fake_docker) if n.startswith(docker.CLAIM_PREFIX)]
+
+
+def test_a_folder_with_no_id_is_claimed_by_its_path(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "data"
+    folder.mkdir()
+    monkeypatch.setattr(docker, "folder_id", lambda _f: None)
+
+    with docker.folder_claim(folder, IMAGE) as held:
+        assert held
+        (claim,) = [n for n in fake_containers(fake_docker) if n.startswith(docker.CLAIM_PREFIX)]
+        assert claim.startswith(docker.CLAIM_PREFIX + "p"), claim
+    with pytest.raises(docker.FolderClaimed):  # the same spelling is the same claim
+        with docker.folder_claim(folder, IMAGE):
+            with docker.folder_claim(folder, IMAGE):
+                pass
 
 
 def test_two_yulons_pressing_at_once_one_goes_ahead(fake_docker: Path, tmp_path: Path) -> None:
@@ -265,6 +287,8 @@ def test_two_yulons_pressing_at_once_one_goes_ahead(fake_docker: Path, tmp_path:
         "        time.sleep(3)\n"
         "except docker.FolderClaimed as e:\n"
         "    print('refused-ours' if e.ours else 'refused', flush=True)\n"
+        "except docker.ClaimUnavailable as e:\n"
+        "    print('unavailable', e, flush=True)\n"
     )
     procs = []
     for who in ("one", "two"):

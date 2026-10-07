@@ -3290,3 +3290,50 @@ def test_a_reextract_claims_its_folder_before_the_first_tool_and_lets_go_after(
         assert fake_containers(state) == [], "the claim was not let go of"
     finally:
         end_fake_containers(state)
+
+
+@pytest.mark.parametrize("case", ["unavailable", "left-by-us"])
+def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Codex adversarial review of T543: the press fails closed. A claim Docker would not
+    make, or one an earlier run of this Yu'lon left (named, with the command, and never
+    removed by the press), stops it before the old map data is touched."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        box.seams["folder_claim"] = docker.folder_claim
+        before = data_files(box)
+        data = box.server_dir / "data"
+        ident = docker.folder_id(data)
+        assert ident is not None
+        name = docker.CLAIM_PREFIX + ident
+        if case == "unavailable":
+            (state / "claim-refused").write_text("", encoding="utf-8")
+        else:
+            (state / "containers" / name).write_text("4242", encoding="utf-8")
+            (state / "labels").mkdir(exist_ok=True)
+            (state / "labels" / name).write_text(
+                f"yulon.owner={docker.owner_id()}\n{docker.CLAIM_LABEL}=old", encoding="utf-8"
+            )
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir)))
+
+        said = str(refused.value)
+        if case == "unavailable":
+            assert said.startswith(f"Yu'lon could not reserve {data} in Docker"), said
+        else:
+            assert said.startswith("An earlier run of this Yu'lon left its reservation"), said
+            assert said.splitlines()[-1] == f"docker rm -f {name}", said
+            assert not [call for call in fake_calls(state) if call.startswith("rm ")]
+        assert "Nothing was changed." in said, said
+        assert not [call for call in fake_calls(state) if call.startswith("create ")]
+        assert data_files(box) == before
+        assert not (data / extract.PREVIOUS_DIR).exists()
+    finally:
+        end_fake_containers(state)
