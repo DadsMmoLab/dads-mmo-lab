@@ -24,7 +24,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import git
+from yulon import git, networking
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
@@ -250,6 +250,11 @@ def repair_confs(entry: CatalogEntry, server_dir: Path) -> ConfRepaired:
                 )
             ) from exc
     return ConfRepaired(written=tuple(written))
+
+
+SEEDED_WORLD_PORT = 8085
+"""The realm row's port as AzerothCore's import seeds it, and the port the template's
+world server listens on inside its container (`…:8085`). T552."""
 
 
 class AzerothCoreInstaller(StagedInstaller):
@@ -536,7 +541,32 @@ class AzerothCoreInstaller(StagedInstaller):
         owner chooses (the owner's decision, 2026-09-27).
         """
         yield from self._confs_from_dist(ctx)
+        yield from self._realm_port(ctx)
         yield from self.stage_up(ctx)
+
+    def _realm_port(self, ctx: StageContext) -> Iterator[str]:
+        """Give the realm row this server's own world port, before the first start (T552).
+
+        The import seeds AzerothCore's 8085, which is WotLK's published port.
+        A second AzerothCore server publishes another one, and the authserver
+        both hands clients the row's port and prints it once, when it starts,
+        in the line the ready wait reads (`ready.auth`). So the row is set
+        here, before `up`, and a row that cannot be set stops the install:
+        left at 8085 it would send this server's players to WotLK's world.
+        Nothing is sent for an entry on 8085, so a WotLK install does exactly
+        what it did before.
+        """
+        port = self.entry.ports.world
+        if port == SEEDED_WORLD_PORT:
+            return
+        failed = self._run_auth_statement(networking.realm_port_sql(self.entry), ctx)
+        if failed:
+            raise InstallerError(
+                f"The realm could not be given this server's world port {port} ({failed}), so "
+                "the server was not started: its players would be sent to another server's "
+                "world. Press Install again to retry."
+            )
+        yield f"The realm hands players this server's world port, {port}."
 
     def _confs_from_dist(self, ctx: StageContext) -> Iterator[str]:
         """One line per conf: written, already there, or why not. Never fails the install.

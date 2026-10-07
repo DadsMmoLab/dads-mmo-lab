@@ -349,20 +349,20 @@ def test_write_client_realmlist_retail_and_repack_layouts(tmp_path: Path) -> Non
     f = retail / "Data" / "enUS" / "realmlist.wtf"
     f.parent.mkdir(parents=True)
     f.write_text("set realmlist logon.example.com\nset patchlist x\n", encoding="utf-8")
-    out = networking.write_client_realmlist(retail, "192.168.1.25")
+    out = networking.write_client_realmlist(retail, "192.168.1.25", auth_port=3724)
     assert out == f
     assert f.read_text(encoding="utf-8") == "set realmlist 192.168.1.25\nset patchlist x\n"
 
     repack = tmp_path / "repack"
     repack.mkdir()
     (repack / "realmlist.wtf").write_text("SET REALMLIST 127.0.0.1\n", encoding="utf-8")
-    out2 = networking.write_client_realmlist(repack, "10.0.0.5")
+    out2 = networking.write_client_realmlist(repack, "10.0.0.5", auth_port=3724)
     assert out2 == repack / "realmlist.wtf"
     assert out2.read_text(encoding="utf-8") == "set realmlist 10.0.0.5\n"
 
     fresh = tmp_path / "fresh"
     fresh.mkdir()
-    out3 = networking.write_client_realmlist(fresh, "1.2.3.4")
+    out3 = networking.write_client_realmlist(fresh, "1.2.3.4", auth_port=3724)
     assert out3 == fresh / "Data" / "enUS" / "realmlist.wtf"
 
 
@@ -385,7 +385,7 @@ def test_every_realmlist_of_a_ready_to_play_client_is_written(tmp_path: Path) ->
     """Finding 5: a client reads its locale's file; one left alone names another server."""
     files = _two_locales(tmp_path / "play")
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert sorted(written) == sorted(files)
     for f in files:
@@ -395,7 +395,7 @@ def test_every_realmlist_of_a_ready_to_play_client_is_written(tmp_path: Path) ->
 def test_the_first_found_writer_is_unchanged_for_its_other_callers(tmp_path: Path) -> None:
     gb, us, top = _two_locales(tmp_path / "client")
 
-    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5") == gb
+    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724) == gb
     assert us.read_text(encoding="utf-8").startswith("set realmlist logon.example.com")
     assert top.read_text(encoding="utf-8").startswith("set realmlist logon.example.com")
 
@@ -403,7 +403,7 @@ def test_the_first_found_writer_is_unchanged_for_its_other_callers(tmp_path: Pat
 def test_a_ready_to_play_client_with_no_realmlist_gets_one(tmp_path: Path) -> None:
     (tmp_path / "play").mkdir()
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert written == (tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf",)
     assert written[0].read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
@@ -416,7 +416,7 @@ def test_a_read_only_realmlist_of_its_own_is_made_writable_and_written(tmp_path:
     f.write_text("set realmlist logon.example.com\n", encoding="utf-8")
     os.chmod(f, 0o444)
 
-    networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+    networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert f.read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
 
@@ -432,7 +432,7 @@ def test_a_realmlist_shared_through_a_hard_link_is_never_touched(tmp_path: Path)
     os.link(other, f)
 
     with pytest.raises(PermissionError, match="shared with another folder"):
-        networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+        networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert other.read_text(encoding="utf-8") == "set realmlist logon.example.com\n"
     assert other.stat().st_mode & 0o777 == 0o444
@@ -460,7 +460,7 @@ def test_the_players_realmlist_under_a_lowercase_data_folder_is_the_one_written(
     """T261: it wrote a second, fresh `Data/enUS/realmlist.wtf` beside `data/enus/`."""
     f = _lowercase_locale(tmp_path / "client")
 
-    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5")
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
 
     assert out == f
     assert f.read_text(encoding="utf-8") == "set realmlist 10.0.0.5\nset patchlist x\n"
@@ -473,7 +473,7 @@ def test_a_realmlist_named_in_another_case_is_written_where_it_is(tmp_path: Path
     f.parent.mkdir(parents=True)
     f.write_text("set realmlist logon.example.com\n", encoding="utf-8")
 
-    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5") == f
+    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724) == f
     assert _tree(tmp_path / "client") == ["Data", "Data/enUS", "Data/enUS/Realmlist.WTF"]
 
 
@@ -486,8 +486,8 @@ def test_a_fresh_realmlist_goes_into_the_lowercase_data_folder_already_there(
         (folder / "data" / "enus").mkdir(parents=True)
         (folder / "data" / "common.MPQ").write_bytes(b"MPQ")
 
-    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5")
-    (written,) = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+    (written,) = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert out == tmp_path / "client" / "data" / "enus" / "realmlist.wtf"
     assert written == tmp_path / "play" / "data" / "enus" / "realmlist.wtf"
@@ -510,7 +510,7 @@ def test_every_realmlist_under_a_lowercase_data_folder_of_a_ready_to_play_client
     gb.write_text("set realmlist logon.example.com\n", encoding="utf-8")
     os.chmod(us, 0o444)
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
 
     assert sorted(written) == sorted([us, gb])
     for f in (us, gb):

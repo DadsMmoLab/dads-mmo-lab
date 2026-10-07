@@ -187,3 +187,108 @@ def test_a_soap_port_the_channel_does_not_dial_is_refused() -> None:
     raw["operations"]["port"] = 7878
     with pytest.raises(ValidationError, match="soap_port"):
         parse_catalog({"games": [raw]})
+
+
+# -- the realm row and the client say the second server's own ports ------------
+
+
+def _install_second(tmp_path: Path, **recorder: object) -> tuple[list[str], object]:
+    from tests.support_native import Recorder
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+    from yulon.catalog.installer import InstallOptions
+
+    rec = Recorder(**recorder)  # type: ignore[arg-type]
+    engine = AzerothCoreInstaller(
+        second_ac_entry(),
+        installers_root=TEMPLATES,
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(),
+    )
+    return list(engine.run(InstallOptions(server_dir=tmp_path / "srv"))), rec
+
+
+PORT_SQL = "UPDATE acore_auth.realmlist SET port=8086 WHERE id=1 AND port<>8086;"
+
+
+def test_the_realm_row_is_given_the_world_port_before_the_first_start(tmp_path: Path) -> None:
+    """The authserver hands clients the row's port, and prints it once at its first start.
+
+    The import seeds 8085, WotLK's port, so without this a client logging in to
+    the second server is sent to WotLK's world, and the ready wait for
+    `<addr>:8086` never matches what the authserver printed.
+    """
+    lines, rec = _install_second(tmp_path)
+    assert PORT_SQL in rec.sql_scripts  # type: ignore[attr-defined]
+    calls = rec.calls  # type: ignore[attr-defined]
+    assert calls.index("sql") < calls.index("start"), calls
+    assert any("8086" in line and "realm" in line for line in lines), lines
+
+
+def test_a_wotlk_install_sends_no_port_statement(tmp_path: Path) -> None:
+    """8085 is what the import seeds and what WotLK publishes: nothing to write."""
+    from tests.support_native import Recorder, install
+
+    rec = Recorder()
+    install(rec, tmp_path / "srv")
+    assert not [s for s in rec.sql_scripts if "SET port" in s], rec.sql_scripts
+
+
+def test_a_realm_port_that_could_not_be_written_stops_the_install(tmp_path: Path) -> None:
+    from yulon.catalog.installer import InstallerError
+
+    with pytest.raises(InstallerError, match="8086"):
+        _install_second(tmp_path, failing_sql="SET port")
+
+
+def test_the_client_is_pointed_at_a_non_standard_auth_port(tmp_path: Path) -> None:
+    from yulon import networking
+
+    play = tmp_path / "play"
+    (written,) = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3725)
+    assert written.read_text(encoding="utf-8").splitlines()[0] == "set realmlist 127.0.0.1:3725"
+    (again,) = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+    assert again.read_text(encoding="utf-8").splitlines()[0] == "set realmlist 127.0.0.1"
+
+
+def test_the_networking_plan_tells_players_the_port_too() -> None:
+    from yulon import networking
+
+    def realmlist(entry: object, mode: str) -> str | None:
+        return networking.plan(
+            entry,  # type: ignore[arg-type]
+            mode,  # type: ignore[arg-type]
+            lan_ip="192.168.1.25",
+            firewall="ufw",
+            steamos=False,
+            wsl=False,
+            bindings={},
+        ).client_realmlist
+
+    wotlk = load_catalog().get("wow-wotlk")
+    assert realmlist(second_ac_entry(), "loopback") == "127.0.0.1:3725"
+    assert realmlist(second_ac_entry(), "lan") == "192.168.1.25:3725"
+    assert realmlist(wotlk, "loopback") == "127.0.0.1"
+    assert realmlist(wotlk, "lan") == "192.168.1.25"
+
+
+def test_every_realmlist_writer_call_passes_its_entrys_auth_port() -> None:
+    """A required keyword stops a caller forgetting the port; this stops one hard-coding it."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1] / "yulon"
+    found = 0
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+            if name not in ("write_ready_to_play_realmlists", "write_client_realmlist"):
+                continue
+            found += 1
+            port = next((k.value for k in node.keywords if k.arg == "auth_port"), None)
+            assert port is not None and ast.unparse(port).endswith("entry.ports.auth"), (
+                f"{path.name}:{node.lineno}"
+            )
+    assert found == 3

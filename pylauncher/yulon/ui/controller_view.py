@@ -11122,7 +11122,10 @@ class ControllerView(QWidget):
         problem: str | None = None
         try:
             networking.write_ready_to_play_realmlists(
-                choice.target, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                choice.target,
+                PLAY_CLIENT_ADDRESS,
+                self.entry.client.realmlist_file,
+                auth_port=self.entry.ports.auth,
             )
         except OSError as exc:
             problem = str(exc)
@@ -11637,7 +11640,10 @@ class ControllerView(QWidget):
             else:
                 try:
                     networking.write_ready_to_play_realmlists(
-                        play, _realm_address(record), client.realmlist_file
+                        play,
+                        _realm_address(record),
+                        client.realmlist_file,
+                        auth_port=self.entry.ports.auth,
                     )
                 except OSError as exc:
                     raise play_client.PlayClientError(
@@ -11804,6 +11810,7 @@ class ControllerView(QWidget):
                     play,
                     _realm_address(client_packs.read_record(play)),
                     self.entry.client.realmlist_file,
+                    auth_port=self.entry.ports.auth,
                 )
             except OSError as exc:
                 raise play_launch.LaunchRefusal(
