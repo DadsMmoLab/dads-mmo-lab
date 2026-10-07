@@ -43,7 +43,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
-from yulon import links, rmtree
+from yulon import folder_swap, links
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -523,6 +523,14 @@ def copy_folder(src: Path, dest: Path) -> None:
     folder is looked at (`links.walk()`, which knows a junction), `.git` aside,
     before the old copy is removed; the copy stops at a link it meets as the belt.
     The chosen folder itself may be a link: that is where the player keeps it.
+
+    **The old copy stays until the new one is whole** (T538, `folder_swap`). The
+    copy is made in `.yulon-module-staging/` beside the real `modules/` folder
+    (`folder_swap.places()`) and swapped in by two
+    renames, the old copy aside first; a copy that fails is removed and the old
+    one is untouched, and a rename into place that fails puts the old one back,
+    so `Applier._copy_folder()`'s "Nothing was changed" is true. The staging
+    folder is outside `modules/`, which the build globs, dot-names included.
     """
     modules_dir = dest.parent
     if _is_within(src, modules_dir):
@@ -533,9 +541,15 @@ def copy_folder(src: Path, dest: Path) -> None:
     link = _first_link(src)
     if link is not None:
         raise DeriveError(_link_refusal(link))
-    if dest.exists():
-        rmtree.remove_tree(dest)  # T49: the dest may be a previous copy holding a .git
-    shutil.copytree(src, dest, ignore=_git_and_links)
+    folder_swap.settle(dest)
+    partial = folder_swap.prepare(dest)
+    try:
+        shutil.copytree(src, partial, ignore=_git_and_links)
+    except BaseException:
+        folder_swap.remove_quietly(partial)
+        folder_swap.tidy(partial.parent)
+        raise
+    folder_swap.swap_in(partial, dest)
     logger.info(f"copied {src} → {dest}")
 
 
