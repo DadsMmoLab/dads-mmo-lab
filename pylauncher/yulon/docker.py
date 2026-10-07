@@ -7248,8 +7248,9 @@ a hung daemon must not hold a press, or a Stop, for `_ASK_AGAIN_TIMEOUT`."""
 _CLAIM_LOOK_TIMEOUT = 1.0
 """How long one look at a coming-up claim may take, so a Stop is seen between looks."""
 
-_CLAIM_SWEEP_SECONDS = 60.0
-"""How long a claim given up while it came up is looked for, in the background, to remove it."""
+_CLAIM_SWEEP_SECONDS = _CLAIM_UP_TIMEOUT + 30.0
+"""How long a claim given up, or not removed, is looked for in the background to remove it:
+past the whole wait for one to come up, with margin (Codex review of the folds)."""
 
 _CLAIM_SWEEP_POLL = 0.5
 
@@ -7306,6 +7307,7 @@ class _Claim:
     name: str
     container: str
     proc: subprocess.Popen[bytes]
+    nonce: str
 
 
 @contextmanager
@@ -7412,10 +7414,15 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         if cut_short and not removed:
             # Ending the CLI does not cancel a `run` the daemon already has (Codex review
             # of the folds): the claim may appear later and would block every press.
-            threading.Thread(
-                target=_sweep_late_claim, args=(name, nonce), name="yulon-claim-sweep", daemon=True
-            ).start()
+            _start_sweep(name, nonce)
         raise
+
+
+def _start_sweep(name: str, nonce: str) -> None:
+    """`_sweep_late_claim()` on a background thread, so nothing waits for it."""
+    threading.Thread(
+        target=_sweep_late_claim, args=(name, nonce), name="yulon-claim-sweep", daemon=True
+    ).start()
 
 
 def _sweep_late_claim(name: str, nonce: str) -> None:
@@ -7462,7 +7469,7 @@ def _claim_coming_up(
                 raise ClaimStopped("Stop was pressed before the folder was reserved.")
             with _CLAIMS_LOCK:
                 _CLAIMS_HELD.add(name)
-            return _Claim(name, facts.container, proc)
+            return _Claim(name, facts.container, proc, nonce)
         if proc.poll() is not None:
             assert proc.stderr is not None
             said = proc.stderr.read().decode("utf-8", "replace").strip()
@@ -7534,7 +7541,9 @@ def _release_claim(held: _Claim) -> None:
     with _CLAIMS_LOCK:
         _CLAIMS_HELD.discard(held.name)
     _end_claim_cli(held.proc)
-    _remove_claim(held.container)
+    if not _remove_claim(held.container):
+        # A daemon slow to answer (Codex review of the folds): left to the sweep, by nonce.
+        _start_sweep(held.name, held.nonce)
 
 
 def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEASE_TIMEOUT) -> None:

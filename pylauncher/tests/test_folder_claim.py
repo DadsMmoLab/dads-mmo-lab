@@ -603,3 +603,46 @@ def test_a_stopped_daemon_in_todays_words_is_named_as_one() -> None:
         "path is correct and if the daemon is running",
     )
     assert said.startswith("Docker is not running"), said
+
+
+SWEEP_AS_SHIPPED = docker._CLAIM_SWEEP_SECONDS
+"""Read at import, before the autouse fixture sets it to 0 for each test."""
+
+
+def test_the_sweep_outlasts_the_wait_for_a_claim_to_come_up() -> None:
+    """Codex review of the folds: a `run` the daemon took late within the 60 s wait must still
+    be looked for after it, with margin."""
+    assert SWEEP_AS_SHIPPED >= docker._CLAIM_UP_TIMEOUT + 15.0
+
+
+def test_a_released_claim_whose_removal_failed_is_swept(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the folds: letting go of a held claim on a slow daemon -- a failed
+    `rm` -- leaves it to the sweep, which removes it by its nonce."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    tries: list[str] = []
+    gone = threading.Event()
+    real_remove = docker._remove_claim
+
+    def remove(container: str, timeout: float = 5.0) -> bool:
+        tries.append(container)
+        if len(tries) == 1:
+            return False  # the release's own try: the daemon did not answer in time
+        gone.set()
+        return real_remove(container, timeout=timeout)
+
+    monkeypatch.setattr(docker, "_remove_claim", remove)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.02)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
+    monkeypatch.setattr(docker, "_end_claim_cli", lambda proc, wait=0.0: proc.kill())
+    name = _claim_name(folder)
+
+    with docker.folder_claim(folder, IMAGE):
+        pass  # the CLI is killed without its stdin closing: the claim stays, as on a slow daemon
+    assert gone.wait(HANG_BOUND), f"removal tried {tries}"
+    deadline = time.monotonic() + HANG_BOUND
+    while name in fake_containers(fake_docker):
+        assert time.monotonic() < deadline, "the claim stayed"
+        time.sleep(0.02)
