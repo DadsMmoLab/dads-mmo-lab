@@ -987,15 +987,21 @@ def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
     there (T262). Every name planned joins its folder's listing, so two source
     names that differ only in case land on one name. A destination folder that
     is not there yet holds nothing. `_NOT_FOR_THE_CLIENT` stays in the clone, as
-    `copytree`'s `ignore` left it; the source is walked in name order, following
-    its links as `copytree` did.
+    `copytree`'s `ignore` left it; the source is walked in name order.
+
+    **Never through a link in the source** (T530, `links.walk()`): a link in the
+    module's checkout, a folder or a file, plans nothing, neither itself nor what
+    is behind it, so a repository's `home -> /home/<user>` or `up -> ..` hands the
+    client nothing from outside and no loop. An install refuses such a link before
+    this plans the copy (`Applier._refuse_checkout_links()`); a remove plans its
+    asides from this and so never reads through one either.
 
     Raises:
         OSError: a destination folder that is there could not be listed.
     """
     pairs: list[tuple[Path, Path]] = []
     into = {src: target}
-    for folder, dirs, files in os.walk(src, followlinks=True):
+    for folder, dirs, files, _linked in links.walk(src):
         here = Path(folder)
         dest = into.pop(here)
         names = os.listdir(dest) if dest.is_dir() else []
@@ -1010,6 +1016,115 @@ def _plan_onto(src: Path, target: Path) -> list[tuple[Path, Path]]:
             names.append(onto)
             pairs.append((here / name, dest / onto))
     return pairs
+
+
+_GLOB_OR_FIELD = frozenset("*?[{")
+
+
+def _checkout_paths(manifest: Manifest, action: When) -> list[tuple[str, bool]]:
+    """`(path in the checkout, client copy?)` for everything `action` reads or writes there.
+
+    `install` runs every copy and the install- and configure-time SQL and
+    patches (`_whens`); `configure` its own SQL, patches and conf templates;
+    `remove` its own SQL and patches, and the deploy sources `_undeploy()` lists.
+    A glob or a `{key}` path is cut to the fixed folder in front of it, and
+    everything under that folder is looked at. `True` marks a client source,
+    whose copy leaves `.git` and the claim behind (`_NOT_FOR_THE_CLIENT`).
+    """
+    whens = _whens(action)
+    named: list[tuple[str, bool]] = []
+    if action in ("install", "remove"):
+        named += [(step.src, False) for step in manifest.deploy]
+    if action == "install":
+        named += [(step.src, True) for step in manifest.client]
+        named += [(step.src, False) for step in manifest.server_dbc]
+    if action in ("install", "configure"):
+        named += [(conf.template, False) for conf in manifest.conf if conf.template is not None]
+    named += [(sql.path, False) for sql in manifest.sql if sql.when in whens and sql.path]
+    named += [(name, False) for sql in manifest.sql if sql.when in whens for name in sql.then]
+    named += [(p.file, False) for p in manifest.patches if p.in_clone and p.when in whens]
+    out: list[tuple[str, bool]] = []
+    for rel, client in named:
+        parts = PurePosixPath(rel.replace("\\", "/")).parts
+        fixed: list[str] = []
+        for part in parts:
+            if _GLOB_OR_FIELD & set(part):
+                break
+            fixed.append(part)
+        out.append(("/".join(fixed) or ".", client))
+    return out
+
+
+def _checkout_link(clone: Path, rel: str, *, whole_tree: bool, ignore: bool = False) -> Path | None:
+    """The first link met on the way from `clone` to `clone/rel`, or under it; `None` if none.
+
+    Never follows one (`links.is_link()`, which knows a Windows junction). With
+    `whole_tree`, a folder at `rel` is walked to the bottom (`links.walk()`), in
+    name order, outermost first; `ignore` leaves out what a client copy leaves
+    (`_NOT_FOR_THE_CLIENT`) at every level. A path that is not there has no link.
+    """
+    here = clone
+    for part in PurePosixPath(rel.replace("\\", "/")).parts:
+        if part in ("", "."):
+            continue
+        here = here / part
+        if links.is_link(here):
+            return here
+    if not whole_tree or not here.is_dir():
+        return None
+    for folder, dirs, files, linked in links.walk(here):
+        left = _NOT_FOR_THE_CLIENT(folder, [*dirs, *files, *linked]) if ignore else set()
+        dirs[:] = [name for name in dirs if name not in left]
+        found = sorted(name for name in linked if name not in left)
+        if found:
+            return Path(folder) / found[0]
+    return None
+
+
+def _stop_at_links(manifest: Manifest, clone: Path) -> Callable[[str, list[str]], set[str]]:
+    """A `copytree` `ignore` that raises at the first link in a folder it copies (T530)."""
+
+    def ignore(folder: str, names: list[str]) -> set[str]:
+        for name in sorted(names):
+            path = Path(folder) / name
+            if links.is_link(path):
+                raise ApplyError(_checkout_link_said(manifest, clone, path, "install"))
+        return set()
+
+    return ignore
+
+
+def _checkout_link_said(manifest: Manifest, clone: Path, link: Path, action: When) -> str:
+    """The refusal for a link in `manifest`'s checkout: which, where it points, what was kept."""
+    rel = link.relative_to(clone).as_posix() if link.is_relative_to(clone) else str(link)
+    try:
+        target = os.readlink(link)
+    except (OSError, ValueError):
+        where = "somewhere Yu'lon could not read"
+    else:
+        # Only for the sentence, never for the decision: a link is refused either way.
+        # A junction's target reads `\\?\C:\...` on Windows; another drive is outside.
+        lands = os.path.normpath(
+            os.path.join(os.path.dirname(link), target.removeprefix("\\\\?\\"))
+        )
+        root = os.path.normpath(clone)
+        try:
+            inside = os.path.commonpath([lands, root]) == root
+        except ValueError:
+            inside = False
+        place = "inside" if inside else "outside"
+        where = f"{target}, {place} the module's own files"
+    done = {
+        "install": f"Nothing of {manifest.id} was deployed, run or put into your game client.",
+        "configure": f"Nothing of {manifest.id} was changed.",
+        "remove": f"Nothing of {manifest.id} was removed.",
+    }[action]
+    return (
+        f"{manifest.id}: {rel} in the module's files is a link to {where}. Yu'lon does not read "
+        f"or copy anything of a module through a link, so it stopped before using it. "
+        f"{done} The module's author can replace the link with the file or folder it "
+        f"points to."
+    )
 
 
 def _copy_onto(
@@ -3114,11 +3229,15 @@ class Applier:
             if manifest.type == "module":
                 # CMake's CollectSourceFiles() silently skips a module without include.sh.
                 include = clone / "include.sh"
-                if not include.exists():
+                # `lexists`, not `exists`: a repository's `include.sh` that is a
+                # link to nothing was "not there", and `touch()` follows a link
+                # and made the file it points to, wherever that is (T530).
+                if not os.path.lexists(include):
                     include.touch()
                     log.done.append("touch include.sh")
         if complete is not None:
             manifest = self._completed(manifest, clone, complete)
+        self._refuse_checkout_links(manifest, clone, "install")
         self._refuse_a_clash(manifest, clone)
         self._refuse_links(manifest, clone)
         self._deploy(manifest, clone, log)
@@ -3680,6 +3799,7 @@ class Applier:
             # folder this run would never touch would be a refusal about
             # nothing.
             self._require_own_clone(manifest, clone, "configure")
+        self._refuse_checkout_links(manifest, clone, "configure")
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
         self._conf(manifest, clone, vals, log)
@@ -3710,6 +3830,7 @@ class Applier:
             # the same one and worse — that `rmtree` needs no git seam to
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
+        self._refuse_checkout_links(manifest, clone, "remove")
         self._patches(manifest, clone, vals, "remove", log)
         sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
@@ -4416,11 +4537,24 @@ class Applier:
     # -- steps -------------------------------------------------------------
 
     def _deploy(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy each `deploy` step's source in the checkout into the server folder.
+
+        Never through a link in the checkout (T530): `_refuse_checkout_links()`
+        refused one before the install changed anything, and the copy asks again
+        of every folder it lists (`_stop_at_links`) and of the way to the source,
+        because `copytree` follows a symlink and, on Python 3.11 under Windows,
+        walks into a junction as a folder.
+        """
         for step in manifest.deploy:
             src = clone / step.src
             target = self._deploy_target(step.src, step.dest)
+            link = _checkout_link(clone, step.src, whole_tree=False)
+            if link is not None:
+                raise ApplyError(_checkout_link_said(manifest, clone, link, "install"))
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(
+                    src, target, dirs_exist_ok=True, ignore=_stop_at_links(manifest, clone)
+                )
             elif src.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)
@@ -5188,6 +5322,38 @@ class Applier:
             f"change what the link points to instead: {named}. {why} Nothing of "
             f"{manifest.id} was put into your game client or deployed."
         )
+
+    def _refuse_checkout_links(self, manifest: Manifest, clone: Path, action: When) -> None:
+        """Refuse `action` if anything it reads or writes in the checkout is reached through a link.
+
+        T530. A module repository may hold symlinks (and "Install from link..."
+        lets any repository be a module); every step that reads the checkout
+        followed them, so `secret -> /home/<user>/.ssh/id_rsa` or `up -> ../../..`
+        put a file from elsewhere on the player's disk into the server folder, the
+        game client or the database, and an `in_clone` patch through one rewrote
+        it. The rule is `yulon.links`': never through a link Yu'lon did not choose,
+        and a module's links are the repository's choice, not Yu'lon's.
+
+        Looked at, without following anything, for each path `action` reads or
+        writes (`_checkout_paths()`): every folder on the way from the checkout to
+        it, the path itself, and for a folder that is copied, or the fixed folder
+        in front of a glob, everything under it. A link there refuses the action,
+        whether it points outside the checkout or inside it: no shipped module
+        has one (measured 2026-10-07, all 37 repositories), refusing needs only
+        "is this a link", and following one safely needs a containment test on
+        the resolved path and a loop guard (`up -> ..` points inside). Run before
+        `action` changes anything; a link elsewhere in the checkout, where
+        nothing of Yu'lon's looks, is left alone.
+
+        Raises:
+            ApplyRefusal: naming the module, the link and where it points.
+        """
+        if not clone.is_dir():
+            return
+        for rel, ignore in _checkout_paths(manifest, action):
+            link = _checkout_link(clone, rel, whole_tree=True, ignore=ignore)
+            if link is not None:
+                raise ApplyRefusal(_checkout_link_said(manifest, clone, link, action))
 
     def _writes_a_ready_client(self) -> bool:
         """Whether `client_dir` is a ready-to-play client: its marker, or its origins."""

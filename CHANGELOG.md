@@ -34,6 +34,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+- A module whose files hold a link is refused, naming the link, so it never copies files from elsewhere on your computer.
 - On Windows with Docker Desktop, a WotLK build no longer fails within a second of starting.
 - A Tortoise server installed before the dbc.MPQ check learns that archive on its next Install, so a later swap is noticed.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
