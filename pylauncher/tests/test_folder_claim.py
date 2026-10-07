@@ -480,7 +480,7 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
         return docker._ClaimFacts("late-id", "created", nonce, docker.owner_id())
 
     monkeypatch.setattr(docker, "_claim_facts", facts)
-    monkeypatch.setattr(docker, "_remove_claim", lambda c, timeout=5.0: removed.append(c))
+    monkeypatch.setattr(docker, "_remove_claim", lambda c, timeout=5.0: removed.append(c) is None)
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
     outcome: list[BaseException] = []
@@ -548,3 +548,58 @@ def test_a_stop_during_the_look_that_finds_the_claim_running_is_a_stop(
     while any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(fake_docker)):
         assert time.monotonic() < deadline, "the claim was kept after the Stop"
         time.sleep(0.02)
+
+
+def test_a_late_claim_whose_first_removal_fails_is_swept_again(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the folds: the Stop's one removal can fail on a daemon that is slow
+    to answer; the background sweep still runs and removes it."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / "claim-slow").write_text("", encoding="utf-8")
+    nonce = "c" * 32
+    monkeypatch.setattr(docker.uuid, "uuid4", lambda: SimpleNamespace(hex=nonce))
+    cancel = threading.Event()
+    tries: list[str] = []
+    gone = threading.Event()
+
+    def facts(_name: str, timeout: float = 5.0) -> object:
+        if not cancel.is_set() or gone.is_set():
+            return None
+        return docker._ClaimFacts("mine-id", "created", nonce, docker.owner_id())
+
+    def remove(container: str, timeout: float = 5.0) -> bool:
+        tries.append(container)
+        if len(tries) > 1:
+            gone.set()
+        return gone.is_set()
+
+    monkeypatch.setattr(docker, "_claim_facts", facts)
+    monkeypatch.setattr(docker, "_remove_claim", remove)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
+    worker = threading.Thread(
+        target=lambda: pytest.raises(docker.ClaimStopped, _hold, folder, cancel)
+    )
+    worker.start()
+    time.sleep(0.3)
+    cancel.set()
+    worker.join(HANG_BOUND)
+    (fake_docker / "claim-slow").unlink()
+    assert gone.wait(HANG_BOUND), f"removal tried {tries}, never done"
+    assert tries[:2] == ["mine-id", "mine-id"], tries
+
+
+def _hold(folder: Path, cancel: threading.Event) -> None:
+    with docker.folder_claim(folder, IMAGE, cancel):
+        pytest.fail("held a claim after Stop")
+
+
+def test_a_stopped_daemon_in_todays_words_is_named_as_one() -> None:
+    said = docker._claim_refused(
+        IMAGE,
+        "failed to connect to the docker API at unix:///var/run/docker.sock; check if the "
+        "path is correct and if the daemon is running",
+    )
+    assert said.startswith("Docker is not running"), said

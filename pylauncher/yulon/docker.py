@@ -7295,7 +7295,8 @@ _IMAGE_GONE = re.compile(
     re.IGNORECASE,
 )
 _DAEMON_DOWN = re.compile(
-    r"Cannot connect to the Docker daemon|error during connect|daemon is not running",
+    r"Cannot connect to the Docker daemon|error during connect|daemon is not running"
+    r"|failed to connect to the docker API",
     re.IGNORECASE,
 )
 
@@ -7405,9 +7406,10 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         cut_short = proc.poll() is None
         _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
         facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+        removed = False
         if facts is not None and facts.nonce == nonce:
-            _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
-        elif cut_short:
+            removed = _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
+        if cut_short and not removed:
             # Ending the CLI does not cancel a `run` the daemon already has (Codex review
             # of the folds): the claim may appear later and would block every press.
             threading.Thread(
@@ -7429,8 +7431,8 @@ def _sweep_late_claim(name: str, nonce: str) -> None:
             facts = _claim_facts(name)
             if facts is not None and facts.nonce == nonce:
                 logger.info(f"removing the claim {name}, made after its press gave it up")
-                _remove_claim(facts.container)
-                return
+                if _remove_claim(facts.container):
+                    return
             time.sleep(_CLAIM_SWEEP_POLL)
     except Exception as exc:  # noqa: BLE001 - a background thread has no caller to tell
         logger.warning(f"stopped looking for the claim {name}: {exc}")
@@ -7551,11 +7553,13 @@ def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEAS
         proc.stderr.close()
 
 
-def _remove_claim(container: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> None:
-    """`docker rm -f` a claim by its container id; one already gone is not a failure."""
+def _remove_claim(container: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> bool:
+    """`docker rm -f` a claim by its container id; True once it is gone (already gone counts)."""
     proc = _docker(["rm", "-f", container], timeout=timeout)
     if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
         logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
+        return False
+    return True
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"
