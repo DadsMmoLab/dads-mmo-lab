@@ -285,6 +285,11 @@ def learn_required_file(current: Evidence, expected: Evidence) -> Evidence:
     never be noticed (T523). Both sides must have measured everything, and this
     run must have something to learn; otherwise `current` comes back unchanged.
     Only the two facts are added: the tool records are the ones already earned.
+
+    The limit, accepted (T523, as T521 accepted it): an old record never knew the
+    file, so a `dbc.MPQ` swapped BEFORE the first press that learns it is taken to
+    be the one the data came from. Forcing a re-extract of every old install
+    instead is the hours-long cost `_same_required_file()` exists to avoid.
     """
     if (
         current.client_facts_complete

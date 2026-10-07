@@ -3,8 +3,7 @@
 Every release of Yu'lon, newest first.
 
 <!--
-How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed"- A Tortoise server installed before the game-file check now notices when its dbc.MPQ archive is later replaced.
- and "### Changed".
+How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed" and "### Changed".
 One plain line per change, at most about 120 characters, saying what the player gets. Bold button names are fine;
 ticket ids, proof, test notes, numbers as evidence, backticks and commands are not: they go in the pull request.
 New: Set a server's time zone on the Tuning tab with **Server time zone**.
@@ -33,6 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- A Tortoise server installed before the game-file check now notices when its dbc.MPQ archive is later replaced.
 - Tortoise builds TortoiseBots v10, whose faster travel and auction-house planning cuts lag on servers with hundreds of bots.
 - A Tortoise client folder missing its dbc.MPQ archive is refused before the build, with how to fix it.
 - A missing bots table is now reported once, with how to fix it, instead of a quiet note every few seconds.
