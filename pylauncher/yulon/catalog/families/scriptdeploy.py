@@ -74,22 +74,27 @@ def record_path(server_dir: Path) -> Path:
 
 def read_record(server_dir: Path) -> dict[str, str]:
     """The record, or empty when there is none or it cannot be read (then nothing is replaced)."""
+    return _read_record(server_dir)[0]
+
+
+def _read_record(server_dir: Path) -> tuple[dict[str, str], str]:
+    """The record and, when there is one that cannot be read, why not ("" otherwise)."""
     path = record_path(server_dir)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return {}, ""
     except (OSError, ValueError) as exc:
         logger.warning(f"{path} could not be read ({exc}); no script there counts as Yu'lon's")
-        return {}
+        return {}, str(exc)
     files = parsed.get("files") if isinstance(parsed, dict) else None
     if not isinstance(files, dict):
-        return {}
+        return {}, "it holds no list of files"
     return {
         k: v
         for k, v in files.items()
         if isinstance(k, str) and isinstance(v, str) and _inside_the_script_dir(k)
-    }
+    }, ""
 
 
 def _inside_the_script_dir(rel: str) -> bool:
@@ -140,6 +145,15 @@ def _through_a_link(server_dir: Path, target: Path) -> Path | None:
         if here.is_symlink():
             return here
     return None
+
+
+def _link_refusal(server_dir: Path, link: Path, remedy: str) -> InstallerError:
+    """The press stops at a link where the scripts go: writing through it writes elsewhere."""
+    return InstallerError(
+        f"{link.relative_to(server_dir).as_posix()} is a link, so the Lua scripts were not laid "
+        "through it and the server would start without them. Nothing was written there. Make "
+        f"it a plain folder, then press {remedy}."
+    )
 
 
 def missing_sources(server_dir: Path, specs: Sequence[LuaScripts]) -> tuple[str, ...]:
@@ -205,21 +219,35 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     """
     if not specs:
         return
+    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    # The script folder, each entry's own folder in it, and the record: none may be
+    # a link (or under one), or the press would write where the link points. Asked
+    # before anything is read or written, so a refusal here writes nothing at all.
+    for target in (
+        record_path(server_dir),
+        *(server_dir / spec.dest.rstrip("/") / RECORD_FILE for spec in specs),
+    ):
+        link = target if target.is_symlink() else _through_a_link(server_dir, target)
+        if link is not None:
+            raise _link_refusal(server_dir, link, remedy)
     planned, skipped = _plan(server_dir, specs)
     yield from skipped
-    record = read_record(server_dir)
+    record, unreadable = _read_record(server_dir)
+    if unreadable:
+        folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
+        yield (
+            f"{LUA_SCRIPTS_DIR}/{RECORD_FILE}, Yu'lon's list of the scripts it laid, could not "
+            f"be read ({unreadable}), so no script counts as Yu'lon's and none is replaced or "
+            f"removed. To have them laid fresh, delete {folders} and that file, then press "
+            f"{remedy}."
+        )
     kept_record = dict(record)
     wrote = current = 0
-    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
     try:
         for item in planned:
             link = _through_a_link(server_dir, item.target)
             if link is not None:
-                yield (
-                    f"{link.relative_to(server_dir).as_posix()} is a link, so "
-                    f"{item.target.name} was not written through it."
-                )
-                continue
+                raise _link_refusal(server_dir, link, remedy)
             data = item.src.read_bytes()
             new = _sha(data)
             if item.target.is_symlink():

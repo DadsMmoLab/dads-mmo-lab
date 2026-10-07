@@ -668,3 +668,120 @@ def test_a_recorded_folder_that_became_a_link_is_not_deleted_through(tmp_path: P
 
     assert (elsewhere / "a.lua").read_text(encoding="utf-8") == "a\n"
     assert any("nothing was removed through it" in line for line in said), said
+
+
+# -- cold review (T553 rework) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("linked", [LUA_SCRIPTS_DIR, f"{LUA_SCRIPTS_DIR}/m"], ids=("root", "dest"))
+def test_a_linked_script_folder_refuses_and_nothing_is_written_through_it(
+    tmp_path: Path, linked: str
+) -> None:
+    """The script folder (or the entry's own folder in it) is a link: the press refuses.
+
+    Nothing lands where the link points -- no script, and no record either.
+    """
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua").mkdir(parents=True)
+    (server_dir / "modules/m/lua/a.lua").write_text("a\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = server_dir / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere, target_is_directory=True)
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+
+    with pytest.raises(InstallerError, match="is a link") as raised:
+        list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert "Nothing was written" in str(raised.value)
+    assert sorted(p.relative_to(elsewhere).as_posix() for p in elsewhere.rglob("*")) == []
+
+
+def test_a_linked_folder_inside_the_scripts_refuses_and_writes_nothing_there(
+    tmp_path: Path,
+) -> None:
+    """A subfolder of the entry's dest that is a link (the per-file guard)."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua/sub").mkdir(parents=True)
+    (server_dir / "modules/m/lua/sub/a.lua").write_text("a\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    dest = server_dir / LUA_SCRIPTS_DIR / "m"
+    dest.mkdir(parents=True)
+    (dest / "sub").symlink_to(elsewhere, target_is_directory=True)
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+
+    with pytest.raises(InstallerError, match="is a link"):
+        list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_resumed_install_on_a_built_and_patched_tree_goes_through(
+    tmp_path: Path, installers: Path
+) -> None:
+    """The ordinary second press: build done, images there, patch on disk. No refusal."""
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    rec.calls.clear()
+
+    said = list(made.run(InstallOptions(server_dir=server_dir)))
+
+    assert "build" not in rec.calls, "the resume compiled a finished build"
+    assert any("already carries the fix" in line for line in said), said
+    assert (server_dir / TARGET).read_text(encoding="utf-8") == PATCHED
+
+
+def test_an_unreadable_record_is_said_with_what_to_delete(tmp_path: Path) -> None:
+    """A corrupt record keeps every script (nothing counts as Yu'lon's) and says how out."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua").mkdir(parents=True)
+    (server_dir / "modules/m/lua/a.lua").write_text("v2\n", encoding="utf-8")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua"
+    laid.parent.mkdir(parents=True)
+    laid.write_text("v1\n", encoding="utf-8")
+    scriptdeploy.record_path(server_dir).write_text("{not json", encoding="utf-8")
+
+    said = list(
+        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")])
+    )
+
+    assert laid.read_text(encoding="utf-8") == "v1\n"
+    told = [line for line in said if scriptdeploy.RECORD_FILE in line]
+    assert told and "could not be read" in told[0], said
+    assert f"{LUA_SCRIPTS_DIR}/m" in told[0] and "delete" in told[0], told
+
+
+def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -> None:
+    """With nothing to lay, only the record would be written -- through the link. Refused."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    record = elsewhere / scriptdeploy.RECORD_FILE
+    stale = f"{LUA_SCRIPTS_DIR}/m/old.lua"
+    record.write_text(json.dumps({"version": 1, "files": {stale: "0" * 64}}), encoding="utf-8")
+    before = record.read_bytes()
+    root = server_dir / LUA_SCRIPTS_DIR
+    root.parent.mkdir(parents=True)
+    root.symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(InstallerError, match="is a link"):
+        list(
+            scriptdeploy.lay(
+                server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")]
+            )
+        )
+
+    assert record.read_bytes() == before
+    assert sorted(p.name for p in elsewhere.iterdir()) == [scriptdeploy.RECORD_FILE]
