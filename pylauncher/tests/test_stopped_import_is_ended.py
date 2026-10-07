@@ -522,6 +522,8 @@ def test_repair_ends_a_leftover_importer_before_it_reads_the_databases(
 
     assert docker.repair_import(SPEC, tmp_path, probe) is True
     assert f"end-one-shot:{SPEC.import_service}" in order, order
+    # Before the database it writes to is started, and before it is read (Codex review).
+    assert order.index(f"end-one-shot:{SPEC.import_service}") < order.index("start-db"), order
     assert order.index(f"end-one-shot:{SPEC.import_service}") < order.index("probe"), order
 
 

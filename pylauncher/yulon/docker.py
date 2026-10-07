@@ -2256,16 +2256,17 @@ def repair_import(
             "whatever it finds. Press Stop first, then try again."
         )
 
+    # T539 (re-review of 7312223b): Repair is offered in exactly the half-written state
+    # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
+    # the container -- so that importer is ended before anything else: before the
+    # database it writes to is started (Codex review), and before it is read.
+    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
+    if left is not None:
+        raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     start_database(
         spec, server_dir, timeout=db_timeout, because="nothing was imported", wsl_distro=wsl_distro
     )
 
-    # T539 (re-review of 7312223b): Repair is offered in exactly the half-written state
-    # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
-    # the container -- so that importer is ended before the databases are even read.
-    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
-    if left is not None:
-        raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
     if before.state == "populated":
