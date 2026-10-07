@@ -17,7 +17,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from tests.test_tray import FakeTrayIcon, FakeView, FakeWindow, _add, _close_by_hand
-from yulon import ui_settings
+from yulon import autostart, ui_settings
 from yulon.ui import tray as tray_module
 from yulon.ui.tray import YulonTray
 
@@ -224,11 +224,9 @@ def test_the_settings_dialog_turns_keep_in_tray_and_sign_in_on_and_off(
     from yulon.ui.tray_settings import TraySettingsDialog
 
     switched: list[bool] = []
-    monkeypatch.setattr(tray_module.autostart, "why_not", lambda *a, **k: None)
-    monkeypatch.setattr(tray_module.autostart, "is_enabled", lambda *a, **k: False)
-    monkeypatch.setattr(
-        tray_module.autostart, "set_enabled", lambda on, *a, **k: switched.append(on)
-    )
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(autostart, "set_enabled", lambda on, *a, **k: switched.append(on))
     dialog = TraySettingsDialog(tray)
     try:
         assert dialog.keep.isChecked() and dialog.keep.isEnabled()
@@ -251,7 +249,7 @@ def test_the_settings_dialog_says_when_there_is_no_tray(
 
     made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: False)
     made.install()
-    monkeypatch.setattr(tray_module.autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
     dialog = TraySettingsDialog(made)
     try:
         assert not dialog.keep.isEnabled()
@@ -271,9 +269,9 @@ def test_a_sign_in_switch_that_fails_says_why_and_stays_off(
     def refuse(on: bool, *a: Any, **k: Any) -> None:
         raise OSError("access denied")
 
-    monkeypatch.setattr(tray_module.autostart, "why_not", lambda *a, **k: None)
-    monkeypatch.setattr(tray_module.autostart, "is_enabled", lambda *a, **k: False)
-    monkeypatch.setattr(tray_module.autostart, "set_enabled", refuse)
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(autostart, "set_enabled", refuse)
     dialog = TraySettingsDialog(tray)
     try:
         dialog.sign_in.click()
@@ -288,14 +286,12 @@ def test_a_source_checkout_greys_the_sign_in_switch_with_the_reason(
 ) -> None:
     from yulon.ui.tray_settings import TraySettingsDialog
 
-    monkeypatch.setattr(
-        tray_module.autostart, "why_not", lambda *a, **k: tray_module.autostart.NOT_INSTALLED
-    )
-    monkeypatch.setattr(tray_module.autostart, "is_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: autostart.NOT_INSTALLED)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: False)
     dialog = TraySettingsDialog(tray)
     try:
         assert not dialog.sign_in.isEnabled()
-        assert dialog.sign_in.toolTip() == tray_module.autostart.NOT_INSTALLED
+        assert dialog.sign_in.toolTip() == autostart.NOT_INSTALLED
     finally:
         dialog.deleteLater()
 

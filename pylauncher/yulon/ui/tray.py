@@ -63,6 +63,9 @@ STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention"
 
 NOTE_NEVER = "never"
 
+NOTIFY_MS = 10000
+"""How long a notification asks to stay (the desktop may decide otherwise)."""
+
 TRAY_WAIT_MS = 500
 TRAY_WAIT_TRIES = 30
 """A sign-in start waits up to 15 s for the desktop's tray before it shows the window."""
@@ -245,6 +248,9 @@ class YulonTray(QObject):
         """The tabs Stop-then-quit pressed Stop on and is waiting for (empty: not waiting)."""
         self._wait_tries = 0
         self._wait_timer: QTimer | None = None
+        self._last_words: dict[int, str] = {}
+        """Each followed tab's last badge word, by id, for what changed (notifications)."""
+        self._notified: Any = None
         self._quitting = False
         self._installed = False
         self._followed: list[Any] = []
@@ -372,7 +378,13 @@ class YulonTray(QObject):
         self._let_go_of_servers()
         for view in self.views():
             view.realm_badge.status_changed.connect(self._server_changed)
+            view.action_failed.connect(self._server_failed)
             self._followed.append(view)
+            # What it says now is where a change is measured from: nothing is
+            # said about a tab for the state it opened in.
+            self._last_words.setdefault(id(view), view.realm_badge.status)
+        live = {id(view) for view in self._followed}
+        self._last_words = {k: v for k, v in self._last_words.items() if k in live}
         self.refresh()
 
     def _let_go_of_servers(self) -> None:
@@ -380,13 +392,72 @@ class YulonTray(QObject):
             if shiboken6.isValid(view) and shiboken6.isValid(view.realm_badge):
                 try:
                     view.realm_badge.status_changed.disconnect(self._server_changed)
+                    view.action_failed.disconnect(self._server_failed)
                 except (RuntimeError, TypeError):  # pragma: no cover - already gone
                     pass
         self._followed = []
 
     @Slot(str)
-    def _server_changed(self, _status: str) -> None:
+    def _server_changed(self, status: str) -> None:
+        badge = self.sender()
+        view = next((v for v in self._followed if v.realm_badge is badge), None)
+        if view is not None:
+            before = self._last_words.get(id(view), "")
+            self._last_words[id(view)] = status
+            self._notice_change(view, before, status)
         self.refresh()
+
+    # -------------------------------------------------------- notifications
+
+    def _looking(self) -> bool:
+        """Whether the player can see the window, which already says what happened."""
+        window = self.window
+        return window.isVisible() and not window.isMinimized() and window.isActiveWindow()
+
+    def _notice_change(self, view: Any, before: str, now: str) -> None:
+        """A crash loop, or a realm down without a Stop of ours: said from the tray.
+
+        A Stop of ours holds the badge at "stopping" first (T188), so up straight
+        to down is something else: a crash, or the server stopped outside Yu'lon.
+        """
+        before, now = before.lower(), now.lower()
+        title = self._title_of(view)
+        if now in ("loop", "restarting") and before not in ("loop", "restarting"):
+            if now == "loop":
+                self.notify(
+                    view,
+                    f"{title} is crash-looping",
+                    "Its world keeps stopping. Click to see its Server tab.",
+                )
+            else:
+                self.notify(view, f"{title} is restarting", "Click to see its Server tab.")
+        elif realm_tone(before) == "up" and realm_tone(now) == "down":
+            self.notify(
+                view,
+                f"{title} went offline",
+                "Yu'lon did not stop it. Click to see its Server tab.",
+            )
+
+    @Slot(str)
+    def _server_failed(self, message: str) -> None:
+        sender = self.sender()
+        view = next((v for v in self._followed if v is sender), None)
+        if view is None or view in self._stopping:
+            return  # Stop-then-quit shows that one itself
+        self.notify(view, f"{self._title_of(view)}: something went wrong", message)
+
+    def _title_of(self, view: Any) -> str:
+        views = self.views()
+        titles = dict(zip((id(v) for v in views), server_titles(views), strict=True))
+        return titles.get(id(view)) or str(view.entry.name)
+
+    def notify(self, view: Any, title: str, text: str) -> None:
+        """A tray notification about one server, unless the window already shows it."""
+        if self.icon is None or not self.keeping or self._looking():
+            return
+        logger.info(f"tray: notified: {title}")
+        self._notified = view
+        self.icon.showMessage(title, text, QSystemTrayIcon.MessageIcon.Warning, NOTIFY_MS)
 
     def servers(self) -> list[tuple[Any, str, str]]:
         """(view, title, badge word) for each live server tab, in rail order."""
@@ -639,8 +710,13 @@ class YulonTray(QObject):
 
     @Slot()
     def _message_clicked(self) -> None:
-        """A notification was clicked (step 4 says which server)."""
-        self.open_window()
+        """A notification was clicked: the window, on the server it was about."""
+        view = self._notified
+        self._notified = None
+        if view is not None and shiboken6.isValid(view) and view in self.views():
+            self.show_server(view)
+        else:
+            self.open_window()
 
     # ----------------------------------------------------------------- menu
 
