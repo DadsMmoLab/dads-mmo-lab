@@ -557,9 +557,17 @@ def copy_folder(src: Path, dest: Path) -> None:
         if had_one:
             os.rename(dest, aside)
         os.rename(partial, dest)
-    except BaseException:
+    except BaseException as failure:
         if had_one and not os.path.lexists(dest) and os.path.lexists(aside):
-            os.rename(aside, dest)
+            try:
+                os.rename(aside, dest)
+            except OSError as stuck:
+                _remove_quietly(partial)
+                raise OSError(
+                    f"the new copy could not take the place of {dest} ({failure}), and the "
+                    f"earlier copy could not be put back ({stuck}): it is kept whole as {aside}, "
+                    f"and the next copy of this folder puts it back first"
+                ) from failure
         _remove_quietly(partial)
         raise
     if had_one:

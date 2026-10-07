@@ -3931,9 +3931,17 @@ class Applier:
         check is `is_dir()` on the destination, which is the one thing every
         implementation of this seam must have produced.
         """
+        was_there = clone.is_dir()
         try:
             folder.copier(folder.path, clone)
         except OSError as exc:
+            if was_there and not clone.is_dir():
+                # T538: a copier that set the module aside and could not put it back
+                # says where it is; "Nothing was changed" would be false here.
+                raise ApplyError(
+                    f"{folder.path} could not be copied into "
+                    f"{_rel(self.server_dir, clone)}, and the module is not there now: {exc}."
+                ) from exc
             raise ApplyError(
                 f"{folder.path} could not be copied into "
                 f"{_rel(self.server_dir, clone)}: {exc}. Nothing was changed."

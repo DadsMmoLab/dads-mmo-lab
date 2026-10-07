@@ -761,3 +761,65 @@ def test_a_partial_copy_a_crash_left_does_not_stop_the_next_copy(tmp_path: Path)
 
     assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
     _modules_holds_only(dest)
+
+
+def test_a_swap_whose_roll_back_fails_says_where_the_old_copy_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex adversarial review of 9d83b410: both renames failing left `modules/<id>` empty
+    while the applier said "Nothing was changed". The old copy is kept aside and named."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    aside = dest.with_name(f".{dest.name}.yulon-old")
+    real = os.rename
+
+    def refuse_into_place(old: Any, new: Any) -> None:
+        if Path(new) == dest:
+            raise PermissionError(13, "Access is denied", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(module_source.os, "rename", refuse_into_place)
+
+    with pytest.raises(OSError) as failed:
+        module_source.copy_folder(src, dest)
+
+    assert str(aside) in str(failed.value), str(failed.value)
+    assert _bytes_under(aside) == before
+    assert sorted(p.name for p in dest.parent.iterdir()) == [aside.name]
+
+
+def test_the_applier_does_not_say_nothing_changed_when_the_module_is_gone(
+    tmp_path: Path,
+) -> None:
+    from yulon.apply import Applier, ApplyError, FolderSource, _Log
+
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-my-thing"
+    (clone / "src").mkdir(parents=True)
+
+    def copier(_src: Path, dest: Path) -> None:
+        dest.rename(dest.with_name(f".{dest.name}.yulon-old"))
+        raise OSError("the earlier copy is kept as .mod-my-thing.yulon-old")
+
+    with pytest.raises(ApplyError) as failed:
+        Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
+
+    assert "Nothing was changed" not in str(failed.value)
+    assert ".mod-my-thing.yulon-old" in str(failed.value)
+
+
+def test_the_applier_says_nothing_changed_when_the_module_is_still_there(
+    tmp_path: Path,
+) -> None:
+    from yulon.apply import Applier, ApplyError, FolderSource, _Log
+
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-my-thing"
+    (clone / "src").mkdir(parents=True)
+
+    def copier(_src: Path, _dest: Path) -> None:
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(ApplyError) as failed:
+        Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
+
+    assert str(failed.value).endswith("Nothing was changed.")
