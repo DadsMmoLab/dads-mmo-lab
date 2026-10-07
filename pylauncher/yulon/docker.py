@@ -2637,6 +2637,9 @@ def run_one_shot(
         wsl_distro=wsl_distro,
         sink=sink,
         cancel=cancel,
+        # T539: the container goes with a Stop at once, `up` and `run` alike. See
+        # `end_one_shot()`; the caller asks it again before it reports the Stop.
+        on_cancel=lambda: end_one_shot(service, server_dir, wsl_distro=wsl_distro),
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -5733,6 +5736,7 @@ def run_attached(
     cancel: threading.Event | None = None,
     merge_stderr: bool = False,
     env: Mapping[str, str] | None = None,
+    on_cancel: Callable[[], object] | None = None,
 ) -> AttachedRun:
     """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
@@ -5792,6 +5796,12 @@ def run_attached(
     `native.build_cancel_note()` and its neighbours. `repair_import()`
     deliberately passes no cancel at all; see there.
 
+    `on_cancel`, when given, is called once, on the watcher's thread, right after
+    the cancel has ended the CLI: what else of the run must end with it (T539:
+    `run_one_shot()` ends its container, because a `compose up` sent one SIGTERM
+    stops it gracefully and slowly, and an orphaned compose held the importer
+    and the pipe for 46 s live).
+
     `merge_stderr` is for the build, whose entire progress output is stderr;
     see `runner.stream()`. `env` is the child's whole environment, None to
     inherit; for a WSL install it must already carry its `WSLENV`
@@ -5830,7 +5840,7 @@ def run_attached(
             closing(
                 runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
             ) as lines,
-            _ended_on_cancel(cancel, lines, ended_by_cancel),
+            _ended_on_cancel(cancel, lines, ended_by_cancel, on_cancel),
         ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
@@ -7188,6 +7198,7 @@ def _ended_on_cancel(
     cancel: threading.Event | None,
     stream: Generator[str, None, None],
     ended: threading.Event,
+    on_cancel: Callable[[], object] | None = None,
 ) -> Iterator[None]:
     """While inside, a set `cancel` ends the docker CLI of `stream`, and nothing else (T303, T526).
 
@@ -7209,10 +7220,18 @@ def _ended_on_cancel(
     done = threading.Event()
 
     def watch() -> None:
+        called = on_cancel is None
         while not done.is_set():
             if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
+                # Claimed first, so the run reads as the Stop however its CLI exits.
                 if runner.end_stream(stream):
                     ended.set()
+                if not called:
+                    called = True
+                    try:
+                        on_cancel()  # type: ignore[misc]
+                    except Exception as exc:  # noqa: BLE001 - the Stop goes on regardless
+                        logger.warning(f"ending what a cancelled run left failed: {exc!r}")
                 done.wait(_STOP_POLL_SECONDS)
 
     watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)

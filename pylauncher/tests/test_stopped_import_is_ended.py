@@ -12,6 +12,7 @@ branch, which DROPs the half-written schemas it is still writing.
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -183,3 +184,44 @@ def test_a_retry_ends_a_leftover_importer_before_it_clears(tmp_path: Path) -> No
     list(engine(rec).run(InstallOptions(server_dir=tmp_path / "s")))
     assert rec.ended_one_shots == [IMPORTER]
     assert rec.calls.index("reset") < rec.calls.index(f"one-shot:{IMPORTER}"), rec.calls
+
+
+_ONE_LINE_THEN_SILENCE = "import time; print('Importing acore_world', flush=True); time.sleep(600)"
+
+
+def test_a_cancelled_one_shot_has_its_container_ended_as_the_stop_lands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Measured live (yulon-ubuntu, 2026-10-07): one SIGTERM to `compose up` starts a
+    graceful stop, `_end_child` kills the CLI 5 s later, and the orphaned compose kept the
+    importer and the pipe 46 s. So the run's own cancel ends the container at once.
+
+    Mutation this catches: `run_one_shot()` not handing `run_attached()` its ending.
+    """
+    from tests.conftest import HANG_BOUND
+
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    ended: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        docker,
+        "end_one_shot",
+        lambda service, server_dir, **k: ended.append((service, server_dir)),
+    )
+    cancel = threading.Event()
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        result.append(
+            docker.run_one_shot(IMPORTER, tmp_path, sink=lambda line: cancel.set(), cancel=cancel)
+        )
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t539-one-shot")
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    assert not worker.is_alive(), "the cancelled one-shot did not return"
+    assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+    assert ended == [(IMPORTER, tmp_path)], ended
