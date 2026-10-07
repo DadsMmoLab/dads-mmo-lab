@@ -95,3 +95,50 @@ def test_without_a_cancel_a_run_ended_from_its_own_thread_keeps_its_exit(
         assert result[0].returncode not in (0, docker.CANCELLED_RETURNCODE), result
     finally:
         worker.join(timeout=HANG_BOUND)
+
+
+def test_a_cancel_ends_the_attached_runs_own_cli_and_no_other_stream_of_its_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The watcher is scoped to the run, not to the thread (Codex adversarial review of T526).
+
+    A stream the same thread already holds -- suspended at a line, as an outer job's
+    stream is while it calls `run_attached()` -- is not this run's, and the run's
+    cancel must not end it. The panel's own Stop still ends everything its thread
+    started; that is `request_stop()`, not this.
+
+    Mutation this catches: the watcher ending every stream started on the thread
+    (`end_streams_started_on(ident)`) -- the outer child is then gone.
+    """
+    cancel = threading.Event()
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    outer = runner.stream([sys.executable, "-c", _ONE_LINE_THEN_SILENCE])
+    held: list[object] = []
+    result: list[docker.AttachedRun] = []
+
+    def work() -> None:
+        held.append(next(outer))  # the outer stream is live, suspended at its first line
+
+        def sink(line: str) -> None:
+            cancel.set()
+
+        result.append(docker.run_attached([], tmp_path, sink=sink, cancel=cancel))
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t526-scoped")
+    worker.start()
+    try:
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the cancelled run did not return"
+        assert result[0].returncode == docker.CANCELLED_RETURNCODE, result
+        with runner._LIVE_STREAMS_LOCK:
+            outer_child = runner._LIVE_STREAMS[outer].proc
+        assert (
+            outer_child is not None and outer_child.poll() is None
+        ), "the run's cancel ended a stream it did not start"
+    finally:
+        outer.close()
+        worker.join(timeout=HANG_BOUND)

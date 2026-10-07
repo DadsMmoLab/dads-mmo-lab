@@ -601,8 +601,31 @@ def end_streams_started_on(ident: int) -> int:
         # last reference dropped elsewhere, or a GC pass), running its `finally`
         # here. Nothing that `finally` needs may be held (cold review of T299).
         mine = [child for child in _LIVE_STREAMS.values() if child.started_on == ident]
+    ended = _end_chosen(mine)
+    if ended:
+        logger.debug(f"ending {ended} stream child(ren) started on thread {ident}")
+    return ended
+
+
+def end_stream(generator: Generator[str, None, None]) -> bool:
+    """End the child of the ONE live stream `generator`, as a Stop would (T526). True if it did.
+
+    `end_streams_started_on()` for a caller that holds its own stream and must
+    not reach any other: `docker.run_attached()`'s cancel watcher. A thread can
+    hold more than one live stream -- an outer job's, suspended at a line while
+    it runs a command -- and a run's cancel is about that run alone (Codex's
+    adversarial review). Not a Stop of the thread, so `stops_sent_to()` does not
+    count it.
+    """
+    with _LIVE_STREAMS_LOCK:
+        child = _LIVE_STREAMS.get(generator)
+    return child is not None and _end_chosen([child]) == 1
+
+
+def _end_chosen(candidates: list[_Child]) -> int:
+    """Claim each of `candidates` that is a Stop's to end, and end it off this thread. How many."""
     children = []
-    for child in mine:
+    for child in candidates:
         # Chosen and marked under the child's own lock, so `_finish` cannot
         # decide between release and close in between (Codex's fourth
         # adversarial review of T299). Marked before the end is even asked for,
@@ -639,8 +662,6 @@ def end_streams_started_on(ident: int) -> int:
                 f"could not start a thread to end pid {proc.pid} ({exc!r}); ending it here"
             )
             _stop_child_here(child)
-    if children:
-        logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
     return len(children)
 
 

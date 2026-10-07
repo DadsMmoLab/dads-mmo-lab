@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -5684,7 +5684,7 @@ def run_attached(
 
     `cancel`, when set mid-run, ends the docker CLI at once and the result
     comes back as `CANCELLED_RETURNCODE`, whether the CLI was ended by the
-    watcher (`_cli_ended_on`) or abandoned when its next line arrived. The
+    watcher (`_ended_on_cancel`) or abandoned when its next line arrived. The
     watcher is T526: the install engine runs this on its own worker thread
     (`native._pump()`), out of reach of the panel's Stop, and a build step that
     prints nothing used to keep the Stop waiting -- measured 2026-10-07, a step
@@ -5740,10 +5740,10 @@ def run_attached(
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
         with (
-            _cli_ended_on(cancel),
             closing(
                 runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
             ) as lines,
+            _ended_on_cancel(cancel, lines),
         ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
@@ -7090,27 +7090,30 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
 
 
 @contextmanager
-def _cli_ended_on(cancel: threading.Event | None) -> Iterator[None]:
-    """While inside, a set `cancel` ends the docker CLI this thread started (T303, T526).
+def _ended_on_cancel(
+    cancel: threading.Event | None, stream: Generator[str, None, None]
+) -> Iterator[None]:
+    """While inside, a set `cancel` ends the docker CLI of `stream`, and nothing else (T303, T526).
 
     `run_attached()` reads the token only when a line arrives, and a tool can be
-    silent for minutes (`vmap4assembler`), as can a build step, so a watcher
-    around `run_attached()`'s stream ends the CLI through
-    `runner.end_streams_started_on()` -- the panel's own Stop for a stream -- and
-    the read returns. It keeps ending while it watches, for a CLI started a
-    moment after the token was set. Ending the CLI does not end the container on
-    Docker Desktop; `run_container()` does that next, by its name.
+    silent for minutes (`vmap4assembler`), as can a build step, so a watcher ends
+    the CLI through `runner.end_stream()` -- the panel's own Stop, for this one
+    stream -- and the read returns. One stream and not the thread's (Codex's
+    adversarial review): a thread can hold an outer job's stream while it runs
+    this one, and a run's cancel is about the run. It keeps ending while it
+    watches, for a CLI the lazy stream starts a moment after the token was set.
+    Ending the CLI does not end the container on Docker Desktop;
+    `run_container()` does that next, by its name.
     """
     if cancel is None:
         yield
         return
-    ident = threading.get_ident()
     done = threading.Event()
 
     def watch() -> None:
         while not done.is_set():
             if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
-                runner.end_streams_started_on(ident)
+                runner.end_stream(stream)
                 done.wait(_STOP_POLL_SECONDS)
 
     watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)
