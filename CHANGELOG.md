@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Two Yu'lons sharing one server folder, as Windows and WSL or through a link, never extract map data into it at once.
 - On Windows, **Stop** ends a build's leftover helpers even when the build's own docker process had already exited.
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.

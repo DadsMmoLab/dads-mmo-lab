@@ -844,9 +844,9 @@ def test_a_folder_id_made_by_the_other_yulon_meanwhile_is_the_one_used(
     theirs = "f" * 32
     real_link = docker.os.link
 
-    def raced(src: object, dst: object) -> None:
+    def raced(src: str, dst: str) -> None:
         (tmp_path / docker.FOLDER_ID_FILE).write_text(theirs + "\n", encoding="utf-8")
-        real_link(src, dst)  # type: ignore[arg-type]
+        real_link(src, dst)
 
     monkeypatch.setattr(docker.os, "link", raced)
     assert docker.folder_id(tmp_path) == theirs
@@ -910,3 +910,17 @@ def test_an_older_yulons_path_label_still_counts_and_ours_still_carries_one(
     assert writes is not None
     assert docker.folder_label(folder) in writes.split(","), writes
     assert docker.folder_id(folder) in writes.split(","), writes
+
+
+def test_a_tool_writing_two_folders_names_neither_when_one_has_no_id(tmp_path: Path) -> None:
+    """A label naming only the folder with an id would say the tool writes there alone, and
+    a guard on the other folder would leave it out. So it names none: every guard counts it."""
+    named, missing = tmp_path / "data", tmp_path / "gone"
+    named.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image,
+        argv=SPEC.argv,
+        mounts=(docker.Mount(named, "/out"), docker.Mount(missing, "/more")),
+    )
+    assert docker.folder_id(named) is not None
+    assert _writes_label(spec) is None
