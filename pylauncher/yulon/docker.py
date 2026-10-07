@@ -7109,9 +7109,13 @@ def folder_id(folder: Path) -> str | None:
     `os.link()`, which refuses a name that is taken, so a reader sees no file or the
     whole one and two Yu'lons making it at once end with the one that won.
 
+    A filesystem with no hard links (vfat, exFAT) refuses the link; there the file is
+    made by an exclusive create instead (T543), written in place, so a reader at that
+    instant may find it empty and answer None for that one ask.
+
     None, and the caller takes the safe side, when it can be neither read nor made:
-    no folder, one that refuses the write, a filesystem with no hard links (vfat), or
-    a file that does not hold an id. Not remembered, so the next ask tries again.
+    no folder, one that refuses the write, or a file that does not hold an id. Not
+    remembered, so the next ask tries again.
 
     A folder copied by hand carries its id: a guard on the copy then counts the
     original's tool as writing into it, a refusal and never a mix. Device and inode
@@ -7128,9 +7132,10 @@ def folder_id(folder: Path) -> str | None:
         logger.info(f"could not make an id for {folder}: {exc}")
         return None
     tmp = Path(name)
+    text = f"{uuid.uuid4().hex}\n"
     try:
         with os.fdopen(fd, "w", encoding="ascii") as handle:
-            handle.write(f"{uuid.uuid4().hex}\n")
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         try:
@@ -7139,15 +7144,44 @@ def folder_id(folder: Path) -> str | None:
             os.chmod(tmp, 0o644)
         except OSError as exc:
             logger.info(f"could not make {tmp} readable to other users: {exc}")
-        os.link(tmp, target)
-    except FileExistsError:
-        pass  # another Yu'lon made it meanwhile: theirs is the id
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            pass  # another Yu'lon made it meanwhile: theirs is the id
+        except OSError as exc:
+            logger.info(f"no hard link for {target} ({exc}); creating it exclusively instead")
+            _create_folder_id(target, text)
     except OSError as exc:
         logger.info(f"could not make an id for {folder}: {exc}")
         return None
     finally:
         _drop_temp(tmp)
     return _read_folder_id(target)
+
+
+def _create_folder_id(target: Path, text: str) -> None:
+    """`folder_id()`'s publish where hard links are refused: create-if-absent, written in place.
+
+    A name another Yu'lon took meanwhile is theirs. A write that fails part-way removes
+    the file it made, so a half id is not left to read as none for ever.
+
+    Raises:
+        OSError: it could not be made.
+    """
+    try:
+        fd = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644
+        )
+    except FileExistsError:
+        return
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 def _drop_temp(tmp: Path) -> None:
@@ -7250,8 +7284,7 @@ def folder_claim(folder: Path, image: str) -> Iterator[bool]:
     Re-extract on one server folder at once, and both find no tool running yet. The
     claim is a container named by the folder's id (`folder_id()`), so every spelling
     of the folder names one claim and the daemon, which refuses a second container of
-    one name, decides which press goes ahead. A folder with no id (one that refuses
-    the file) is named by its path hash: one spelling is still one claim.
+    one name, decides which press goes ahead.
 
     It is `docker run --rm -i ... cat` with its stdin a pipe this process holds, so it
     lives exactly as long as this process: closing the pipe, or this process dying,
@@ -7263,16 +7296,20 @@ def folder_claim(folder: Path, image: str) -> Iterator[bool]:
 
     Raises:
         FolderClaimed: another press holds it.
-        ClaimUnavailable: no claim could be made (no docker, no image, a daemon that
-            refused or did not answer). The press does not go on unclaimed: the
+        ClaimUnavailable: no claim could be made (no folder id, no docker, no image, a
+            daemon that refused or did not answer); its text says what to do. The
+            press does not go on unclaimed (Codex adversarial review, twice): the
             tools need the same docker and image, so nothing is lost by stopping
             before the old map data moves (Codex adversarial review).
     """
     ident = folder_id(folder)
     if ident is None:
-        path = os.path.normcase(os.path.abspath(folder))
-        ident = "p" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
-        logger.warning(f"no id for {folder}; claiming it by its path")
+        # Not by its path (Codex adversarial review): a path names one folder twice
+        # under two spellings, the very race the claim is for.
+        raise ClaimUnavailable(
+            f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
+            "file is there, delete it; if the folder is read-only, make it writable."
+        )
     held = _take_claim(CLAIM_PREFIX + ident, image, again=True)
     try:
         yield True
@@ -7289,7 +7326,7 @@ def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
     """
     program = platform.docker_program()
     if program is None:
-        raise ClaimUnavailable("there is no docker CLI")
+        raise ClaimUnavailable("Docker's command-line tool was not found; start or install Docker.")
     nonce = uuid.uuid4().hex
     argv = [
         program,
@@ -7321,7 +7358,7 @@ def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
             creationflags=runner.creationflags(),
         )
     except OSError as exc:
-        raise ClaimUnavailable(f"docker could not be started: {exc}") from exc
+        raise ClaimUnavailable(f"Docker could not be started ({exc}); is Docker running?") from exc
     try:
         return _claim_coming_up(name, image, proc, nonce, again=again)
     except BaseException:
@@ -7350,10 +7387,13 @@ def _claim_coming_up(
             said = proc.stderr.read().decode("utf-8", "replace").strip()
             proc.stderr.close()
             if not _NAME_IN_USE.search(said):
-                raise ClaimUnavailable(said or f"docker exited {proc.returncode}")
+                said = said or f"it exited {proc.returncode}"
+                raise ClaimUnavailable(f"Docker refused it ({said}); is Docker running?")
             return _claim_in_use(name, image, again=again)
         if time.monotonic() > deadline:
-            raise ClaimUnavailable(f"it was not running after {_CLAIM_UP_TIMEOUT:.0f} s")
+            raise ClaimUnavailable(
+                f"Docker had not started it after {_CLAIM_UP_TIMEOUT:.0f} s; is Docker running?"
+            )
         time.sleep(_CLAIM_POLL_SECONDS)
 
 

@@ -2070,10 +2070,9 @@ class TrinityCoreInstaller(CmangosInstaller):
                 raise InstallerError(self._claimed_note(data_dir, claimed)) from claimed
             except docker.ClaimUnavailable as exc:
                 raise InstallerError(
-                    f"Yu'lon could not reserve {data_dir} in Docker for this extraction ({exc}), "
-                    f"so {self.entry.name}'s map data was not extracted again. Check that Docker "
-                    f"is running, then press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was "
-                    "changed."
+                    f"Yu'lon could not reserve {data_dir} for this extraction, so "
+                    f"{self.entry.name}'s map data was not extracted again. {exc} Then press "
+                    f"\u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
                 ) from exc
             yield from self._reextract_claimed(server_dir, probe, data_dir, client)
 

@@ -861,7 +861,7 @@ def test_a_folder_id_made_by_the_other_yulon_meanwhile_is_the_one_used(
     assert [p.name for p in tmp_path.iterdir()] == [docker.FOLDER_ID_FILE], "no temp file left"
 
 
-@pytest.mark.parametrize("why", ["missing", "garbage", "no-link", "read-only"])
+@pytest.mark.parametrize("why", ["missing", "garbage", "read-only"])
 def test_a_folder_without_a_readable_id_falls_back_to_the_safe_side(
     fake_docker: tuple[Path, Path],
     tmp_path: Path,
@@ -877,12 +877,6 @@ def test_a_folder_without_a_readable_id_falls_back_to_the_safe_side(
         folder.mkdir()
     if why == "garbage":
         (folder / docker.FOLDER_ID_FILE).write_text("not an id\n", encoding="utf-8")
-    if why == "no-link":
-
-        def refused(*_a: object) -> None:
-            raise PermissionError(1, "Operation not permitted")  # vfat
-
-        monkeypatch.setattr(docker.os, "link", refused)
     if why == "read-only":
         monkeypatch.setattr(docker.tempfile, "mkstemp", _read_only_mkstemp)
     assert docker.folder_id(folder) is None
@@ -970,6 +964,7 @@ def test_a_temp_file_that_will_not_go_never_escapes_the_id_question(
             raise PermissionError(1, "Operation not permitted")
 
         monkeypatch.setattr(docker.os, "link", refused)
+        monkeypatch.setattr(docker, "_create_folder_id", refused)
     found = docker.folder_id(tmp_path)
     if published:
         assert found is not None
@@ -990,3 +985,25 @@ def test_an_id_whose_mode_cannot_be_set_is_still_published(
     found = docker.folder_id(tmp_path)
     assert found is not None
     assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found
+
+
+@pytest.mark.parametrize("theirs", [False, True])
+def test_a_filesystem_with_no_hard_links_still_gets_one_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, theirs: bool
+) -> None:
+    """T543: vfat and exFAT refuse `os.link()`. The id is then made by an exclusive create,
+    and one another Yu'lon made at that moment is the one used."""
+    other = "e" * 32
+
+    def refused(*_a: object) -> None:
+        if theirs:
+            (tmp_path / docker.FOLDER_ID_FILE).write_text(other + "\n", encoding="ascii")
+        raise PermissionError(1, "Operation not permitted")  # vfat
+
+    monkeypatch.setattr(docker.os, "link", refused)
+    found = docker.folder_id(tmp_path)
+    assert found is not None and re.fullmatch(r"[0-9a-f]{32}", found), found
+    assert (found == other) is theirs
+    assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found
+    assert [p.name for p in tmp_path.iterdir()] == [docker.FOLDER_ID_FILE], "no temp file left"
+    assert docker.folder_id(tmp_path) == found

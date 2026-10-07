@@ -252,21 +252,19 @@ def test_a_claim_that_cannot_be_made_stops_the_press(
     assert not [n for n in fake_containers(fake_docker) if n.startswith(docker.CLAIM_PREFIX)]
 
 
-def test_a_folder_with_no_id_is_claimed_by_its_path(
+def test_a_folder_with_no_id_stops_the_press(
     fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Codex adversarial review, round 2: a path names one folder twice under two
+    spellings, so a folder with no id is not claimed by its path; the press stops."""
     folder = tmp_path / "data"
     folder.mkdir()
     monkeypatch.setattr(docker, "folder_id", lambda _f: None)
 
-    with docker.folder_claim(folder, IMAGE) as held:
-        assert held
-        (claim,) = [n for n in fake_containers(fake_docker) if n.startswith(docker.CLAIM_PREFIX)]
-        assert claim.startswith(docker.CLAIM_PREFIX + "p"), claim
-    with pytest.raises(docker.FolderClaimed):  # the same spelling is the same claim
+    with pytest.raises(docker.ClaimUnavailable, match=docker.FOLDER_ID_FILE):
         with docker.folder_claim(folder, IMAGE):
-            with docker.folder_claim(folder, IMAGE):
-                pass
+            pytest.fail("the press went ahead with no id to claim by")
+    assert not [c for c in fake_calls(fake_docker) if c.startswith("run ")]
 
 
 def test_two_yulons_pressing_at_once_one_goes_ahead(fake_docker: Path, tmp_path: Path) -> None:

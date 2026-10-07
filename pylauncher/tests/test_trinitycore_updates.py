@@ -3326,7 +3326,7 @@ def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
 
         said = str(refused.value)
         if case == "unavailable":
-            assert said.startswith(f"Yu'lon could not reserve {data} in Docker"), said
+            assert said.startswith(f"Yu'lon could not reserve {data} for this extraction"), said
         else:
             assert said.startswith("An earlier run of this Yu'lon left its reservation"), said
             assert said.splitlines()[-1] == f"docker rm -f {name}", said
