@@ -11,6 +11,14 @@ the commit `git ls-remote` still answered for the branch on 2026-10-02:
 * the HD packs: an HTTPS HEAD on each zip at centurionpvp.com on 2026-10-02 (Content-Length),
   the zip's own central directory (read by a range request) for its members.
 
+T500 (2026-10-06) moved the pin to 56fe34fa. None of the 14 commits after faac5fc9 touches
+`centurion/patches/`, `centurion/launcher/`, a `sql/` file or CMake, and `worldserver.conf.dist`
+only gained keys, so every value read at faac5fc9 still holds at 56fe34fa. They do change five
+files in `centurion/dbc/` (Item, ItemDisplayInfo, ItemSet, Spell, SpellShapeshiftForm), the
+folder `dbc_overlay_from` lays over the map data, so an install moved onto 56fe34fa is asked to
+"Re-extract map data". The gate was the existing `yulon-ubuntu2` install, moved onto it by the
+"Return to the tested pin…" route, then re-extracted, started and logged into again.
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -36,7 +44,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "faac5fc9b0fe0934c26f08231793ca607d38327d"
+REV = "56fe34fa8f4ad655d297e132a520b7902feb26c2"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
