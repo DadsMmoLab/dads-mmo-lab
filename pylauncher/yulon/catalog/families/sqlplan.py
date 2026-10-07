@@ -1613,6 +1613,10 @@ def _code_only(text: str) -> tuple[str, bool]:
             parts.append(f" {token[1:-1]}")
         elif token[0] in "'\"":
             parts.append(" '' ")
+        elif token[0] == "`":
+            # A quoted name is a token of its own even glued to a keyword
+            # (UPDATE`characters`.`x`), so it starts after a space here (Codex, T531).
+            parts.append(f" {token}")
         elif token.startswith(("/*!", "/*M!")):
             executable = True
             parts.append(" ")
