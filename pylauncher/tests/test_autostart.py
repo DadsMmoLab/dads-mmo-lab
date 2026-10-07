@@ -223,3 +223,20 @@ def test_an_app_id_that_cannot_be_written_is_logged_not_raised(
     reg.CreateKeyEx = refuse  # type: ignore[method-assign]
     monkeypatch.setattr(autostart, "_winreg", lambda: reg)
     assert autostart.register_app_id(platform_id="windows") is False
+
+
+def test_an_entry_for_another_copy_of_yulon_reads_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adversarial review [medium]: an entry left by a moved or second install still names a
+    file that exists, and read "on" while sign-in started that other copy."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    other = tmp_path / "old" / "Yulon-x86_64.AppImage"
+    other.parent.mkdir()
+    other.write_text("")
+    autostart.set_enabled(True, Install(InstallKind.APPIMAGE, other, "", True), platform_id="linux")
+    current = _installed(tmp_path, InstallKind.APPIMAGE)
+    assert not autostart.is_enabled(current, platform_id="linux")
+    autostart.set_enabled(True, current, platform_id="linux")
+    assert autostart.is_enabled(current, platform_id="linux")

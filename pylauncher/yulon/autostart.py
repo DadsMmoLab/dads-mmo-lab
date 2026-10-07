@@ -80,7 +80,13 @@ def why_not(install: Install | None = None, *, platform_id: str | None = None) -
 
 
 def is_enabled(install: Install | None = None, *, platform_id: str | None = None) -> bool:
-    """Whether this system will start Yu'lon at sign-in: the entry is there and names a file."""
+    """Whether this system will start THIS Yu'lon at sign-in.
+
+    The entry is there, names a file that exists, and that file is this copy's
+    own program (adversarial review: an entry left by a moved or second install
+    names a file that exists and would start that other copy). Read as off, the
+    switch offers to write it again for this copy.
+    """
     which = platform_id or platform.detect()
     try:
         if which == "windows":
@@ -92,7 +98,14 @@ def is_enabled(install: Install | None = None, *, platform_id: str | None = None
     except OSError as exc:
         logger.info(f"autostart: could not read the sign-in entry: {exc}")
         return False
-    return program is not None and program.is_file()
+    if program is None or not program.is_file():
+        return False
+    expected = launch_program(install)
+    return expected is None or _same_file(program, expected)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
 def set_enabled(
