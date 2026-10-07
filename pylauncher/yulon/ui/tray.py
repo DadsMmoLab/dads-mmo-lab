@@ -125,12 +125,21 @@ def tray_state(statuses: Sequence[str]) -> str:
 
 
 def tray_tooltip(servers: Sequence[tuple[str, str]]) -> str:
-    """ "Yu'lon: N servers online" and, one per line, which."""
+    """ "Yu'lon: N servers online", which, and any in between or needing a look, with its state.
+
+    Stopped servers are left out; a starting, stopping, partly up or looping one
+    is named with its state (yulon-win11: the amber and red icons said only "no
+    servers online").
+    """
     online = [name for name, status in servers if is_online(status)]
-    if not online:
-        return "Yu'lon: no servers online"
+    others = [
+        f"{name} — {status_words(status)}"
+        for name, status in servers
+        if not is_online(status) and realm_tone(status) not in ("down", "unknown")
+    ]
     noun = "server" if len(online) == 1 else "servers"
-    return "\n".join([f"Yu'lon: {len(online)} {noun} online", *online])
+    head = f"Yu'lon: {len(online)} {noun} online" if online else "Yu'lon: no servers online"
+    return "\n".join([head, *online, *others])
 
 
 DASHBOARD = "Bot dashboard"

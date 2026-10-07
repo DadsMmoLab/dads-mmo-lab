@@ -182,6 +182,16 @@ def test_the_tooltip_counts_and_names_the_servers_online() -> None:
     )
 
 
+def test_the_tooltip_says_which_server_is_starting_or_needs_a_look() -> None:
+    """yulon-win11: the amber and red icons read only "no servers online"."""
+    assert tray_tooltip([("WotLK", "starting"), ("TBC", "stopped")]) == (
+        "Yu'lon: no servers online\nWotLK — Starting"
+    )
+    assert tray_tooltip([("WotLK", "running"), ("TBC", "partial")]) == (
+        "Yu'lon: 1 server online\nWotLK\nTBC — Partly up"
+    )
+
+
 def test_each_state_draws_its_own_colour_on_the_icon(qapp: Any) -> None:
     from yulon.ui.theme import COLOR_DANGER, COLOR_UNCOMMON
 
