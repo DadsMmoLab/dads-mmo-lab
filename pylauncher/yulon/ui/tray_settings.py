@@ -103,10 +103,31 @@ class TraySwitches(QWidget):
         self._said_problem = ""
         if not on and self.sign_in.isChecked():
             # "Start the tray" with no tray to start in: the entry goes with it,
-            # rather than staying on behind a greyed box (normal review).
-            self.sign_in.setChecked(False)
-        self.tray.remember_keep_in_tray(on)
+            # rather than staying on behind a greyed box (normal review). Only
+            # if it really went: otherwise keep stays on (T551 adversarial).
+            try:
+                autostart.set_enabled(False)
+            except OSError as exc:
+                logger.warning(f"tray: could not turn start-at-sign-in off: {exc}")
+                self._said_problem = (
+                    f"Could not turn starting at sign-in off ({exc}), so Yu'lon stays in "
+                    "the tray."
+                )
+                self._set_quietly(self.keep, True)
+                self._settle()
+                return
+            self._set_quietly(self.sign_in, False)
+        if not self.tray.remember_keep_in_tray(on):
+            self._said_problem = (
+                "This setting could not be saved, so it lasts only until Yu'lon closes."
+            )
         self._settle()
+
+    @staticmethod
+    def _set_quietly(box: QCheckBox, on: bool) -> None:
+        box.blockSignals(True)
+        box.setChecked(on)
+        box.blockSignals(False)
 
     def _sign_in_toggled(self, on: bool) -> None:
         self._said_problem = ""

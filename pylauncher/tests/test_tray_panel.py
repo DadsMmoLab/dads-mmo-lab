@@ -247,3 +247,53 @@ def test_a_long_list_fits_a_small_screen(tray: YulonTray, window: FakeWindow) ->
     panel = _open(tray)
     assert panel.height() <= tray_flyout.FLYOUT_MAX_HEIGHT
     assert panel.height() < 800
+
+
+# ------------------------------------------------- Codex adversarial, T551
+
+
+def test_keep_off_stays_on_when_the_sign_in_entry_cannot_be_removed(
+    tray: YulonTray, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[high]: keep-in-tray went off while the sign-in entry that needs it stayed on disk."""
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: True)
+
+    def refuse(on: bool, *a: Any, **k: Any) -> None:
+        raise OSError("access denied")
+
+    monkeypatch.setattr(autostart, "set_enabled", refuse)
+    panel = _open(tray)
+    panel.switches.keep.click()
+    assert tray.keep_in_tray is True
+    assert panel.switches.keep.isChecked()
+    assert panel.switches.sign_in.isChecked()
+    assert "access denied" in panel.switches.note.text()
+
+
+def test_a_setting_that_could_not_be_saved_says_so(
+    tray: YulonTray, window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[medium]: ui.json not written, and the switch looked saved."""
+    from yulon import ui_settings
+
+    monkeypatch.setattr(ui_settings, "remember_tray", lambda **k: False)
+    panel = _open(tray)
+    panel.switches.keep.click()
+    assert "saved" in panel.switches.note.text()
+    assert not panel.switches.note.isHidden()
+
+
+def test_a_click_begun_on_one_server_never_lands_on_another(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """[medium]: rows are reused by position; a refresh between press and release turned
+    the pressed row into another server."""
+    first = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+    second = _add(window, FakeView("WotLK", "/srv/a", "stopped"))
+    panel = _open(tray)
+    row = _row(panel, "Vanilla")
+    row.action.pressed.emit()
+    window.yulon_controllers.remove(first)
+    window.servers_changed.emit()  # the row is now WotLK's
+    row.action.clicked.emit()
+    assert (first.starts, second.starts) == (0, 0), "the click landed on another server"

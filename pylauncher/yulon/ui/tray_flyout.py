@@ -214,6 +214,12 @@ class ServerCard(QFrame):
         self.action = _icon_button(self)
         row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    armed: tuple[Any, str] | None = None
+    """(server, action) as they were when the icon button was pressed."""
+
+    def arm(self) -> None:
+        self.armed = (self.view, self.which)
+
     def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
         """Fill the row; answers which button it shows (PLAY, START, OPEN or "")."""
         self.view = view
@@ -356,6 +362,7 @@ class TrayFlyout(QWidget):
         self.count.setText(count)
         while len(self._cards) < len(servers):
             card = ServerCard(self._list)
+            card.action.pressed.connect(card.arm)
             card.action.clicked.connect(lambda _c=False, c=card: self._pressed(c))
             card.dashboard.clicked.connect(lambda _c=False, c=card: self._dashboard_pressed(c))
             self._cards_box.insertWidget(len(self._cards), card)
@@ -382,7 +389,10 @@ class TrayFlyout(QWidget):
 
     def _pressed(self, card: ServerCard) -> None:
         view = card.view
-        if view is None:
+        if view is None or card.armed != (view, card.which):
+            # Rows are reused by position: a refresh between the press and the
+            # release made this row another server's (T551 adversarial). The
+            # click goes nowhere rather than to a server it was not begun on.
             return
         if card.which == PLAY:
             self.play_requested.emit(view)

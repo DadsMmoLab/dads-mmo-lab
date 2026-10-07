@@ -727,17 +727,20 @@ class YulonTray(QObject):
         dialog.raise_()
         dialog.activateWindow()
 
-    def remember_keep_in_tray(self, keep: bool) -> None:
+    def remember_keep_in_tray(self, keep: bool) -> bool:
         """The Settings switch: applied now, and kept in `ui.json` for the next start.
+
+        Answers whether `ui.json` took it (the switch says when it did not).
 
         Off with the window hidden (the panel's switch, T551): the icon goes, so
         the window comes back rather than Yu'lon running with neither.
         """
         self.set_keep_in_tray(keep)
-        ui_settings.remember_tray(keep_in_tray=keep)
+        saved = ui_settings.remember_tray(keep_in_tray=keep)
         if not keep and self.window.isHidden():
             self.hide_flyout()
             self.open_window()
+        return saved
 
     # ------------------------------------------------------------ quitting
 
