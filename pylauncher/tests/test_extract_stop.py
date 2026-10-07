@@ -783,7 +783,7 @@ def _another_yulons_tool(state: Path, name: str, writes: str | None) -> None:
 
 
 def _writes_label(spec: docker.ContainerRun) -> str | None:
-    """The `yulon.writes` value `docker create` would carry for `spec`; None without one."""
+    """The `yulon.writes-ids` value `docker create` would carry for `spec`; None without one."""
     argv = spec.to_create_argv(name="yulon-extract-0123456789ab")
     values = [
         argv[i + 1].split("=", 1)[1]
@@ -945,3 +945,46 @@ def test_a_tool_writing_two_folders_names_neither_when_one_has_no_id(tmp_path: P
     )
     assert docker.folder_id(named) is not None
     assert _writes_label(spec) is None
+
+
+@pytest.mark.parametrize("published", [True, False])
+def test_a_temp_file_that_will_not_go_never_escapes_the_id_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Cold review: on Windows a sharing violation (another Yu'lon reading) can refuse the temp
+    file's removal. That must not raise out of `folder_id()` into `docker create` or the press:
+    the id that was published is the answer, and with none the safe side's None."""
+    real_unlink = Path.unlink
+
+    def locked(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".yulon-new"):
+            raise PermissionError(13, "The process cannot access the file")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    if not published:
+
+        def refused(*_a: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(docker.os, "link", refused)
+    found = docker.folder_id(tmp_path)
+    if published:
+        assert found is not None
+        assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found
+    else:
+        assert found is None
+
+
+def test_an_id_whose_mode_cannot_be_set_is_still_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused chmod costs other users' reads at most; the id is still made and used."""
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(docker.os, "chmod", refused)
+    found = docker.folder_id(tmp_path)
+    assert found is not None
+    assert (tmp_path / docker.FOLDER_ID_FILE).read_text(encoding="ascii").strip() == found

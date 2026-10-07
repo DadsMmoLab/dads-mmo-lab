@@ -7101,7 +7101,12 @@ def folder_id(folder: Path) -> str | None:
             handle.write(f"{uuid.uuid4().hex}\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, 0o644)  # `mkstemp` makes it owner-only; another user's Yu'lon reads it
+        try:
+            # `mkstemp` makes it owner-only; another user's Yu'lon reads it. Refused, the
+            # id is still this user's to use (cold review).
+            os.chmod(tmp, 0o644)
+        except OSError as exc:
+            logger.info(f"could not make {tmp} readable to other users: {exc}")
         os.link(tmp, target)
     except FileExistsError:
         pass  # another Yu'lon made it meanwhile: theirs is the id
@@ -7109,8 +7114,21 @@ def folder_id(folder: Path) -> str | None:
         logger.info(f"could not make an id for {folder}: {exc}")
         return None
     finally:
-        tmp.unlink(missing_ok=True)
+        _drop_temp(tmp)
     return _read_folder_id(target)
+
+
+def _drop_temp(tmp: Path) -> None:
+    """Remove `folder_id()`'s temp file; a refusal is logged, never raised (cold review).
+
+    On Windows another process reading it (a sharing violation) refuses the removal,
+    and an exception here would leave `docker create` or the press with no answer at
+    all instead of the id, or None and the safe side.
+    """
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.info(f"could not remove the temporary file {tmp}: {exc}")
 
 
 def _read_folder_id(target: Path) -> str | None:
