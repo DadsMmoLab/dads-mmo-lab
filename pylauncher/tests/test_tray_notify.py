@@ -183,3 +183,25 @@ def test_making_the_icon_names_the_app_id_for_windows(
         assert asked == [1]
     finally:
         made.uninstall()
+
+
+def test_a_click_after_two_servers_said_something_opens_yulon_not_the_wrong_tab(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Adversarial review [medium]: the click carries no identity, so after A then B it
+    opened B even when the player clicked A's notification."""
+    a = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    b = _add(window, FakeView("TBC", "/srv/b", "running"))
+    window.hide()
+    a.realm_badge.set_status("loop")
+    b.realm_badge.set_status("loop")
+    assert isinstance(tray.icon, FakeTrayIcon)
+    tray.icon.messageClicked.emit()
+    assert window.shown_tabs == [], "a click opened one server's tab for two notifications"
+    assert window.isVisible()
+    # Said again for one server only: its click goes to its tab.
+    window.hide()
+    a.realm_badge.set_status("running")
+    a.realm_badge.set_status("loop")
+    tray.icon.messageClicked.emit()
+    assert window.shown_tabs == [("game-wotlk", Path("/srv/a"))]

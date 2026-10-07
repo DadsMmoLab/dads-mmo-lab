@@ -310,7 +310,8 @@ class YulonTray(QObject):
         """Each tab's realm was last settled up, not taken down by a Stop of ours."""
         self._looping: dict[int, bool] = {}
         """A crash loop was said for this tab and has not ended (up or down) since."""
-        self._notified: Any = None
+        self._notified: list[Any] = []
+        """The servers notified about since the last notification click."""
         self._quitting = False
         self._installed = False
         self._followed: list[Any] = []
@@ -543,7 +544,8 @@ class YulonTray(QObject):
         if self.icon is None or not self.keeping or self._looking():
             return
         logger.info(f"tray: notified: {title}")
-        self._notified = view
+        if all(seen is not view for seen in self._notified):
+            self._notified.append(view)
         self.icon.showMessage(title, text, QSystemTrayIcon.MessageIcon.Warning, NOTIFY_MS)
 
     def servers(self) -> list[tuple[Any, str, str]]:
@@ -875,10 +877,11 @@ class YulonTray(QObject):
     @Slot()
     def _message_clicked(self) -> None:
         """A notification was clicked: the window, on the server it was about."""
-        view = self._notified
-        self._notified = None
-        if view is not None and shiboken6.isValid(view) and view in self.views():
-            self.show_server(view)
+        # The click says nothing about WHICH notification (adversarial review):
+        # one server since the last click opens its tab, more open the window.
+        said, self._notified = self._notified, []
+        if len(said) == 1 and shiboken6.isValid(said[0]) and said[0] in self.views():
+            self.show_server(said[0])
         else:
             self.open_window()
 

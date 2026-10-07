@@ -2482,7 +2482,8 @@ def main() -> int:
     # either beside the first is the race this exists to stop. After the theme,
     # so the one box a second launch can show looks like the app.
     instance = InstanceGuard(platform.config_dir())
-    claim = instance.claim()
+    # T540: a `--tray` (sign-in) start only asks whether Yu'lon is there.
+    claim = instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
     if claim == "raised":
         return 0
     # T540: the sign-in entry (`autostart`) starts Yu'lon with `--tray`: hidden
