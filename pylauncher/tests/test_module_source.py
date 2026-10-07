@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from yulon import module_source
+from yulon import folder_swap, module_source
 from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, parse_index, parse_manifest
 from yulon.module_source import DeriveError
 
@@ -636,8 +636,9 @@ def _bytes_under(folder: Path) -> dict[str, bytes]:
 
 
 def _modules_holds_only(dest: Path) -> None:
-    """Nothing beside `modules/<id>` but what was there: no staging copy, no old copy."""
+    """Nothing beside `modules/<id>` but what was there, and no staging folder left."""
     assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+    assert not (dest.parent.parent / folder_swap.STAGING).exists()
 
 
 def test_a_copy_that_fails_half_way_leaves_the_old_copy_as_it_was(
@@ -709,9 +710,10 @@ def test_an_old_copy_a_crash_left_aside_is_put_back_when_the_next_copy_fails(
 ) -> None:
     """A crash between the two renames leaves the old copy aside and no module at the name."""
     src, dest, before = _a_copy_in_place(tmp_path)
-    aside = dest.with_name(f".{dest.name}.yulon-old")
+    aside = folder_swap.places(dest)[1]
+    aside.parent.mkdir(parents=True)
     os.rename(dest, aside)
-    partial = dest.with_name(f".{dest.name}.yulon-partial")
+    partial = folder_swap.places(dest)[0]
     (partial / "half").mkdir(parents=True)
 
     def fail(*_a: Any, **_k: Any) -> None:
@@ -729,7 +731,7 @@ def test_an_old_copy_a_crash_left_aside_is_put_back_when_the_next_copy_fails(
 def test_a_stale_old_copy_beside_a_good_module_is_cleared(tmp_path: Path) -> None:
     """A crash after the swap leaves the old copy aside AND the new one in place: old goes."""
     src, dest, _before = _a_copy_in_place(tmp_path)
-    (dest.with_name(f".{dest.name}.yulon-old") / "src").mkdir(parents=True)
+    (folder_swap.places(dest)[1] / "src").mkdir(parents=True)
 
     module_source.copy_folder(src, dest)
 
@@ -755,7 +757,7 @@ def test_a_link_met_while_copying_leaves_the_old_copy_as_it_was(
 
 def test_a_partial_copy_a_crash_left_does_not_stop_the_next_copy(tmp_path: Path) -> None:
     src, dest, _before = _a_copy_in_place(tmp_path)
-    (dest.with_name(f".{dest.name}.yulon-partial") / "half").mkdir(parents=True)
+    (folder_swap.places(dest)[0] / "half").mkdir(parents=True)
 
     module_source.copy_folder(src, dest)
 
@@ -769,7 +771,7 @@ def test_a_swap_whose_roll_back_fails_says_where_the_old_copy_is(
     """Codex adversarial review of 9d83b410: both renames failing left `modules/<id>` empty
     while the applier said "Nothing was changed". The old copy is kept aside and named."""
     src, dest, before = _a_copy_in_place(tmp_path)
-    aside = dest.with_name(f".{dest.name}.yulon-old")
+    aside = folder_swap.places(dest)[1]
     real = os.rename
 
     def refuse_into_place(old: Any, new: Any) -> None:
@@ -784,7 +786,7 @@ def test_a_swap_whose_roll_back_fails_says_where_the_old_copy_is(
 
     assert str(aside) in str(failed.value), str(failed.value)
     assert _bytes_under(aside) == before
-    assert sorted(p.name for p in dest.parent.iterdir()) == [aside.name]
+    assert list(dest.parent.iterdir()) == []
 
 
 def test_the_applier_does_not_say_nothing_changed_when_the_module_is_gone(
@@ -797,14 +799,16 @@ def test_the_applier_does_not_say_nothing_changed_when_the_module_is_gone(
     (clone / "src").mkdir(parents=True)
 
     def copier(_src: Path, dest: Path) -> None:
-        dest.rename(dest.with_name(f".{dest.name}.yulon-old"))
-        raise OSError("the earlier copy is kept as .mod-my-thing.yulon-old")
+        aside = folder_swap.places(dest)[1]
+        aside.parent.mkdir(parents=True)
+        dest.rename(aside)
+        raise OSError(f"the earlier copy is kept whole as {aside}")
 
     with pytest.raises(ApplyError) as failed:
         Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
 
     assert "Nothing was changed" not in str(failed.value)
-    assert ".mod-my-thing.yulon-old" in str(failed.value)
+    assert "mod-my-thing.old" in str(failed.value)
 
 
 def test_the_applier_says_nothing_changed_when_the_module_is_still_there(
@@ -823,3 +827,192 @@ def test_the_applier_says_nothing_changed_when_the_module_is_still_there(
         Applier(server)._copy_folder(FolderSource(tmp_path / "mod-my-thing", copier), clone, _Log())
 
     assert str(failed.value).endswith("Nothing was changed.")
+
+
+# -- T538 cold review: a stopped swap is settled before the install reads the claim --
+
+
+def _folder_module(tmp_path: Path) -> tuple[Any, Any, Path, Path, Path]:
+    """A sourceless module with a client patch, its folder, the applier, the server, the client."""
+    from yulon.apply import Applier
+
+    manifest = parse_manifest(
+        {
+            "id": "mod-my-thing",
+            "name": "My thing",
+            "type": "module",
+            "game": "wow-wotlk",
+            "client": [{"src": "client-data", "dest": "data"}],
+            "origin": {
+                "kind": "folder",
+                "path": str(tmp_path / "mod-my-thing"),
+                "added": "2026-10-07",
+            },
+        }
+    )
+    folder = tmp_path / "mod-my-thing"
+    (folder / "src").mkdir(parents=True)
+    (folder / "src" / "a.cpp").write_text("// a\n", encoding="utf-8")
+    (folder / "client-data").mkdir()
+    (folder / "client-data" / "Patch-Z.MPQ").write_bytes(b"the module's patch")
+    server = tmp_path / "server"
+    server.mkdir()
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    return manifest, Applier(server, client_dir=client), folder, server, client
+
+
+def _stop_a_swap(monkeypatch: pytest.MonkeyPatch, applier: Any, manifest: Any, source: Any) -> None:
+    """Install again with the new copy AND the roll-back refused: the old copy is left aside."""
+    from yulon.apply import ApplyError
+
+    dest = applier.clone_dir(manifest)
+    real = os.rename
+
+    def refuse_into_place(old: Any, new: Any) -> None:
+        if Path(new) == dest:
+            raise PermissionError(13, "Access is denied", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(os, "rename", refuse_into_place)
+    with pytest.raises(ApplyError):
+        applier.install(manifest, folder=source)
+    monkeypatch.setattr(os, "rename", real)
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("player_had_one", [False, True], ids=["new patch", "player's patch"])
+def test_an_install_after_a_stopped_swap_keeps_the_receipts_so_remove_takes_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, player_had_one: bool
+) -> None:
+    """Cold review MUST 1, through `install()`: the swap stopped with the old copy aside
+    and nothing at `modules/<id>`; the next Install reads the claim only after the stopped
+    swap is settled, so its receipts are there, and Remove takes back what Yu'lon put in."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    patch = client / "Data" / "Patch-Z.MPQ"
+    if player_had_one:
+        patch.write_bytes(b"the player's own patch")
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+
+    applier.install(manifest, folder=source)
+    applier.remove(manifest)
+
+    left = {p.name: p.read_bytes() for p in (client / "Data").iterdir()}
+    assert left == ({"Patch-Z.MPQ": b"the player's own patch"} if player_had_one else {})
+
+
+@pytest.mark.parametrize("player_had_one", [False, True], ids=["new patch", "player's patch"])
+def test_a_remove_after_a_stopped_swap_takes_back_the_client_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, player_had_one: bool
+) -> None:
+    """The same stopped swap, then Remove: the module row reads not installed, so this is
+    the press that finds it. Before, Remove saw no checkout, so no receipts: the patch
+    stayed in the client, and the old copy stayed in the server folder."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    patch = client / "Data" / "Patch-Z.MPQ"
+    if player_had_one:
+        patch.write_bytes(b"the player's own patch")
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+
+    applier.remove(manifest)
+
+    left = {p.name: p.read_bytes() for p in (client / "Data").iterdir()}
+    assert left == ({"Patch-Z.MPQ": b"the player's own patch"} if player_had_one else {})
+    assert [p.name for p in server.rglob("*mod-my-thing*")] == []
+
+
+@pytest.fixture(autouse=True)
+def _no_wait_between_renames(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    waited: list[float] = []
+    monkeypatch.setattr(folder_swap, "_sleep", waited.append)
+    return waited
+
+
+def test_the_copy_is_made_outside_the_modules_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review SHOULD 2: the build takes every folder in `modules/`, dot-names too
+    (AzerothCore's `GetModuleSourceList()`: `file(GLOB … "${BASE_PATH}/*")`, measured with
+    CMake 3.28), so a copy being made, or an old copy left by a failed delete, must not
+    be there."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    real = module_source.shutil.copytree
+    made_in: list[Path] = []
+
+    def record(*args: Any, **kwargs: Any) -> Any:
+        if not made_in:  # the whole copy; `shutil`'s own recursion comes here too
+            made_in.append(Path(args[1]))
+            assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module_source.shutil, "copytree", record)
+    module_source.copy_folder(src, dest)
+
+    assert not made_in[0].is_relative_to(dest.parent)
+    assert made_in[0].parent.parent == dest.parent.parent
+
+
+def test_an_old_copy_that_will_not_delete_is_left_outside_the_modules_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+
+    def locked(path: Any) -> None:
+        raise PermissionError(13, "a file in it is open", str(path))
+
+    monkeypatch.setattr(folder_swap.rmtree, "remove_tree", locked)
+    module_source.copy_folder(src, dest)
+
+    assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+
+
+def test_a_rename_refused_for_a_moment_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _no_wait_between_renames: list[float]
+) -> None:
+    """Cold review SHOULD 3: on Windows an antivirus scan holds a new file for a moment."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    real = os.rename
+    refused = [2]
+
+    def busy(old: Any, new: Any) -> None:
+        if Path(new) == dest and refused[0]:
+            refused[0] -= 1
+            raise PermissionError(32, "being used by another process", str(new))
+        real(old, new)
+
+    monkeypatch.setattr(os, "rename", busy)
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    assert len(_no_wait_between_renames) == 2
+    _modules_holds_only(dest)
+
+
+def test_an_install_after_a_stopped_swap_carries_the_old_receipts_forward(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review MUST 1, where it bites: the new version of the folder no longer ships
+    a patch the old one put into the client. Its receipt is only in the old claim, which
+    the install must read after the stopped swap is settled, or Remove leaves it behind."""
+    from yulon.apply import FolderSource
+
+    manifest, applier, folder, server, client = _folder_module(tmp_path)
+    source = FolderSource(folder, module_source.copy_folder)
+    applier.install(manifest, folder=source)
+    _stop_a_swap(monkeypatch, applier, manifest, source)
+    (folder / "client-data" / "Patch-Z.MPQ").unlink()
+    (folder / "client-data" / "Patch-Y.MPQ").write_bytes(b"the new version's patch")
+
+    applier.install(manifest, folder=source)
+    applier.remove(manifest)
+
+    assert sorted(p.name for p in (client / "Data").iterdir()) == []

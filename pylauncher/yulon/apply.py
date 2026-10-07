@@ -42,6 +42,7 @@ from typing import IO, Any, Literal, Protocol
 from yulon import (
     client_names,
     docker,
+    folder_swap,
     links,
     module_answers,
     platform,
@@ -3135,6 +3136,7 @@ class Applier:
         if missing:
             raise ApplyRefusal(missing)
         clone = self.clone_dir(manifest)
+        self._settle_a_stopped_swap(clone)
         # Whether a claim of OURS is at `clone`, so the completion mark at the
         # end knows whether there is a record to update. False for the two
         # routes that write no claim (a sourceless manifest, a claim whose write
@@ -3872,6 +3874,7 @@ class Applier:
         log = _Log()
         self._check_values(manifest, "remove", vals, log)
         clone = self.clone_dir(manifest)
+        self._settle_a_stopped_swap(clone)
         if clone.exists():
             # Before the SQL, not next to the `rmtree` below: a refusal must
             # leave the install exactly as it was, and remove-time SQL is not
@@ -3912,6 +3915,25 @@ class Applier:
         return self._report("remove", manifest, log)
 
     # -- filling the clone from somewhere that is not git ------------------
+
+    def _settle_a_stopped_swap(self, clone: Path) -> None:
+        """Put back a module copy a stopped "Install from folder" left aside (T538 cold review).
+
+        Before anything reads `clone`'s claim: read from an empty `modules/<id>`, it
+        has no receipts, so an Install would rewrite the claim without them and a
+        Remove would leave in the player's client every file the module put there.
+
+        Raises:
+            ApplyError: the old copy could not be put back; it is still aside, whole.
+        """
+        try:
+            folder_swap.settle(clone)
+        except OSError as exc:
+            raise ApplyError(
+                f"{_rel(self.server_dir, clone)} was left aside by a copy that stopped, and "
+                f"could not be put back ({exc}). It is kept whole in "
+                f"{_rel(self.server_dir, folder_swap.places(clone)[1])}. Nothing else was changed."
+            ) from exc
 
     def _copy_folder(self, folder: FolderSource, clone: Path, log: _Log) -> None:
         """Run the copier, and refuse anything short of a folder at the clone path.

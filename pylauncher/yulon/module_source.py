@@ -43,7 +43,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
-from yulon import links, rmtree
+from yulon import folder_swap, links
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -524,16 +524,12 @@ def copy_folder(src: Path, dest: Path) -> None:
     before the old copy is removed; the copy stops at a link it meets as the belt.
     The chosen folder itself may be a link: that is where the player keeps it.
 
-    **The old copy stays until the new one is whole** (T538). The copy goes into
-    `.<id>.yulon-partial` beside the target and is swapped in by two renames: the
-    old copy to `.<id>.yulon-old`, the new one to `<id>`; then the old one is
-    deleted. A copy that fails (a full disk, an unreadable file, the link belt)
-    removes the partial copy and leaves the old one as it was, and a second rename
-    that fails puts the old one back, so `Applier._copy_folder()`'s "Nothing was
-    changed" is true. Both names start with a dot, which `docker.clone_names()`
-    never lists as a module. A crash between the renames leaves the old copy
-    aside and nothing at `<id>`: the next copy puts it back before it starts, and
-    one aside beside a module that is there is a finished swap's, and is deleted.
+    **The old copy stays until the new one is whole** (T538, `folder_swap`). The
+    copy is made in `<server>/.yulon-module-staging/` and swapped in by two
+    renames, the old copy aside first; a copy that fails is removed and the old
+    one is untouched, and a rename into place that fails puts the old one back,
+    so `Applier._copy_folder()`'s "Nothing was changed" is true. The staging
+    folder is outside `modules/`, which the build globs, dot-names included.
     """
     modules_dir = dest.parent
     if _is_within(src, modules_dir):
@@ -544,64 +540,17 @@ def copy_folder(src: Path, dest: Path) -> None:
     link = _first_link(src)
     if link is not None:
         raise DeriveError(_link_refusal(link))
-    partial = dest.with_name(f".{dest.name}{_PARTIAL_SUFFIX}")
-    aside = dest.with_name(f".{dest.name}{_ASIDE_SUFFIX}")
-    _settle_an_earlier_swap(dest, partial, aside)
+    partial, _aside = folder_swap.places(dest)
+    folder_swap.settle(dest)
+    partial.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copytree(src, partial, ignore=_git_and_links)
     except BaseException:
-        _remove_quietly(partial)
+        folder_swap.remove_quietly(partial)
+        folder_swap.tidy(partial.parent)
         raise
-    had_one = os.path.lexists(dest)
-    try:
-        if had_one:
-            os.rename(dest, aside)
-        os.rename(partial, dest)
-    except BaseException as failure:
-        if had_one and not os.path.lexists(dest) and os.path.lexists(aside):
-            try:
-                os.rename(aside, dest)
-            except OSError as stuck:
-                _remove_quietly(partial)
-                raise OSError(
-                    f"the new copy could not take the place of {dest} ({failure}), and the "
-                    f"earlier copy could not be put back ({stuck}): it is kept whole as {aside}, "
-                    f"and the next copy of this folder puts it back first"
-                ) from failure
-        _remove_quietly(partial)
-        raise
-    if had_one:
-        _remove_quietly(aside)  # T49: the old copy may hold a read-only .git
+    folder_swap.swap_in(partial, dest)
     logger.info(f"copied {src} → {dest}")
-
-
-_PARTIAL_SUFFIX = ".yulon-partial"
-_ASIDE_SUFFIX = ".yulon-old"
-
-
-def _settle_an_earlier_swap(dest: Path, partial: Path, aside: Path) -> None:
-    """Undo what a crashed `copy_folder()` left beside `dest`, before a new copy starts (T538).
-
-    A partial copy is deleted. An old copy set aside with nothing at `dest` is a
-    swap stopped between its two renames, and is put back; one beside a `dest`
-    that is there is a swap that finished, and is deleted.
-    """
-    _remove_quietly(partial)
-    if os.path.lexists(aside):
-        if os.path.lexists(dest):
-            rmtree.remove_tree(aside)
-        else:
-            os.rename(aside, dest)
-
-
-def _remove_quietly(folder: Path) -> None:
-    """Delete `folder` if it is there; a failure is logged, and the next copy tries again."""
-    if not os.path.lexists(folder):
-        return
-    try:
-        rmtree.remove_tree(folder)
-    except OSError as exc:
-        logger.warning(f"could not remove {folder}; the next copy of this module removes it: {exc}")
 
 
 def _first_link(src: Path) -> Path | None:
