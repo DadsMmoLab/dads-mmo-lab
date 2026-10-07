@@ -19,6 +19,11 @@ folder `dbc_overlay_from` lays over the map data, so an install moved onto 56fe3
 "Re-extract map data". The gate was the existing `yulon-ubuntu2` install, moved onto it by the
 "Return to the tested pin…" route, then re-extracted, started and logged into again.
 
+T524 (2026-10-07) moved the pin to 6c6472c3, one commit after 56fe34fa: Battleground.cpp,
+PathGenerator.cpp/.h and MoveSplineInit.cpp. No conf, SQL, CMake, dbc, World.cpp or
+World.h change, so every reading above still holds; the `World.cpp` lines cited in
+this file and in the catalog were re-read at 6c6472c3 on that date.
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -44,7 +49,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "56fe34fa8f4ad655d297e132a520b7902feb26c2"
+REV = "6c6472c3b6aeb89169d7d49c45af7f7eab326743"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
@@ -93,7 +98,8 @@ def test_ports_databases_and_the_realm_row() -> None:
 def test_the_world_is_ready_when_it_says_so_after_its_network_is_up() -> None:
     """`(worldserver-daemon) ready...` (worldserver/Main.cpp:446) is printed after the SOAP
     thread, the world socket and the realm's online flag (:383-425); `World initialized`
-    (World.cpp:2480) comes before all three. The fatal line is World.cpp:1821, whole."""
+    (World.cpp:2492 at 6c6472c3, read 2026-10-07) comes before all three. The fatal line is
+    World.cpp:1833, whole."""
     assert NATIVE.ready.world == "(worldserver-daemon) ready..."
     assert NATIVE.ready.regex is False
     assert NATIVE.ready.fatal == "Unable to load critical files - server shutting down !!!"
