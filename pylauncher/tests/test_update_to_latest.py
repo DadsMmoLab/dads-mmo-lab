@@ -1899,11 +1899,12 @@ def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
     assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
-    # T531: TBC asks only about the folders its `report` phases read -- the bots'
-    # world SQL in the moved bots checkout, and Instances/ACID in tbc-db's move.
+    # T531/T533: TBC asks git only about the core's update chain in the moved core
+    # checkout (T533 refuses a move that adds to it) and about Instances/ACID in
+    # tbc-db's move; the bots' world SQL is told apart by its bytes, not by git (T534).
     asked = [call for call in rec.calls if call.startswith("changed-")]
     assert asked == [
-        f"changed-files:Bots:{OLD[:7]}..{NEW[:7]}",
+        f"changed-files:mangos-tbc:{OLD[:7]}..{NEW[:7]}",
         f"changed-files:tbc-db:{OLD[:7]}..{TBC_DB_PIN[:7]}",
     ], asked
     assert rec.calls.index("stop_servers") < rec.calls.index("recreate")

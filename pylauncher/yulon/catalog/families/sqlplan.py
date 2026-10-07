@@ -1686,6 +1686,99 @@ def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[st
     return found
 
 
+_TOKENS = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'"
+    r'|"(?:[^"\\]|\\.)*"'
+    r"|`[^`]*`"
+    r"|--[^\n]*|#[^\n]*"
+    r"|/\*![0-9]*|\*/"
+    r"|/\*.*?\*/"
+    r"|;"
+    r"|[^'\"`;#/*-]+"
+    r"|.",
+    re.S,
+)
+_TABLE = r"`?(?:\w+`?\.`?)?(\w+)`?"
+
+
+def _statements(text: str) -> Iterator[str]:
+    """Each statement's text with comments and string bodies gone; quote-aware. An
+    executable comment (`/*!40101 … */`) is read as the SQL MySQL runs from it."""
+    parts: list[str] = []
+    for match in _TOKENS.finditer(text):
+        token = match.group(0)
+        if token == ";":
+            yield "".join(parts).strip()
+            parts = []
+        elif token.startswith("/*!") or token == "*/":
+            # An executable comment's body IS SQL the server runs: kept, markers dropped.
+            parts.append(" ")
+        elif token.startswith(("--", "#", "/*")):
+            parts.append(" ")
+        elif token[0] in "'\"":
+            parts.append("''")
+        else:
+            parts.append(token)
+    tail = "".join(parts).strip()
+    if tail:
+        yield tail
+
+
+def whole_table_problem(path: Path) -> str | None:
+    """Why re-running this file whole could leave something a single run would not; None if
+    it cannot (T534).
+
+    Whole-table means: every table the file INSERTs into or UPDATEs is dropped
+    (`DROP TABLE IF EXISTS`) or emptied (`DELETE FROM t` / `TRUNCATE t`, no WHERE)
+    earlier in the same file. `REPLACE`/`INSERT IGNORE`, `CREATE TABLE`/`INDEX`,
+    `DELETE … WHERE`, `SET`, `SELECT`, `LOCK`/`UNLOCK TABLES` and mysqldump's
+    `ALTER TABLE … DISABLE/ENABLE KEYS` are idempotent as statements; an executable
+    comment's body is read as the statement it is. Anything else (`ALTER`, `RENAME`,
+    `USE`, a procedure) is a reason.
+    Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
+    world/classic file passes.
+    """
+    emptied: set[str] = set()
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        if not raw:
+            continue
+        sql = " ".join(raw.split())
+        head = sql.upper()
+        if head.startswith(
+            (
+                "SET ",
+                "SELECT ",
+                "CREATE INDEX",
+                "CREATE UNIQUE INDEX",
+                "LOCK TABLES",
+                "UNLOCK TABLES",
+            )
+        ):
+            continue
+        if re.fullmatch(rf"(?i)ALTER TABLE {_TABLE} (DISABLE|ENABLE) KEYS", sql):
+            continue
+        if head.startswith("CREATE TABLE"):
+            continue
+        match = re.match(rf"(?i)DROP TABLE IF EXISTS {_TABLE}", sql)
+        if match:
+            emptied.add(match.group(1).lower())
+            continue
+        match = re.match(rf"(?i)(?:DELETE FROM|TRUNCATE(?: TABLE)?) {_TABLE}(.*)$", sql)
+        if match:
+            if "WHERE" not in match.group(2).upper():
+                emptied.add(match.group(1).lower())
+            continue
+        if re.match(r"(?i)(REPLACE INTO|INSERT IGNORE INTO) ", sql):
+            continue
+        match = re.match(rf"(?i)(?:INSERT INTO|UPDATE) {_TABLE}", sql)
+        if match:
+            if match.group(1).lower() not in emptied:
+                return f"it writes {match.group(1)} without emptying it first"
+            continue
+        return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+    return None
+
+
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:
     """`seeded` rows for every file of a phase the ledger holds NO row of, in run order. Pure
     but for reading each file's bytes.

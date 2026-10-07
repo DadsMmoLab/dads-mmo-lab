@@ -430,12 +430,62 @@ class CmangosInstaller(StagedInstaller):
             if behind:
                 self._refuse_unless_updatable(server_dir, behind)
         for source, dest, old in moved:
+            refusing = catch_up.refusing(source)
+            if refusing:
+                self._refuse_new_chain_files(refusing, source, dest, old, to_pin=to_pin)
             reports = catch_up.reporting(source)
             if reports:
                 yield from self._name_what_moved(
                     reports, source, dest, old, self._seams.head_sha(dest)
                 )
         return catch_up
+
+    def _refuse_new_chain_files(
+        self,
+        phases: Sequence[SqlPhase],
+        source: EmulatorSource,
+        dest: Path,
+        old: str,
+        *,
+        to_pin: bool,
+    ) -> None:
+        """Refuse a move that ADDS a file to a `refuse_new` phase -- the core's update chain (T533).
+
+        Those files are the core's database migrations, for the characters, accounts
+        and logs as well as the world; a new core refuses a database that has not had
+        them, and a rollback after applying them would leave the old core refusing it
+        instead. So the press stops here, before anything is built, and every moved
+        source goes back (the lead's call (d), 2026-10-07). Fail-closed: git that
+        cannot say what changed refuses too.
+        """
+        new = self._seams.head_sha(dest)
+        if new is None or new == old:
+            return
+        prefix = f"{source.dest.rstrip('/')}/"
+        globs = [g[len(prefix) :] for phase in phases for g in _globs(phase)]
+        folders = sorted({posixpath.dirname(g) for g in globs})
+        pairs = self._seams.changed_files(dest, old, new, folders)
+        where = "the commit this Yu'lon was tested with" if to_pin else "upstream's newest code"
+        if pairs is None:
+            raise InstallerError(
+                f"Yu'lon could not read whether {where} in {source.repo} adds database updates "
+                "that this server would need, so it did not build it. Nothing was changed."
+            )
+        added = [
+            path
+            for status, path in pairs
+            if status.startswith("A") and any(_glob_names(g, path) for g in globs)
+        ]
+        if added:
+            shown = ", ".join(posixpath.basename(p) for p in added[:3])
+            more = f" and {len(added) - 3} more" if len(added) > 3 else ""
+            raise InstallerError(
+                f"{where[0].upper()}{where[1:]} in {source.repo} adds {len(added)} database "
+                f"update(s) for your characters, accounts or world ({shown}{more}), and Yu'lon "
+                "cannot yet apply those to a server that already exists. Nothing was built or "
+                "changed: your server stays on the code it runs. A fresh install of this server "
+                "gets them."
+            )
 
     def _world_catch_up_plan(self) -> _WorldCatchUp:
         """Each `on_update` phase with the source whose checkout holds its files.
@@ -450,7 +500,7 @@ class CmangosInstaller(StagedInstaller):
         for phase in self._data().sql.phases:
             if phase.on_update == "leave":
                 continue
-            owners = [_owner_of(glob, sources) for glob in phase.files]
+            owners = [_owner_of(glob, sources) for glob in _globs(phase)]
             owner = owners[0] if owners and all(o is owners[0] for o in owners) else None
             why = ""
             if owner is None:
@@ -460,7 +510,10 @@ class CmangosInstaller(StagedInstaller):
                     f"{owner.repo} is not a database repository, so what an existing server "
                     "already has of it cannot be known"
                 )
-            elif phase.on_update == "apply_new" and phase.into != self.entry.databases.world:
+            elif (
+                phase.on_update in ("apply_new", "replace_changed")
+                and phase.into != self.entry.databases.world
+            ):
                 why = f"it writes {phase.into}, and only the world database is updated this way"
             elif phase.on_update == "apply_new" and not owner.rev:
                 why = f"{owner.repo} has no tested commit to move to"
@@ -485,7 +538,7 @@ class CmangosInstaller(StagedInstaller):
         if new is None or new == old:
             return
         prefix = f"{source.dest.rstrip('/')}/"
-        globs = {phase.name: [g[len(prefix) :] for g in phase.files] for phase in phases}
+        globs = {phase.name: [g[len(prefix) :] for g in _globs(phase)] for phase in phases}
         folders = sorted({posixpath.dirname(g) for found in globs.values() for g in found})
         pairs = self._seams.changed_files(dest, old, new, folders)
         if pairs is None:
@@ -521,7 +574,9 @@ class CmangosInstaller(StagedInstaller):
         press applies only what is still missing. `finishes_start_refusal` is False:
         this work clears nothing that refuses a start.
         """
-        if not isinstance(changes, _WorldCatchUp) or not changes.applying():
+        if not isinstance(changes, _WorldCatchUp) or not (
+            changes.applying() or changes.replacing()
+        ):
             return None
         catch_up = changes
         applied: list[int] = [0]
@@ -610,6 +665,29 @@ class CmangosInstaller(StagedInstaller):
                 f"Yu'lon could not read which world updates {world} already has ({exc}), so "
                 "none was applied: guessing could apply one twice."
             ) from exc
+        if catch_up.applying():
+            yield from self._bring_new_world_files(ctx, catch_up, ledger, applied)
+        if catch_up.replacing():
+            yield from self._replace_changed_files(ctx, catch_up, ledger)
+
+    def _bring_new_world_files(
+        self,
+        ctx: StageContext,
+        catch_up: _WorldCatchUp,
+        ledger: dict[tuple[str, str], sqlplan.FileRow],
+        applied: list[int],
+    ) -> Iterator[str]:
+        """Seed, move each `*-db` checkout to its pin, then apply each new file once (T531)."""
+        world = self.entry.databases.world
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        held = catch_up.held()
+
+        def record(rows: Sequence[sqlplan.FileRow]) -> None:
+            self._record_world_files(ctx, rows)
+
         sub = plan.model_copy(update={"phases": catch_up.applying()})
         seeds = sqlplan.seed_rows(self._expand(sub, ctx.server_dir, {}), ledger)
         if seeds:
@@ -688,12 +766,7 @@ class CmangosInstaller(StagedInstaller):
             f"Applying {len(owed.new)} new world update(s) to {world} while the servers are "
             "stopped, each once, in order, before the new build starts."
         )
-        others = {
-            name
-            for name in (self.entry.databases.auth, self.entry.databases.characters)
-            + tuple(self.entry.databases.extra)
-            if name != world
-        }
+        others = self._other_schemas()
         for number, run in enumerate(owed.new):
             self._check_cancel(ctx.cancel)
             assert run.path is not None
@@ -740,6 +813,90 @@ class CmangosInstaller(StagedInstaller):
             f"{applied[0]} new world update(s) applied to {world}, in order; each is recorded, "
             "so none is applied again."
         )
+
+    def _replace_changed_files(
+        self,
+        ctx: StageContext,
+        catch_up: _WorldCatchUp,
+        ledger: dict[tuple[str, str], sqlplan.FileRow],
+    ) -> Iterator[str]:
+        """Each `replace_changed` file whose bytes the ledger lacks, run again whole (T534).
+
+        The bots' world SQL: whole-table files (every table they write is dropped or
+        emptied first), so running one again leaves what a fresh install leaves --
+        and replaces whatever the bots generated into that table since (travel
+        routes, zone levels, named locations, help texts), on the lead's word of
+        2026-10-07. A file of another shape (`sqlplan.whole_table_problem()`) or one
+        that names another schema is named and not run. Failures are named and do
+        not stop the others: each file is its own table. The ledger row is the
+        file's sha256, so it runs again only when upstream changes it.
+        """
+        world = self.entry.databases.world
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        sub = plan.model_copy(update={"phases": catch_up.replacing()})
+        others = self._other_schemas()
+        due: list[tuple[sqlplan.PhaseRun, str]] = []
+        for run in self._expand(sub, ctx.server_dir, {}):
+            if run.path is None:
+                continue
+            sha = sqlplan.file_digest(run.path)
+            row = ledger.get((run.phase.name, run.rel))
+            if row is None or row.sha256 != sha:
+                due.append((run, sha))
+        if not due:
+            return
+        yield (
+            f"Loading {len(due)} changed bot table file(s) into {world} fresh while the servers "
+            "are stopped; what the bots generated into those tables is replaced by the files."
+        )
+        loaded = 0
+        for run, sha in due:
+            self._check_cancel(ctx.cancel)
+            assert run.path is not None
+            why = sqlplan.whole_table_problem(run.path)
+            reaches = sqlplan.foreign_schemas(run.path, others)
+            if why or reaches:
+                said = why or f"it reaches outside {world} ({', '.join(reaches)})"
+                yield (
+                    f"{run.rel} was not loaded: {said}, so running it again could leave "
+                    "something a fresh install would not. A fresh install of the server loads it."
+                )
+                continue
+            self._record_world_files(
+                ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),)
+            )
+            refused: list[sqlplan.PhaseRun] = []
+            yield from self._stream(
+                _apply_one(
+                    run,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    exec_stdin=self._seams.exec_stdin,
+                    refused=refused,
+                ),
+                cancel=None,
+                stage="world-updates",
+            )
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
+            if refused:
+                yield (
+                    f"The database refused {run.rel}; that bot table is as the file left it. "
+                    "The next update loads it again only if the file changes; a fresh install "
+                    "loads it."
+                )
+                continue
+            loaded += 1
+        yield f"{loaded} of {len(due)} changed bot table file(s) loaded."
+
+    def _other_schemas(self) -> set[str]:
+        """Every schema of this server that is not its world: what an update may never name."""
+        names = self.entry.databases
+        return {n for n in (names.auth, names.characters, *names.extra) if n != names.world}
 
     def _say_so(self, rel: str) -> str:
         """What a player can do about a world update Yu'lon will not run again on its own word.
@@ -3110,6 +3267,18 @@ class _WorldCatchUp:
             if owner.dest == source.dest and phase.on_update == "report"
         )
 
+    def replacing(self) -> tuple[SqlPhase, ...]:
+        """The `replace_changed` phases, in plan order (T534)."""
+        return tuple(phase for phase, _owner in self.phases if phase.on_update == "replace_changed")
+
+    def refusing(self, source: EmulatorSource) -> tuple[SqlPhase, ...]:
+        """The `refuse_new` phases whose files live in `source`'s checkout (T533)."""
+        return tuple(
+            phase
+            for phase, owner in self.phases
+            if owner.dest == source.dest and phase.on_update == "refuse_new"
+        )
+
     def held(self) -> tuple[EmulatorSource, ...]:
         """The `*-db` sources holding any of these phases' files, once each, in catalog order."""
         found: dict[str, EmulatorSource] = {}
@@ -3146,6 +3315,11 @@ def _apply_one(
         )
 
     return call
+
+
+def _globs(phase: SqlPhase) -> tuple[str, ...]:
+    """Every glob a phase reads, `into_each`'s included."""
+    return (*phase.files, *(phase.into_each or {}).values())
 
 
 def _owner_of(glob: str, sources: Sequence[EmulatorSource]) -> EmulatorSource | None:

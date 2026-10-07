@@ -130,7 +130,8 @@ def test_the_shipped_tbc_and_vanilla_plans_bring_new_content_updates_and_name_th
         "content updates": "apply_new",
         "instance updates": "report",
         "ACID": "report",
-        "playerbots world": "report",
+        "core updates": "refuse_new",
+        "playerbots world": "replace_changed",
     }, said
 
 
@@ -555,15 +556,6 @@ def test_a_rolled_back_update_keeps_what_went_in_and_the_next_press_does_not_rep
     rec.sql_calls.clear()
     _press(rec, server_dir, db, world)
     assert _sent(rec, U3) == 0
-
-
-def test_a_change_to_the_bots_world_sql_is_named_and_never_applied(tmp_path: Path) -> None:
-    rec, server_dir, db, world = _installed(tmp_path)
-    bots = server_dir / BOTS.dest
-    rec.diffs[(bots, OLD, NEW)] = (("M", "sql/world/tbc/ai_playerbot_enchants.sql"),)
-    lines = _press(rec, server_dir, db, world)
-    assert any("ai_playerbot_enchants.sql" in line for line in lines), lines
-    assert not any("ai_playerbot_enchants" in call for call in rec.sql_calls)
 
 
 def _with_on_update(phase_name: str, **fields: object) -> CatalogEntry:
