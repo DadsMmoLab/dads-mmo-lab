@@ -351,3 +351,87 @@ def test_a_cancel_set_after_the_last_line_still_ends_what_the_run_made(
     run = docker.run_one_shot(IMPORTER, tmp_path, sink=last_line, cancel=cancel)
     assert run.returncode == 0, run
     assert ended == [IMPORTER], ended
+
+
+@pytest.mark.parametrize("reading", [ABSENT, IMPORTED], ids=["absent", "imported"])
+def test_a_leftover_importer_is_ended_before_the_databases_are_read(
+    tmp_path: Path, reading: docker.ImportState
+) -> None:
+    """Cold review of 9bc9da0a (MUST): the guard ran after the probe, so the stage acted on a
+    reading a live importer was still changing. `absent` then imported over the tables it
+    had made with no reset -- IMPORT_CANCEL_NOTE's "permanently unimportable" case -- and
+    `imported` returned before the guard, the importer writing on as the world started.
+
+    Mutation this catches: `end_one_shot()` asked after `gate.probe()`.
+    """
+    rec = Recorder(probe_answers=[reading, IMPORTED])
+    order: list[str] = []
+    real_probe = rec.probe
+
+    def probe() -> docker.ImportState:
+        order.append("probe")
+        return real_probe()
+
+    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        order.append("end-one-shot")
+        return None
+
+    made = engine(rec, end_one_shot=end_one_shot)
+    made._probe = probe  # type: ignore[attr-defined]
+    list(made.run(InstallOptions(server_dir=tmp_path / "s")))
+    assert "end-one-shot" in order and "probe" in order, order
+    assert order.index("end-one-shot") < order.index("probe"), order
+
+
+def test_a_held_claim_does_not_end_the_one_shot_before_its_cli_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cold review of 9bc9da0a: a claim made while the CLI is being started is held (T546)
+    and reads as claimed; the container the CLI is about to make does not exist yet, so
+    the run's ending waits until the CLI has started.
+
+    Mutation this catches: the watcher running `on_cancel` on a held claim.
+    """
+    from tests.conftest import HANG_BOUND
+
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", _ONE_LINE_THEN_SILENCE),
+    )
+    order: list[str] = []
+    claimed_held = threading.Event()
+    real_end_stream = docker.runner.end_stream
+
+    def end_stream(stream: object) -> bool:
+        claimed = real_end_stream(stream)  # type: ignore[arg-type]
+        started = docker.runner.stream_started(stream)  # type: ignore[arg-type]
+        order.append(f"claim:{claimed}:started:{started}")
+        if claimed and not started:
+            claimed_held.set()
+        return claimed
+
+    monkeypatch.setattr(docker.runner, "end_stream", end_stream)
+    monkeypatch.setattr(docker, "end_one_shot", lambda *a, **k: order.append("end-one-shot"))
+    real_spawn = docker.runner._spawn
+
+    def spawn_after_a_held_claim(start):  # type: ignore[no-untyped-def]
+        assert claimed_held.wait(HANG_BOUND), "the watcher never held a claim"
+        threading.Event().wait(0.3)  # more polls with the claim held, before the CLI exists
+        started = real_spawn(start)
+        order.append("spawned")
+        return started
+
+    monkeypatch.setattr(docker.runner, "_spawn", spawn_after_a_held_claim)
+    cancel = threading.Event()
+    cancel.set()
+    result: list[docker.AttachedRun] = []
+    worker = threading.Thread(
+        target=lambda: result.append(docker.run_one_shot(IMPORTER, tmp_path, cancel=cancel)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    assert not worker.is_alive()
+    assert "end-one-shot" in order, order
+    assert order.index("spawned") < order.index("end-one-shot"), order

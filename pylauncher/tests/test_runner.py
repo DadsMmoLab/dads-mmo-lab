@@ -3122,3 +3122,29 @@ def test_a_held_stop_ends_the_group_of_a_root_that_exited_while_it_was_held(
             except OSError:
                 pass
         worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_a_child_that_could_not_be_started_leaves_no_claim_behind(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Cold review of 9bc9da0a: `started_on` is written before the spawn (T546), so a Popen
+    that raises left a stream that read as started -- and as Stopped, if a Stop had held its
+    claim -- for a child that never existed. The record is cleared with the failure.
+
+    Mutation this catches: the spawn's failure leaving `started_on` and the held claim.
+    """
+
+    def stop_then_fail(start):  # type: ignore[no-untyped-def]
+        runner.end_streams_started_on(threading.get_ident())
+        raise FileNotFoundError(2, "No such file or directory: 'docker'")
+
+    monkeypatch.setattr(runner, "_spawn", stop_then_fail)
+    start = stream if entry == "stream" else runner.stream_progress
+    generator = start(["docker", "compose", "build"])
+    with runner._LIVE_STREAMS_LOCK:
+        child = runner._LIVE_STREAMS[generator]
+    with pytest.raises(FileNotFoundError):
+        next(generator)
+    assert child.started_on is None, "a child that never started reads as started"
+    assert not child.ended, "a Stop's claim was kept for a child that never existed"

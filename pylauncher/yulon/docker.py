@@ -7372,8 +7372,10 @@ def _ended_on_cancel(
     the CLI through `runner.end_stream()` -- the panel's own Stop, for this one
     stream -- and the read returns. One stream and not the thread's (Codex's
     adversarial review): a thread can hold an outer job's stream while it runs
-    this one, and a run's cancel is about the run. It keeps ending while it
-    watches, for a CLI the lazy stream starts a moment after the token was set.
+    this one, and a run's cancel is about the run. It claims the CLI once (T541),
+    and polls until it has: a claim made while the lazy stream is still starting
+    its CLI is held for it and ended as it starts (T546). `after_cancel` runs once
+    the claimed CLI exists, never before what it makes can exist.
     Ending the CLI does not end the container on Docker Desktop;
     `run_container()` does that next, by its name. `ended` is set once it has
     ended the CLI, so `run_attached()` reads the run as the Stop even when the
@@ -7390,9 +7392,9 @@ def _ended_on_cancel(
                 # Claimed first, so the run reads as the Stop however its CLI exits.
                 if runner.end_stream(stream):
                     ended.set()
-                # Only once the CLI has been claimed: before it starts, what it is
-                # about to make does not exist yet (Codex review).
-                if after_cancel is not None and ended.is_set():
+                # Only once the CLI has been claimed AND started: before it starts, what
+                # it is about to make does not exist yet (Codex review; a held claim, T546).
+                if after_cancel is not None and ended.is_set() and runner.stream_started(stream):
                     after_cancel.once()
                 done.wait(_STOP_POLL_SECONDS)
 

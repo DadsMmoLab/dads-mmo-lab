@@ -718,6 +718,18 @@ def _end_chosen(candidates: list[_Child]) -> int:
     return len(children) + held
 
 
+def _not_started(child: _Child) -> None:
+    """A spawn that failed: the stream started nothing, so a Stop's held claim goes with it.
+
+    `started_on` is written before the spawn (T546); left there, a stream whose `Popen`
+    raised read as started, and as Stopped if a Stop had held its claim (cold review).
+    """
+    with child.lock:
+        child.started_on = None
+        child.ended = False
+        child.stopping_since = None
+
+
 def _start_stopper(child: _Child) -> None:
     """End a claimed child on a thread of its own, or here, bounded, if none will start."""
     proc = child.proc
@@ -779,6 +791,13 @@ def _stop_child_claimed(child: _Child) -> None:
         logger.warning(f"ending the stream child pid {proc.pid if proc else None} failed: {exc!r}")
         with child.lock:
             child.stopping_since = None
+
+
+def stream_started(generator: Generator[str, None, None]) -> bool:
+    """Has this live stream started its child? A Stop's claim can be held before it has (T546)."""
+    with _LIVE_STREAMS_LOCK:
+        child = _LIVE_STREAMS.get(generator)
+    return child is not None and child.proc is not None
 
 
 def _job_unsettled(child: _Child) -> bool:
@@ -1102,19 +1121,23 @@ def _stream_lines(
     # Before the spawn (T546): the child runs the moment `Popen` returns, and a Stop
     # in between has to find this stream to hold its claim for it (`_started`).
     child.started_on = threading.get_ident()
-    proc, job = _spawn(
-        lambda flags: subprocess.Popen(
-            command,
-            cwd=_cwd_arg(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=child_env(env),
-            creationflags=flags,
+    try:
+        proc, job = _spawn(
+            lambda flags: subprocess.Popen(
+                command,
+                cwd=_cwd_arg(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=child_env(env),
+                creationflags=flags,
+            )
         )
-    )
+    except BaseException:
+        _not_started(child)  # nothing was started: no record, no held claim
+        raise
     _started(child, proc, job)
     stderr_lines: list[str] = []
 
@@ -1268,18 +1291,22 @@ def _progress_lines(
     # what it starts (`_end_child`'s `group`); with no terminal, and stdin
     # closed, a git that asks for input fails instead of waiting.
     own_session = sys.platform != "win32"
-    proc, job = _spawn(
-        lambda flags: subprocess.Popen(
-            command,
-            cwd=_cwd_arg(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=child_env(env),
-            creationflags=flags,
-            stdin=subprocess.DEVNULL if own_session else None,
-            start_new_session=own_session,
+    try:
+        proc, job = _spawn(
+            lambda flags: subprocess.Popen(
+                command,
+                cwd=_cwd_arg(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=child_env(env),
+                creationflags=flags,
+                stdin=subprocess.DEVNULL if own_session else None,
+                start_new_session=own_session,
+            )
         )
-    )
+    except BaseException:
+        _not_started(child)  # nothing was started: no record, no held claim
+        raise
     fragments: queue.Queue[str | None] = queue.Queue()
 
     def read(pipe: object) -> None:

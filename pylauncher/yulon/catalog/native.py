@@ -12420,6 +12420,14 @@ class StagedInstaller:
         None this returns after the table and the family applies the SQL
         itself, re-probes and writes its own marker (7.3).
         """
+        if service is not None:
+            # T539: never read, clear or import under an importer still running from
+            # an earlier run -- a Stop whose importer outlived it, or a Yu'lon that
+            # closed mid-import. One that can be ended is ended first, and BEFORE the
+            # probe (cold review): a live importer changes what the probe would read.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         before = gate.probe()
         yield f"The databases read as {before.state}: {before.detail}"
         if before.state == "imported" or (before.state == "populated" and before.complete):
@@ -12436,13 +12444,6 @@ class StagedInstaller:
                 "Importing over them would overwrite it, so nothing was run. Use an empty "
                 "folder for a new install."
             )
-        if service is not None:
-            # T539: never clear or import under an importer still running from an
-            # earlier run -- a Stop whose importer outlived it, or a Yu'lon that
-            # closed mid-import. One that can be ended is ended first.
-            left = self._seams.end_one_shot(service, ctx.server_dir)
-            if left is not None:
-                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         if before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
             # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and
