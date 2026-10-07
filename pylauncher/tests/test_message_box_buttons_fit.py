@@ -349,3 +349,65 @@ def test_no_question_is_built_as_a_bare_qmessagebox() -> None:
         for line in _bare_constructions(source.read_text(encoding="utf-8")):
             bare.append(f"{source.relative_to(root)}:{line}")
     assert bare == [], f"build these through FittedMessageBox: {bare}"
+
+
+def _static_notices(source: str) -> list[int]:
+    """The line of every static `QMessageBox.warning/information/critical(...)` in `source`.
+
+    T355: those build Qt's own box, which has no height limit. The callee is an
+    attribute `warning`, `information` or `critical` of the name `QMessageBox`
+    (or of a name bound to it with `import ... as`).
+    """
+    import ast
+
+    tree = ast.parse(source)
+    names = {"QMessageBox"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(a.asname for a in node.names if a.name == "QMessageBox" and a.asname)
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("warning", "information", "critical")
+        and (
+            (isinstance(node.func.value, ast.Name) and node.func.value.id in names)
+            or (
+                isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "QMessageBox"
+            )
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "from PySide6.QtWidgets import QMessageBox\nQMessageBox.warning(None, 't', 'x')\n",
+        "from PySide6 import QtWidgets\nQtWidgets.QMessageBox.critical(None, 't', 'x')\n",
+        "from PySide6.QtWidgets import QMessageBox as Box\nBox.information(None, 't', 'x')\n",
+    ],
+    ids=["plain", "attribute", "aliased"],
+)
+def test_the_notice_guard_sees_a_static_call_under_every_spelling(spelling: str) -> None:
+    assert _static_notices(spelling) == [2]
+
+
+def test_the_notice_guard_does_not_count_the_fitted_calls() -> None:
+    source = "from yulon.ui.message_box import show_warning\nshow_warning(None, 't', 'x')\n"
+    assert _static_notices(source) == []
+
+
+def test_no_notice_is_shown_by_a_static_qmessagebox_call() -> None:
+    """Every warning, information and critical box goes through `message_box.show_*` (T355)."""
+    import yulon
+
+    package = Path(yulon.__file__).parent
+    root = package.parent
+    sources = [*sorted(package.rglob("*.py")), root / "main.py"]
+    assert (root / "main.py").is_file()
+    static: list[str] = []
+    for source in sources:
+        for line in _static_notices(source.read_text(encoding="utf-8")):
+            static.append(f"{source.relative_to(root)}:{line}")
+    assert static == [], f"show these through message_box.show_warning and friends: {static}"

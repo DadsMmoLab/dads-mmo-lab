@@ -25,7 +25,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import git as git_module
 from yulon import module_answers
-from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
+from yulon.apply import Applier, ApplyError, ApplyRefusal, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import (
     Behind,
@@ -2223,8 +2223,8 @@ def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Pa
         (" 5", "no spaces"),
         ("+5", "whole number"),
         ("0x10", "whole number"),
-        ("2147483648", "2147483647"),
-        ("-2147483649", "2147483647"),
+        ("4294967296", "4294967295"),
+        ("-2147483649", "0 to 4294967295"),
     ],
 )
 def test_a_number_answer_the_server_would_read_differently_is_refused_before_the_clone(
@@ -2260,6 +2260,74 @@ def _int_prompt() -> Any:
             "prompts": [{"key": "n", "question": "How many?", "kind": "int"}],
         }
     ).prompts[0]
+
+
+def _prompt(**over: Any) -> Any:
+    prompt = {"key": "n", "question": "How many?", "kind": "int", **over}
+    return parse_manifest(
+        {
+            "schema_version": 1,
+            "id": "n",
+            "name": "N",
+            "type": "module",
+            "game": "wow-wotlk",
+            "description": "one number",
+            "source": {"repo": "acme/n"},
+            "prompts": [prompt],
+        }
+    ).prompts[0]
+
+
+def test_an_unsigned_question_takes_zero_to_uint32_and_refuses_a_negative() -> None:
+    """T370: the AH bot's GUID is read as `uint32`; 3000000000 is a number, -1 is not."""
+    prompt = _prompt(unsigned=True)
+    for good in ("0", "2147483648", "3000000000", "4294967295"):
+        assert apply_module.check_answer(prompt, good) == "", good
+    for bad in ("-1", "4294967296"):
+        assert apply_module.check_answer(prompt, bad) != "", bad
+    assert apply_module.check_answer(_prompt(), "3000000000") != ""
+
+
+@pytest.mark.parametrize(
+    "typed", ["1_0", "+1", "１.５", "١", "1e3", "inf", "nan", " 1", "1 ", "1,5"]
+)
+def test_a_decimal_answer_in_any_spelling_but_plain_digits_is_refused(typed: str) -> None:
+    """T395: `float("1_0")` is 10.0 to Python and 1 to the server's `std::stof`/`atof`."""
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, typed) != "", typed
+    from tests.support_player_text import command_faults
+
+    assert command_faults(apply_module.check_answer(prompt, typed)) == []
+
+
+@pytest.mark.parametrize(
+    ("stored", "read"), [("2 ", "2"), (" 2", "2"), ("+2", "2"), ("2e0", "2"), ("1.5e1", "15")]
+)
+def test_a_decimal_stored_before_the_spelling_rule_is_still_read_back(
+    stored: str, read: str
+) -> None:
+    """The SQL that build sent read each of these as the number it says (cold review)."""
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, stored) != "", "typing stays strict"
+    assert apply_module.stored_answer(prompt, stored) == read
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) == ""
+
+
+@pytest.mark.parametrize("stored", ["1_0", "１.５", "inf", "1e-7", "1e99999"])
+def test_a_stored_decimal_no_server_reads_is_still_refused(stored: str) -> None:
+    prompt = _prompt(kind="float")
+    assert apply_module.check_answer(prompt, apply_module.stored_answer(prompt, stored)) != ""
+
+
+@pytest.mark.parametrize("typed", ["0.00001", "9" * 50])
+def test_a_decimal_answer_follows_the_tuning_rules_on_places_and_size(typed: str) -> None:
+    """One rule with the Server rates card (`tuning.decimal_fault`), not a second regex."""
+    assert apply_module.check_answer(_prompt(kind="float"), typed) != ""
+
+
+def test_a_decimal_answer_in_plain_digits_still_passes() -> None:
+    for good in ("0", "1", "1.5", "2.", ".5", "-0.5", "007", "0.0001"):
+        assert apply_module.check_answer(_prompt(kind="float"), good) == "", good
 
 
 def test_a_number_answer_in_plain_digits_still_passes() -> None:
@@ -2312,6 +2380,198 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     )
     report2 = second.install(plus, {"bot_guid": "42"})
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
+
+
+class _StoppedThenStarted(_FakeReader):
+    """A reader whose database answers only after the start seam has been pressed."""
+
+    def __init__(self, rows: str = "Ahbot\n") -> None:
+        super().__init__(rows=rows)
+        self.up = False
+
+    def query(self, db: str, statement: str) -> str:
+        if not self.up:
+            self.queries.append((db, statement))
+            raise RuntimeError("Error response from daemon: container x is not running")
+        return super().query(db, statement)
+
+
+def test_a_stopped_database_is_started_for_the_does_it_exist_check(tmp_path: Path) -> None:
+    """T396: the check ran against a stopped database, said "skipped" and went on.
+
+    With a start seam the database is brought up alone first, so the answer is
+    really checked, once for the two questions, and the report says so.
+    Mutation: drop the start call and both questions read "NOT checked".
+    """
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _StoppedThenStarted()
+
+    def start() -> bool:
+        reader.up = True
+        start.calls += 1  # type: ignore[attr-defined]
+        return True
+
+    start.calls = 0  # type: ignore[attr-defined]
+    report = Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+    )
+
+    assert start.calls == 1  # type: ignore[attr-defined]
+    assert [s for s in report.skipped if "NOT checked" in s] == []
+    assert "started the database alone; the world server was left stopped" in report.done
+
+
+def test_a_wrong_answer_is_refused_even_when_the_database_was_stopped(tmp_path: Path) -> None:
+    """The point of T396: a stopped database no longer lets a wrong GUID through."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _StoppedThenStarted(rows="")
+
+    def start() -> bool:
+        reader.up = True
+        return True
+
+    with pytest.raises(ApplyError) as refusal:
+        Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+            _shipped("mod-ah-bot-plus"), {"bot_guid": "999"}
+        )
+
+    assert "999" in str(refusal.value)
+    assert git.calls == []
+
+
+def test_a_database_that_will_not_start_refuses_before_anything_is_written(
+    tmp_path: Path,
+) -> None:
+    """Could not start it, could not check: refuse, so a second press cannot repeat SQL."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    start = _StartDb(boom=ApplyError("the database did not become healthy in 180 seconds"))
+
+    with pytest.raises(ApplyError) as refusal:
+        Applier(tmp_path, git=git, sql=_StoppedThenStarted(), start_database=start).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+        )
+
+    assert "did not become healthy" in str(refusal.value)
+    assert "Nothing was changed" in str(refusal.value)
+    assert git.calls == []
+    assert not (tmp_path / "modules").exists()
+
+
+def test_the_database_is_not_started_for_a_module_with_no_question_to_check(
+    tmp_path: Path,
+) -> None:
+    start = _StartDb()
+    Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeReader(),
+        world_running=lambda: False,
+        start_database=start,
+    ).install(parse_manifest(STACKABLES))
+    # The direct-SQL path starts it once for its own reasons; the check adds none.
+    assert start.calls == 1
+
+
+def _check_applier(
+    tmp_path: Path, reader: _FakeReader, *, started: bool = True, git: Any = None
+) -> tuple[Applier, Any]:
+    """An applier whose exists check finds the database stopped (`started`) or already up."""
+    git = git if git is not None else _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+
+    def start() -> bool:
+        if isinstance(reader, _StoppedThenStarted):
+            reader.up = True
+        return started
+
+    return (
+        Applier(tmp_path, git=git, sql=reader, world_running=lambda: False, start_database=start),
+        git,
+    )
+
+
+WRONG_GUID = "no character in this server's own database has GUID 999"
+STILL_UP = (
+    "Nothing was changed. Yu'lon started the database to check your answers, and it is "
+    "still running; press Stop if you do not need it."
+)
+
+
+def test_a_refused_answer_says_the_database_the_check_started_is_still_running(
+    tmp_path: Path,
+) -> None:
+    """T476: the check started the database alone, the GUID was wrong, and the
+    report said only "Nothing was changed" while the database was left running.
+
+    The refusal is the same exception, its own sentence first, then the database.
+    Mutation: drop the sentence and the refusal ends at "Nothing was changed."
+    """
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted(rows=""))
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    said = str(refusal.value)
+    assert WRONG_GUID in said and said.endswith(STILL_UP), said
+    assert git.calls == []
+
+
+def test_a_database_that_was_already_running_adds_nothing(tmp_path: Path) -> None:
+    """Only a database Yu'lon started is named: one the player had up says nothing more."""
+    applier, _git = _check_applier(tmp_path, _FakeReader(rows=""), started=False)
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    said = str(refusal.value)
+    assert WRONG_GUID in said and said.endswith("Nothing was changed."), said
+    assert "still running" not in said
+
+
+def test_a_conflict_after_the_check_says_it_too(tmp_path: Path) -> None:
+    """The check passes, then the conflict guard refuses: the database is still up.
+
+    Mutation: guard only `_check_values()` and the conflict says nothing of it.
+    """
+    seat = tmp_path / "modules" / "mod-ah-bot-plus"
+    seat.mkdir(parents=True)
+    (seat / "README.md").write_text("x\n", encoding="utf-8")
+    applier, git = _check_applier(tmp_path, _StoppedThenStarted())
+
+    with pytest.raises(ApplyRefusal) as refusal:
+        applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    said = str(refusal.value)
+    assert "cannot both be installed" in said and said.endswith(STILL_UP), said
+    assert git.calls == []
+
+
+def test_a_finished_install_keeps_the_started_line_and_adds_nothing(tmp_path: Path) -> None:
+    """T396's report line is how a finished install says it; no refusal sentence appears."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted())
+
+    report = applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert not any("still running" in line for line in report.done + report.skipped)
+
+
+class _BrokenGit(_FakeGit):
+    """A clone that breaks with something that is not Yu'lon's refusal."""
+
+    def clone(self, spec: CloneSpec) -> None:
+        raise RuntimeError("the clone broke")
+
+
+def test_something_that_is_not_a_refusal_after_the_check_is_raised_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """Not a refusal the player reads as one: same type, same words, nothing added."""
+    applier, _git = _check_applier(tmp_path, _StoppedThenStarted(), git=_BrokenGit({}))
+
+    with pytest.raises(RuntimeError) as broke:
+        applier.install(_shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"})
+
+    assert str(broke.value) == "the clone broke"
 
 
 def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:
@@ -2474,6 +2734,59 @@ def test_a_conf_write_recommends_a_restart_the_world_reads_it_at_its_next_start(
     assert "the world reads" in sentence and "next start" in sentence
     assert report.rebuild_required is False  # not conflating the two questions
     assert report.restart_recommended is True
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected", "asks"),
+    [(False, True, 1), (True, False, 1), (None, False, 1)],
+)
+def test_a_conf_only_install_reads_the_world_to_say_which_press_is_owed(
+    tmp_path: Path, answer: bool | None, expected: bool, asks: int
+) -> None:
+    """T397: a conf-only install sends no SQL, so the SQL guard never read the world, and the
+    report told a player whose world was already stopped to press Stop and then Start.
+
+    The report now reads the world once when only a conf write asks for the restart. Only an
+    explicit "not running" says stopped; a running world, or a seam that cannot answer, keep
+    the old "Stop and then Start" line.
+
+    Catches the read dropped (stays False on a stopped world), the flag set for any answer,
+    and `None` read as stopped.
+    """
+    asked: list[int] = []
+
+    def world_running() -> bool | None:
+        asked.append(1)
+        return answer
+
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git, world_running=world_running).install(
+        parse_manifest(_THING_MODULE)
+    )
+
+    assert report.restart_recommended is True
+    assert report.world_stopped is expected
+    assert len(asked) == asks
+
+
+def test_a_conf_only_install_with_no_seam_does_not_claim_the_world_is_stopped(
+    tmp_path: Path,
+) -> None:
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+    assert report.restart_recommended is True and report.world_stopped is False
+
+
+def test_a_conf_that_writes_nothing_never_reads_the_world(tmp_path: Path) -> None:
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_text("Thing.Enabled = 1\n", encoding="utf-8")
+    asked: list[int] = []
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git, world_running=lambda: asked.append(1) or False).install(
+        parse_manifest(_THING_MODULE)
+    )
+    assert report.world_stopped is False and asked == []
 
 
 def test_a_conf_that_writes_nothing_does_not_recommend_a_restart(tmp_path: Path) -> None:
@@ -4973,6 +5286,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     45 after T104: `npc-teleporter` writes the Onyxia-level answer into the one
     `conditions` row upstream builds from `@ONY_LEVEL`, as an inline `world`
     step after the file, so the question it always asked finally does something.
+    50 after T394: WotLK's `all-stackables` gained the backup table's two install
+    steps and its three remove steps, around the repository's own files.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -4993,7 +5308,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        45,
+        50,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

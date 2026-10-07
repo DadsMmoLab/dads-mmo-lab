@@ -269,8 +269,8 @@ class ClientSpec(_Strict):
         default=None,
         description=(
             "A file that proves the expansion, relative to the client dir (`Data/expansion.MPQ` "
-            "for TBC, `Data/dbc.MPQ` for Vanilla). None disables this one rule — Tortoise's "
-            "7272 client has no single defining file — while `Data/` and the MPQ count still apply."
+            "for TBC, `Data/dbc.MPQ` for Vanilla and Tortoise). None disables this one rule "
+            "while `Data/` and the MPQ count still apply."
         ),
     )
     min_mpq: int = Field(default=5, ge=1, description="Fewer MPQs than this is a WARNING.")
@@ -1419,7 +1419,7 @@ class SaveBeforeStop(_Strict):
         description=(
             "A console line whose answer holds the character save queue's length, for a core "
             "that drops what is still queued when it closes: the stop waits for the queue to be "
-            "back at its level from before the save. TrinityCore's `server debug` prints "
+            "empty while it still gets shorter. TrinityCore's `server debug` prints "
             "`CharacterDatabase queue size: N` (`cs_server.cpp:256`). Empty: no wait."
         ),
     )
@@ -1427,9 +1427,30 @@ class SaveBeforeStop(_Strict):
         default="",
         description="A regular expression with ONE group, the length, found in that answer.",
     )
+    first: tuple[Annotated[str, Field(min_length=1, pattern=r"^[^\r\n]+$")], ...] = Field(
+        default=(),
+        description=(
+            "Console lines typed before `command`, in order, so nothing new joins the save queue "
+            "while the stop waits for it (T498). Centurion: `playerbot population stop` (no bot "
+            "logs in again), then `server plimit administrator`, which kicks every session below "
+            "administrator -- its random bots are player-level accounts -- and each kick is a "
+            "logout save. Without it 150 bots autosaving every 90 s kept the queue full for 5 "
+            "minutes. A line that cannot be typed does not stop the save."
+        ),
+    )
+    if_given_up: tuple[Annotated[str, Field(min_length=1, pattern=r"^[^\r\n]+$")], ...] = Field(
+        default=(),
+        description=(
+            "Console lines that undo `first` when the stop is given up before its signal and the "
+            "world is left running: Centurion's `server plimit reset` and `playerbot population "
+            "start`."
+        ),
+    )
 
     @model_validator(mode="after")
     def _a_queue_command_comes_with_a_pattern_of_one_group(self) -> SaveBeforeStop:
+        if self.if_given_up and not self.first:
+            raise ValueError("if_given_up undoes `first`, so it needs `first`")
         if bool(self.queue_command) != bool(self.queue_pattern):
             raise ValueError("queue_command and queue_pattern are given together or not at all")
         if self.queue_pattern:
@@ -2114,6 +2135,25 @@ def _inside(value: str, field: str, *, names_a_file: bool) -> str:
     if names_a_file and not path.parts:
         raise ValueError(f"{field} must name a file, got {value!r}")
     return value
+
+
+class HelpPlace(_Strict):
+    """One place a player can take a problem with this server, and what it looks after (T520).
+
+    The Server tab's "Where to get help…" lists them in order, a link button
+    (`label`) with its line (`purpose`) beside it.
+    """
+
+    label: str = Field(min_length=1, description="The link button's text: who runs the place.")
+    url: str = Field(description="The https page the button opens.")
+    purpose: str = Field(
+        min_length=1, description="One plain sentence: which problems belong there."
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "help place url")
 
 
 class PackSource(_Strict):
@@ -2843,6 +2883,13 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+    help_places: tuple[HelpPlace, ...] = Field(
+        default=(),
+        description=(
+            "Where a player takes a problem with this server, in the order the Server tab's "
+            "'Where to get help…' lists them; Yu'lon's own issues page is last (T520)."
+        ),
+    )
     notes: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -2992,6 +3039,8 @@ class CatalogEntry(_Strict):
             command=save.command,
             queue_command=save.queue_command,
             queue_pattern=save.queue_pattern,
+            first=save.first,
+            if_given_up=save.if_given_up,
             prompt=console.prompt,
             prompt_precedes_answer=console.prompt_precedes_answer,
         )

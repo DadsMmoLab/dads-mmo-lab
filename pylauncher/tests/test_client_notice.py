@@ -242,16 +242,13 @@ def test_with_no_way_to_set_a_folder_the_notice_is_still_given(
     qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A tab with no client-folder write seam has no button to offer; it still says why."""
-    told: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        QMessageBox, "information", lambda parent, title, text, *a: told.append((title, text))
-    )
     view, applier, dialogs, _written = _view(monkeypatch, tmp_path, writable=False)
 
     view._row_install("mod-arac")
 
-    assert dialogs.shown == []
-    assert len(told) == 1 and "Patch-A.MPQ" in told[0][1]
+    # T355: the notice is a one-button box that fits the screen, so it reaches `exec`.
+    assert len(dialogs.shown) == 1 and "Patch-A.MPQ" in dialogs.shown[0]["text"]
+    assert dialogs.shown[0]["buttons"] == ["OK"]
     assert applier.installed == []
 
 

@@ -636,6 +636,42 @@ def test_the_failure_names_it_when_the_old_build_does_not_come_up_either(
     assert "did not report ready either" in said, said
 
 
+@pytest.mark.parametrize("status", ["running", "restarting"])
+def test_a_rollback_that_did_not_come_up_says_what_is_left_running_and_offers_stop(
+    tmp_path: Path, status: str
+) -> None:
+    """T391: both builds failed, the containers were left up, and the failure did not say so.
+
+    On m910q (2026-10-06) the world crash-looped under them while the header read
+    REALM ONLINE. The sentence now says the containers are still up and points at
+    Stop. Mutation: drop `_left_running()` from the `_NotUpEither` sentence.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready = False
+    rec.world_output = native.WorldOutput("Starting worldserver...", 6, status)
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "did not report ready either" in said, said
+    assert native.ROLLBACK_LEFT_RUNNING in said, said
+    assert said.rstrip().endswith(native.ROLLBACK_LEFT_RUNNING), "said last, where it is read"
+
+
+@pytest.mark.parametrize("status", ["exited", ""])
+def test_a_rollback_whose_world_is_not_up_does_not_claim_it_is_left_running(
+    tmp_path: Path, status: str
+) -> None:
+    """A world that exited (or a Docker that did not say) is not "still up"."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready = False
+    rec.world_output = native.WorldOutput("Starting worldserver...", 0, status)
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert native.ROLLBACK_LEFT_RUNNING not in str(raised.value)
+
+
 def test_a_rebuild_with_images_missing_refuses_rather_than_compiling_without_a_rollback(
     tmp_path: Path,
 ) -> None:

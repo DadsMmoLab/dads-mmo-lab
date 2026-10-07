@@ -493,6 +493,21 @@ def _the_users_own_log_is_out_of_reach(
 
 
 @pytest.fixture(autouse=True)
+def _the_support_file_does_not_look_in_the_real_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sources_for_app()` looks for failed installs under an empty folder, not `~` (T351).
+
+    Without this, any test that builds `Sources` without `home=` reads the
+    developer's own `~/yulon-*` folders and passes or fails with their machine.
+    """
+    from yulon.support import sources
+
+    empty = tmp_path_factory.mktemp("no-home")
+    monkeypatch.setattr(sources, "default_home", lambda: empty)
+
+
+@pytest.fixture(autouse=True)
 def _this_computer_is_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every render answers the same on any box: this computer's time zone is UTC (T171).
 
@@ -888,6 +903,20 @@ QT_QUESTION = _qts_own_question()
 """Qt's own static `question()`; see `_qts_own_question`."""
 
 
+def _qts_own(name: str) -> object:
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:  # pragma: no cover
+        return None
+    return getattr(QMessageBox, name)
+
+
+QT_WARNING = _qts_own("warning")
+QT_INFORMATION = _qts_own("information")
+QT_CRITICAL = _qts_own("critical")
+"""Qt's own static notices, read at import for the reason `QT_QUESTION` is."""
+
+
 def _disarm_modals(monkeypatch: pytest.MonkeyPatch, QMessageBox: Any) -> None:  # noqa: N803
     for name in ("warning", "information", "critical", "about"):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
@@ -915,7 +944,10 @@ def three_way_only(answer: Callable[[Any], object]) -> Callable[[Any], object]:
     def exec_(box: Any) -> object:
         from PySide6.QtWidgets import QMessageBox
 
-        if box.standardButtons() == QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No:
+        yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        if box.standardButtons() in (yes_no, QMessageBox.StandardButton.Ok):
+            # A Yes/No question goes to `question`, a one-button notice to the static
+            # `warning`/`information`/`critical` a test watches (T355).
             return _answer_like_the_static_question(box)
         return answer(box)
 
@@ -941,6 +973,21 @@ def _answer_like_the_static_question(box: Any) -> object:
     """
     from PySide6.QtWidgets import QMessageBox
 
+    ok_only = QMessageBox.StandardButton.Ok
+    notice = {
+        QMessageBox.Icon.Warning: ("warning", QT_WARNING),
+        QMessageBox.Icon.Information: ("information", QT_INFORMATION),
+        QMessageBox.Icon.Critical: ("critical", QT_CRITICAL),
+    }.get(box.icon())
+    if box.standardButtons() == ok_only and notice is not None:
+        # T355: a one-button notice (`message_box.show_warning` and its siblings) is the
+        # static call's box; tests that watch `QMessageBox.warning` see the same arguments.
+        name, qts_own = notice
+        static = getattr(QMessageBox, name)
+        if static is qts_own:
+            return ok_only
+        static(box.parentWidget(), box.windowTitle(), box.text())
+        return ok_only
     yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
     if box.standardButtons() != yes_no or QMessageBox.question is QT_QUESTION:
         # Not the static call's shape, or a test has put Qt's own `question()` back:
@@ -1444,3 +1491,5 @@ def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
         raise ConsoleError(f"no console in the test suite ({command!r} was not typed)")
 
     monkeypatch.setattr(docker, "_console_send", unreachable)
+    # T496: the command channels the wiring registers for a stop are this test's alone.
+    monkeypatch.setattr(docker, "_save_channels", {})

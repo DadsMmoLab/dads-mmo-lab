@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Generator
 from pathlib import Path
 
@@ -485,10 +486,10 @@ def test_end_streams_started_on_returns_before_the_reap_it_asked_for_finishes(
     release = threading.Event()
     real_end_child = runner._end_child
 
-    def blocking_end_child(proc: subprocess.Popen[str]) -> None:
+    def blocking_end_child(proc: subprocess.Popen[str], job: object = None, **kw: bool) -> None:
         entered.set()
         release.wait(HANG_BOUND)
-        real_end_child(proc)
+        real_end_child(proc, job, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(runner, "_end_child", blocking_end_child)
     blocked = _BlockedStream("test-end-streams-nonblocking")
@@ -1526,9 +1527,9 @@ def test_every_way_a_stream_is_stopped_ends_its_child_through_end_child(
     alive_when_asked: list[bool] = []
     real_end = runner._end_child
 
-    def note(proc: subprocess.Popen[str]) -> None:
+    def note(proc: subprocess.Popen[str], job: object = None, **kw: bool) -> None:
         alive_when_asked.append(proc.poll() is None)
-        real_end(proc)
+        real_end(proc, job, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(runner, "_end_child", note)
 
@@ -1577,3 +1578,873 @@ def test_only_end_child_terminates_a_child_in_the_runner() -> None:
             ):
                 callers.add(function.name)
     assert callers == {"_end_child"}, callers
+
+
+# ---------------------------------------------------------------------------
+# T299: on Windows a streamed child is born into a Job object, and a Stop ends the job.
+#
+# `taskkill /T` (T246, above) finds a tree by parent pid at the moment of Stop,
+# so it misses a descendant whose parent had already exited, one started after
+# its snapshot, and can sweep in an unrelated process whose recorded parent pid
+# was reused. A job tracks membership instead. The child is created suspended
+# and put in the job before it runs, so nothing it starts is ever outside.
+# `yulon.winjob`'s own tests cover the Win32 calls; these cover the wiring.
+
+_CREATE_SUSPENDED = 0x00000004
+_NO_WINDOW = 0x08000000
+_REAL_POPEN = subprocess.Popen
+
+
+class _FakeJob:
+    """A `winjob.Job` double. `events` records start/end/close in order."""
+
+    def __init__(
+        self, *, starts: object = True, ends: bool = True, root: _TreeRoot | None = None
+    ) -> None:
+        self.starts = starts
+        self.ends = ends
+        self.root = root
+        """A root this job holds: an `end()` that succeeds ends it, as TerminateJobObject does."""
+        self.events: list[object] = []
+        self.pid: int | None = None
+        self.proc: subprocess.Popen[str] | None = None
+
+    def start(self, pid: int) -> bool:
+        self.events.append(("start", pid))
+        self.pid = pid
+        if isinstance(self.starts, BaseException):
+            raise self.starts
+        return bool(self.starts)
+
+    def end(self) -> bool:
+        self.events.append("end")
+        if self.ends and self.root is not None:
+            self.root.alive = False
+        if self.ends and self.proc is not None and self.proc.poll() is None:
+            # The real child of a `_windows_spawns` test: ended as the job would.
+            # Through its Popen, never by a pid that may have been reaped and reused.
+            self.proc.kill()
+        return self.ends
+
+    def close(self) -> None:
+        self.events.append("close")
+
+    def release(self) -> None:
+        self.events.append("release")
+
+
+def _windows_spawns(
+    monkeypatch: pytest.MonkeyPatch, job: _FakeJob | None, *, exited: bool = False
+) -> list[dict[str, object]]:
+    """Pretend to be Windows with `job` as the job `winjob.create()` makes; record every Popen.
+
+    The child is a real process, started with `creationflags=0` because POSIX
+    refuses any other value: what the code ASKED for is in the record.
+    """
+    _as_windows(monkeypatch)
+    monkeypatch.setattr(runner.winjob, "create", lambda: job)
+    spawned: list[dict[str, object]] = []
+    real_popen = _REAL_POPEN
+
+    def recording_popen(argv: list[str], **kw: object) -> subprocess.Popen[str]:
+        record: dict[str, object] = {"creationflags": kw.get("creationflags")}
+        spawned.append(record)
+        kw["creationflags"] = 0
+        proc: subprocess.Popen[str] = real_popen(argv, **kw)  # type: ignore[call-overload]
+        record["proc"] = proc
+        if isinstance(job, _FakeJob):
+            job.proc = proc
+        if exited:
+            proc.wait(timeout=HANG_BOUND)
+        return proc
+
+    monkeypatch.setattr(runner.subprocess, "Popen", recording_popen)
+    return spawned
+
+
+def test_on_windows_a_stream_child_starts_suspended_and_the_job_resumes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CREATE_SUSPENDED with the no-window flag, then `job.start(pid)`, then the job released.
+
+    A command that ran out by itself has its job RELEASED, not closed: whatever
+    it left running goes on as it did before jobs (Codex adversarial review).
+
+    Mutations this catches: CREATE_SUSPENDED not asked for (docker.exe could
+    start compose before it joined); `start` never called (the child would stay
+    suspended for ever on Windows); the wrong pid; the job never let go, or
+    closed with its kill-on-close still set.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+
+    lines = list(stream(_python_cmd("print('built')")))
+
+    assert lines == ["built"]
+    assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert job.events == [("start", proc.pid), "release"]
+
+
+def test_on_windows_with_no_job_the_child_is_not_started_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No job means nobody would resume it: a suspended child there is a command that never runs.
+
+    Mutation this catches: CREATE_SUSPENDED added whatever `create()` answered.
+    """
+    spawned = _windows_spawns(monkeypatch, None)
+
+    assert list(stream(_python_cmd("print('built')"))) == ["built"]
+    assert [record["creationflags"] for record in spawned] == [_NO_WINDOW]
+
+
+def test_on_windows_a_child_that_did_not_join_its_job_is_stopped_with_taskkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`start()` answering False lets the job go at once, so a Stop falls back to taskkill.
+
+    Mutation this catches: keeping the job, after which a Stop would end an
+    empty job, call that success and never run taskkill on the real tree.
+    """
+    job = _FakeJob(starts=False)
+    _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)"))
+
+    assert next(lines) == "first"
+    try:
+        assert job.events[1:] == ["close"], job.events
+        child = runner._LIVE_STREAMS[lines]
+        assert child.job is None
+    finally:
+        lines.close()
+    assert "end" not in job.events
+
+
+def test_on_windows_a_child_its_job_could_not_resume_is_killed_and_the_spawn_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that cannot be resumed would never run, so it is killed and the caller told.
+
+    Mutations this catches: the child left running (or, on Windows, suspended)
+    with nobody reading it; the job's handle leaked; the error swallowed so
+    `stream()` hands back a command that will never produce a line.
+    """
+    job = _FakeJob(starts=OSError(5, "could not resume pid 1"))
+    spawned = _windows_spawns(monkeypatch, job)
+
+    with pytest.raises(OSError, match="could not resume"):
+        next(stream(_python_cmd("import time; time.sleep(60)")))
+
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert proc.poll() is not None, "the child the job could not resume is still running"
+    assert job.events[-1] == "close"
+
+
+def test_on_windows_a_spawn_that_fails_lets_its_job_go(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation this catches: a missing executable leaking a job handle per attempt."""
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+
+    with pytest.raises(OSError):
+        next(stream(["/no/such/yulon-test-binary"]))
+
+    assert job.events == ["close"]
+
+
+def test_on_windows_abandoning_a_stream_ends_its_job_before_closing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End, then close: after `close()` the job's handle is let go and cannot end anything.
+
+    Mutations this catches: the job not passed to `_end_child` from the
+    stream's `finally` (no "end"); the job closed before it is ended.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+
+    def no_taskkill(argv: list[str], **kw: object) -> object:
+        raise AssertionError(f"taskkill ran although the job ended the tree: {argv}")
+
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)"))
+    assert next(lines) == "first"
+    monkeypatch.setattr(runner.subprocess, "run", no_taskkill)
+    lines.close()
+
+    assert job.events[1:] == ["end", "close"], job.events
+
+
+def test_on_windows_a_stop_ends_the_job_of_the_stream_the_thread_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`end_streams_started_on()` — the Stop button — hands the child's job to `_end_child`.
+
+    Mutation this catches: the Stop thread started with the process alone, so
+    the Stop falls back to taskkill and the job's reach is lost.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)"))
+    assert next(lines) == "first"
+    try:
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        deadline = time.monotonic() + HANG_BOUND
+        while "end" not in job.events and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert "end" in job.events, job.events
+    finally:
+        lines.close()
+
+
+def test_on_windows_a_stream_ended_at_exit_ends_its_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exit hook's other branch, for a frame another thread is running, passes the job too.
+
+    The generator here calls the hook from inside itself, which is the one way
+    to make its own `close()` refuse with "generator already executing".
+
+    Mutation this catches: `_end_child(child.proc)` without the job there.
+    """
+    _as_windows(monkeypatch)
+    job = _FakeJob()
+    events: list[object] = []
+    root = _TreeRoot(events)
+    taskkills = _taskkill_double(monkeypatch, root)
+
+    def running() -> Generator[str, None, None]:
+        runner._close_abandoned_streams()
+        yield "done"
+
+    generator = running()
+    child = runner._Child()
+    child.proc = root  # type: ignore[assignment]
+    child.job = job  # type: ignore[assignment]
+    runner._register(generator, child)
+    try:
+        assert next(generator) == "done"
+    finally:
+        with runner._LIVE_STREAMS_LOCK:
+            runner._LIVE_STREAMS.pop(generator, None)
+
+    assert job.events == ["end"]
+    assert taskkills == []
+    assert not root.alive
+
+
+def test_on_windows_a_job_that_ended_the_tree_takes_the_place_of_taskkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Job ended: no taskkill and no `terminate()`, only the reap. Job failed: taskkill, as T246.
+
+    `TerminateJobObject` ended docker.exe with the rest, so it is waited for and
+    not terminated a second time (Codex's third adversarial review).
+
+    Mutations this catches: taskkill run even after the job ended the tree; the
+    job's failure not falling back to taskkill; `terminate()` dropped from the
+    fallback.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root)
+    ended = _FakeJob(ends=True, root=root)
+
+    runner._end_child(root, ended)  # type: ignore[arg-type]
+
+    assert ended.events == ["end"]
+    assert calls == []
+    assert events == ["wait"], events
+
+    events.clear()
+    root.alive = True
+    failed = _FakeJob(ends=False)
+
+    runner._end_child(root, failed)  # type: ignore[arg-type]
+
+    assert failed.events == ["end"]
+    assert len(calls) == 1
+    assert events[:2] == ["taskkill", "terminate"], events
+
+
+def test_on_windows_stream_progress_runs_its_child_in_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The git clone a Stop can end goes through the same spawn.
+
+    Mutation this catches: `stream_progress()` left on a bare `Popen`.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+
+    assert list(runner.stream_progress(_python_cmd("print('cloned')"))) == ["cloned"]
+    assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
+    assert job.events[-1] == "release" and job.events[0][0] == "start"  # type: ignore[index]
+
+
+def test_on_windows_interact_runs_its_child_in_a_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`interact()` ends its child with `_end_child` too, so it gets the same job.
+
+    Mutation this catches: `interact()`'s pipe branch left on a bare `Popen`.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+
+    out = list(runner.interact(_python_cmd("print('asked')"), respond=lambda line: None))
+
+    assert "asked" in out
+    assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
+    assert job.events[-1] == "release" and job.events[0][0] == "start"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_off_windows_no_job_is_ever_made(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
+    """Linux and macOS spawn exactly as before.
+
+    Mutation this catches: the platform check dropped, so `winjob.create()`
+    (which would load kernel32) runs on every host.
+    """
+    _as_windows(monkeypatch, platform)
+
+    def no_job() -> object:
+        raise AssertionError("a job was made off Windows")
+
+    monkeypatch.setattr(runner.winjob, "create", no_job)
+
+    assert list(stream(_python_cmd("print('built')"))) == ["built"]
+
+
+class _ThreadThatCannotStart(threading.Thread):
+    """`RuntimeError: can't start new thread`, the failure a long-lived GUI process can meet."""
+
+    def start(self) -> None:
+        raise RuntimeError("can't start new thread")
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress", "interact"])
+def test_on_windows_a_reader_that_cannot_start_still_ends_and_closes_the_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """The child is running and in its job before the reader starts: a failed start ends both.
+
+    From both Codex reviews of T299: the reader was started before the
+    `try`/`finally` that ends the child, so the job's handle stayed open and the
+    tree ran on. Closing the job (kill-on-close) is what reaches the tree.
+
+    Mutation this catches: the failed start leaving the job open.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+    command = _python_cmd("import time; time.sleep(60)")
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        if entry == "stream":
+            next(stream(command))
+        elif entry == "stream_progress":
+            next(runner.stream_progress(command))
+        else:
+            next(iter(runner.interact(command, respond=lambda line: None)))
+
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert proc.poll() is not None, "the child is still running"
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_on_windows_a_stopped_stream_whose_root_exits_first_still_closes_its_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A Stop already chosen wins over "it ran out by itself": the job is closed, not released.
+
+    From Codex's second adversarial review: Stop marks the stream and hands
+    `_end_child` to a thread; if docker.exe exits before that thread runs, the
+    thread finds nothing alive and never ends the job, and the stream's
+    `finally` saw a root that had exited and released the job, leaving the
+    rest of the tree running. Here the root exits, the stream is marked as a
+    Stop marks it, and the `finally` runs: kill-on-close must still be set.
+
+    Mutation this catches: `_finish` deciding from `poll()` alone.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd("print('first', flush=True)"))
+    assert next(lines) == "first"
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    proc.wait(timeout=HANG_BOUND)
+    runner._LIVE_STREAMS[lines].ended = True
+
+    assert list(lines) == []
+
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events
+
+
+def test_on_windows_a_root_that_outlives_its_ended_job_is_still_terminated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reap after a job's end is bounded; a root still there afterwards gets the old ending.
+
+    Mutation this catches: returning after the bounded wait whether or not the
+    root exited.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    _taskkill_double(monkeypatch, root)
+    job = _FakeJob(ends=True)  # reports success, but the root is not in it
+
+    runner._end_child(root, job)  # type: ignore[arg-type]
+
+    assert events[:2] == ["wait", "terminate"], events
+    assert not root.alive
+
+
+def test_on_windows_an_error_while_ending_the_child_still_closes_its_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job is let go in a `finally`, whatever `_end_child` did (Codex, third review).
+
+    Mutation this catches: the close skipped when `_end_child` raises.
+    """
+    _as_windows(monkeypatch)
+    root = _TreeRoot([])
+    job = _FakeJob()
+
+    def broken(proc: object, job: object = None) -> None:
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(runner, "_end_child", broken)
+
+    with pytest.raises(PermissionError):
+        runner._finish(root, job)  # type: ignore[arg-type]
+
+    assert job.events == ["close"]
+
+
+def test_on_windows_a_cancelled_interact_closes_its_job_even_when_the_root_exited_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`interact()`'s cancel is its Stop: kill-on-close stays, whatever `poll()` says by then.
+
+    From Codex's third review. The child here has exited before the loop first
+    looks at `cancel`, which is the order that released the job.
+
+    Mutation this catches: `interact()` passing no `stopped` to `_finish`.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job, exited=True)
+    cancel = threading.Event()
+    cancel.set()
+
+    list(runner.interact(_python_cmd("pass"), respond=lambda line: None, cancel=cancel))
+
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events
+
+
+def test_on_windows_a_stop_reaches_a_stream_whose_root_exited_but_whose_job_is_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docker.exe gone, its tree still in the job and still writing: Stop ends the job.
+
+    From Codex's fourth adversarial review. Descendants inherit the output pipe,
+    so the stream reads on after its root exits, and a Stop that chose streams
+    by `poll()` alone skipped it. The job can end the tree without its root.
+
+    Mutations this catches: selection by `poll()` alone (0 streams ended); the
+    Stop thread gating `job.end()` on a live root (no "end").
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True)"))
+    assert next(lines) == "first"
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    proc.wait(timeout=HANG_BOUND)
+    try:
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        deadline = time.monotonic() + HANG_BOUND
+        while "end" not in job.events and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert "end" in job.events, job.events
+    finally:
+        lines.close()
+    assert job.events[-1] == "close", job.events
+
+
+def test_on_windows_a_stop_after_a_stream_let_its_job_go_ends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a finished stream has released its job, it is history: a later Stop leaves it alone.
+
+    Mutation this catches: selecting every child with a job, settled or not.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True)"))
+    assert list(lines) == ["first"]
+    assert job.events[-1] == "release"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 0
+    assert "end" not in job.events
+
+
+@pytest.mark.parametrize("where", ["in the registry walk", "in the choice"])
+def test_on_windows_a_stream_finalised_while_a_stop_is_choosing_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """A stream whose last reference drops while a Stop is choosing ends without a deadlock.
+
+    From the cold review of T299. `end_streams_started_on()` walks the weak
+    registry under `_LIVE_STREAMS_LOCK`; a generator whose owner dropped it can
+    be finalised right there, on that thread, when `WeakKeyDictionary.values()`
+    lets go of its strong reference, or in a GC pass. Its `finally` runs
+    `_finish`, which must not need a lock that thread already holds.
+
+    `in the registry walk` drops the last reference inside `values()`, under
+    the registry lock; `in the choice` drops it while the child's own lock is
+    held. The Stop runs on its own thread with a registry lock of its own, so
+    a deadlock fails this test instead of hanging the suite. Both deadlocked
+    (timed out at `HANG_BOUND`) on the code the cold review read.
+
+    Mutations this catches: `_finish` taking `_LIVE_STREAMS_LOCK` (walk); the
+    child's lock not re-entrant (choice).
+    """
+    holder: list[Generator[str, None, None]] = []
+
+    class FinalisingRegistry(weakref.WeakKeyDictionary):  # type: ignore[type-arg]
+        def values(self):  # type: ignore[no-untyped-def]
+            for value in super().values():
+                if where == "in the registry walk" and holder:
+                    holder.pop()  # the last reference: finalised here, under the lock
+                yield value
+
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    monkeypatch.setattr(runner, "_LIVE_STREAMS_LOCK", threading.Lock())
+    monkeypatch.setattr(runner, "_LIVE_STREAMS", FinalisingRegistry())
+    holder.append(stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)")))
+    assert next(holder[0]) == "first"
+    ident = threading.get_ident()
+    real_still_running = runner._still_running
+
+    def finalising(proc: object) -> bool:
+        if where == "in the choice" and holder:
+            holder.pop()  # the last reference: finalised here, under the child's lock
+        return real_still_running(proc)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "_still_running", finalising)
+    answered: list[int] = []
+    stop = threading.Thread(
+        target=lambda: answered.append(runner.end_streams_started_on(ident)), daemon=True
+    )
+    stop.start()
+    stop.join(HANG_BOUND)
+
+    assert not holder, "the stream was never finalised where the test meant it to be"
+    assert answered, f"the Stop deadlocked on a stream finalised {where}"
+    assert job.events[-1] == "close", job.events
+
+
+class _JobHoldingAPid(_FakeJob):
+    """A job double whose `end()` ends one more process, the way the real job ends a descendant."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.member: int | None = None
+
+    def end(self) -> bool:
+        ended = super().end()
+        if self.member is not None:
+            os.kill(self.member, signal.SIGKILL)
+        return ended
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reported_as_a_stop(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """docker.exe exited 0, its tree was still writing, Stop ended the tree: that is a Stop.
+
+    From the cold review of T299: the exit status alone read as success,
+    although the work the root had handed its descendants was cut off.
+
+    `stream_progress` is the git clone's path, from the scoped review of
+    d3252e19: its own check could drop the flag with every test still green.
+
+    Mutations this catches: either generator deciding from `returncode` alone;
+    the error carrying exit 0, which `docker.run_attached()` would report as
+    success.
+    """
+    job = _JobHoldingAPid()
+    spawned = _windows_spawns(monkeypatch, job)
+    # The root starts a grandchild that inherits the pipe, says its pid and
+    # writes on; the root itself exits 0 at once.
+    script = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', "
+        "\"import os, time; print('pid', os.getpid(), flush=True); time.sleep(60)\"]); "
+        "print('first', flush=True)"
+    )
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd(script))
+    seen = [next(lines), next(lines)]
+    said = next(line for line in seen if line.startswith("pid "))
+    job.member = int(said.split()[1])
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert proc.wait(timeout=HANG_BOUND) == 0
+
+    try:
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        with pytest.raises(runner.StreamEnded) as raised:
+            list(lines)
+    finally:
+        lines.close()
+    assert raised.value.returncode == 1, "a Stop must not read as exit 0"
+
+
+def test_on_windows_a_stop_after_the_stream_gave_its_answer_leaves_it_a_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader's answer and a Stop's choice are one decision: whichever is first wins whole.
+
+    From the scoped review of d3252e19: the flag that turns a success into a
+    Stop was set on the Stop's thread after the choice, so a reader that had
+    just passed its exit check reported success while `_finish` then closed
+    the job on the tree. Here the Stop lands in exactly that window, between
+    the answer and `_finish`: it must find the stream answered and leave it
+    alone, and the job is released as for any command that finished.
+
+    Mutations this catches: the choice not skipping an answered stream (the
+    Stop ends the job of a command reported as a success).
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    real_finish = runner._finish
+    chosen: list[int] = []
+
+    def stop_in_the_window(*args: object, **kw: object) -> None:
+        chosen.append(runner.end_streams_started_on(threading.get_ident()))
+        real_finish(*args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "_finish", stop_in_the_window)
+
+    assert list(stream(_python_cmd("print('built')"))) == ["built"]
+
+    assert chosen == [0]
+    assert "end" not in job.events
+    assert job.events[-1] == "release", job.events
+
+
+def test_off_windows_a_root_that_exits_0_after_a_stop_chose_it_is_still_a_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a job nothing ends a root that has exited, so its exit status is the whole story.
+
+    The Stop here chooses the stream while the root runs, and the root exits 0
+    on its own before the Stop's thread could end anything (the thread is
+    stubbed out to hold that order). Linux and macOS report it as before T299.
+
+    Mutation this catches: `cut_short` set for a child with no job.
+    """
+    _as_windows(monkeypatch, "linux")
+    monkeypatch.setattr(runner, "_stop_child", lambda child: None)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(0.3)"))
+    assert next(lines) == "first"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    assert list(lines) == []
+
+
+# ---------------------------------------------------------------------------
+# T365: a Stop whose own thread cannot start still ends the stream.
+#
+# `end_streams_started_on()` hands each ending to a thread, so the button that
+# called it never waits on a child. `Thread.start()` can refuse ("can't start new
+# thread") in a long-lived process that has run out of them; before T365 that
+# error left the Stop on the first child, every later child was never asked, and
+# `ended` claimed a Stop that never happened while the stream stayed blocked.
+
+
+def test_a_stop_whose_thread_cannot_start_still_ends_the_stream_a_worker_is_blocked_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stream's worker leaves its blocked read, and its exit reads as the Stop's.
+
+    Mutation this catches: no fallback (the `RuntimeError` escapes the Stop and
+    the worker stays inside the generator).
+    """
+    blocked = _BlockedStream("test-stop-thread-cannot-start")
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        try:
+            assert runner.end_streams_started_on(blocked.worker.ident) == 1
+        finally:
+            monkeypatch.undo()
+        blocked.worker.join(timeout=HANG_BOUND)
+        assert not blocked.worker.is_alive(), "still inside the generator: the child was not ended"
+        assert isinstance(blocked.outcome[0], runner.StreamEnded), blocked.outcome
+    finally:
+        blocked.close()
+
+
+def test_a_stop_whose_threads_cannot_start_ends_every_stream_not_only_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two streams this thread started: both children are ended when no thread will start.
+
+    Mutation this catches: the fallback ending the first child and then
+    stopping (a `break`, or the start's error raised again after it).
+    """
+    script = "print('first', flush=True); import time; time.sleep(60)"
+    streams = [stream(_python_cmd(script)), stream(_python_cmd(script))]
+    try:
+        for lines in streams:
+            assert next(lines) == "first"
+        procs = [runner._LIVE_STREAMS[lines].proc for lines in streams]
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        try:
+            assert runner.end_streams_started_on(threading.get_ident()) == 2
+        finally:
+            monkeypatch.undo()
+        for proc in procs:
+            assert proc is not None
+            assert proc.wait(timeout=HANG_BOUND) is not None
+    finally:
+        for lines in streams:
+            lines.close()
+
+
+class _RootThatOutlivesKill(_TreeRoot):
+    """A root that `kill()` does not end: the `proc.rs` case, where a wait after it never returns.
+
+    An unbounded `wait()` is recorded rather than blocked on, so the test can
+    say what the Stop would have done instead of hanging in it.
+    """
+
+    def kill(self) -> None:
+        self.events.append("kill")
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is None:
+            self.events.append("unbounded wait")
+            return 1
+        self.events.append("wait")
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+
+def _registered(child_proc: object) -> tuple[Generator[str, None, None], runner._Child]:
+    """A stream entry for `child_proc`, started on this thread; the caller unregisters it."""
+
+    def body() -> Generator[str, None, None]:
+        yield "never read"
+
+    generator = body()
+    child = runner._Child()
+    child.proc = child_proc  # type: ignore[assignment]
+    child.started_on = threading.get_ident()
+    runner._register(generator, child)
+    return generator, child
+
+
+def _unregister(*generators: Generator[str, None, None]) -> None:
+    with runner._LIVE_STREAMS_LOCK:
+        for generator in generators:
+            runner._LIVE_STREAMS.pop(generator, None)
+
+
+def test_a_stop_ended_on_its_own_thread_never_waits_without_a_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback runs on the thread that painted Stop, so its every wait is bounded.
+
+    Mutation this catches: the fallback calling the threaded ending as it is,
+    whose `kill()` is followed by an unbounded `wait()` (`proc.rs`: a 600 ms
+    call that returned after 605 seconds).
+    """
+    _as_windows(monkeypatch, "linux")
+    events: list[object] = []
+    root = _RootThatOutlivesKill(events, ignores_terminate=True)
+    generator, child = _registered(root)
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+    finally:
+        _unregister(generator)
+    assert events == ["terminate", "wait", "kill"], events
+    assert child.ended
+
+
+def test_a_stop_whose_inline_ending_fails_still_asks_every_other_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error ending one child on the Stop's own thread does not skip the next one.
+
+    Mutation this catches: the fallback's error escaping the loop.
+    """
+    _as_windows(monkeypatch, "linux")
+
+    class _RootThatCannotBeTerminated(_TreeRoot):
+        def terminate(self) -> None:
+            self.events.append("terminate")
+            raise OSError(1, "Operation not permitted")
+
+    first: list[object] = []
+    second: list[object] = []
+    entries = [_registered(_RootThatCannotBeTerminated(log)) for log in (first, second)]
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 2
+    finally:
+        _unregister(*(generator for generator, _ in entries))
+    assert first == ["terminate"] and second == ["terminate"], (first, second)
+
+
+def test_on_windows_a_stop_whose_thread_cannot_start_ends_the_job_on_its_own_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the same ending as the thread's: the job first, before the call returns.
+
+    Mutation this catches: the fallback ending the process alone, so the
+    job's reach (everything docker.exe started) is lost.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(60)"))
+    assert next(lines) == "first"
+    try:
+        monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        assert "end" in job.events, job.events
+        proc = spawned[0]["proc"]
+        assert isinstance(proc, _REAL_POPEN)
+        assert proc.wait(timeout=HANG_BOUND) is not None
+    finally:
+        lines.close()
+    assert job.events[-1] == "close", job.events
+
+
+def test_on_windows_a_stream_started_in_a_job_still_gets_the_environment_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stream(env=...)` (T376) reaches the child through the job's spawn too.
+
+    Guards the merge of T299's suspended spawn with T376's `env`: the two met
+    in the same `Popen` call. Mutation this catches: `child_env()` without the
+    caller's `env` inside `_spawn`'s lambda.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    env = {**os.environ, "YULON_T299_ENV_PROBE": "given"}
+
+    lines = list(
+        stream(_python_cmd("import os; print(os.environ['YULON_T299_ENV_PROBE'])"), env=env)
+    )
+
+    assert lines == ["given"]
