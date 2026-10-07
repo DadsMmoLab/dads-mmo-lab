@@ -7241,7 +7241,10 @@ _CLAIM_RELEASE_TIMEOUT = 15.0
 
 _CLAIM_POLL_SECONDS = 0.1
 
-_CLAIM_ABANDON_WAIT = 2.0
+_CLAIM_LOOK_TIMEOUT = 1.0
+"""How long one look at a coming-up claim may take, so a Stop is seen between looks."""
+
+_CLAIM_ABANDON_WAIT = 0.5
 """How long the CLI of a claim given up while it came up gets before it is killed."""
 
 _NAME_IN_USE = re.compile(r"Conflict\. The container name .* is already in use", re.IGNORECASE)
@@ -7391,7 +7394,7 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         # not after the release's wait, for a Stop's sake -- and a claim this press
         # made goes with it (by its nonce, never another's).
         _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
-        facts = _claim_facts(name)
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
         if facts is not None and facts.nonce == nonce:
             _remove_claim(facts.container)
         raise
@@ -7409,7 +7412,11 @@ def _claim_coming_up(
     """Wait for `proc`'s claim to run as this press's own (`nonce`), or say why it did not."""
     deadline = time.monotonic() + _CLAIM_UP_TIMEOUT
     while True:
-        facts = _claim_facts(name)
+        # Before each look, and each look short (Codex review of the cold-review folds):
+        # a Docker that does not answer must not hold a Stop for a whole question.
+        if cancel is not None and cancel.is_set():
+            raise ClaimStopped("Stop was pressed before the folder was reserved.")
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
         # Running, not only there (Codex adversarial review, round 3): a claim whose
         # command failed is seen created, with this nonce, before `--rm` takes it.
         if facts is not None and facts.nonce == nonce and facts.status == "running":
@@ -7467,13 +7474,13 @@ class _ClaimFacts(NamedTuple):
     owner: str
 
 
-def _claim_facts(name: str) -> _ClaimFacts | None:
+def _claim_facts(name: str, timeout: float = _ASK_AGAIN_TIMEOUT) -> _ClaimFacts | None:
     """The claim `name`'s container id, state, nonce and owner; None when none (or no answer)."""
     fmt = (
         f'{{{{.Id}}}}\t{{{{.State.Status}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
         f'\t{{{{index .Config.Labels "{OWNER_LABEL}"}}}}'
     )
-    proc = _docker(["inspect", name, "--format", fmt], timeout=_ASK_AGAIN_TIMEOUT)
+    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout)
     if proc.returncode != 0:
         return None
     facts = _ClaimFacts(*([*proc.stdout.strip().split("\t"), "", "", ""])[:4])

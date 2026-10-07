@@ -390,3 +390,39 @@ def test_a_claim_whose_owner_docker_will_not_say_is_not_called_another_yulons(
         with docker.folder_claim(folder, IMAGE):
             pytest.fail("the press went ahead")
     assert not refused.value.known and not refused.value.ours
+
+
+def test_a_stop_is_not_held_up_by_a_slow_docker_question(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of the cold-review folds: each look at the coming-up claim asks Docker,
+    and a Docker that does not answer held a Stop for the whole 20 s question."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / "claim-slow").write_text("", encoding="utf-8")
+
+    def slow(_name: str, timeout: float = docker._ASK_AGAIN_TIMEOUT) -> None:
+        time.sleep(timeout)  # Docker does not answer: the question runs to its bound
+
+    monkeypatch.setattr(docker, "_claim_facts", slow)
+    cancel = threading.Event()
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            with docker.folder_claim(folder, IMAGE, cancel):
+                pytest.fail("held a claim that never came up")
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is read
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    time.sleep(0.3)
+    stopped = time.monotonic()
+    cancel.set()
+    worker.join(HANG_BOUND)
+    took = time.monotonic() - stopped
+    (fake_docker / "claim-slow").unlink()
+    assert not worker.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], docker.ClaimStopped), outcome
+    assert took < 5.0, f"the Stop waited {took:.1f} s on a Docker question"
