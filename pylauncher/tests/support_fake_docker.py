@@ -64,6 +64,11 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
     if (state / "claim-refused").exists():
         sys.stderr.write("docker: Error response from daemon: No such image: nope\\n")
         sys.exit(125)
+    if (state / "claim-no-daemon").exists():
+        sys.stderr.write("docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
+        sys.exit(125)
+    while (state / "claim-slow").exists():  # the daemon takes its time (cold review of T543)
+        time.sleep(0.02)
     labels = state / "labels"
     labels.mkdir(exist_ok=True)
     given = [args[i + 1] for i, arg in enumerate(args) if arg == "--label"]

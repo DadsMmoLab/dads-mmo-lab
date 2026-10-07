@@ -3180,6 +3180,36 @@ def test_the_refusal_names_where_this_platform_removes_the_container(
 # ------------------------------------- T543: the press claims its folder first
 
 
+def _bounded_press(box: Box, cancel: threading.Event | None = None) -> list[str]:
+    """`list(reextract())` on a worker, bounded by HANG_BOUND (cold review of T543).
+
+    A press that hangs -- a mutation that drops the claim leaves the fake tool running
+    for ten minutes -- fails here instead of stalling the suite. Its exception is raised.
+    """
+    stop = cancel if cancel is not None else threading.Event()
+    lines: list[str] = []
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            lines.extend(
+                box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=stop)
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    worker.join(HANG_BOUND)
+    if worker.is_alive():
+        stop.set()
+        worker.join(HANG_BOUND)
+        pytest.fail("the Re-extract press did not end in time")
+    if outcome:
+        raise outcome[0]
+    return lines
+
+
 def _another_yulons_claim(cli: Path, data: Path) -> subprocess.Popen[bytes]:
     """Another Yu'lon on this daemon, pressing on the same folder: its claim, held open."""
     ident = docker.folder_id(data)
@@ -3228,12 +3258,15 @@ def test_a_reextract_while_another_yulon_claims_the_folder_is_refused_before_any
             time.sleep(0.01)
 
         with pytest.raises(InstallerError) as refused:
-            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir)))
+            _bounded_press(box)
 
         said = str(refused.value)
+        name = docker.CLAIM_PREFIX + str(docker.folder_id(data))
         assert said.startswith(
-            f"Another Yu'lon on this computer is extracting map data into {data} right now."
+            f"Another Yu'lon on this computer is extracting map data into {data} right now "
+            f"({name})."
         ), said
+        assert "If no other Yu'lon is open on this computer" in said, said
         assert "Nothing was changed." in said and "docker rm" not in said, said
         assert not [call for call in fake_calls(state) if call.startswith("create ")]
         assert data_files(box) == before
@@ -3322,7 +3355,7 @@ def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
             )
 
         with pytest.raises(InstallerError) as refused:
-            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir)))
+            _bounded_press(box)
 
         said = str(refused.value)
         if case == "unavailable":
@@ -3335,5 +3368,57 @@ def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
         assert not [call for call in fake_calls(state) if call.startswith("create ")]
         assert data_files(box) == before
         assert not (data / extract.PREVIOUS_DIR).exists()
+    finally:
+        end_fake_containers(state)
+
+
+@pytest.mark.parametrize("ends", ["finished", "failed", "closed", "stopped-first"])
+def test_a_reextract_lets_go_of_its_claim_however_it_ends(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ends: str
+) -> None:
+    """Cold review of T543: the claim is released on success, on failure, on a closed
+    stream; and a Stop before it came up ends the press as a Stop, nothing moved."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["folder_claim"] = docker.folder_claim
+        before = data_files(box)
+        if ends == "failed":
+            box.m.tools.fail_tool = "vmap4assembler"
+        if ends == "closed":
+            press = box.engine().reextract(
+                InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+            )
+            for line in press:
+                if line.startswith("vmap assemble: running"):
+                    assert any(
+                        n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state)
+                    ), "the claim is held while the tools run"
+                    break
+            press.close()
+        elif ends == "stopped-first":
+            cancel = threading.Event()
+            cancel.set()
+            with pytest.raises(InstallerError) as stopped:
+                _bounded_press(box, cancel)
+            assert stop_took_effect(stopped.value), stopped.value
+            assert data_files(box) == before
+        elif ends == "failed":
+            with pytest.raises(InstallerError):
+                _bounded_press(box)
+        else:
+            _bounded_press(box)
+            assert "mapextractor" in box.m.tools.seen
+
+        deadline = time.monotonic() + HANG_BOUND
+        while any(n.startswith(docker.CLAIM_PREFIX) for n in fake_containers(state)):
+            assert time.monotonic() < deadline, f"the claim was kept after a press that {ends}"
+            time.sleep(0.02)
+        made = [call for call in fake_calls(state) if call.startswith("run ")]
+        if ends != "stopped-first":
+            assert made and "yulon-claim-" in made[0], made
     finally:
         end_fake_containers(state)

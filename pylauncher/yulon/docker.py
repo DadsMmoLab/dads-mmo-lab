@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
 
-from yulon import ansi, container_end, platform, runner, wsl
+from yulon import ansi, container_end, platform, runner, server_build_presses, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
@@ -7241,6 +7241,9 @@ _CLAIM_RELEASE_TIMEOUT = 15.0
 
 _CLAIM_POLL_SECONDS = 0.1
 
+_CLAIM_ABANDON_WAIT = 2.0
+"""How long the CLI of a claim given up while it came up gets before it is killed."""
+
 _NAME_IN_USE = re.compile(r"Conflict\. The container name .* is already in use", re.IGNORECASE)
 """How the daemon refuses a second container of one name (m910q Engine and Docker Desktop,
 measured 2026-10-07, `.notes/gates/live-t543-2026-10-07`)."""
@@ -7252,21 +7255,37 @@ _CLAIMS_LOCK = threading.Lock()
 
 
 class FolderClaimed(Exception):
-    """Another press holds the folder's claim (T543).
+    """Another press holds the folder's claim (T543), the container `name`.
 
     `ours`: its owner label is this Yu'lon's. `here`: this process holds it -- a press
     still running; ours and not here is one an earlier run of this Yu'lon left.
+    `known` False: Docker refused the name and then would not say whose it is.
     """
 
-    def __init__(self, name: str, *, ours: bool, here: bool = False) -> None:
+    def __init__(self, name: str, *, ours: bool, here: bool = False, known: bool = True) -> None:
         super().__init__(name)
         self.name = name
         self.ours = ours
         self.here = here
+        self.known = known
 
 
 class ClaimUnavailable(Exception):
     """The folder's claim could not be made, for a reason other than another press (T543)."""
+
+
+class ClaimStopped(ClaimUnavailable, StopTookEffect):
+    """Stop was pressed while the claim came up (cold review of T543): nothing was touched."""
+
+
+_IMAGE_GONE = re.compile(
+    r"No such image|Unable to find image|pull access denied|repository does not exist",
+    re.IGNORECASE,
+)
+_DAEMON_DOWN = re.compile(
+    r"Cannot connect to the Docker daemon|error during connect|daemon is not running",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -7277,7 +7296,7 @@ class _Claim:
 
 
 @contextmanager
-def folder_claim(folder: Path, image: str) -> Iterator[bool]:
+def folder_claim(folder: Path, image: str, cancel: threading.Event | None = None) -> Iterator[bool]:
     """Hold `folder`'s claim while inside (T543); a press goes ahead only inside one.
 
     Two Yu'lons on one daemon -- a second user, or a Windows and a WSL one -- can press
@@ -7293,14 +7312,18 @@ def folder_claim(folder: Path, image: str) -> Iterator[bool]:
     adversarial review): the caller says what it is and, for this Yu'lon's own, how.
 
     Yields True; the type is the seam's, so a test's stand-in can say what it held.
+    Without a claim nothing is yielded: the press stops there (Codex adversarial
+    review, twice), since the tools need the same docker and image and nothing is
+    lost by stopping before the old map data moves.
+
+    `cancel` set while the claim comes up ends the wait at once (cold review): the
+    claim's CLI goes, and so does a claim it had made.
 
     Raises:
         FolderClaimed: another press holds it.
+        ClaimStopped: `cancel` was set while it came up.
         ClaimUnavailable: no claim could be made (no folder id, no docker, no image, a
-            daemon that refused or did not answer); its text says what to do. The
-            press does not go on unclaimed (Codex adversarial review, twice): the
-            tools need the same docker and image, so nothing is lost by stopping
-            before the old map data moves (Codex adversarial review).
+            daemon that refused or did not answer); its text says what to do.
     """
     ident = folder_id(folder)
     if ident is None:
@@ -7310,20 +7333,22 @@ def folder_claim(folder: Path, image: str) -> Iterator[bool]:
             f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
             "file is there, delete it; if the folder is read-only, make it writable."
         )
-    held = _take_claim(CLAIM_PREFIX + ident, image, again=True)
+    held = _take_claim(CLAIM_PREFIX + ident, image, cancel, again=True)
     try:
         yield True
     finally:
         _release_claim(held)
 
 
-def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
+def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
     """Start the claim `name` and see it running as this press's own.
 
     Raises:
         FolderClaimed: the daemon refused the name: another press holds it.
         ClaimUnavailable: any other reason it is not running as ours.
     """
+    if cancel is not None and cancel.is_set():
+        raise ClaimStopped("Stop was pressed before the folder was reserved.")
     program = platform.docker_program()
     if program is None:
         raise ClaimUnavailable("Docker's command-line tool was not found; start or install Docker.")
@@ -7360,11 +7385,12 @@ def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
     except OSError as exc:
         raise ClaimUnavailable(f"Docker could not be started ({exc}); is Docker running?") from exc
     try:
-        return _claim_coming_up(name, image, proc, nonce, again=again)
+        return _claim_coming_up(name, image, proc, nonce, cancel, again=again)
     except BaseException:
-        # Not ours after all, or abandoned while it came up: its CLI goes, and a claim
-        # this press made goes with it (by its nonce, never another's).
-        _end_claim_cli(proc)
+        # Not ours after all, or abandoned while it came up: its CLI goes -- at once,
+        # not after the release's wait, for a Stop's sake -- and a claim this press
+        # made goes with it (by its nonce, never another's).
+        _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
         facts = _claim_facts(name)
         if facts is not None and facts.nonce == nonce:
             _remove_claim(facts.container)
@@ -7372,7 +7398,13 @@ def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
 
 
 def _claim_coming_up(
-    name: str, image: str, proc: subprocess.Popen[bytes], nonce: str, *, again: bool
+    name: str,
+    image: str,
+    proc: subprocess.Popen[bytes],
+    nonce: str,
+    cancel: threading.Event | None,
+    *,
+    again: bool,
 ) -> _Claim:
     """Wait for `proc`'s claim to run as this press's own (`nonce`), or say why it did not."""
     deadline = time.monotonic() + _CLAIM_UP_TIMEOUT
@@ -7388,24 +7420,41 @@ def _claim_coming_up(
             assert proc.stderr is not None
             said = proc.stderr.read().decode("utf-8", "replace").strip()
             proc.stderr.close()
-            if not _NAME_IN_USE.search(said):
-                said = said or f"it exited {proc.returncode}"
-                raise ClaimUnavailable(f"Docker refused it ({said}); is Docker running?")
-            return _claim_in_use(name, image, again=again)
+            if _NAME_IN_USE.search(said):
+                return _claim_in_use(name, image, cancel, again=again)
+            raise ClaimUnavailable(_claim_refused(image, said or f"it exited {proc.returncode}"))
         if time.monotonic() > deadline:
             raise ClaimUnavailable(
-                f"Docker had not started it after {_CLAIM_UP_TIMEOUT:.0f} s; is Docker running?"
+                f"Docker had not started its reservation after {_CLAIM_UP_TIMEOUT:.0f} s; "
+                "wait until Docker has started."
             )
-        time.sleep(_CLAIM_POLL_SECONDS)
+        if cancel is not None and cancel.wait(_CLAIM_POLL_SECONDS):
+            raise ClaimStopped("Stop was pressed before the folder was reserved.")
+        elif cancel is None:
+            time.sleep(_CLAIM_POLL_SECONDS)
 
 
-def _claim_in_use(name: str, image: str, *, again: bool) -> _Claim:
+def _claim_refused(image: str, said: str) -> str:
+    """What to do about a claim Docker refused, by Docker's own words (cold review of T543)."""
+    if _IMAGE_GONE.search(said):
+        return (
+            f"The server's extraction image, {image}, is no longer in Docker (Docker said: "
+            f"{said}). Press \u201c{server_build_presses.REBUILD}\u201d on the Server tab to make "
+            "it again."
+        )
+    if _DAEMON_DOWN.search(said):
+        return f"Docker is not running (Docker said: {said}); start Docker."
+    return f"Docker refused it (Docker said: {said})."
+
+
+def _claim_in_use(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
     """The daemon said `name` is taken: say whose; never remove it (T543)."""
     facts = _claim_facts(name)
     if facts is None:
         if again:  # it ended between the refusal and the question
-            return _take_claim(name, image, again=False)
-        raise FolderClaimed(name, ours=False)
+            return _take_claim(name, image, cancel, again=False)
+        # Refused twice, and twice no answer about whose (cold review): not "another's".
+        raise FolderClaimed(name, ours=False, known=False)
     with _CLAIMS_LOCK:
         here = name in _CLAIMS_HELD
     raise FolderClaimed(name, ours=facts.owner == owner_id(), here=here)
@@ -7439,15 +7488,15 @@ def _release_claim(held: _Claim) -> None:
     _remove_claim(held.container)
 
 
-def _end_claim_cli(proc: subprocess.Popen[bytes]) -> None:
-    """Close the claim's stdin and wait for its CLI; killed when it will not end. Never raises."""
+def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEASE_TIMEOUT) -> None:
+    """Close the claim's stdin and wait `wait` s for its CLI; killed if it will not end. Never raises."""
     try:
         if proc.stdin is not None:
             proc.stdin.close()
     except OSError as exc:
         logger.info(f"the claim's stdin would not close: {exc}")
     try:
-        proc.wait(timeout=_CLAIM_RELEASE_TIMEOUT)
+        proc.wait(timeout=wait)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()

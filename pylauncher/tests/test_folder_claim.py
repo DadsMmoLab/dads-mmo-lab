@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,6 +27,7 @@ from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from yulon import container_end, docker, platform
+from yulon.after_stop import stop_took_effect
 from yulon.catalog.families.trinitycore import TrinityCoreInstaller
 from yulon.catalog.installer import InstallerError
 
@@ -321,3 +323,70 @@ def test_a_claim_that_never_runs_is_never_held(fake_docker: Path, tmp_path: Path
     with pytest.raises(docker.ClaimUnavailable):
         with docker.folder_claim(folder, IMAGE):
             pytest.fail("the press went ahead on a claim that never ran")
+
+
+def test_a_stop_while_the_claim_comes_up_ends_the_wait_at_once(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """Cold review: Docker may take its time with the claim; a Stop does not wait for it."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / "claim-slow").write_text("", encoding="utf-8")
+    cancel = threading.Event()
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            with docker.folder_claim(folder, IMAGE, cancel):
+                pytest.fail("held a claim that never came up")
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is read
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    time.sleep(0.3)
+    stopped = time.monotonic()
+    cancel.set()
+    worker.join(HANG_BOUND)
+    took = time.monotonic() - stopped
+    (fake_docker / "claim-slow").unlink()
+    assert not worker.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], docker.ClaimStopped), outcome
+    assert stop_took_effect(outcome[0])
+    assert took < 5.0, f"the Stop waited {took:.1f} s for the claim"
+
+
+@pytest.mark.parametrize(
+    ("flag", "says", "not_says"),
+    [
+        ("claim-refused", "Rebuild the server", "is Docker running"),
+        ("claim-no-daemon", "Docker is not running", "Rebuild"),
+    ],
+)
+def test_a_refused_claim_names_its_real_cause(
+    fake_docker: Path, tmp_path: Path, flag: str, says: str, not_says: str
+) -> None:
+    """Cold review: a missing extraction image is not "is Docker running?"."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / flag).write_text("", encoding="utf-8")
+
+    with pytest.raises(docker.ClaimUnavailable) as refused:
+        with docker.folder_claim(folder, IMAGE):
+            pytest.fail("held a refused claim")
+    assert says in str(refused.value) and not_says not in str(refused.value), refused.value
+
+
+def test_a_claim_whose_owner_docker_will_not_say_is_not_called_another_yulons(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "data"
+    folder.mkdir()
+    name = _claim_name(folder)
+    _running(fake_docker, name, ["yulon.owner=someone-else", f"{docker.CLAIM_LABEL}=theirs"])
+    (fake_docker / "no-answer").write_text("", encoding="utf-8")
+
+    with pytest.raises(docker.FolderClaimed) as refused:
+        with docker.folder_claim(folder, IMAGE):
+            pytest.fail("the press went ahead")
+    assert not refused.value.known and not refused.value.ours

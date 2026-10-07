@@ -2065,9 +2065,13 @@ class TrinityCoreInstaller(CmangosInstaller):
             # T543: before anything is asked or moved, so of two presses on one folder
             # -- two Yu'lons on one daemon -- only one gets past here.
             try:
-                claim.enter_context(self._seams.folder_claim(data_dir, image))
+                claim.enter_context(self._seams.folder_claim(data_dir, image, probe.cancel))
             except docker.FolderClaimed as claimed:
                 raise InstallerError(self._claimed_note(data_dir, claimed)) from claimed
+            except docker.ClaimStopped as exc:
+                raise InstallerError(
+                    f"{exc} {self.entry.name}'s map data was not touched. Nothing was changed."
+                ) from exc
             except docker.ClaimUnavailable as exc:
                 raise InstallerError(
                     f"Yu'lon could not reserve {data_dir} for this extraction, so "
@@ -2094,7 +2098,16 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"Remove it with the command below, then {again}\n"
                 f"docker rm -f {claimed.name}"
             )
-        return f"{another_yulon_extracting(data_dir)} Wait for it to finish, then {again}"
+        if not claimed.known:
+            return (
+                f"{data_dir} is reserved in Docker ({claimed.name}), and Docker would not say "
+                f"by whom. Wait for any other Yu'lon's extraction to finish, then {again}"
+            )
+        return (
+            f"{another_yulon_extracting(data_dir, (claimed.name,))} Wait for it to finish, then "
+            f"{again} If no other Yu'lon is open on this computer, that reservation was left "
+            "behind: remove the container of that name in Docker first."
+        )
 
     def _reextract_claimed(
         self, server_dir: Path, probe: StageContext, data_dir: Path, client: Path
