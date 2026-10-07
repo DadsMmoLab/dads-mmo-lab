@@ -147,8 +147,16 @@ class Controller:
         reset_unfinished: docker.ResetUnfinished | None = None,
         pre_stop: Callable[[], object] | None = None,
         start_guard: Callable[[], str | None] | None = None,
+        before_servers: Callable[[], str | None] | None = None,
     ) -> None:
         self.spec = spec
+        # A family's last word before its servers start, asked once every
+        # refusal has passed -- the port check and the missing database (T377)
+        # included, so it may write to the database without recreating one
+        # Docker lost (T552, Codex review). A reason refuses the start like
+        # `start_guard`'s. Also asked by `refuse_before_a_stop()`, so a Restart
+        # or Recreate cannot reach the servers without it.
+        self.before_servers = before_servers
         self.server_dir = server_dir
         # Why this install must not be started now, or None (T179): asked first by
         # `start()` and `stop_conflicting_and_start()`, the one door every Start,
@@ -326,6 +334,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.refuse_a_missing_database()
+        self._ask_before_the_servers()
         self._before_the_servers_start()
         self.zone_problem = self._put_back_the_zone_file()
         # The map-data fingerprint was written by `refuse_start()` above (T219).
@@ -513,6 +522,16 @@ class Controller:
         """
         self.refuse_start()
         self.refuse_a_missing_database()
+        self._ask_before_the_servers()
+
+    def _ask_before_the_servers(self) -> None:
+        """Raise `StartRefused` when `before_servers` gives a reason (T552)."""
+        if self.before_servers is None:
+            return
+        reason = self.before_servers()
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
 
     def stop_conflicting_and_start(self) -> list[str]:
         """Stop the server holding our ports, then start this one."""

@@ -3001,33 +3001,37 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
-def _realm_port_guard(
+def _realm_port_keeper(
     entry: CatalogEntry,
     spec: docker.ContainerSpec,
     server_dir: Path,
-    sql: apply_module.SqlRunner,
+    sql: DockerSql,
     wsl_distro: str | None,
 ) -> Callable[[], str | None] | None:
-    """Before every start, the realm row gets this server's world port; None for 8085 (T552).
+    """Before the servers start, the realm row gets this server's world port; None for 8085 (T552).
 
     The install sets the row before its first `up` (`AzerothCoreInstaller.
     _realm_port()`), but AzerothCore's importer seeds it with 8085, WotLK's
     world port, and a repair import runs that importer again; a statement that
-    failed once must also be tried again, not left behind a repair that now
-    refuses (Codex adversarial review, rounds 1 and 2). So the controller's
-    start guard, the one door every Start, Restart and Play goes through,
-    brings the database up and runs the guarded UPDATE, which changes nothing
-    on a row that is already right. A guard that cannot set it refuses the
-    start: the authserver hands clients the row's port and prints it once, at
-    its start, in the line the ready wait reads. An entry on 8085 gets no guard,
-    so WotLK starts exactly as it did.
+    failed once must be tried again at the next start, not left behind a repair
+    that now refuses (Codex adversarial review, rounds 1 and 2). So the
+    controller asks this once every refusal has passed (`Controller.
+    before_servers`): the port check and the missing-database check (T377) come
+    first, so it never brings up a database Docker lost (Codex review, round
+    2). It starts the database the presence check found, runs the guarded
+    UPDATE, and reads the row back: the start goes ahead only when the row says
+    this server's port (round 3: an UPDATE that matched nothing also exits 0).
+    The authserver hands clients the row's port, and prints it once at its
+    start in the line the ready wait reads. An entry on 8085 gets no step, so
+    WotLK starts exactly as it did.
     """
     port = entry.ports.world
     if port == azerothcore.SEEDED_WORLD_PORT:
         return None
     statement = networking.realm_port_sql(entry)
+    read_back = networking.realm_port_query(entry)
 
-    def guard() -> str | None:
+    def keep() -> str | None:
         try:
             docker.start_database(
                 spec,
@@ -3036,15 +3040,20 @@ def _realm_port_guard(
                 wsl_distro=wsl_distro,
             )
             sql.run_statement("auth", statement)
+            said = sql.query("auth", read_back).split()
         except Exception as exc:  # noqa: BLE001 - any failure refuses the start, worded once
-            return (
-                f"The realm could not be given this server's world port {port} ({exc}), so the "
-                "server was not started: its players would be sent to another server's world. "
-                "Press Start again."
-            )
-        return None
+            why = str(exc)
+        else:
+            if said == [str(port)]:
+                return None
+            why = f"the realm row reads {' '.join(said) or 'nothing'}"
+        return (
+            f"The realm could not be given this server's world port {port} ({why}), so the "
+            "server was not started: its players would be sent to another server's world. "
+            "Press Start again."
+        )
 
-    return guard
+    return keep
 
 
 def _for_wotlk(
@@ -3272,7 +3281,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
-            start_guard=_realm_port_guard(entry, spec, server_dir, sql, wsl_distro),
+            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of

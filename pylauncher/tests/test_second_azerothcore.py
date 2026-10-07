@@ -441,24 +441,26 @@ def test_a_resumed_install_starts_the_database_before_the_port_statement(tmp_pat
 
 
 def _guarded_services(
-    monkeypatch: pytest.MonkeyPatch, entry: object, run_statement: object
+    monkeypatch: pytest.MonkeyPatch, entry: object, run_statement: object, row: str = "8086\n"
 ) -> object:
     from yulon import apply, docker
     from yulon.ui import controller_view
 
     started: list[str] = []
     monkeypatch.setattr(apply.DockerSql, "run_statement", run_statement)
+    monkeypatch.setattr(apply.DockerSql, "query", lambda self, db, statement: row)
     monkeypatch.setattr(
         docker, "start_database", lambda spec, *_a, **_k: started.append(spec.db) or True
     )
-    services = controller_view._for_wotlk(entry, Path("/nonexistent/srv"), None, None)  # type: ignore[arg-type]
+    services = controller_view._for_wotlk(
+        entry, Path("/nonexistent/srv"), None, None  # type: ignore[arg-type]
+    )
     services.started_dbs = started  # type: ignore[attr-defined]
     return services
 
 
-def test_every_start_gives_the_realm_its_port_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A repair re-runs the importer, which seeds 8085 (Codex adversarial, round 1); so does
-    nothing else on the way to a Start. The guard brings the database up and sets the row."""
+def test_before_the_servers_start_the_realm_gets_its_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repair re-runs the importer, which seeds 8085 (Codex adversarial, round 1)."""
     ran: list[tuple[str, str]] = []
     services = _guarded_services(
         monkeypatch,
@@ -466,9 +468,22 @@ def test_every_start_gives_the_realm_its_port_first(monkeypatch: pytest.MonkeyPa
         lambda self, db, statement: ran.append((db, statement)),
     )
     controller = services.controller  # type: ignore[attr-defined]
-    controller.refuse_start()
+    assert controller.start_guard is None
+    assert controller.before_servers() is None
     assert ran == [("auth", PORT_SQL)]
     assert services.started_dbs == [SECOND_CONTAINERS["db"]]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("row", ["8085\n", "", "NULL\n", "8086\n8086\n"])
+def test_a_row_that_does_not_read_back_the_port_refuses(
+    monkeypatch: pytest.MonkeyPatch, row: str
+) -> None:
+    """An UPDATE that matched nothing exits 0 too (Codex adversarial, round 3)."""
+    services = _guarded_services(
+        monkeypatch, second_ac_entry(manifests_from="wow-wotlk"), lambda *_a: None, row=row
+    )
+    reason = services.controller.before_servers()  # type: ignore[attr-defined]
+    assert reason is not None and "8086" in reason
 
 
 def test_a_port_that_could_not_be_set_refuses_the_start_and_the_next_one_retries(
@@ -488,16 +503,51 @@ def test_a_port_that_could_not_be_set_refuses_the_start_and_the_next_one_retries
 
     services = _guarded_services(monkeypatch, second_ac_entry(manifests_from="wow-wotlk"), flaky)
     ctl = services.controller  # type: ignore[attr-defined]
+    monkeypatch.setattr(ctl, "refuse_start", lambda: None)
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: None)
     with pytest.raises(controller.StartRefused, match="8086"):
-        ctl.refuse_start()
-    ctl.refuse_start()
+        ctl.refuse_before_a_stop()
+    ctl.refuse_before_a_stop()
     assert ran == [PORT_SQL, PORT_SQL]
 
 
-def test_a_wotlk_start_has_no_port_guard() -> None:
+def test_the_step_runs_after_every_refusal_and_before_the_servers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After the port check and the missing-database check, so it never brings up a database
+    Docker lost and never starts one for a start that is refused (Codex review, round 2)."""
+    from yulon import controller, docker
+
+    order: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: order.append("before_servers") or None,
+    )
+    monkeypatch.setattr(ctl, "refuse_start", lambda: order.append("refuse_start"))
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: order.append("ports") or [])
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: order.append("database"))
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: order.append("servers"))
+    ctl.start()
+    assert order == ["refuse_start", "ports", "database", "before_servers", "servers"]
+
+    refused = controller.Controller(
+        second_ac_entry().container_spec(), tmp_path, before_servers=lambda: "no port"
+    )
+    monkeypatch.setattr(refused, "refuse_start", lambda: None)
+    monkeypatch.setattr(refused, "port_conflicts", lambda: [])
+    monkeypatch.setattr(refused, "refuse_a_missing_database", lambda: None)
+    order.clear()
+    with pytest.raises(controller.StartRefused, match="no port"):
+        refused.start()
+    assert "servers" not in order
+
+
+def test_a_wotlk_start_has_no_port_step() -> None:
     from yulon.ui import controller_view
 
     services = controller_view._for_wotlk(
         load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
     )
-    assert services.controller.start_guard is None
+    assert services.controller.before_servers is None

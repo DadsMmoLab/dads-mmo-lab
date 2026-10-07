@@ -3449,6 +3449,12 @@ def realm_port_sql(entry: CatalogEntry) -> str:
     )
 
 
+def realm_port_query(entry: CatalogEntry) -> str:
+    """The SELECT that reads back what `realm_port_sql()` was to establish (T552)."""
+    rl = entry.realmlist
+    return f"SELECT port FROM {entry.databases.auth}.{rl.table} WHERE id={rl.realm_id};"
+
+
 def _sql_literal(ip: str) -> str:
     # IPs/hostnames only: refuse anything that is not a plain address token.
     if not all(ch.isalnum() or ch in ".-:" for ch in ip):
