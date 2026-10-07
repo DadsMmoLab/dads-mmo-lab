@@ -77,6 +77,14 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
         )
         sys.exit(125)
     (labels / name).write_text("\\n".join(given), encoding="utf-8")
+    if (state / "claim-dies").exists():
+        # Created, never running: its command failed to start, and `--rm` takes it.
+        os.write(made, b"created")
+        os.close(made)
+        time.sleep(0.5)
+        box.unlink(missing_ok=True)
+        sys.stderr.write("docker: Error response from daemon: failed to create task\\n")
+        sys.exit(127)
     os.write(made, str(os.getpid()).encode("ascii"))
     os.close(made)
     sys.stdin.read()
@@ -154,12 +162,17 @@ if args[:1] == ["inspect"]:
         sys.exit(1)
     fmt = args[args.index("--format") + 1] if "--format" in args else ""
     if (state / "containers" / args[1]).exists() and ".Config.Labels" in fmt:
-        # T543: `{{{{.Id}}}}` then each `{{{{index .Config.Labels "<key>"}}}}`, tab-separated.
+        # T543: `{{{{.Id}}}}`, `{{{{.State.Status}}}}` when asked, then each
+        # `{{{{index .Config.Labels "<key>"}}}}`, tab-separated.
         label = state / "labels" / args[1]
         given = label.read_text(encoding="utf-8").splitlines() if label.exists() else []
         values = dict(line.split("=", 1) for line in given if "=" in line)
         keys = [piece.split('"')[1] for piece in fmt.split(".Config.Labels ")[1:]]
-        sys.stdout.write("\\t".join([args[1] + "-id", *(values.get(k, "") for k in keys)]) + "\\n")
+        made = (state / "containers" / args[1]).read_text(encoding="utf-8")
+        status = ["created" if made == "created" else "running"] if ".State.Status" in fmt else []
+        sys.stdout.write(
+            "\\t".join([args[1] + "-id", *status, *(values.get(k, "") for k in keys)]) + "\\n"
+        )
         sys.exit(0)
     if (state / "containers" / args[1]).exists():
         sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")

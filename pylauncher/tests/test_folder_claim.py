@@ -309,3 +309,15 @@ def test_two_yulons_pressing_at_once_one_goes_ahead(fake_docker: Path, tmp_path:
     go.write_text("", encoding="utf-8")
     said = sorted(proc.communicate(timeout=HANG_BOUND)[0].strip() for proc in procs)
     assert said == ["held", "refused"], said
+
+
+def test_a_claim_that_never_runs_is_never_held(fake_docker: Path, tmp_path: Path) -> None:
+    """Codex adversarial review, round 3: a claim created whose command then fails is seen,
+    with this press's nonce, before `--rm` takes it. Held means running, not just there."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (fake_docker / "claim-dies").write_text("", encoding="utf-8")
+
+    with pytest.raises(docker.ClaimUnavailable):
+        with docker.folder_claim(folder, IMAGE):
+            pytest.fail("the press went ahead on a claim that never ran")

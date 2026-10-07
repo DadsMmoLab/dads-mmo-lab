@@ -7366,8 +7366,8 @@ def _take_claim(name: str, image: str, *, again: bool) -> _Claim:
         # this press made goes with it (by its nonce, never another's).
         _end_claim_cli(proc)
         facts = _claim_facts(name)
-        if facts is not None and facts[1] == nonce:
-            _remove_claim(facts[0])
+        if facts is not None and facts.nonce == nonce:
+            _remove_claim(facts.container)
         raise
 
 
@@ -7378,10 +7378,12 @@ def _claim_coming_up(
     deadline = time.monotonic() + _CLAIM_UP_TIMEOUT
     while True:
         facts = _claim_facts(name)
-        if facts is not None and facts[1] == nonce:
+        # Running, not only there (Codex adversarial review, round 3): a claim whose
+        # command failed is seen created, with this nonce, before `--rm` takes it.
+        if facts is not None and facts.nonce == nonce and facts.status == "running":
             with _CLAIMS_LOCK:
                 _CLAIMS_HELD.add(name)
-            return _Claim(name, facts[0], proc)
+            return _Claim(name, facts.container, proc)
         if proc.poll() is not None:
             assert proc.stderr is not None
             said = proc.stderr.read().decode("utf-8", "replace").strip()
@@ -7406,20 +7408,27 @@ def _claim_in_use(name: str, image: str, *, again: bool) -> _Claim:
         raise FolderClaimed(name, ours=False)
     with _CLAIMS_LOCK:
         here = name in _CLAIMS_HELD
-    raise FolderClaimed(name, ours=facts[2] == owner_id(), here=here)
+    raise FolderClaimed(name, ours=facts.owner == owner_id(), here=here)
 
 
-def _claim_facts(name: str) -> tuple[str, str, str] | None:
-    """The claim `name`'s container id, nonce and owner; None when there is none (or no answer)."""
+class _ClaimFacts(NamedTuple):
+    container: str
+    status: str
+    nonce: str
+    owner: str
+
+
+def _claim_facts(name: str) -> _ClaimFacts | None:
+    """The claim `name`'s container id, state, nonce and owner; None when none (or no answer)."""
     fmt = (
-        f'{{{{.Id}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
+        f'{{{{.Id}}}}\t{{{{.State.Status}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
         f'\t{{{{index .Config.Labels "{OWNER_LABEL}"}}}}'
     )
     proc = _docker(["inspect", name, "--format", fmt], timeout=_ASK_AGAIN_TIMEOUT)
     if proc.returncode != 0:
         return None
-    container, nonce, owner = ([*proc.stdout.strip().split("\t"), "", ""])[:3]
-    return (container, nonce, owner) if container else None
+    facts = _ClaimFacts(*([*proc.stdout.strip().split("\t"), "", "", ""])[:4])
+    return facts if facts.container else None
 
 
 def _release_claim(held: _Claim) -> None:
