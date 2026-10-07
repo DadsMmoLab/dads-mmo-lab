@@ -287,8 +287,13 @@ engine on `yulon-fedora-gate`, each read back from its own `src/` checkout.
 T524 (2026-10-07) moved the shared `playerbots` once more, 76b97537 -> 45bed519 (one
 commit, the Karazhan Netherspite strategy: eight C++ files under `playerbot/`; no SQL,
 conf, CMake or `contrib/` file). The other four sources were still upstream's heads.
-The gate was an existing TBC (or Vanilla) install of the T500 pins moved onto it
-through "Update the server to latest...".
+The gate was one Vanilla install made at the T500 pins (a4c9faa5's code), moved onto
+this commit through "Update the server to latest..." on `yulon-fedora-gate`: playerbots
+76b97537 -> 45bed519 recompiled in a 52-minute rebuild, world ready 54 s after the start,
+500 bots (509 online of the 900 characters), SOAP Verified, SRP6 1.12.1 login ok/wrong/
+unknown, Stop clean. TBC's compile of the new playerbots files was not run live: the
+box's disk could not hold the TBC client and an install without root to format the extra
+disk. The new playerbots commit is C++ only and shared, so the Vanilla build compiled it.
 """
 
 

@@ -23,6 +23,10 @@ T524 (2026-10-07) moved the pin to 6c6472c3, one commit after 56fe34fa: Battlegr
 PathGenerator.cpp/.h and MoveSplineInit.cpp. No conf, SQL, CMake, dbc, World.cpp or
 World.h change, so every reading above still holds; the `World.cpp` lines cited in
 this file and in the catalog were re-read at 6c6472c3 on that date.
+The gate was the existing `yulon-ubuntu2` install moved from 56fe34fa through "Update the
+server to latest..." (full recompile in 648 s): world ready 12 s after the start, 150 bots
+online, SRP6 3.3.5a login ok/wrong/unknown, Stop clean. Not proved there: the SOAP
+command channel, because that box's Yu'lon profile had lost the app account's password.
 
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
