@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- On Windows, **Stop** ends a build's leftover helpers even when the build's own docker process had already exited.
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
 - **Stop** during a clone or map tool removes its container, even as it starts; one Docker would not start goes too.
