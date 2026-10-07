@@ -245,7 +245,8 @@ WOTLK_RATES = (
     "Rate.Drop.Money                 = 5\n"
 )
 TBC_RATES = (
-    # cmangos/mangos-tbc @15b6ddb4 (conf and World.cpp byte-identical to 75f9ae68), mangosd.conf.dist.in:1560-1594 (an excerpt)
+    # cmangos/mangos-tbc @15b6ddb4, mangosd.conf.dist.in:1560-1594 (an excerpt; the conf and
+    # World.cpp are byte-identical to 75f9ae68)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
