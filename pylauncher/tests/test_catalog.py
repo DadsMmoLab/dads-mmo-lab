@@ -228,12 +228,12 @@ GATE_PINS = {
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
-        "cmangos/playerbots": "45bed51955bf6b07e750b72ac056d9253ca3cecd",
+        "cmangos/playerbots": "da4419afc44f97bb950ca2ebccc3f29a902a3fab",
         "cmangos/tbc-db": "866723612d93791e442fb1b18d642118fa682edd",
     },
     "wow-vanilla": {
         "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
-        "cmangos/playerbots": "45bed51955bf6b07e750b72ac056d9253ca3cecd",
+        "cmangos/playerbots": "da4419afc44f97bb950ca2ebccc3f29a902a3fab",
         "cmangos/classic-db": "ec4f596146be6467ea93c57397858e329e2db852",
     },
 }
@@ -294,6 +294,12 @@ this commit through "Update the server to latest..." on `yulon-fedora-gate`: pla
 unknown, Stop clean. TBC's compile of the new playerbots files was not run live: the
 box's disk could not hold the TBC client and an install without root to format the extra
 disk. The new playerbots commit is C++ only and shared, so the Vanilla build compiled it.
+
+T537 (2026-10-07) moved the shared `playerbots` again, 45bed519 -> da4419af (ten commits,
+the first being our Netherspite null checks, cmangos/playerbots#393; the rest are C++:
+mount crash fix, hunter pet pick, login delay setting, debug strategies, tests). The
+diff holds no SQL, conf, CMake or `contrib/` file. The other four sources were still
+upstream's heads. The live result is added below once the gate has run.
 """
 
 
