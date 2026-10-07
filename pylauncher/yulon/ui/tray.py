@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from yulon import ui_settings
 from yulon.log import get_logger
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
 from yulon.ui.theme import COLOR_DANGER, COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
 from yulon.ui.tray_flyout import TrayFlyout
@@ -900,7 +901,7 @@ OWN_DIALOG = "yulonTrayDialog"
 def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit tray… with `count` servers running: leave them (default), stop them, or cancel."""
     noun = "server is" if count == 1 else "servers are"
-    box = QMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
+    box = FittedMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
     box.setText(
         f"{count} {noun} running. They keep running after Yu'lon quits: they are Docker "
         "containers, and Yu'lon picks them up again when it starts."
@@ -917,7 +918,7 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
 
 def note_box() -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """The first close: "Yu'lon stays in the tray"."""
-    box = QMessageBox(QMessageBox.Icon.Information, "Yu'lon stays in the tray", "")
+    box = FittedMessageBox(QMessageBox.Icon.Information, "Yu'lon stays in the tray", "")
     text = (
         "Yu'lon keeps running in the system tray, so your servers' status and Play are one "
         "click away. Quit tray… in its menu closes it for good."
