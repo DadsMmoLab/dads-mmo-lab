@@ -376,8 +376,8 @@ def test_an_abandoned_tool_whose_container_will_not_go_is_known_to_write_into_it
         docker.run_container(spec, sink=interrupted, cancel=threading.Event())
 
     (name,) = fake_containers(state)
-    assert docker.tool_containers_writing_into(out) == (name,)
-    assert docker.tool_containers_writing_into(tmp_path / "elsewhere") == ()
+    assert docker.tool_containers_writing_into(out).names == (name,)
+    assert docker.tool_containers_writing_into(tmp_path / "elsewhere").names == ()
 
 
 @pytest.mark.parametrize(
@@ -409,10 +409,10 @@ def test_a_remembered_tool_container_is_asked_about_again_and_kept_unless_docker
     else:
         end_fake_containers(state)
 
-    assert docker.tool_containers_writing_into(out) == ((name,) if still else ())
+    assert docker.tool_containers_writing_into(out).names == ((name,) if still else ())
     (state / "no-answer").unlink(missing_ok=True)
     end_fake_containers(state)
-    assert docker.tool_containers_writing_into(out) == (), "and dropped once Docker says gone"
+    assert docker.tool_containers_writing_into(out).names == (), "and dropped once Docker says gone"
 
 
 def test_a_tool_whose_container_was_removed_is_not_counted_as_writing(
@@ -430,7 +430,7 @@ def test_a_tool_whose_container_was_removed_is_not_counted_as_writing(
     with pytest.raises(KeyboardInterrupt):
         docker.run_container(spec, sink=interrupted, cancel=threading.Event())
 
-    assert docker.tool_containers_writing_into(out) == ()
+    assert docker.tool_containers_writing_into(out).names == ()
 
 
 def test_a_tool_that_finishes_on_its_own_is_left_to_its_rm(
@@ -556,7 +556,7 @@ def test_a_tool_container_an_earlier_app_left_running_is_counted_as_writing(
     # Docker's name filter matches anywhere in the name; only the prefix is ours.
     (boxes / "mine-yulon-extract-copy").write_text("4244", encoding="utf-8")
 
-    assert docker.tool_containers_writing_into(out) == ("yulon-extract-0123456789ab",)
+    assert docker.tool_containers_writing_into(out).names == ("yulon-extract-0123456789ab",)
 
     # One this process started, into another folder, whose removal was refused: known
     # here, so it is counted for its own folder only and not as an earlier run's.
@@ -578,11 +578,13 @@ def test_a_tool_container_an_earlier_app_left_running_is_counted_as_writing(
         "yulon-git-0123456789ab",
         "mine-yulon-extract-copy",
     }
-    assert docker.tool_containers_writing_into(out) == ("yulon-extract-0123456789ab",)
-    assert docker.tool_containers_writing_into(other) == (ours, "yulon-extract-0123456789ab")
+    assert docker.tool_containers_writing_into(out).names == ("yulon-extract-0123456789ab",)
+    assert docker.tool_containers_writing_into(other).names == tuple(
+        sorted((ours, "yulon-extract-0123456789ab"))
+    )
 
     (boxes / "yulon-extract-0123456789ab").unlink()
-    assert docker.tool_containers_writing_into(out) == (), "gone is gone"
+    assert docker.tool_containers_writing_into(out).names == (), "gone is gone"
 
 
 def test_a_docker_that_will_not_list_its_containers_adds_none(
@@ -593,7 +595,7 @@ def test_a_docker_that_will_not_list_its_containers_adds_none(
     (state / "containers" / "yulon-extract-0123456789ab").write_text("4242", encoding="utf-8")
     (state / "no-answer").write_text("", encoding="utf-8")
 
-    assert docker.tool_containers_writing_into(tmp_path) == ()
+    assert docker.tool_containers_writing_into(tmp_path).names == ()
 
 
 @pytest.mark.parametrize(
@@ -646,7 +648,7 @@ def test_a_tool_docker_would_not_start_has_its_created_container_removed(
     assert run.returncode not in (0, docker.CANCELLED_RETURNCODE), run
     assert fake_containers(state) == [], "the created container was left behind"
     assert f"rm -f {name}" in fake_calls(state)
-    assert docker.tool_containers_writing_into(out) == ()
+    assert docker.tool_containers_writing_into(out).names == ()
 
 
 def test_a_tool_docker_would_not_start_and_would_not_remove_is_still_known_to_write(
@@ -668,7 +670,7 @@ def test_a_tool_docker_would_not_start_and_would_not_remove_is_still_known_to_wr
     assert run.container_left == name, run
     assert said[-1].startswith(f"The extraction tool's container {name} could not be removed")
     assert "after Stop" not in said[-1], "nobody pressed Stop (cold review)"
-    assert docker.tool_containers_writing_into(out) == (name,)
+    assert docker.tool_containers_writing_into(out).names == (name,)
 
 
 def test_a_tool_container_another_yulon_made_on_the_same_daemon_counts_only_for_its_folder(
@@ -704,7 +706,7 @@ def test_a_tool_container_another_yulon_made_on_the_same_daemon_counts_only_for_
         if given is not None:
             (labels / name).write_text("\n".join(given), encoding="utf-8")
 
-    assert docker.tool_containers_writing_into(out) == (
+    assert docker.tool_containers_writing_into(out).names == (
         "yulon-extract-bbbbbbbbbbbb",
         "yulon-extract-cccccccccccc",
         "yulon-extract-dddddddddddd",
@@ -765,7 +767,7 @@ def test_a_run_of_this_app_changing_while_docker_is_asked_is_not_called_left(
 
     monkeypatch.setattr(docker, "_docker", ps)
 
-    assert docker.tool_containers_left_running(tmp_path) == ()
+    assert docker.tool_containers_left_running(tmp_path).names == ()
 
 
 # ------------------------------------- T536: one folder, two spellings, one identity
@@ -812,7 +814,7 @@ def test_one_server_folder_reached_by_two_spellings_is_one_writer(
     assert writes is not None
     _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", writes)
 
-    assert docker.tool_containers_writing_into(real) == ("yulon-extract-aaaaaaaaaaaa",)
+    assert docker.tool_containers_writing_into(real).names == ("yulon-extract-aaaaaaaaaaaa",)
 
 
 def test_another_yulons_tool_writing_a_different_folder_is_still_left_out(
@@ -828,7 +830,7 @@ def test_another_yulons_tool_writing_a_different_folder_is_still_left_out(
     )
     _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", _writes_label(spec))
 
-    assert docker.tool_containers_writing_into(here) == ()
+    assert docker.tool_containers_writing_into(here).names == ()
 
 
 def test_the_folder_id_is_made_once_and_then_read(tmp_path: Path) -> None:
@@ -890,7 +892,7 @@ def test_a_folder_without_a_readable_id_falls_back_to_the_safe_side(
     assert _writes_label(spec) is None
     _another_yulons_tool(state, "yulon-extract-aaaaaaaaaaaa", "0" * 32)
 
-    assert docker.tool_containers_writing_into(folder) == ("yulon-extract-aaaaaaaaaaaa",)
+    assert docker.tool_containers_writing_into(folder).names == ("yulon-extract-aaaaaaaaaaaa",)
 
 
 def _read_only_mkstemp(*_a: object, **_k: object) -> tuple[int, str]:
@@ -916,7 +918,7 @@ def test_an_older_yulons_path_label_always_counts(
         f"yulon.owner=someone-else\nyulon.writes={old_hash}", encoding="utf-8"
     )
 
-    assert docker.tool_containers_writing_into(folder) == ("yulon-extract-aaaaaaaaaaaa",)
+    assert docker.tool_containers_writing_into(folder).names == ("yulon-extract-aaaaaaaaaaaa",)
 
 
 def test_an_older_yulon_finds_no_writes_label_on_ours(tmp_path: Path) -> None:

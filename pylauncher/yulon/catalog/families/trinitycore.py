@@ -156,6 +156,18 @@ REEXTRACT_KEPT_ASIDE = (
 """What a stopped `reextract()` ends with when a tool's container could not be removed (T303)."""
 
 
+def another_yulon_extracting(data_dir: Path, names: Sequence[str] = ()) -> str:
+    """The sentence for another Yu'lon's extraction into `data_dir` (T543, T544).
+
+    Its run is live and only that Yu'lon ends it, so nothing here offers to remove it.
+    """
+    which = f" ({', '.join(names)})" if names else ""
+    return (
+        f"Another Yu'lon on this computer is extracting map data into {data_dir} right "
+        f"now{which}."
+    )
+
+
 def reextract_kept_tiles(kept: int) -> str:
     """What a failed `reextract()` adds when a part-made pathfinding run's tiles stay (T263).
 
@@ -2235,25 +2247,35 @@ class TrinityCoreInstaller(CmangosInstaller):
         A Stop whose tool container Docker would not remove left that container
         extracting into `data/`. Settling the earlier press, setting data aside and
         extracting again under it would mix its output with both.
+
+        Another Yu'lon's running tool (T544) is that Yu'lon's live extraction: the
+        refusal says so and names no command to remove it, which would end the other
+        Yu'lon's run part-way. Only this Yu'lon's own are offered for removal.
         """
         running = docker.tool_containers_writing_into(data_dir)
-        if running:
-            said = (
-                f"An earlier extraction is still running in Docker ({', '.join(running)}) and "
-                f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
-                "extracted again."
-            )
-            again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
-            if container_end.on_docker_desktop():
-                raise InstallerError(
-                    f"{said} Remove it in Docker Desktop's Containers list, then {again}"
-                )
-            # A Linux engine has no list to look in (live, yulon-ubuntu2): the command,
-            # on a line of its own (T296).
+        if not running:
+            return
+        again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+        theirs = another_yulon_extracting(data_dir, running.others) if running.others else ""
+        if not running.ours:
+            raise InstallerError(f"{theirs} Wait for it to finish, then {again}")
+        said = (
+            f"An earlier extraction is still running in Docker ({', '.join(running.ours)}) and "
+            f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
+            "extracted again."
+        )
+        if theirs:
+            said = f"{said} {theirs}"
+        if container_end.on_docker_desktop():
             raise InstallerError(
-                f"{said} Remove it with the command below, then {again}\n"
-                f"docker rm -f {' '.join(running)}"
+                f"{said} Remove it in Docker Desktop's Containers list, then {again}"
             )
+        # A Linux engine has no list to look in (live, yulon-ubuntu2): the command,
+        # on a line of its own (T296).
+        raise InstallerError(
+            f"{said} Remove it with the command below, then {again}\n"
+            f"docker rm -f {' '.join(running.ours)}"
+        )
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""

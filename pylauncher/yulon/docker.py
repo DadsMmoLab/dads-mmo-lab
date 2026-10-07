@@ -6955,8 +6955,30 @@ def _ended(name: str) -> None:
         _UNENDED.pop(name, None)
 
 
-def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
-    """The tool containers that may still be writing into `folder` (T303), by name.
+@dataclass(frozen=True)
+class StillWriting:
+    """The tool containers that may still be writing into a folder, by whose they are (T544).
+
+    `ours`: this process's, one an earlier run of this Yu'lon left, or one with no
+    owner label (made before the label was) -- the player may remove these. `others`:
+    another Yu'lon's on the same daemon (a second user, or a WSL one beside Windows),
+    its live run, which only it ends. True when either holds a name.
+    """
+
+    ours: tuple[str, ...] = ()
+    others: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.ours or self.others)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Every name, sorted."""
+        return tuple(sorted(self.ours + self.others))
+
+
+def tool_containers_writing_into(folder: Path) -> StillWriting:
+    """The tool containers that may still be writing into `folder` (T303), by name and whose.
 
     Started by `run_container()` with `folder` as a writable mount and not yet seen
     to end: still running, or stopped and refused removal. A Re-extract asks before
@@ -6982,10 +7004,11 @@ def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
             _ended(name)
         else:
             still.append(name)
-    return tuple(still) + tool_containers_left_running(folder)
+    left = tool_containers_left_running(folder)
+    return StillWriting(ours=tuple(sorted({*still, *left.ours})), others=left.others)
 
 
-def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
+def tool_containers_left_running(folder: Path) -> StillWriting:
     """Running extraction tool containers this process did not start that may write `folder`.
 
     Codex review of the stop-paths branch: `_UNENDED` is this process's memory and
@@ -7007,6 +7030,9 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     a hash cannot tell an alias from another folder, so its container counts, and a
     folder here with no id to compare leaves no other Yu'lon's container out.
 
+    Another Yu'lon's that counts comes back in `StillWriting.others` (T544): it is that
+    Yu'lon's live run, and the press says so rather than offering to remove it.
+
     A Docker that does not answer adds none. The guard's question is "could a tool
     still be writing?", and a daemon that is down runs nothing; the press asks Docker
     for the tool's own container next and says so if it cannot.
@@ -7025,13 +7051,14 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     )
     if proc.returncode != 0:
         logger.info(f"could not list the running extraction tool containers: {proc.stderr.strip()}")
-        return ()
+        return StillWriting()
     # Before AND after the question (cold review): a run of this app that ended, or
     # started, while Docker answered is this app's own and not one left behind.
     with _UNENDED_LOCK:
         known |= set(_UNENDED)
     mine, here = owner_id(), folder_id(folder)
-    left = []
+    left: list[str] = []
+    theirs: list[str] = []
     for row in proc.stdout.splitlines():
         name, owner, writes = ([*row.strip().split("\t"), "", ""])[:3]
         if not name.startswith(TOOL_CONTAINER_PREFIX) or name in known:
@@ -7044,11 +7071,16 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
         named = {part for part in writes.strip().split(",") if part}
         if others and here is not None and named and here not in named:
             continue
-        left.append(name)
+        (theirs if others else left).append(name)
     left.sort()
+    theirs.sort()
     for name in left:
         logger.warning(f"the extraction tool container {name} was left running by an earlier run")
-    return tuple(left)
+    for name in theirs:
+        logger.info(
+            f"another Yu'lon's extraction tool container {name} may be writing into {folder}"
+        )
+    return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
 WRITES_LABEL = "yulon.writes-ids"

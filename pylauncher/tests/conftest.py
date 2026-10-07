@@ -1254,7 +1254,11 @@ def _no_unit_test_asks_for_tool_containers_left_running(monkeypatch: pytest.Monk
     test hears none, so the tests written about something else keep testing that. The
     tests about the question put the real one back with `real_left_tool_read`.
     """
-    monkeypatch.setattr(docker_module, "tool_containers_left_running", lambda *_a, **_k: ())
+    monkeypatch.setattr(
+        docker_module,
+        "tool_containers_left_running",
+        lambda *_a, **_k: docker_module.StillWriting(),
+    )
 
 
 @pytest.fixture
