@@ -1341,6 +1341,22 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
         eng = engine_for(without_patches((ghost,)), Recorder(), volume_exists=refuse_to_answer)
         list(eng._patch_sources(context(server_dir)))
     said["_patch_text"] = str(from_patch.value)
+    # T531: an `apply_new` phase the update route cannot apply safely.
+    plan = SQL.model_copy(
+        update={
+            "phases": tuple(
+                (
+                    p.model_copy(update={"on_update": "apply_new"})
+                    if p.name == "playerbots world"
+                    else p
+                )
+                for p in SQL.phases
+            )
+        }
+    )
+    with pytest.raises(InstallerError) as from_catch_up:
+        engine_for(entry_with_sql(plan), Recorder())._world_catch_up_plan()
+    said["_world_catch_up_plan"] = str(from_catch_up.value)
 
     assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
         "a function spends the catalog tail that this test does not drive, or drives one "

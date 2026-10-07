@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import fnmatch
 import gzip
+import hashlib
 import io
 import re
 import stat as stat_module
@@ -1431,6 +1432,209 @@ def record_phases(
         schema=marker_db,
         exec_stdin=exec_stdin,
         wsl_distro=wsl_distro,
+    )
+
+
+FILE_TABLE = "yulon_install_file"
+"""Beside the marker: each world-update file an existing server has, and in what state (T531).
+
+One row per `(phase, file)`, written only by the update route's world catch-up
+(`CmangosInstaller.servers_down_work()`), never by the import. `seeded` is a file
+that was in the checkout before the route first moved it, so the import applied
+it; `started` is written BEFORE a file runs and `applied`/`failed` after, so a
+press that stops mid-file leaves `started`, which is never run again. It lives in
+the world schema, so it travels with the world: a restored world brings its own
+rows, and a Reset that drops the world drops them with it.
+"""
+
+FILE_SEEDED = "seeded"
+FILE_STARTED = "started"
+FILE_APPLIED = "applied"
+FILE_FAILED = "failed"
+
+_FILE_STATES = frozenset({FILE_SEEDED, FILE_STARTED, FILE_APPLIED, FILE_FAILED})
+_FILE_MAX = 255
+"""`FILE_TABLE.file`'s `VARCHAR(255)`: a longer path cannot be recorded, so it is not applied."""
+
+
+@dataclass(frozen=True)
+class FileRow:
+    """One row of `FILE_TABLE`: a phase's file, the sha256 of its bytes, and its state."""
+
+    phase: str
+    file: str
+    sha256: str
+    state: str
+
+
+FileLedger = Mapping[tuple[str, str], FileRow]
+
+
+def file_digest(path: Path) -> str:
+    """The sha256 of a file's bytes as they lie on disk: what the ledger compares."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def file_ledger_query(marker_db: str) -> str:
+    """The one question the ledger is read with; `parse_file_ledger()` reads its answer."""
+    return f"SELECT phase, file, sha256, state FROM `{marker_db}`.`{FILE_TABLE}`"
+
+
+def parse_file_ledger(answer: str) -> dict[tuple[str, str], FileRow]:
+    """`file_ledger_query()`'s answer as rows. A row that is not four known columns raises.
+
+    Raises `ValueError` rather than skipping the row: a ledger that cannot be read
+    is a ledger that cannot say a file already ran, and guessing there is how a
+    file runs twice.
+    """
+    rows: dict[tuple[str, str], FileRow] = {}
+    for line in answer.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[3] not in _FILE_STATES:
+            raise ValueError(f"unreadable {FILE_TABLE} row: {line!r}")
+        row = FileRow(*parts)
+        rows[(row.phase, row.file)] = row
+    return rows
+
+
+def recordable(rel: str) -> bool:
+    """Can `FILE_TABLE` hold this path? Not past 255, and nothing `'...'` cannot carry."""
+    return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
+
+
+def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int) -> str:
+    """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
+
+    InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
+    capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
+    """
+    text = (
+        f"CREATE TABLE IF NOT EXISTS `{marker_db}`.`{FILE_TABLE}` "
+        "(phase VARCHAR(191) NOT NULL, file VARCHAR(255) NOT NULL, sha256 CHAR(64) NOT NULL, "
+        "state VARCHAR(8) NOT NULL, at_unix BIGINT NOT NULL, PRIMARY KEY (phase, file)) "
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+    )
+    if not rows:
+        return text
+    for row in rows:
+        _refuse_unquotable(row.phase, f"the SQL phase name {row.phase!r}")
+        if not recordable(row.file):
+            raise InstallerError(
+                f"The world update {row.file!r} cannot be recorded as applied, so it was not "
+                "applied: its path is too long or holds a character SQL cannot carry here."
+            )
+        if row.state not in _FILE_STATES or not _HEX64.fullmatch(row.sha256):
+            raise InstallerError(f"internal: a malformed {FILE_TABLE} row {row!r}")
+    values = ", ".join(
+        f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
+    )
+    return (
+        text
+        + f"REPLACE INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+        + f"VALUES {values};\n"
+    )
+
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def record_world_files(
+    rows: Sequence[FileRow],
+    *,
+    marker_db: str,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+) -> None:
+    """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
+
+    Raises:
+        InstallerError: the client refused the script, or could not be reached.
+    """
+    _run_sql(
+        file_rows_sql(marker_db, rows, int(time.time())),
+        what="recording which world updates this server has",
+        container=container,
+        client=client,
+        password=password,
+        schema=marker_db,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:
+    """`seeded` rows for every file of a phase the ledger holds NO row of, in run order. Pure
+    but for reading each file's bytes.
+
+    Asked with the runs expanded BEFORE the checkout moves: a phase with no rows is
+    one whose files were applied by the import from the checkout as it stood then.
+    A file the ledger could not hold is left out, and is then offered as new and
+    refused by name when it is recorded, never applied unrecorded.
+    """
+    known = {phase for phase, _file in ledger}
+    return tuple(
+        FileRow(run.phase.name, run.rel, file_digest(run.path), FILE_SEEDED)
+        for run in runs
+        if run.path is not None and run.phase.name not in known and recordable(run.rel)
+    )
+
+
+@dataclass(frozen=True)
+class PendingFiles:
+    """What the ledger says about a phase's files as they lie on disk now (T531)."""
+
+    new: tuple[PhaseRun, ...]
+    """Not in the ledger, in a phase nothing is stuck in: applied once, in this order."""
+    changed: tuple[str, ...]
+    """In the ledger with other bytes: edited upstream since; never run again."""
+    unsure: tuple[str, ...]
+    """Left `started` by a press that stopped mid-file: never run again."""
+    failed: tuple[str, ...]
+    """Recorded `failed`: the client refused it. Never run again."""
+    withheld: tuple[str, ...]
+    """Not in the ledger, but its phase has an `unsure` or `failed` file: the updates are a
+    chain in file order, so nothing after a file that did not land runs past it."""
+
+
+def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
+    """Sort the runs against the ledger. Pure but for reading each held file's bytes.
+
+    A `started` or `failed` row is the player's to settle, never this function's: it
+    is not run again, and no new file of its phase runs either until that row is
+    gone (`CmangosInstaller._catch_up_world()` says how).
+    """
+    stuck = {
+        phase for (phase, _file), row in ledger.items() if row.state in (FILE_STARTED, FILE_FAILED)
+    }
+    new: list[PhaseRun] = []
+    withheld: list[str] = []
+    changed: list[str] = []
+    unsure: list[str] = []
+    failed: list[str] = []
+    for run in runs:
+        row = ledger.get((run.phase.name, run.rel))
+        if row is None:
+            if run.phase.name in stuck:
+                withheld.append(run.rel)
+            else:
+                new.append(run)
+        elif row.state == FILE_STARTED:
+            unsure.append(run.rel)
+        elif row.state == FILE_FAILED:
+            failed.append(run.rel)
+        elif run.path is not None and file_digest(run.path) != row.sha256:
+            changed.append(run.rel)
+    return PendingFiles(
+        new=tuple(new),
+        changed=tuple(changed),
+        unsure=tuple(unsure),
+        failed=tuple(failed),
+        withheld=tuple(withheld),
     )
 
 

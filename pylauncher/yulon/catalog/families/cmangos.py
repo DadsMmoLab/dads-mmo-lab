@@ -63,7 +63,9 @@ rot; the mutation run above is how they were re-checked rather than re-copied.
 
 from __future__ import annotations
 
+import fnmatch
 import os
+import posixpath
 import queue
 import threading
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
@@ -71,11 +73,12 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import dbsecret, docker, platform
+from yulon import dbsecret, docker, git, platform
 from yulon.catalog import bot_count, bot_dashboard, composegen
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
+    EmulatorSource,
     NativeInstall,
     SourcePatch,
     SqlPhase,
@@ -90,11 +93,13 @@ from yulon.catalog.native import (
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
+    UPDATE_SOURCES_STAGE,
     UPDATES_BUTTON_LABEL,
     CorrectionCheck,
     ImportGate,
     MarkerRow,
     Secrets,
+    ServersDownWork,
     Stage,
     StageContext,
     StagedInstaller,
@@ -102,6 +107,7 @@ from yulon.catalog.native import (
     _speaking,
     _stop_control,
     build_cancel_note,
+    held_at_its_pin,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
@@ -387,6 +393,329 @@ class CmangosInstaller(StagedInstaller):
         return any(
             table.keys.get(self.AUTO_UPDATE_KEY) == "1"
             for table in self._data().conf.files.values()
+        )
+
+    # -- the world updates a `*-db` pin brings to an existing server (T531) ----
+
+    def check_moved_sources(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, object]:
+        """Refuse a plan the world catch-up cannot apply safely; name what the move changed.
+
+        Before the compile and inside the route's put-back (a refusal here puts every
+        moved source back): an `apply_new` phase must read into the world schema from a
+        `*-db` checkout, or the ledger's first reading of it could not be what the install
+        applied. Then each `report` phase whose files live in a source that just moved --
+        the bots' world SQL -- is asked of git, and what changed is named, never applied.
+        What is returned is what `servers_down_work()` acts on.
+        """
+        catch_up = self._world_catch_up_plan()
+        for source, dest, old in moved:
+            reports = catch_up.reporting(source)
+            if reports:
+                yield from self._name_what_moved(
+                    reports, source, dest, old, self._seams.head_sha(dest)
+                )
+        return catch_up
+
+    def _world_catch_up_plan(self) -> _WorldCatchUp:
+        """Each `on_update` phase with the source whose checkout holds its files.
+
+        Raises:
+            InstallerError: an `apply_new` phase outside a `*-db` source, not into the
+                world schema, on a source with no pin, or a phase whose globs are in no
+                source or in two. Catalog errors, said before anything is built.
+        """
+        sources = self.entry.emulator.sources
+        found: list[tuple[SqlPhase, EmulatorSource]] = []
+        for phase in self._data().sql.phases:
+            if phase.on_update == "leave":
+                continue
+            owners = [_owner_of(glob, sources) for glob in phase.files]
+            owner = owners[0] if owners and all(o is owners[0] for o in owners) else None
+            why = ""
+            if owner is None:
+                why = "its files are not inside exactly one of this server's source checkouts"
+            elif phase.on_update == "apply_new" and not held_at_its_pin(owner):
+                why = (
+                    f"{owner.repo} is not a database repository, so what an existing server "
+                    "already has of it cannot be known"
+                )
+            elif phase.on_update == "apply_new" and phase.into != self.entry.databases.world:
+                why = f"it writes {phase.into}, and only the world database is updated this way"
+            elif phase.on_update == "apply_new" and not owner.rev:
+                why = f"{owner.repo} has no tested commit to move to"
+            if why or owner is None:
+                raise InstallerError(
+                    f"The install plan's step {phase.name!r} is set to be brought to existing "
+                    f"servers on an update, but {why}. Nothing was built or applied. "
+                    f"{CATALOG_ERROR_TAIL}"
+                )
+            found.append((phase, owner))
+        return _WorldCatchUp(phases=tuple(found))
+
+    def _name_what_moved(
+        self,
+        phases: Sequence[SqlPhase],
+        source: EmulatorSource,
+        dest: Path,
+        old: str,
+        new: str | None,
+    ) -> Iterator[str]:
+        """One line per file of a `report` phase that `old`..`new` added, changed or removed."""
+        if new is None or new == old:
+            return
+        prefix = f"{source.dest.rstrip('/')}/"
+        globs = {phase.name: [g[len(prefix) :] for g in phase.files] for phase in phases}
+        folders = sorted({posixpath.dirname(g) for found in globs.values() for g in found})
+        pairs = self._seams.changed_files(dest, old, new, folders)
+        if pairs is None:
+            yield (
+                f"Yu'lon could not read what {source.repo} changed in "
+                f"{', '.join(phase.name for phase in phases)}; none of it is applied to this "
+                "server either way."
+            )
+            return
+        for status, path in pairs:
+            for phase in phases:
+                if not any(_glob_names(glob, path) for glob in globs[phase.name]):
+                    continue
+                what = (
+                    "is new"
+                    if status.startswith("A")
+                    else "was removed" if status.startswith("D") else "changed"
+                )
+                yield (
+                    f"{prefix}{path} ({phase.name}) {what} in {source.repo} since this server "
+                    "was built from it. Yu'lon does not apply it to a server that already "
+                    "exists; a fresh install gets it."
+                )
+
+    def servers_down_work(
+        self, server_dir: Path, changes: object, *, press: str
+    ) -> ServersDownWork | None:
+        """Bring the world the `apply_new` files its `*-db` pin adds, servers down (T531).
+
+        `forward()` -- the old servers stopped, the new build not yet started -- is
+        `_catch_up_world()`. Nothing to undo in `back()`: the world is not copied
+        (owner, 2026-10-04), so what went in stays with its ledger rows, and the next
+        press applies only what is still missing. `finishes_start_refusal` is False:
+        this work clears nothing that refuses a start.
+        """
+        if not isinstance(changes, _WorldCatchUp) or not changes.applying():
+            return None
+        catch_up = changes
+        applied: list[int] = [0]
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            yield from self._catch_up_world(ctx, catch_up, applied)
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            if applied[0]:
+                yield (
+                    f"The {applied[0]} world update(s) applied before the new build started stay "
+                    f"in {self.entry.databases.world}; the build from before runs with them, and "
+                    "the next update does not apply them again."
+                )
+
+        return ServersDownWork(
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            finishes_start_refusal=False,
+        )
+
+    def _catch_up_world(
+        self, ctx: StageContext, catch_up: _WorldCatchUp, applied: list[int]
+    ) -> Iterator[str]:
+        """The `*-db` checkouts to their pin, and each new `apply_new` file into the world once.
+
+        In order, and each step is where it is because of what must already be true:
+
+        1. The world must read stopped (fail closed: only an explicit False), and the
+           import finished -- a world that is not one has nothing to bring up to date,
+           and the checkouts are then left where they are.
+        2. The ledger is read, and a phase it has no row of is SEEDED from the files
+           on disk NOW, before anything moves: nothing but this step moves a `*-db`
+           checkout, so they are what the import applied.
+        3. Each `*-db` checkout goes to its catalog pin (never upstream's tip), and
+           the `report` phases in it name what that move changed.
+        4. Every file the ledger does not hold is applied in the phase's order: a
+           `started` row first, then the file, then `applied` or `failed`. A file the
+           ledger holds with other bytes, or left `started`, is named and not run.
+        """
+        world = self.entry.databases.world
+        running: bool | None
+        try:
+            running = self._seams.ask_world_running(self.entry.container_spec().world)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether the world server is running: {exc}")
+            running = None
+        if running is not False:
+            raise InstallerError(
+                f"Yu'lon could not confirm that {self.entry.name}'s world server is stopped, so "
+                f"the world updates for {world} were not applied: a running world holds that "
+                "database in memory and writes back over it. Nothing was applied."
+            )
+        held = catch_up.held()
+        seen = self._gate(ctx).probe()
+        if not import_reads_as_finished(seen):
+            yield (
+                f"{world} does not read as a finished import ({seen.state}), so no world update "
+                f"was applied and {', '.join(s.dest for s in held)} stayed where it was."
+            )
+            return
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+
+        def record(rows: Sequence[sqlplan.FileRow]) -> None:
+            self._record_world_files(ctx, rows)
+
+        record(())
+        try:
+            ledger = dict(
+                sqlplan.parse_file_ledger(
+                    self._query_seam()(
+                        container,
+                        db.client,
+                        password,
+                        plan.marker_db,
+                        sqlplan.file_ledger_query(plan.marker_db),
+                    )
+                )
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"Yu'lon could not read which world updates {world} already has ({exc}), so "
+                "none was applied: guessing could apply one twice."
+            ) from exc
+        sub = plan.model_copy(update={"phases": catch_up.applying()})
+        seeds = sqlplan.seed_rows(self._expand(sub, ctx.server_dir, {}), ledger)
+        if seeds:
+            record(seeds)
+            ledger.update({(row.phase, row.file): row for row in seeds})
+            yield (
+                f"Recorded the {len(seeds)} world update(s) this server was installed with, so "
+                "none of them is applied again."
+            )
+        for source in held:
+            dest = ctx.server_dir / source.dest
+            old = self._seams.head_sha(dest)
+            if not source.rev or old == source.rev:
+                continue
+            yield (
+                f"Moving {source.repo} in {source.dest} to {source.rev[:7]}, the commit this "
+                "Yu'lon was tested with. A world-database repository never follows upstream's "
+                "newest."
+            )
+            yield from self._clone_lines(
+                git.CloneSpec(
+                    url=source.url,
+                    dest=dest,
+                    branch=source.branch,
+                    sparse_path=source.sparse_path,
+                    depth=source.depth,
+                    rev=source.rev,
+                ),
+                UPDATE_SOURCES_STAGE,
+            )
+            if old is not None:
+                yield from self._name_what_moved(
+                    catch_up.reporting(source), source, dest, old, source.rev
+                )
+        owed = sqlplan.pending_files(self._expand(sub, ctx.server_dir, {}), ledger)
+        for rel in owed.changed:
+            yield (
+                f"{rel} changed upstream since this server applied it. It is not run again; a "
+                "fresh install gets the new version."
+            )
+        for rel in owed.unsure:
+            yield (
+                f"An earlier update stopped while applying {rel}, and Yu'lon cannot tell whether "
+                f"it went in, so it is not run again. {self._say_so(rel)}"
+            )
+        for rel in owed.failed:
+            yield (
+                f"{rel} was refused by the database when an earlier update applied it, so it is "
+                f"not run again. {self._say_so(rel)}"
+            )
+        if owed.withheld:
+            yield (
+                f"{len(owed.withheld)} newer world update(s) wait behind it and were not applied: "
+                "they are a chain, applied in order."
+            )
+        if not owed.new:
+            if not owed.withheld:
+                yield f"{world} already has every world update its sources hold."
+            return
+        yield (
+            f"Applying {len(owed.new)} new world update(s) to {world} while the servers are "
+            "stopped, each once, in order, before the new build starts."
+        )
+        for number, run in enumerate(owed.new):
+            self._check_cancel(ctx.cancel)
+            assert run.path is not None
+            sha = sqlplan.file_digest(run.path)
+            record((sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),))
+            refused: list[sqlplan.PhaseRun] = []
+            yield from self._stream(
+                _apply_one(
+                    run,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    exec_stdin=self._seams.exec_stdin,
+                    refused=refused,
+                ),
+                cancel=None,
+                stage="world-updates",
+            )
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            record((sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
+            if refused:
+                left = len(owed.new) - number - 1
+                yield (
+                    f"The database refused the world update {run.rel}, so the world updates stop "
+                    f"there: {applied[0]} went in before it and the {left} after it were not "
+                    f"applied. The new build still starts. {self._say_so(run.rel)}"
+                )
+                return
+            applied[0] += 1
+        yield (
+            f"{applied[0]} new world update(s) applied to {world}, in order; each is recorded, "
+            "so none is applied again."
+        )
+
+    def _say_so(self, rel: str) -> str:
+        """How a player lets the next update try a file again: the one path, said in full.
+
+        Nothing in the app retries it on its own word: the file may have half run,
+        and running it again could put rows in twice. Deleting its ledger row is the
+        player saying it is safe; a fresh install of the server brings every update.
+        """
+        table = f"{self._data().sql.marker_db}.{sqlplan.FILE_TABLE}"
+        return (
+            f"Once you have checked what it does, delete its row to have the next update try it "
+            f"and everything after it again (in the database: DELETE FROM {table} WHERE "
+            f"file='{rel}'), or install this server fresh to get every world update."
+        )
+
+    def _record_world_files(self, ctx: StageContext, rows: Sequence[sqlplan.FileRow]) -> None:
+        """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
+        db = self._native().db
+        sqlplan.record_world_files(
+            rows,
+            marker_db=self._data().sql.marker_db,
+            container=self.entry.container_spec().db,
+            client=db.client,
+            password=ctx.secrets.db_password,
+            exec_stdin=self._seams.exec_stdin,
         )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
@@ -2706,6 +3035,79 @@ class CmangosInstaller(StagedInstaller):
             if isinstance(exc, InstallerError):
                 raise exc
             raise InstallerError(f"the step could not be run: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class _WorldCatchUp:
+    """The plan's `on_update` phases, each with the source whose checkout holds its files (T531)."""
+
+    phases: tuple[tuple[SqlPhase, EmulatorSource], ...]
+
+    def applying(self) -> tuple[SqlPhase, ...]:
+        """The `apply_new` phases, in plan order."""
+        return tuple(phase for phase, _owner in self.phases if phase.on_update == "apply_new")
+
+    def reporting(self, source: EmulatorSource) -> tuple[SqlPhase, ...]:
+        """The `report` phases whose files live in `source`'s checkout."""
+        return tuple(
+            phase
+            for phase, owner in self.phases
+            if owner.dest == source.dest and phase.on_update == "report"
+        )
+
+    def held(self) -> tuple[EmulatorSource, ...]:
+        """The `*-db` sources holding any of these phases' files, once each, in catalog order."""
+        found: dict[str, EmulatorSource] = {}
+        for _phase, owner in self.phases:
+            if held_at_its_pin(owner):
+                found.setdefault(owner.dest, owner)
+        return tuple(found.values())
+
+
+def _apply_one(
+    run: sqlplan.PhaseRun,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: sqlplan.ExecStdin,
+    refused: list[sqlplan.PhaseRun],
+) -> Callable[[docker.OutputSink], Iterator[str]]:
+    """`sqlplan.apply()` over ONE world update, for `_stream()`; a refusal lands in `refused`.
+
+    `cancel=None`: a Stop is checked between files, never inside one.
+    """
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        return sqlplan.apply(
+            (run,),
+            container=container,
+            client=client,
+            password=password,
+            exec_stdin=exec_stdin,
+            sink=sink,
+            cancel=None,
+            on_refused=refused.append,
+        )
+
+    return call
+
+
+def _owner_of(glob: str, sources: Sequence[EmulatorSource]) -> EmulatorSource | None:
+    """The source whose checkout `glob` (server-dir relative) lies in; the deepest one wins.
+
+    Deepest, because the bots' checkout sits inside the core's
+    (`src/mangos-tbc/src/modules/Bots`).
+    """
+    inside = [s for s in sources if glob.startswith(f"{s.dest.rstrip('/')}/")]
+    return max(inside, key=lambda s: len(s.dest), default=None)
+
+
+def _glob_names(glob: str, path: str) -> bool:
+    """Does a checkout-relative `glob` name `path`: the same folder, the name by pattern."""
+    folder, pattern = posixpath.split(glob)
+    where, name = posixpath.split(path)
+    return where == folder and fnmatch.fnmatchcase(name, pattern)
 
 
 @dataclass
