@@ -97,6 +97,9 @@ def test_end_one_shot_kills_this_installs_running_importer_and_sees_it_gone(
     assert docker.end_one_shot(IMPORTER, tmp_path) is None
     assert ["kill", IMPORTER, f"{project}-{IMPORTER}-run-0a1b2c"] in daemon.asked
     assert daemon.running == []
+    # Gone is "seen empty twice, a settle apart", after a kill as before one (adversarial
+    # review: a create in flight can land after the first empty look).
+    assert [argv[0] for argv in daemon.asked] == ["ps", "kill", "ps", "ps"]
 
 
 def test_end_one_shot_never_kills_another_installs_importer(
@@ -313,3 +316,38 @@ def test_a_one_shot_is_ended_only_after_its_cli_was_claimed(
     assert not worker.is_alive()
     assert "end-one-shot" in order, order
     assert order.index("spawned") < order.index("end-one-shot"), order
+
+
+def test_a_cancel_set_after_the_last_line_still_ends_what_the_run_made(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex adversarial review: set after the final line and before the exit, a cancel is
+    seen by neither the read nor the watcher. The run's ending runs all the same; its exit
+    stays its own (the run finished; the stage reports the late Stop as before).
+
+    Mutation this catches: no reconciliation when the read ends with the cancel set.
+    """
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda *a, **k: (sys.executable, "-c", "print('Importing acore_world', flush=True)"),
+    )
+    ended: list[str] = []
+    monkeypatch.setattr(docker, "end_one_shot", lambda service, *a, **k: ended.append(service))
+    cancel = threading.Event()
+
+    me = threading.get_ident()
+
+    def last_line(line: str) -> None:
+        # Wait until the CLI has exited, so there is nothing left for the watcher to claim.
+        from tests.conftest import HANG_BOUND
+
+        with docker.runner._LIVE_STREAMS_LOCK:
+            mine = [c for c in docker.runner._LIVE_STREAMS.values() if c.started_on == me]
+        assert mine and mine[-1].proc is not None
+        mine[-1].proc.wait(timeout=HANG_BOUND)
+        cancel.set()
+
+    run = docker.run_one_shot(IMPORTER, tmp_path, sink=last_line, cancel=cancel)
+    assert run.returncode == 0, run
+    assert ended == [IMPORTER], ended

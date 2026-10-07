@@ -2988,16 +2988,17 @@ def end_one_shot(
                 # Same project and service, another folder: another install's. Not ours.
                 logger.info(f"end_one_shot(): {name.strip()} belongs to {folder.strip()}; left")
         if not running:
-            if killed:
-                logger.info(f"end_one_shot(): {', '.join(killed)} ended")
-                return None
             if settled:
+                if killed:
+                    logger.info(f"end_one_shot(): {', '.join(killed)} ended")
                 return None
-            # One more look a settle later: a create the daemon received before a
-            # Stop can finish after the first look (T321's bound, adversarial review).
+            # One more look a settle later, after a kill too: a create the daemon
+            # received before a Stop can finish after this look (T321's bound,
+            # Codex's adversarial reviews).
             settled = True
             time.sleep(container_end.LATE_CREATE_SETTLE)
             continue
+        settled = False
         fresh = [name for name in running if name not in killed]
         if fresh:
             # Each container is killed once; one that appears later (a create the
@@ -5889,24 +5890,33 @@ def run_attached(
             closing(stream) as lines,
             _ended_on_cancel(cancel, lines, ended_by_cancel, after_cancel),
         ):
-            for line in lines:
+            try:
+                for line in lines:
+                    if cancel is not None and cancel.is_set():
+                        logger.warning(
+                            f"docker {' '.join(argv)} was cancelled; abandoning the client"
+                        )
+                        # A line came, so the CLI runs and has made what it makes: end that
+                        # with it, as the watcher would have (T539).
+                        after_cancel.once()
+                        return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+                    # Colour codes off at the source (T214): this line goes to the
+                    # screen, to Details through `tail` and to the log, and none of
+                    # them draws `ESC[36m`. AzerothCore's importer colours every line.
+                    line = ansi.strip(line)
+                    tail.append(line)
+                    if live is not None:
+                        try:
+                            live(line)
+                        except Exception as exc:  # noqa: BLE001 - a dead sink keeps the child
+                            logger.warning(f"the output sink stopped accepting lines: {exc}")
+                            live = None
+            finally:
                 if cancel is not None and cancel.is_set():
-                    logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
-                    # A line came, so the CLI runs and has made what it makes: end that
-                    # with it, as the watcher would have (T539).
+                    # Set after the last line, before the CLI's exit (Codex adversarial
+                    # review): neither the read nor the watcher saw it. What the run made
+                    # is ended all the same; its exit stays its own (a late Stop).
                     after_cancel.once()
-                    return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
-                # Colour codes off at the source (T214): this line goes to the
-                # screen, to Details through `tail` and to the log, and none of
-                # them draws `ESC[36m`. AzerothCore's importer colours every line.
-                line = ansi.strip(line)
-                tail.append(line)
-                if live is not None:
-                    try:
-                        live(line)
-                    except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
-                        logger.warning(f"the output sink stopped accepting lines: {exc}")
-                        live = None
     except subprocess.CalledProcessError as exc:
         if ended_by_cancel.is_set() or (
             isinstance(exc, runner.StreamEnded) and cancel is not None and cancel.is_set()

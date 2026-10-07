@@ -2694,7 +2694,9 @@ def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
     monkeypatch.setattr(runner.subprocess, "Popen", _Recorded)
     generator = runner.stream_progress(["git", "clone", "x"])
     next(generator)
-    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    # This stream alone: `end_streams_started_on(this thread)` also reached whatever an
+    # earlier test left on the main thread, and that was T546's flake on fork CI.
+    assert runner.end_stream(generator) is True
     generator.close()
     assert signalled == []
 
@@ -2865,8 +2867,13 @@ def test_an_undrained_close_ends_the_group_when_its_root_exits_as_the_close_chec
         def poll(self) -> int | None:
             return None
 
+    class _Reading:
+        def is_alive(self) -> bool:
+            return True  # a member still holds the pipe (T546's condition)
+
     child = runner._Child()
     child.group = 424242
+    child.readers = (_Reading(),)  # type: ignore[assignment]
     runner._finish(_Running(), None, child=child, drained=False)  # type: ignore[arg-type]
 
     assert ended_groups == [424242]
@@ -2907,3 +2914,63 @@ def test_a_stop_whose_ending_failed_can_be_claimed_again(monkeypatch: pytest.Mon
     # Let go, not lapsed: the claim's own window is shorter than this wait could be.
     assert child.stopping_since is None, "the claim of a failed ending was kept"
     assert runner._end_chosen([child]) == 1, "a Stop whose ending failed could not be retried"
+
+
+# T546: a host-git stream that ran out but was never closed, and the group id it had.
+_SAYS_DONE_AND_EXITS = "print('done', flush=True)"
+
+
+def _stale_host_git_stream() -> tuple[Generator[str, None, None], runner._Child]:
+    """A `stream_progress()` whose child exited and whose pipes reached EOF, left suspended."""
+    stale = runner.stream_progress(_python_cmd(_SAYS_DONE_AND_EXITS))
+    assert next(stale) == "done"
+    with runner._LIVE_STREAMS_LOCK:
+        child = runner._LIVE_STREAMS[stale]
+    assert child.proc is not None
+    child.proc.wait(timeout=HANG_BOUND)
+    deadline = time.monotonic() + HANG_BOUND
+    while any(reader.is_alive() for reader in child.readers) and time.monotonic() < deadline:
+        time.sleep(POLL_PACE)
+    return stale, child
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_never_signals_the_group_id_of_a_stream_whose_pipes_are_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546 (fork CI flake `assert [(16437, 0)] == []`): a Stop asked a dead group's id.
+
+    A stream that ran out and was never closed stays registered and unsettled. Its
+    group had no member left, so its id was free for any new process group, and the
+    Stop probed it -- and, its root having exited, would have sent it SIGTERM. Only a
+    pipe still held keeps a group this stream's: nothing reads from a pipe nobody holds.
+
+    Mutation this catches: `_group_unsettled` without the held-pipe condition.
+    """
+    stale, child = _stale_host_git_stream()
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    try:
+        assert runner.end_stream(stale) is False
+        assert signalled == []
+    finally:
+        monkeypatch.undo()
+        stale.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_closing_a_stream_whose_pipes_are_closed_signals_no_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546: the early-close ending (T495's POSIX twin) is for a pipe still held.
+
+    Closed long after it ran out -- a generator finalised by a garbage collection hours
+    later -- its root and every member are gone, and the group id may be another's.
+
+    Mutation this catches: the twin without the held-pipe condition (SIGTERM recorded).
+    """
+    stale, child = _stale_host_git_stream()
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    stale.close()
+    assert signalled == []

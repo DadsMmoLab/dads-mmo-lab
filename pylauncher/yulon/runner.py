@@ -74,6 +74,7 @@ class _Child:
         "job",
         "group",
         "stopping_since",
+        "readers",
         "settled",
         "cut_short",
         "answered",
@@ -85,6 +86,8 @@ class _Child:
         self.job: winjob.Job | None = None
         """The Windows Job object `proc` was started in, if it joined one (T299)."""
         self.group: int | None = None
+        self.readers: tuple[threading.Thread, ...] = ()
+        """`stream_progress()`'s pipe readers: while one runs, a pipe is still held (T546)."""
         self.stopping_since: float | None = None
         """When a Stop's ending of this child began, under `lock`; None when none is under way.
 
@@ -385,7 +388,13 @@ def _finish(
     group = child.group if child is not None else None
     try:
         ended_root = False if exited else _end_child(proc, job, group=group)
-        if group is not None and not drained and not ended_root:
+        if (
+            child is not None
+            and group is not None
+            and not drained
+            and not ended_root
+            and _pipe_held(child)
+        ):
             # T495's rule off Windows (T529): closed before EOF with its root gone --
             # gone before this looked, or as `_end_child` looked (Codex review) --
             # something of its group still held the pipe: the command's own work.
@@ -739,8 +748,23 @@ def _group_unsettled(child: _Child) -> bool:
         child.proc is not None
         and child.group is not None
         and not child.settled
+        and _pipe_held(child)
         and _signal_group(child.group, 0)
     )
+
+
+def _pipe_held(child: _Child) -> bool:
+    """Does something still hold this stream's pipes? Only then is its group id still its own.
+
+    T546. A group id is free again once its last member is gone, and any new group
+    leader can be given it. A stream whose readers have reached EOF has nothing left
+    holding its pipes, so its group may be long gone -- a stream that ran out and was
+    never closed stays registered and unsettled for as long as something holds it --
+    and nothing may be sent to that id. While a reader runs, a writer is alive, and a
+    member that holds the pipe keeps the id this group's. (A descendant that left the
+    session and kept the pipe would not; git's detached helpers close theirs.)
+    """
+    return any(reader.is_alive() for reader in child.readers)
 
 
 def _stop_child(child: _Child, *, bounded: bool = False) -> None:
@@ -756,8 +780,9 @@ def _stop_child(child: _Child, *, bounded: bool = False) -> None:
         _end_child(proc, job, bounded=bounded, group=child.group)
     elif job is not None:
         job.end()
-    elif child.group is not None:
-        # The leader has exited and something of its group may still read on (T529).
+    elif child.group is not None and _pipe_held(child):
+        # The leader has exited and something of its group may still read on (T529),
+        # which a held pipe proves; one nobody holds may be another's id (T546).
         _end_group(proc, child.group, bounded=bounded)
 
 
@@ -1228,6 +1253,7 @@ def _progress_lines(
         threading.Thread(target=read, args=(pipe,), daemon=True)
         for pipe in (proc.stdout, proc.stderr)
     ]
+    child.readers = tuple(readers)
     try:
         for reader in readers:
             reader.start()
