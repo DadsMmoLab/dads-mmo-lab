@@ -7489,7 +7489,7 @@ def _release_claim(held: _Claim) -> None:
 
 
 def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEASE_TIMEOUT) -> None:
-    """Close the claim's stdin and wait `wait` s for its CLI; killed if it will not end. Never raises."""
+    """Close the claim's stdin, wait for its CLI, kill it if it will not end; never raises."""
     try:
         if proc.stdin is not None:
             proc.stdin.close()
