@@ -135,6 +135,11 @@ class Recorder:
     folder_asked: list[Path] = field(default_factory=list)
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
+    one_shot_left: docker.OneShotLeft | None = None
+    """What `end_one_shot()` answers (T539): None, nothing of the one-shot is running."""
+    ended_one_shots: list[str] = field(default_factory=list)
+    """Every service `end_one_shot()` was asked to end, in order. Not in `calls`, so the
+    recorded call lists every other test pins stay as they were."""
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
     reset_error: Exception | None = None
@@ -776,6 +781,10 @@ class Recorder:
                 sink(f"{service} said something")
             return self.one_shot_result
 
+        def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+            self.ended_one_shots.append(service)
+            return self.one_shot_left
+
         def verify(
             probe: object, service: str, server_dir: Path, run: object
         ) -> docker.ImportState:
@@ -816,6 +825,7 @@ class Recorder:
             image_id=self.image_id,
             build=build,
             one_shot=one_shot,
+            end_one_shot=end_one_shot,
             verify_import=verify,
             container_exists=self.container_exists,
             container_project=self.container_project,

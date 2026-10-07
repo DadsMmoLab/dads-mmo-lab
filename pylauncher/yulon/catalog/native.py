@@ -116,6 +116,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     InstallStopped,
+    OneShotLeftRunning,
     ReadyWaitStopped,
     RollbackNotDone,
     UnsupportedPlatformError,
@@ -5563,6 +5564,8 @@ class Seams:
     None (`in_wsl()`): walking `\\\\wsl.localhost` would boot the distro (T133) and
     cross 9p for every file, so its finished builds are not kept (owner, D4)."""
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
+    end_one_shot: Callable[..., docker.OneShotLeft | None] = docker.end_one_shot
+    """T539: end what of a one-shot service is still running; None once nothing is."""
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
     container_exists: Callable[[str], bool] = docker.container_exists
     container_project: Callable[[str], str | None] = docker.container_project
@@ -5934,6 +5937,7 @@ class Seams:
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
+            end_one_shot=on(docker.end_one_shot, wsl_distro=distro),
             verify_import=refused("Checking a database import"),
             container_exists=on(docker.container_exists, wsl_distro=distro),
             container_project=on(docker.container_project, wsl_distro=distro),
@@ -12432,6 +12436,13 @@ class StagedInstaller:
                 "Importing over them would overwrite it, so nothing was run. Use an empty "
                 "folder for a new install."
             )
+        if service is not None:
+            # T539: never clear or import under an importer still running from an
+            # earlier run -- a Stop whose importer outlived it, or a Yu'lon that
+            # closed mid-import. One that can be ended is ended first.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         if before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
             # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and
@@ -12492,6 +12503,11 @@ class StagedInstaller:
             stage="import",
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
+            # T539: the note promises the half-written databases are cleared before the
+            # import runs again, which is true only once nothing is still writing them.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=False))
             raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
@@ -13450,6 +13466,27 @@ def stop_abandoned_worker(
             f"{what} was abandoned and did not stop within {ABANDONED_WORKER_SECONDS}s; "
             f"thread {worker.name} was left running"
         )
+
+
+def _one_shot_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
+    """What a database importer that could not be ended means, and how to end it (T539)."""
+    names = ", ".join(left.names)
+    who = f"the database importer ({names})" if names else "the database importer"
+    if earlier:
+        said = (
+            f"A database import from an earlier run may still be running, and {who} could not "
+            f"be ended: {left.reason}. The half-written databases were not cleared and nothing "
+            "was imported."
+        )
+    else:
+        said = (
+            f"The database import was stopped, but {who} could not be ended: {left.reason}. "
+            "It may still be writing to the databases, and Install again will not clear them "
+            "while it runs."
+        )
+    if not left.names:
+        return said
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

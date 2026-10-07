@@ -26,6 +26,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
 - **Stop** during a quiet build step ends the build at once, not at its next line.
 - **Stop** during a clone with your own git also ends the helpers git started.
+- **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
+- **Stop** lets Docker stop a build or an import cleanly instead of forcing it a moment later.
 
 ### Changed
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.

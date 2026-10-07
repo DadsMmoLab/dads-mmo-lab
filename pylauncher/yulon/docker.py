@@ -840,6 +840,8 @@ def _env_value(raw: str) -> str:
 
 PROJECT_LABEL = "com.docker.compose.project"
 WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
+SERVICE_LABEL = "com.docker.compose.service"
+"""The compose service a container was made for: an `up` one and a `run` one alike (T539)."""
 
 
 UNREADABLE = "\x00unreadable"
@@ -2875,6 +2877,90 @@ def apply_module_sql(
             detail="\n".join(importer_last_words(run.tail)),
         )
     return run
+
+
+ONE_SHOT_END_SECONDS = 30.0
+"""How long `end_one_shot()` waits for a killed one-shot to be seen gone (T539).
+
+`docker kill` sends SIGKILL, which no importer can trap, so the wait is for the
+daemon to report the exit: seconds. A container still running at the end of it is
+one the daemon would not end, and the caller says so rather than going on."""
+
+_ONE_SHOT_POLL_SECONDS = 0.5
+"""How often `end_one_shot()` asks again whether a killed one-shot is gone. Not a deadline."""
+
+_ONE_SHOT_ASK_TIMEOUT = 30.0
+"""The bound on each `docker ps`/`docker kill` it sends: a wedged daemon is an answer too."""
+
+
+@dataclass(frozen=True)
+class OneShotLeft:
+    """What `end_one_shot()` could not end: the containers by name (empty if Docker would not
+    say which), and why, in words for the sentence that names them."""
+
+    names: tuple[str, ...]
+    reason: str
+
+
+def end_one_shot(
+    service: str, server_dir: Path, *, wsl_distro: str | None = None
+) -> OneShotLeft | None:
+    """End every running container of this install's one-shot `service`; None once none runs.
+
+    T539. The install's import is `compose up --no-deps <importer>`, attached, and a
+    Stop ends the CLI. Whether the importer goes with it is not this app's to
+    choose: on Linux compose stops it when its CLI is signalled (yulon-ubuntu,
+    2026-10-07), on Windows the Stop ends compose itself with docker.exe
+    (T246/T299) and Docker Desktop keeps a container whose CLI is gone (T303), and
+    a `compose run --rm` one outlives its CLI everywhere (measured the same day).
+    An importer left running is under the next Install's `partial` branch, which
+    DROPs the half-written schemas it is still writing. So the Stop ends it here,
+    and the retry asks here before it clears anything.
+
+    Found by its labels, not a name: this install's compose project (the pin, or
+    the folder's own, as `install_project()` reads it) and the service, which
+    covers an `up` container and any `run` one. Killed, then asked again until
+    none runs or `ONE_SHOT_END_SECONDS` pass. Never raises.
+    """
+    project = pinned_project_name(server_dir) or compose_project_name(
+        server_dir, wsl_distro=wsl_distro
+    )
+    if project is None:
+        return OneShotLeft((), "this install's compose project could not be read")
+    ask = [
+        "ps",
+        "--filter",
+        f"label={PROJECT_LABEL}={project}",
+        "--filter",
+        f"label={SERVICE_LABEL}={service}",
+        "--format",
+        "{{.Names}}",
+    ]
+    deadline = time.monotonic() + ONE_SHOT_END_SECONDS
+    killed: tuple[str, ...] = ()
+    while True:
+        listed = _docker(ask, timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+        if listed.returncode != 0:
+            said = " ".join((listed.stderr or listed.stdout or "no answer").split())
+            return OneShotLeft(killed, f"Docker would not say whether it is still running ({said})")
+        running = tuple(name for name in listed.stdout.split() if name)
+        if not running:
+            if killed:
+                logger.info(f"end_one_shot(): {', '.join(killed)} ended")
+            return None
+        fresh = [name for name in running if name not in killed]
+        if fresh:
+            # Each container is killed once; one that appears later (a create the
+            # daemon finished late) is killed when it is first seen.
+            logger.warning(f"end_one_shot(): {', '.join(fresh)} still running; killing")
+            killed = (*killed, *fresh)
+            _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+        if time.monotonic() >= deadline:
+            return OneShotLeft(
+                running,
+                f"it was still running {ONE_SHOT_END_SECONDS:g} s after it was told to stop",
+            )
+        time.sleep(_ONE_SHOT_POLL_SECONDS)
 
 
 _MYSQL_ERROR = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
