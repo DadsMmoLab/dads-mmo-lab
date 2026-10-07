@@ -299,7 +299,12 @@ T537 (2026-10-07) moved the shared `playerbots` again, 45bed519 -> da4419af (ten
 the first being our Netherspite null checks, cmangos/playerbots#393; the rest are C++:
 mount crash fix, hunter pet pick, login delay setting, debug strategies, tests). The
 diff holds no SQL, conf, CMake or `contrib/` file. The other four sources were still
-upstream's heads. The live result is added below once the gate has run.
+upstream's heads. The gate was one TBC install made at the pins of upstream/Yulon
+(playerbots 45bed519, a0519cb4's code), moved onto this commit through "Update the
+server to latest..." on `yulon-fedora-gate`: rebuild 4528 s, world ready 201 s after the
+start, 500 bots (500-508 online of the 900 characters), SOAP Verified, SRP6 2.4.3 login
+ok/wrong/unknown, Stop clean, no ERROR/FATAL line. Vanilla was not run live: it builds
+the same playerbots commit.
 """
 
 
