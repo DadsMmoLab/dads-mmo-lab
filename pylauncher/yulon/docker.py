@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
 
-from yulon import ansi, container_end, platform, runner, wsl
+from yulon import ansi, container_end, platform, runner, server_build_presses, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
@@ -6955,8 +6955,30 @@ def _ended(name: str) -> None:
         _UNENDED.pop(name, None)
 
 
-def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
-    """The tool containers that may still be writing into `folder` (T303), by name.
+@dataclass(frozen=True)
+class StillWriting:
+    """The tool containers that may still be writing into a folder, by whose they are (T544).
+
+    `ours`: this process's, one an earlier run of this Yu'lon left, or one with no
+    owner label (made before the label was) -- the player may remove these. `others`:
+    another Yu'lon's on the same daemon (a second user, or a WSL one beside Windows),
+    its live run, which only it ends. True when either holds a name.
+    """
+
+    ours: tuple[str, ...] = ()
+    others: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.ours or self.others)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Every name, sorted."""
+        return tuple(sorted(self.ours + self.others))
+
+
+def tool_containers_writing_into(folder: Path) -> StillWriting:
+    """The tool containers that may still be writing into `folder` (T303), by name and whose.
 
     Started by `run_container()` with `folder` as a writable mount and not yet seen
     to end: still running, or stopped and refused removal. A Re-extract asks before
@@ -6982,10 +7004,11 @@ def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
             _ended(name)
         else:
             still.append(name)
-    return tuple(still) + tool_containers_left_running(folder)
+    left = tool_containers_left_running(folder)
+    return StillWriting(ours=tuple(sorted({*still, *left.ours})), others=left.others)
 
 
-def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
+def tool_containers_left_running(folder: Path) -> StillWriting:
     """Running extraction tool containers this process did not start that may write `folder`.
 
     Codex review of the stop-paths branch: `_UNENDED` is this process's memory and
@@ -7007,6 +7030,9 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     a hash cannot tell an alias from another folder, so its container counts, and a
     folder here with no id to compare leaves no other Yu'lon's container out.
 
+    Another Yu'lon's that counts comes back in `StillWriting.others` (T544): it is that
+    Yu'lon's live run, and the press says so rather than offering to remove it.
+
     A Docker that does not answer adds none. The guard's question is "could a tool
     still be writing?", and a daemon that is down runs nothing; the press asks Docker
     for the tool's own container next and says so if it cannot.
@@ -7025,13 +7051,14 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     )
     if proc.returncode != 0:
         logger.info(f"could not list the running extraction tool containers: {proc.stderr.strip()}")
-        return ()
+        return StillWriting()
     # Before AND after the question (cold review): a run of this app that ended, or
     # started, while Docker answered is this app's own and not one left behind.
     with _UNENDED_LOCK:
         known |= set(_UNENDED)
     mine, here = owner_id(), folder_id(folder)
-    left = []
+    left: list[str] = []
+    theirs: list[str] = []
     for row in proc.stdout.splitlines():
         name, owner, writes = ([*row.strip().split("\t"), "", ""])[:3]
         if not name.startswith(TOOL_CONTAINER_PREFIX) or name in known:
@@ -7044,11 +7071,16 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
         named = {part for part in writes.strip().split(",") if part}
         if others and here is not None and named and here not in named:
             continue
-        left.append(name)
+        (theirs if others else left).append(name)
     left.sort()
+    theirs.sort()
     for name in left:
         logger.warning(f"the extraction tool container {name} was left running by an earlier run")
-    return tuple(left)
+    for name in theirs:
+        logger.info(
+            f"another Yu'lon's extraction tool container {name} may be writing into {folder}"
+        )
+    return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
 WRITES_LABEL = "yulon.writes-ids"
@@ -7077,9 +7109,13 @@ def folder_id(folder: Path) -> str | None:
     `os.link()`, which refuses a name that is taken, so a reader sees no file or the
     whole one and two Yu'lons making it at once end with the one that won.
 
+    A filesystem with no hard links (vfat, exFAT) refuses the link; there the file is
+    made by an exclusive create instead (T543), written in place, so a reader at that
+    instant may find it empty and answer None for that one ask.
+
     None, and the caller takes the safe side, when it can be neither read nor made:
-    no folder, one that refuses the write, a filesystem with no hard links (vfat), or
-    a file that does not hold an id. Not remembered, so the next ask tries again.
+    no folder, one that refuses the write, or a file that does not hold an id. Not
+    remembered, so the next ask tries again.
 
     A folder copied by hand carries its id: a guard on the copy then counts the
     original's tool as writing into it, a refusal and never a mix. Device and inode
@@ -7096,9 +7132,10 @@ def folder_id(folder: Path) -> str | None:
         logger.info(f"could not make an id for {folder}: {exc}")
         return None
     tmp = Path(name)
+    text = f"{uuid.uuid4().hex}\n"
     try:
         with os.fdopen(fd, "w", encoding="ascii") as handle:
-            handle.write(f"{uuid.uuid4().hex}\n")
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         try:
@@ -7107,15 +7144,44 @@ def folder_id(folder: Path) -> str | None:
             os.chmod(tmp, 0o644)
         except OSError as exc:
             logger.info(f"could not make {tmp} readable to other users: {exc}")
-        os.link(tmp, target)
-    except FileExistsError:
-        pass  # another Yu'lon made it meanwhile: theirs is the id
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            pass  # another Yu'lon made it meanwhile: theirs is the id
+        except OSError as exc:
+            logger.info(f"no hard link for {target} ({exc}); creating it exclusively instead")
+            _create_folder_id(target, text)
     except OSError as exc:
         logger.info(f"could not make an id for {folder}: {exc}")
         return None
     finally:
         _drop_temp(tmp)
     return _read_folder_id(target)
+
+
+def _create_folder_id(target: Path, text: str) -> None:
+    """`folder_id()`'s publish where hard links are refused: create-if-absent, written in place.
+
+    A name another Yu'lon took meanwhile is theirs. A write that fails part-way removes
+    the file it made, so a half id is not left to read as none for ever.
+
+    Raises:
+        OSError: it could not be made.
+    """
+    try:
+        fd = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644
+        )
+    except FileExistsError:
+        return
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 def _drop_temp(tmp: Path) -> None:
@@ -7157,6 +7223,352 @@ def owner_id() -> str:
 
 _ASK_AGAIN_TIMEOUT = 20.0
 """How long Docker gets to say whether a remembered tool container is still there."""
+
+
+# ------------------------------------- T543: one press per folder, decided by the daemon
+
+CLAIM_PREFIX = "yulon-claim-"
+"""A folder claim's container is `yulon-claim-<folder id>` (T543): one name per folder."""
+
+CLAIM_LABEL = "yulon.claim"
+"""A claim's label: a nonce of the press that made it, so it knows the claim it sees is its own."""
+
+_CLAIM_UP_TIMEOUT = 60.0
+"""How long a claim gets to be running before the press goes on without one."""
+
+_CLAIM_RELEASE_TIMEOUT = 15.0
+"""How long a released claim's CLI gets to end on its own before it is killed."""
+
+_CLAIM_POLL_SECONDS = 0.1
+
+_CLAIM_ASK_TIMEOUT = 5.0
+"""How long any one Docker question about a claim may take (Codex review of the folds):
+a hung daemon must not hold a press, or a Stop, for `_ASK_AGAIN_TIMEOUT`."""
+
+_CLAIM_LOOK_TIMEOUT = 1.0
+"""How long one look at a coming-up claim may take, so a Stop is seen between looks."""
+
+_CLAIM_SWEEP_SECONDS = _CLAIM_UP_TIMEOUT + 30.0
+"""How long a claim given up, or not removed, is looked for in the background to remove it:
+past the whole wait for one to come up, with margin (Codex review of the folds)."""
+
+_CLAIM_SWEEP_POLL = 0.5
+
+_CLAIM_ABANDON_WAIT = 0.5
+"""How long the CLI of a claim given up while it came up gets before it is killed."""
+
+_NAME_IN_USE = re.compile(r"Conflict\. The container name .* is already in use", re.IGNORECASE)
+"""How the daemon refuses a second container of one name (m910q Engine and Docker Desktop,
+measured 2026-10-07, `.notes/gates/live-t543-2026-10-07`)."""
+
+_CLAIMS_HELD: set[str] = set()
+"""The claims this process holds, by name."""
+
+_CLAIMS_LOCK = threading.Lock()
+
+
+class FolderClaimed(Exception):
+    """Another press holds the folder's claim (T543), the container `name`.
+
+    `ours`: its owner label is this Yu'lon's. `here`: this process holds it -- a press
+    still running; ours and not here is one an earlier run of this Yu'lon left.
+    `known` False: Docker refused the name and then would not say whose it is.
+    """
+
+    def __init__(self, name: str, *, ours: bool, here: bool = False, known: bool = True) -> None:
+        super().__init__(name)
+        self.name = name
+        self.ours = ours
+        self.here = here
+        self.known = known
+
+
+class ClaimUnavailable(Exception):
+    """The folder's claim could not be made, for a reason other than another press (T543)."""
+
+
+class ClaimStopped(ClaimUnavailable, StopTookEffect):
+    """Stop was pressed while the claim came up (cold review of T543): nothing was touched."""
+
+
+_IMAGE_GONE = re.compile(
+    r"No such image|Unable to find image|pull access denied|repository does not exist",
+    re.IGNORECASE,
+)
+_DAEMON_DOWN = re.compile(
+    r"Cannot connect to the Docker daemon|error during connect|daemon is not running"
+    r"|failed to connect to the docker API",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class _Claim:
+    name: str
+    container: str
+    proc: subprocess.Popen[bytes]
+    nonce: str
+
+
+@contextmanager
+def folder_claim(folder: Path, image: str, cancel: threading.Event | None = None) -> Iterator[bool]:
+    """Hold `folder`'s claim while inside (T543); a press goes ahead only inside one.
+
+    Two Yu'lons on one daemon -- a second user, or a Windows and a WSL one -- can press
+    Re-extract on one server folder at once, and both find no tool running yet. The
+    claim is a container named by the folder's id (`folder_id()`), so every spelling
+    of the folder names one claim and the daemon, which refuses a second container of
+    one name, decides which press goes ahead.
+
+    It is `docker run --rm -i ... cat` with its stdin a pipe this process holds, so it
+    lives exactly as long as this process: closing the pipe, or this process dying,
+    ends `cat`, and `--rm` removes it (measured on Docker Engine and Docker Desktop,
+    0.7-1.7 s). A claim found in place is never removed here, whoever's it is (Codex
+    adversarial review): the caller says what it is and, for this Yu'lon's own, how.
+
+    Yields True; the type is the seam's, so a test's stand-in can say what it held.
+    Without a claim nothing is yielded: the press stops there (Codex adversarial
+    review, twice), since the tools need the same docker and image and nothing is
+    lost by stopping before the old map data moves.
+
+    `cancel` set while the claim comes up ends the wait at once (cold review): the
+    claim's CLI goes, and so does a claim it had made.
+
+    Raises:
+        FolderClaimed: another press holds it.
+        ClaimStopped: `cancel` was set while it came up.
+        ClaimUnavailable: no claim could be made (no folder id, no docker, no image, a
+            daemon that refused or did not answer); its text says what to do.
+    """
+    ident = folder_id(folder)
+    if ident is None:
+        # Not by its path (Codex adversarial review): a path names one folder twice
+        # under two spellings, the very race the claim is for.
+        raise ClaimUnavailable(
+            f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
+            "file is there, delete it; if the folder is read-only, make it writable."
+        )
+    held = _take_claim(CLAIM_PREFIX + ident, image, cancel, again=True)
+    try:
+        yield True
+    finally:
+        _release_claim(held)
+
+
+def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
+    """Start the claim `name` and see it running as this press's own.
+
+    Raises:
+        FolderClaimed: the daemon refused the name: another press holds it.
+        ClaimUnavailable: any other reason it is not running as ours.
+    """
+    if cancel is not None and cancel.is_set():
+        raise ClaimStopped("Stop was pressed before the folder was reserved.")
+    program = platform.docker_program()
+    if program is None:
+        raise ClaimUnavailable("Docker's command-line tool was not found; start or install Docker.")
+    nonce = uuid.uuid4().hex
+    argv = [
+        program,
+        "run",
+        "--rm",
+        "-i",
+        "--name",
+        name,
+        "--label",
+        f"{OWNER_LABEL}={owner_id()}",
+        "--label",
+        f"{CLAIM_LABEL}={nonce}",
+        "--network",
+        "none",
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        "cat >/dev/null",
+    ]
+    logger.info(f"claiming the folder: `docker {' '.join(argv[1:])}`")
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=runner.child_env(),
+            creationflags=runner.creationflags(),
+        )
+    except OSError as exc:
+        raise ClaimUnavailable(f"Docker could not be started ({exc}); is Docker running?") from exc
+    try:
+        return _claim_coming_up(name, image, proc, nonce, cancel, again=again)
+    except BaseException:
+        # Not ours after all, or abandoned while it came up: its CLI goes -- at once,
+        # not after the release's wait, for a Stop's sake -- and a claim this press
+        # made goes with it (by its nonce, never another's).
+        cut_short = proc.poll() is None
+        _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+        removed = False
+        if facts is not None and facts.nonce == nonce:
+            removed = _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
+        if cut_short and not removed:
+            # Ending the CLI does not cancel a `run` the daemon already has (Codex review
+            # of the folds): the claim may appear later and would block every press.
+            _start_sweep(name, nonce)
+        raise
+
+
+def _start_sweep(name: str, nonce: str) -> None:
+    """`_sweep_late_claim()` on a background thread, so nothing waits for it."""
+    threading.Thread(
+        target=_sweep_late_claim, args=(name, nonce), name="yulon-claim-sweep", daemon=True
+    ).start()
+
+
+def _sweep_late_claim(name: str, nonce: str) -> None:
+    """Remove the claim `name` carrying `nonce` if Docker makes it after its press gave up.
+
+    Looked for in the background for `_CLAIM_SWEEP_SECONDS`, so a Stop is not held up.
+    Another press's claim on the name meanwhile does not end the look (Codex review): it
+    may go before this one's request reaches the daemon. Only `nonce`'s is removed.
+    """
+    deadline = time.monotonic() + _CLAIM_SWEEP_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            facts = _claim_facts(name)
+            if facts is not None and facts.nonce == nonce:
+                logger.info(f"removing the claim {name}, made after its press gave it up")
+                if _remove_claim(facts.container):
+                    return
+            time.sleep(_CLAIM_SWEEP_POLL)
+    except Exception as exc:  # noqa: BLE001 - a background thread has no caller to tell
+        logger.warning(f"stopped looking for the claim {name}: {exc}")
+
+
+def _claim_coming_up(
+    name: str,
+    image: str,
+    proc: subprocess.Popen[bytes],
+    nonce: str,
+    cancel: threading.Event | None,
+    *,
+    again: bool,
+) -> _Claim:
+    """Wait for `proc`'s claim to run as this press's own (`nonce`), or say why it did not."""
+    deadline = time.monotonic() + _CLAIM_UP_TIMEOUT
+    while True:
+        # Before each look, and each look short (Codex review of the cold-review folds):
+        # a Docker that does not answer must not hold a Stop for a whole question.
+        if cancel is not None and cancel.is_set():
+            raise ClaimStopped("Stop was pressed before the folder was reserved.")
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+        # Running, not only there (Codex adversarial review, round 3): a claim whose
+        # command failed is seen created, with this nonce, before `--rm` takes it.
+        if facts is not None and facts.nonce == nonce and facts.status == "running":
+            if cancel is not None and cancel.is_set():  # pressed while Docker answered
+                raise ClaimStopped("Stop was pressed before the folder was reserved.")
+            with _CLAIMS_LOCK:
+                _CLAIMS_HELD.add(name)
+            return _Claim(name, facts.container, proc, nonce)
+        if proc.poll() is not None:
+            assert proc.stderr is not None
+            said = proc.stderr.read().decode("utf-8", "replace").strip()
+            proc.stderr.close()
+            if _NAME_IN_USE.search(said):
+                return _claim_in_use(name, image, cancel, again=again)
+            raise ClaimUnavailable(_claim_refused(image, said or f"it exited {proc.returncode}"))
+        if time.monotonic() > deadline:
+            raise ClaimUnavailable(
+                f"Docker had not started its reservation after {_CLAIM_UP_TIMEOUT:.0f} s; "
+                "wait until Docker has started."
+            )
+        if cancel is not None and cancel.wait(_CLAIM_POLL_SECONDS):
+            raise ClaimStopped("Stop was pressed before the folder was reserved.")
+        elif cancel is None:
+            time.sleep(_CLAIM_POLL_SECONDS)
+
+
+def _claim_refused(image: str, said: str) -> str:
+    """What to do about a claim Docker refused, by Docker's own words (cold review of T543)."""
+    if _IMAGE_GONE.search(said):
+        return (
+            f"The server's extraction image, {image}, is no longer in Docker (Docker said: "
+            f"{said}). Press \u201c{server_build_presses.REBUILD}\u201d on the Server tab to make "
+            "it again."
+        )
+    if _DAEMON_DOWN.search(said):
+        return f"Docker is not running (Docker said: {said}); start Docker."
+    return f"Docker refused it (Docker said: {said})."
+
+
+def _claim_in_use(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
+    """The daemon said `name` is taken: say whose; never remove it (T543)."""
+    facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+    if cancel is not None and cancel.is_set():
+        raise ClaimStopped("Stop was pressed before the folder was reserved.")
+    if facts is None:
+        if again:  # it ended between the refusal and the question (a Stop is seen there)
+            return _take_claim(name, image, cancel, again=False)
+        # Refused twice, and twice no answer about whose (cold review): not "another's".
+        raise FolderClaimed(name, ours=False, known=False)
+    with _CLAIMS_LOCK:
+        here = name in _CLAIMS_HELD
+    raise FolderClaimed(name, ours=facts.owner == owner_id(), here=here)
+
+
+class _ClaimFacts(NamedTuple):
+    container: str
+    status: str
+    nonce: str
+    owner: str
+
+
+def _claim_facts(name: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> _ClaimFacts | None:
+    """The claim `name`'s container id, state, nonce and owner; None when none (or no answer)."""
+    fmt = (
+        f'{{{{.Id}}}}\t{{{{.State.Status}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
+        f'\t{{{{index .Config.Labels "{OWNER_LABEL}"}}}}'
+    )
+    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout)
+    if proc.returncode != 0:
+        return None
+    facts = _ClaimFacts(*([*proc.stdout.strip().split("\t"), "", "", ""])[:4])
+    return facts if facts.container else None
+
+
+def _release_claim(held: _Claim) -> None:
+    """End a claim this process holds: its stdin closed, its CLI waited for, its container gone."""
+    with _CLAIMS_LOCK:
+        _CLAIMS_HELD.discard(held.name)
+    _end_claim_cli(held.proc)
+    if not _remove_claim(held.container):
+        # A daemon slow to answer (Codex review of the folds): left to the sweep, by nonce.
+        _start_sweep(held.name, held.nonce)
+
+
+def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEASE_TIMEOUT) -> None:
+    """Close the claim's stdin, wait for its CLI, kill it if it will not end; never raises."""
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except OSError as exc:
+        logger.info(f"the claim's stdin would not close: {exc}")
+    try:
+        proc.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    if proc.stderr is not None and not proc.stderr.closed:
+        proc.stderr.close()
+
+
+def _remove_claim(container: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> bool:
+    """`docker rm -f` a claim by its container id; True once it is gone (already gone counts)."""
+    proc = _docker(["rm", "-f", container], timeout=timeout)
+    if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
+        logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
+        return False
+    return True
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"

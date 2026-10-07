@@ -197,6 +197,15 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         f"removing a clone's container that Stop could not remove: {_TYPED}",
         frozenset({"docker rm -f {…}"}),
     ),
+    **{
+        # The line is built in `_claimed_note()` and raised in `reextract()`; the walk
+        # meets it in both.
+        ("yulon/catalog/families/trinitycore.py", owner): (
+            f"removing a folder reservation an earlier run of this Yu'lon left (T543): {_TYPED}",
+            frozenset({"docker rm -f {…}"}),
+        )
+        for owner in ("_claimed_note", "reextract")
+    },
     ("yulon/catalog/families/trinitycore.py", "_refuse_a_tool_still_writing"): (
         f"removing, on Linux, a map tool's container an earlier press left running: {_TYPED}",
         frozenset({"docker rm -f {…}"}),

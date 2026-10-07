@@ -852,6 +852,8 @@ class Recorder:
             fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
             run_container=self.run_container,
+            # T543: no claim container; a test about the claim binds `docker.folder_claim`.
+            folder_claim=lambda folder, image, cancel=None: nullcontext(True),
             copy_from_image=self.copy_from_image,
             exec_stdin=self.exec_stdin,
             sql_query=self.sql_query,
