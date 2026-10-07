@@ -186,8 +186,12 @@ class InstanceGuard(QObject):
 
     # ------------------------------------------------------------------ claim
 
-    def claim(self, *, wait_ms: int = CLAIM_WAIT_MS) -> Claim:
-        """Become the one Yu'lon, or ask the one there is to come forward."""
+    def claim(self, *, wait_ms: int = CLAIM_WAIT_MS, verb: str = "raise") -> Claim:
+        """Become the one Yu'lon, or ask the one there is to come forward.
+
+        `verb="present"` (T540, the `--tray` sign-in start) only asks whether
+        it is there: it is answered like a raise and brings nothing forward.
+        """
         deadline = time.monotonic() + wait_ms / 1000
         while True:
             try:
@@ -204,7 +208,7 @@ class InstanceGuard(QObject):
                 )
                 return "unguarded"
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-            answer = self._ask_the_first(reply_ms=remaining_ms)
+            answer = self._ask_the_first(reply_ms=remaining_ms, verb=verb)
             if answer == "raised":
                 logger.info("single instance: Yu'lon is already open; asked it to come forward")
                 return "raised"
@@ -247,7 +251,9 @@ class InstanceGuard(QObject):
         _active = self
         return True
 
-    def _ask_the_first(self, *, reply_ms: int) -> Literal["raised", "absent", "silent"]:
+    def _ask_the_first(
+        self, *, reply_ms: int, verb: str = "raise"
+    ) -> Literal["raised", "absent", "silent"]:
         """Ask whoever holds the lock to come forward, waiting up to `reply_ms` for its answer.
 
         `absent`: nobody is listening, or the listener went away mid-question -
@@ -264,7 +270,7 @@ class InstanceGuard(QObject):
         # What a Wayland desktop hands the process IT launched. This one will
         # not show a window, so the token is only worth anything to the first.
         token = "".join(os.environ.get("XDG_ACTIVATION_TOKEN", "").split())[: MAX_LINE // 2]
-        socket.write(f"raise {token}\n".encode())
+        socket.write(f"{verb} {token}\n".encode())
         socket.flush()
         socket.waitForBytesWritten(CONNECT_MS)
         deadline = QDeadlineTimer(reply_ms)
@@ -303,6 +309,14 @@ class InstanceGuard(QObject):
             return
         line = bytes(socket.readLine(MAX_LINE).data()).decode("utf-8", "replace").strip()
         verb, _, token = line.partition(" ")
+        if verb == "present":
+            # T540: a `--tray` sign-in start asking whether Yu'lon is there. Yes,
+            # and nothing comes forward: nobody at sign-in asked for a window.
+            logger.info("single instance: a sign-in start found this Yu'lon running")
+            socket.write(b"ok\n")
+            socket.flush()
+            socket.disconnectFromServer()
+            return
         if verb != "raise":
             logger.info(f"single instance: dropped a message that was not a raise ({verb[:20]!r})")
             socket.abort()

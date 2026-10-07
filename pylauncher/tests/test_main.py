@@ -5910,3 +5910,187 @@ def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
         console.setHidden(was_hidden[0])
         toggle.setHidden(was_hidden[1])
         process_events(10)
+
+
+# ------------------------------------------------------- T540: the tray's wiring
+
+
+def test_the_tray_hears_each_server_tab_come_and_go(window: Any, tmp_path: Path) -> None:
+    """`servers_changed`: the tray follows the badges of the tabs there are, not of old ones."""
+    heard: list[int] = []
+
+    def hear() -> None:
+        heard.append(len(window.yulon_controllers))
+
+    before = len(window.yulon_controllers)
+    window.servers_changed.connect(hear)
+    try:
+        server_dir = tmp_path / "t540-tray-follows"
+        _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+        view = _tab_for(window, server_dir)
+        assert heard and heard[-1] == before + 1, "a new tab was not announced"
+        view.uninstalled.emit("wow-wotlk", server_dir)
+        assert heard[-1] == before, "a dropped tab was not announced"
+    finally:
+        window.servers_changed.disconnect(hear)
+
+
+def test_the_tray_can_put_a_server_tab_and_the_logs_on_screen(window: Any, tmp_path: Path) -> None:
+    server_dir = tmp_path / "t540-tray-shows"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    was_visible = window.isVisible()
+    try:
+        tabs.setCurrentIndex(0)
+        window.yulon_show_server_tab(view.entry.id, server_dir)
+        assert tabs.currentWidget() is view
+        window.yulon_show_logs()
+        assert tabs.currentIndex() == 1
+        assert window.isVisible(), "the Logs from the tray did not bring the window"
+    finally:
+        if not was_visible:
+            window.hide()
+        tabs.setCurrentIndex(0)
+
+
+def test_the_self_update_quits_through_the_trays_real_quit(update_host: Any, window: Any) -> None:
+    """With the tray up a `close()` is a hide, and the update helper would wait for ever."""
+    real = window.yulon_quit
+    quits: list[int] = []
+
+    def quit_for_real() -> bool:
+        quits.append(1)
+        return True
+
+    window.yulon_quit = quit_for_real
+    try:
+        update_host.close_window()
+    finally:
+        window.yulon_quit = real
+    assert quits == [1]
+
+
+def test_without_a_tray_the_windows_quit_is_its_close(window: Any) -> None:
+    assert window.yulon_quit == window.close
+
+
+_TRAY_ENTRY_POINT = """\
+import os, sys
+
+sys.argv = ["yulon", *os.environ["YULON_T540_ARGS"].split()]
+from yulon import platform, update
+
+update.check_with_cache = lambda *a, **k: None
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMainWindow
+
+import main
+from yulon.ui import message_box, single_instance, tray
+
+main._regain_docker_group = lambda: None
+
+
+def say(_parent, title, text, *a, **k):
+    print(f"T540 box {title}", flush=True)
+
+
+message_box.show_warning = say
+message_box.show_information = say
+if os.environ.get("YULON_T540_UNANSWERED"):
+    single_instance.InstanceGuard.claim = lambda self, **k: "unanswered"
+if os.environ.get("YULON_T540_TRAY"):
+    real_init = tray.YulonTray.__init__
+
+    def with_a_tray(self, window, **kwargs):
+        kwargs["available"] = lambda: True
+        real_init(self, window, **kwargs)
+
+    tray.YulonTray.__init__ = with_a_tray
+
+
+def build_window():
+    window = QMainWindow()
+
+    def look():
+        print(f"T540 visible={window.isVisible()}", flush=True)
+        app = QApplication.instance()
+        print(f"T540 app={type(app).__name__}", flush=True)
+        QApplication.exit(0)
+
+    QTimer.singleShot(400, look)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+print(f"T540 main returned {code}", flush=True)
+raise SystemExit(code)
+"""
+
+
+def _run_t540_child(tmp_path: Path, args: str, **extra: str) -> str:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env.update(
+        {
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / "config"),
+            "QT_QPA_PLATFORM": "offscreen",
+            "YULON_T540_ARGS": args,
+            **extra,
+        }
+    )
+    for name in ("YULON_PROVISION", "YULON_SMOKE_TEST"):
+        env.pop(name, None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+    done = subprocess.run(
+        [sys.executable, "-c", _TRAY_ENTRY_POINT],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return done.stdout + done.stderr
+
+
+def test_a_sign_in_start_opens_in_the_tray_and_shows_no_window(tmp_path: Path) -> None:
+    out = _run_t540_child(tmp_path, "--tray", YULON_T540_TRAY="1")
+    assert "T540 visible=False" in out, out
+    assert "T540 main returned 0" in out, out
+
+
+def test_an_ordinary_start_shows_the_window_with_the_tray_up(tmp_path: Path) -> None:
+    out = _run_t540_child(tmp_path, "", YULON_T540_TRAY="1")
+    assert "T540 visible=True" in out, out
+    assert "T540 app=YulonApplication" in out, out
+
+
+def test_a_sign_in_start_that_finds_yulon_stuck_leaves_without_a_box(tmp_path: Path) -> None:
+    """At sign-in nobody asked for a window: an "already open" box would be noise."""
+    quiet = _run_t540_child(tmp_path, "--tray", YULON_T540_UNANSWERED="1")
+    assert "T540 box" not in quiet, quiet
+    assert "T540 main returned 0" in quiet, quiet
+    loud = _run_t540_child(tmp_path, "", YULON_T540_UNANSWERED="1")
+    assert "T540 box Yu'lon is already open" in loud, loud
+
+
+def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: Any) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    button = window.findChild(QPushButton, "yulon-settings")
+    assert button is not None, "no Settings… in the header"
+    assert button.text() == "Settings…"
+    assert button.parent() is window.property("header")
+    real = window.yulon_open_settings
+    opened: list[int] = []
+    window.yulon_open_settings = lambda: opened.append(1)
+    try:
+        button.click()
+    finally:
+        window.yulon_open_settings = real
+    assert opened == [1]
