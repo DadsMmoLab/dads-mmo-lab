@@ -728,9 +728,16 @@ class YulonTray(QObject):
         dialog.activateWindow()
 
     def remember_keep_in_tray(self, keep: bool) -> None:
-        """The Settings switch: applied now, and kept in `ui.json` for the next start."""
+        """The Settings switch: applied now, and kept in `ui.json` for the next start.
+
+        Off with the window hidden (the panel's switch, T551): the icon goes, so
+        the window comes back rather than Yu'lon running with neither.
+        """
         self.set_keep_in_tray(keep)
         ui_settings.remember_tray(keep_in_tray=keep)
+        if not keep and self.window.isHidden():
+            self.hide_flyout()
+            self.open_window()
 
     # ------------------------------------------------------------ quitting
 
@@ -1047,13 +1054,14 @@ class YulonTray(QObject):
             # this click meant "close", not "close and open again".
             return
         if flyout is None:
-            flyout = TrayFlyout()
+            from yulon.ui.tray_settings import TraySwitches
+
+            flyout = TrayFlyout(TraySwitches(self))
             flyout.play_requested.connect(self._flyout_play)
             flyout.start_requested.connect(self.start)
             flyout.open_server_requested.connect(self._flyout_show_server)
             flyout.open_requested.connect(self._flyout_open)
             flyout.quit_requested.connect(self._flyout_quit)
-            flyout.settings_requested.connect(self._flyout_settings)
             flyout.dashboard_requested.connect(self._flyout_dashboard)
             flyout.dismissed.connect(self._flyout_dismissed)
             self.flyout = flyout
@@ -1080,12 +1088,16 @@ class YulonTray(QObject):
     def hide_flyout(self) -> None:
         if self.flyout is not None and self.flyout.isVisible():
             self.flyout.hide()
+            # Closed by its own press, not by a click elsewhere: the next click
+            # on the icon opens it at once (the reopen guard is for dismissals).
+            self._flyout_hidden_at = 0.0
 
     def _fill_flyout(self, servers: list[tuple[Any, str, str]]) -> None:
         if self.flyout is None:
             return
+        online = sum(1 for _, _, status in servers if is_online(status))
         self.flyout.show_servers(
-            header_text([status for _, _, status in servers]),
+            f"{online} online",
             [
                 (view, title, status, status_words(status), dashboard_entry(view, status))
                 for view, title, status in servers
@@ -1111,12 +1123,6 @@ class YulonTray(QObject):
     def _flyout_quit(self) -> None:
         self.hide_flyout()
         self.ask_to_quit()
-
-    def _flyout_settings(self) -> None:
-        self.hide_flyout()
-        self.open_settings()
-
-    # --------------------------------------------------------------- events
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt's name
         kind = event.type()
