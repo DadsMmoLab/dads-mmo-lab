@@ -178,3 +178,48 @@ def test_macos_writes_a_launch_agent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert autostart.is_enabled(install, platform_id="macos")
     autostart.set_enabled(False, install, platform_id="macos")
     assert not plist.exists()
+
+
+# ------------------------------------------------------- Windows notifications
+
+
+def test_windows_gives_yulons_app_id_a_name_so_its_notifications_show(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """yulon-win11 2026-10-07: with the explicit AppUserModelID unregistered, Windows dropped
+    every tray notification Yu'lon sent; a plain balloon from another process showed."""
+    reg = FakeWinreg()
+    monkeypatch.setattr(autostart, "_winreg", lambda: reg)
+    keys: list[str] = []
+    real_create = reg.CreateKeyEx
+
+    def create(hive: str, sub: str, reserved: int = 0, access: int = 1) -> Any:
+        keys.append(sub)
+        return FakeWinreg._Key()
+
+    reg.CreateKeyEx = create  # type: ignore[method-assign]
+    assert autostart.register_app_id(platform_id="windows") is True
+    assert keys == [rf"Software\Classes\AppUserModelId\{autostart.APP_ID}"]
+    assert reg.values["DisplayName"] == ("Yu'lon", reg.REG_SZ)
+    _ = real_create
+
+
+def test_the_app_id_is_left_alone_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_registry() -> Any:
+        raise AssertionError("winreg asked for off Windows")
+
+    monkeypatch.setattr(autostart, "_winreg", no_registry)
+    assert autostart.register_app_id(platform_id="linux") is False
+
+
+def test_an_app_id_that_cannot_be_written_is_logged_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reg = FakeWinreg()
+
+    def refuse(*a: Any, **k: Any) -> Any:
+        raise PermissionError("denied")
+
+    reg.CreateKeyEx = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(autostart, "_winreg", lambda: reg)
+    assert autostart.register_app_id(platform_id="windows") is False

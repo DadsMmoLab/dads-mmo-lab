@@ -167,3 +167,19 @@ def test_a_realm_that_came_up_while_followed_is_watched_from_then(
     view.realm_badge.set_status("running")
     view.realm_badge.set_status("stopped")
     assert [title for title, _ in _messages(tray)] == ["WotLK went offline"]
+
+
+def test_making_the_icon_names_the_app_id_for_windows(
+    window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the name Windows drops every notification (yulon-win11, 2026-10-07)."""
+    from yulon import autostart
+
+    asked: list[int] = []
+    monkeypatch.setattr(autostart, "register_app_id", lambda **k: asked.append(1) or True)
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    made.install()
+    try:
+        assert asked == [1]
+    finally:
+        made.uninstall()

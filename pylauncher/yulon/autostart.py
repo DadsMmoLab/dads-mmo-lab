@@ -255,3 +255,35 @@ def _write_file(target: Path, content: bytes) -> None:
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+
+
+# ------------------------------------------------- Windows notification identity
+
+APP_ID_KEY = rf"Software\Classes\AppUserModelId\{APP_ID}"
+APP_NAME = "Yu'lon"
+
+
+def register_app_id(*, platform_id: str | None = None) -> bool:
+    """Name Yu'lon's AppUserModelID for Windows, so its tray notifications are shown. Never raises.
+
+    `main()` gives the process the explicit ID `org.dadsmmolab.yulon` (the
+    taskbar groups by it). Windows shows a notification from an app with an
+    explicit ID only when it can name that ID: a Start-menu shortcut carrying it,
+    or this registry key with a `DisplayName`. A zip install has no shortcut,
+    and on yulon-win11 every tray notification was dropped without a word while a
+    plain balloon from another process showed (T540, 2026-10-07). Off Windows
+    there is nothing to do. True when the name is in place.
+    """
+    which = platform_id or platform.detect()
+    if which != "windows":
+        return False
+    try:
+        winreg = _winreg()
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER, APP_ID_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
+    except OSError as exc:
+        logger.info(f"notifications: could not name the app ID {APP_ID}: {exc}")
+        return False
+    return True

@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import ui_settings
+from yulon import autostart, ui_settings
 from yulon.log import get_logger
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
@@ -310,6 +310,8 @@ class YulonTray(QObject):
         self.set_keep_in_tray(self.keep_in_tray)
 
     def _make_icon(self) -> None:
+        # Windows drops a notification from an unnamed explicit app ID (no-op elsewhere).
+        autostart.register_app_id()
         icon = self._icon_factory(self)
         self.icon = icon
         self._menu = QMenu()
