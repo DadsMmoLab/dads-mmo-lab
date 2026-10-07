@@ -28,6 +28,7 @@ did before this existed.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 from yulon.log import get_logger
 from yulon.ui.tab_titles import controller_tab_titles
 from yulon.ui.theme import COLOR_DANGER, COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
+from yulon.ui.tray_flyout import TrayFlyout
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
 logger = get_logger(__name__)
@@ -50,6 +52,10 @@ QUIT_TRAY = "Quit tray…"
 
 STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention": COLOR_DANGER}
 """The dot per icon state: the theme's online green, amber accent and danger red."""
+
+REOPEN_GUARD_S = 0.3
+"""A left click within this of the flyout closing (by losing focus to that same click)
+leaves it closed: on Windows the click reaches the flyout first as a focus loss."""
 
 ICON_SIZES = (16, 20, 24, 32, 48, 64)
 """Drawn at each size the shells ask for, so the dot is never a scaled blur."""
@@ -101,6 +107,13 @@ def tray_tooltip(servers: Sequence[tuple[str, str]]) -> str:
         return "Yu'lon: no servers online"
     noun = "server" if len(online) == 1 else "servers"
     return "\n".join([f"Yu'lon: {len(online)} {noun} online", *online])
+
+
+def header_text(statuses: Sequence[str]) -> str:
+    """ "Yu'lon — N of M servers online": the menu's first row and the flyout's title."""
+    online = sum(1 for status in statuses if is_online(status))
+    noun = "server" if len(statuses) == 1 else "servers"
+    return f"Yu'lon — {online} of {len(statuses)} {noun} online"
 
 
 def dot_geometry(size: int) -> tuple[QPointF, float, float]:
@@ -218,6 +231,8 @@ class YulonTray(QObject):
         self._followed: list[Any] = []
         self._menu: QMenu | None = None
         self._was_quit_on_last = True
+        self.flyout: TrayFlyout | None = None
+        self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
 
@@ -290,6 +305,10 @@ class YulonTray(QObject):
         if self._menu is not None:
             self._menu.deleteLater()
             self._menu = None
+        if self.flyout is not None:
+            self.flyout.hide()
+            self.flyout.deleteLater()
+            self.flyout = None
 
     def set_keep_in_tray(self, keep: bool) -> None:
         """The setting: ON shows the icon and hides on close; OFF is the app as before."""
@@ -356,6 +375,8 @@ class YulonTray(QObject):
         if self.icon is not None:
             self.icon.setIcon(state_icon(state))
             self.icon.setToolTip(tray_tooltip([(title, status) for _, title, status in servers]))
+        if self.flyout is not None and self.flyout.isVisible():
+            self._fill_flyout(servers)
         if changed:
             self.state_changed.emit(state)
 
@@ -409,6 +430,10 @@ class YulonTray(QObject):
         """End the event loop. A seam: a test must not end its own process's loop."""
         QApplication.exit(0)
 
+    def open_settings(self) -> None:
+        """The tray's settings (step 3 gives them a dialog of their own)."""
+        self.open_window()
+
     def ask_to_quit(self) -> None:
         """Quit tray… (step 3 asks about running servers first)."""
         self.quit()
@@ -430,9 +455,7 @@ class YulonTray(QObject):
             menu = QMenu()
         menu.clear()
         servers = self.servers()
-        online = sum(1 for _, _, status in servers if is_online(status))
-        noun = "server" if len(servers) == 1 else "servers"
-        header = menu.addAction(f"Yu'lon — {online} of {len(servers)} {noun} online")
+        header = menu.addAction(header_text([status for _, _, status in servers]))
         header.setEnabled(False)
         for _view, title, status in servers:
             row = menu.addAction(f"{title} — {status_words(status)}")
@@ -462,12 +485,71 @@ class YulonTray(QObject):
 
     @Slot(object)
     def _activated(self, reason: object) -> None:
-        if reason in (
-            QSystemTrayIcon.ActivationReason.DoubleClick,
-            QSystemTrayIcon.ActivationReason.Trigger,
-        ):
-            # Step 2 puts the flyout on a single click.
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_flyout()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.hide_flyout()
             self.open_window()
+
+    # --------------------------------------------------------------- flyout
+
+    def toggle_flyout(self) -> None:
+        """A left click: the flyout opens, or closes if it is open."""
+        flyout = self.flyout
+        if flyout is not None and flyout.isVisible():
+            self.hide_flyout()
+            return
+        if time.monotonic() - self._flyout_hidden_at < REOPEN_GUARD_S:
+            # The click on the icon took the focus first, and that closed it:
+            # this click meant "close", not "close and open again".
+            return
+        if flyout is None:
+            flyout = TrayFlyout()
+            flyout.play_requested.connect(self._flyout_play)
+            flyout.start_requested.connect(self.start)
+            flyout.open_server_requested.connect(self._flyout_show_server)
+            flyout.open_requested.connect(self._flyout_open)
+            flyout.quit_requested.connect(self._flyout_quit)
+            flyout.settings_requested.connect(self._flyout_settings)
+            flyout.dismissed.connect(self._flyout_dismissed)
+            self.flyout = flyout
+        self._fill_flyout(self.servers())
+        flyout.pop_up(self.icon.geometry() if self.icon is not None else QRect())
+
+    def _flyout_dismissed(self) -> None:
+        self._flyout_hidden_at = time.monotonic()
+
+    def hide_flyout(self) -> None:
+        if self.flyout is not None and self.flyout.isVisible():
+            self.flyout.hide()
+
+    def _fill_flyout(self, servers: list[tuple[Any, str, str]]) -> None:
+        if self.flyout is None:
+            return
+        self.flyout.show_servers(
+            header_text([status for _, _, status in servers]),
+            [(view, title, status, status_words(status)) for view, title, status in servers],
+        )
+
+    def _flyout_play(self, view: Any) -> None:
+        self.hide_flyout()
+        self.play(view)
+
+    def _flyout_show_server(self, view: Any) -> None:
+        self.hide_flyout()
+        self.show_server(view)
+
+    def _flyout_open(self) -> None:
+        self.hide_flyout()
+        self.open_window()
+
+    def _flyout_quit(self) -> None:
+        self.hide_flyout()
+        self.ask_to_quit()
+
+    def _flyout_settings(self) -> None:
+        self.hide_flyout()
+        self.open_settings()
 
     # --------------------------------------------------------------- events
 

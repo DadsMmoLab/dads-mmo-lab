@@ -7258,6 +7258,9 @@ class ControllerView(QWidget):
         # ready marker. Until one does, all-containers-running reads STARTING.
         self._world_ready = False
         self._last_polled: InstallStatus | None = None
+        # T540: the verdict the line shows now, for the tray's cards (players,
+        # bots, uptime). The same reading, kept; None whenever the line is gone.
+        self.last_verdict: dashboard_module.Verdict | None = None
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
         self._world_wait_number = 0
@@ -8388,6 +8391,7 @@ class ControllerView(QWidget):
             return
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
+        self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
         self._world_ready = result.state == "up" and result.ready
@@ -8423,6 +8427,7 @@ class ControllerView(QWidget):
         """
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
+        self.last_verdict = None
         self._world_loops = False
         self._world_ready = False
 
