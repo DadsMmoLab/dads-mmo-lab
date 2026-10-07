@@ -642,6 +642,21 @@ class CmangosInstaller(StagedInstaller):
                     catch_up.reporting(source), source, dest, old, source.rev
                 )
         owed = sqlplan.pending_files(self._expand(sub, ctx.server_dir, {}), ledger)
+        if owed.moved:
+            record(
+                tuple(
+                    sqlplan.FileRow(
+                        run.phase.name, run.rel, sqlplan.file_digest(run.path), sqlplan.FILE_SEEDED
+                    )
+                    for run in owed.moved
+                    if run.path is not None
+                )
+            )
+            for run in owed.moved:
+                yield (
+                    f"{run.rel} holds exactly what an update this server already has held under "
+                    "another name, so it is recorded and not run again."
+                )
         for rel in owed.changed:
             yield (
                 f"{rel} changed upstream since this server applied it. It is not run again; a "

@@ -689,3 +689,25 @@ def test_the_schema_scan_flags_what_could_reach_another_schema_and_not_a_table_c
     assert scan("SELECT 1; use realmd;\n") == ("USE",)
     assert scan("DELETE FROM mysql.user;\n") == ("mysql",)
     assert scan("INSERT INTO t VALUES ('#'); UPDATE `characters`.c SET x=1;\n") == ("characters",)
+
+
+def test_a_file_upstream_renamed_is_recorded_under_its_new_name_and_never_run_again(
+    tmp_path: Path,
+) -> None:
+    """Codex on T531: the ledger keys a path, so a renamed file would look new. Its bytes
+    give it away: a new path holding bytes the ledger already has is not run."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    db_dest = server_dir / TBC_DB.dest
+    renamed = "src/tbc-db/Updates/0002_renamed_upstream.sql"
+
+    def the_pin_renames(dest: Path) -> None:
+        if dest == db_dest:
+            old = server_dir / U2
+            _lay(server_dir, renamed, old.read_text(encoding="utf-8"))
+            old.unlink()
+
+    rec.on_clone = the_pin_renames
+    lines = _press(rec, server_dir, db, world)
+    assert rec.sql_calls.count(f"-- {U2}") == 0, "the renamed file kept U2's bytes, line and all"
+    assert db.state(renamed) == "seeded"
+    assert any(renamed in line and "another name" in line for line in lines), lines

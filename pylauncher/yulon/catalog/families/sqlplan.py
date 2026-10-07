@@ -1638,6 +1638,10 @@ class PendingFiles:
     withheld: tuple[str, ...]
     """Not in the ledger, but its phase has an `unsure` or `failed` file: the updates are a
     chain in file order, so nothing after a file that did not land runs past it."""
+    moved: tuple[PhaseRun, ...] = ()
+    """Not in the ledger under this name, but its exact bytes are, under another: a file
+    upstream renamed or moved (Codex, T531). Recorded `seeded` under the new name and
+    never run again."""
 
 
 def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
@@ -1650,7 +1654,9 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     stuck = {
         phase for (phase, _file), row in ledger.items() if row.state in (FILE_STARTED, FILE_FAILED)
     }
+    known_bytes = {row.sha256 for row in ledger.values()}
     new: list[PhaseRun] = []
+    moved: list[PhaseRun] = []
     withheld: list[str] = []
     changed: list[str] = []
     unsure: list[str] = []
@@ -1658,7 +1664,9 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     for run in runs:
         row = ledger.get((run.phase.name, run.rel))
         if row is None:
-            if run.phase.name in stuck:
+            if run.path is not None and file_digest(run.path) in known_bytes:
+                moved.append(run)
+            elif run.phase.name in stuck:
                 withheld.append(run.rel)
             else:
                 new.append(run)
@@ -1674,6 +1682,7 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
         unsure=tuple(unsure),
         failed=tuple(failed),
         withheld=tuple(withheld),
+        moved=tuple(moved),
     )
 
 
