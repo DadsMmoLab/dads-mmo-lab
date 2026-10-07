@@ -14,7 +14,8 @@ With `late-create`, `run` makes no container at all until the test calls
 Since T321 it also answers `create --rm --name <name>` (the container exists,
 not yet running; `slow-create` holds the answer, `create-refused` refuses it as
 a missing image) and `start -a <name>` (the CLI attached to it, as `run` is), and
-`ps --filter name=<part>` lists the running ones.
+`ps --filter name=<part>` lists the running ones. With `start-refused`, `start -a` fails
+and leaves the container created, as a daemon that cannot start it does.
 
 `compose ... build` (T376) prints one line, records its environment's
 `BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
@@ -82,6 +83,11 @@ if args[:2] == ["start", "-a"]:
     box = state / "containers" / args[2]
     if not box.exists():
         sys.stderr.write(f"Error response from daemon: No such container: {{args[2]}}\\n")
+        sys.exit(1)
+    if (state / "start-refused").exists():
+        # Codex review round 3: the daemon will not start it, so it never runs and
+        # `--rm` never removes it: it stays, created.
+        sys.stderr.write("Error response from daemon: failed to create task for container\\n")
         sys.exit(1)
     attached(box)
 if args[:1] == ["run"]:

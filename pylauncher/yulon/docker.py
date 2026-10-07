@@ -6780,8 +6780,21 @@ def run_container(
             _ended(name)
         raise
     if cancel is None or not cancel.is_set():
-        _ended(name)  # it ran to its end, and `--rm` removed it
-        return run
+        if run.returncode == 0:
+            _ended(name)  # it ran to its end, and `--rm` removed it
+            return run
+        # Codex review round 3: `--rm` acts on a container that ran. One the daemon
+        # would not start (or a CLI that lost the daemon mid-run) may still be there,
+        # created or running, so it is removed here; one that ran and failed is gone.
+        refused = container_end.end_container(launcher, name, what=_TOOL, created=True)
+        if refused is None:
+            _ended(name)
+            return run
+        try:
+            sink(tool_container_left_line(name, refused))
+        except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
+            logger.warning(f"the output sink stopped accepting lines: {exc}")
+        return AttachedRun(run.returncode, run.tail, container_left=name)
     refused = container_end.end_container(launcher, name, what=_TOOL, created=True)
     if refused is None:
         _ended(name)

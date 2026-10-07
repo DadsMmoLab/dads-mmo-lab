@@ -3557,8 +3557,9 @@ def test_a_clone_that_fails_on_its_own_still_falls_back_and_ends_nothing(
     """The other half of T240: a containerized clone that FAILED is still answered with host git.
 
     The fallback exists for a host whose containerized git cannot work, and a
-    Stop is the one failure it must not answer. No `rm -f` either: the CLI
-    exited on its own, and `--rm` already removed what it ran.
+    Stop is the one failure it must not answer. One `rm -f` before it (Codex
+    review round 3): `--rm` removed a container that ran, but one the daemon
+    would not start stays created, and the failure cannot tell which it was.
     """
     container_git = _container_git(monkeypatch, Path("docker"))
     ran: list[list[str]] = []
@@ -3590,9 +3591,10 @@ def test_a_clone_that_fails_on_its_own_still_falls_back_and_ends_nothing(
     )
     assert len(host) == 1 and said[-1] == "host git cloned it"
     # T321: the streamed clone is created under its name, then attached to by that name.
-    assert len(created) == 1 and created[0][1:2] == ["create"] and "--name" in created[0]
+    assert created[0][1:2] == ["create"] and "--name" in created[0]
     name = created[0][created[0].index("--name") + 1]
     assert ran == [["docker", "start", "-a", name]], ran
+    assert created[1:] == [["docker", "rm", "-f", name]], created
 
 
 def _stop_mid_clone(
@@ -3842,3 +3844,87 @@ def test_a_timed_out_clone_create_whose_late_container_will_not_go_is_said_not_c
     assert said and said[-1].startswith(f"The clone's container {late[0]} could not be removed")
     assert f"docker rm -f {late[0]}" in said[-1], said[-1]
     assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
+
+
+def test_a_clone_docker_would_not_start_has_its_container_removed_before_host_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    """Codex review round 3: a container the daemon would not start is never `--rm`-removed;
+    the failed clone removes it, and only then answers with host git."""
+    cli, state = fake_docker
+    (state / "start-refused").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    seen_at_host_git: list[list[str]] = []
+
+    def host_clone(
+        self: git.RunnerGit, spec: git.CloneSpec, *, stage: str = "clone"
+    ) -> Iterator[str]:
+        seen_at_host_git.append(fake_containers(state))
+        yield "host git cloned it"
+
+    monkeypatch.setattr(git.RunnerGit, "clone_lines", host_clone)
+    said = list(
+        container_git.clone_lines(git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"))
+    )
+
+    assert said[-1] == "host git cloned it"
+    assert seen_at_host_git == [[]], "host git ran beside the created container"
+    assert fake_containers(state) == []
+
+
+def test_a_clone_docker_would_not_start_or_remove_is_said_and_not_cloned_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    cli, state = fake_docker
+    (state / "start-refused").write_text("", encoding="utf-8")
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    host: list[git.CloneSpec] = []
+
+    def host_clone(
+        self: git.RunnerGit, spec: git.CloneSpec, *, stage: str = "clone"
+    ) -> Iterator[str]:
+        host.append(spec)
+        yield "host git cloned it"
+
+    monkeypatch.setattr(git.RunnerGit, "clone_lines", host_clone)
+    said: list[str] = []
+
+    with pytest.raises(git.GitContainerLeft):
+        for line in container_git.clone_lines(
+            git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core")
+        ):
+            said.append(line)
+
+    (name,) = fake_containers(state)
+    assert host == []
+    assert said[-1].startswith(f"The clone's container {name} could not be removed"), said
+
+
+def test_a_clone_whose_container_was_left_is_not_retried_for_the_mount_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The race retry reads the message, and a left container's message carries git's
+    words: a second container must not start over one that could not be removed."""
+    container_git = git.ContainerGit(
+        selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4"
+    )
+    calls: list[Path] = []
+
+    def left(
+        self: git.ContainerGit, dest: Path, git_args: list[str], *, stage: str
+    ) -> Iterator[str]:
+        calls.append(dest)
+        raise git.GitContainerLeft(
+            "Cloning into '.'... fatal: No such file or directory; its container "
+            "yulon-git-0123456789ab could not be removed"
+        )
+        yield ""  # pragma: no cover - a generator, as the real one is
+
+    monkeypatch.setattr(git.ContainerGit, "_streamed_capture", left)
+    spec = git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core")
+
+    with pytest.raises(git.GitContainerLeft):
+        list(container_git._streamed_clone_with_mount_race_retry(spec, ["clone"], stage="clone"))
+
+    assert calls == [spec.dest], "retried over a container that could not be removed"

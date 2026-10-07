@@ -620,3 +620,47 @@ def test_a_left_container_is_removed_where_this_platform_removes_it(
     assert f"docker rm -f {name}" in lines[0]
     assert "docker rm -f yulon-git-0123456789ab" in lines[1]
     assert "docker rm" not in lines[2], "a command goes in the log, not on the player's line"
+
+
+def test_a_tool_docker_would_not_start_has_its_created_container_removed(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Codex review round 3: `--rm` acts on a container that ran. One the daemon would not
+    start stays created, so the failed run removes it rather than forgetting it."""
+    _cli, state = fake_docker
+    (state / "start-refused").write_text("", encoding="utf-8")
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
+    said: list[str] = []
+
+    run = docker.run_container(spec, sink=said.append, cancel=threading.Event())
+
+    name = _created(state)
+    assert run.returncode not in (0, docker.CANCELLED_RETURNCODE), run
+    assert fake_containers(state) == [], "the created container was left behind"
+    assert f"rm -f {name}" in fake_calls(state)
+    assert docker.tool_containers_writing_into(out) == ()
+
+
+def test_a_tool_docker_would_not_start_and_would_not_remove_is_still_known_to_write(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    _cli, state = fake_docker
+    (state / "start-refused").write_text("", encoding="utf-8")
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
+    said: list[str] = []
+
+    run = docker.run_container(spec, sink=said.append, cancel=None)
+
+    name = _created(state)
+    assert run.container_left == name, run
+    assert said[-1].startswith(f"The extraction tool's container {name} could not be removed")
+    assert docker.tool_containers_writing_into(out) == (name,)

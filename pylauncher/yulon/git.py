@@ -2966,7 +2966,8 @@ class ContainerGit:
         try:
             yield from self._streamed_capture(spec.dest, git_args, stage=stage)
         except GitError as exc:
-            if not _is_fresh_mount_race(str(exc)):
+            # Never again over a container that could not be removed (Codex review).
+            if isinstance(exc, GitContainerLeft) or not _is_fresh_mount_race(str(exc)):
                 raise
             logger.warning(
                 f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
@@ -3056,6 +3057,13 @@ class ContainerGit:
             self._end_container(launcher, name)
             raise
         except GitError as exc:
+            # Codex review round 3: `--rm` acts on a container that ran, and one the
+            # daemon would not start stays created. It is removed before anything
+            # answers this failure with host git; one that ran and failed is gone.
+            refused = self._end_container(launcher, name)
+            if refused is not None:
+                yield container_left_line(name, dest, refused)
+                raise GitContainerLeft(f"{exc}; its container {name} could not be removed") from exc
             # The docker CLI's own absence, arriving from `Popen` rather than
             # from `docker_program()`: the resolution cache pins a hit for the
             # life of the process, so Docker uninstalled or self-updated while
