@@ -287,6 +287,9 @@ class WorldDb:
         self.rows: dict[tuple[str, str], tuple[str, str]] = {}
         self.writes: list[str] = []
         self.rival: set[str] = set()
+        self.table = False
+        """Whether `CREATE TABLE IF NOT EXISTS … yulon_install_file` has run: until it has,
+        a SELECT from the ledger fails the way the client does (cold review of T531)."""
 
     def exec_stdin(
         self,
@@ -299,6 +302,8 @@ class WorldDb:
     ) -> subprocess.CompletedProcess[str]:
         data = source.read()
         text = data.decode("utf-8", errors="replace")
+        if f"CREATE TABLE IF NOT EXISTS `mangos`.`{sqlplan.FILE_TABLE}`" in text:
+            self.table = True
         if f"INSERT INTO `mangos`.`{sqlplan.FILE_TABLE}`" in text:
             # A claim: the key is (phase, file), so ANY row already there refuses it,
             # as the client would with ERROR 1062. `rival` is another press that
@@ -331,6 +336,11 @@ class WorldDb:
     ) -> str:
         if sqlplan.FILE_TABLE in statement:
             self.rec.calls.append("ledger-read")
+            if not self.table:
+                raise docker.DockerCommandError(
+                    f"ERROR 1146 (42S02) at line 1: Table 'mangos.{sqlplan.FILE_TABLE}' "
+                    "doesn't exist"
+                )
             return "".join(
                 f"{phase}\t{file}\t{sha}\t{state}\n"
                 for (phase, file), (sha, state) in sorted(self.rows.items())
@@ -465,6 +475,7 @@ def test_a_file_a_stopped_press_left_started_is_named_and_nothing_after_it_runs(
     for rel in (U1, U2):
         db.rows[("content updates", rel)] = (sqlplan.file_digest(server_dir / rel), "seeded")
     db.rows[("content updates", U3)] = ("0" * 64, "started")
+    db.table = True
     lines = _press(rec, server_dir, db, world)
     assert _sent(rec, U3) == 0 and _sent(rec, U4) == 0
     assert any(
@@ -743,3 +754,42 @@ def test_a_copy_beside_its_original_is_new_and_a_gone_stuck_file_is_still_named(
 def test_a_whole_database_statement_is_never_applied(tmp_path: Path) -> None:
     path = _lay(tmp_path, "x.sql", "DROP DATABASE analytics;\n")
     assert sqlplan.foreign_schemas(path, set()) == ("a whole-database statement",)
+
+
+def test_the_first_press_on_a_server_with_no_ledger_makes_the_table_before_reading_it(
+    tmp_path: Path,
+) -> None:
+    """Cold review of T531: every existing server has no ledger table, and a SELECT from a
+    missing table fails. The `CREATE TABLE IF NOT EXISTS` must go first."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    assert db.table is False
+    _press(rec, server_dir, db, world)
+    assert db.table is True and db.state(U3) == "applied"
+
+
+def test_a_started_row_whose_file_is_gone_is_named_and_holds_the_phase(tmp_path: Path) -> None:
+    run = _run("src/tbc-db/Updates/0001.sql", CONTENT, tmp_path)
+    _lay(tmp_path, run.rel, "-- 1\n")
+    gone = "src/tbc-db/Updates/0000_removed.sql"
+    ledger = {
+        ("content updates", gone): sqlplan.FileRow("content updates", gone, "1" * 64, "started")
+    }
+    owed = sqlplan.pending_files([run], ledger)
+    assert owed.unsure == (gone,) and owed.new == () and owed.withheld == (run.rel,)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "UPDATE quest_template SET Details='Bring me ten logs. Then return.' WHERE entry=1;\n",
+        'UPDATE quest_template SET Details="Two characters. Both." WHERE entry=2;\n',
+        "UPDATE creature_template SET SubName='realmd.example' WHERE entry=3;\n",
+        "INSERT INTO t VALUES ('use realmd;');\n",
+    ],
+    ids=["prose", "double-quoted", "dotted-in-string", "use-in-string"],
+)
+def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path, text: str) -> None:
+    """Cold review of T531, SHOULD 2: a refused file blocks every later update, so a false
+    alarm from prose in a string literal is not cheap. Strings are not SQL."""
+    path = _lay(tmp_path, "x.sql", text)
+    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ()

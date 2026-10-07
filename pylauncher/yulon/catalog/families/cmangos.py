@@ -375,8 +375,11 @@ class CmangosInstaller(StagedInstaller):
         characters and world migrations (`controller_wow_tortoise/autoupdate.py`;
         Tortoise's conf table, "5 character and 3 world module migrations applied at
         first start", measured on yulon-arch 2026-09-11). TBC and Vanilla set no such
-        key and their `*-db` repositories stay on their pin, so their new build
-        changes nothing at its first start and nothing is copied.
+        key, so their new build changes nothing at its first start and nothing is
+        copied. (What the update itself writes into their world -- T531's catch-up,
+        which moves the `*-db` checkouts to their catalog pin and applies the new
+        files once -- happens with the servers down, before that start, and stays
+        if the build is put back.)
 
         World is left out on the owner's word of 2026-10-04: it is the biggest of
         the three and the slowest to copy, so a rollback puts back login and
