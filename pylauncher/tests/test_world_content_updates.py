@@ -785,8 +785,9 @@ def test_a_started_row_whose_file_is_gone_is_named_and_holds_the_phase(tmp_path:
         'UPDATE quest_template SET Details="Two characters. Both." WHERE entry=2;\n',
         "UPDATE creature_template SET SubName='realmd.example' WHERE entry=3;\n",
         "INSERT INTO t VALUES ('use realmd;');\n",
+        "UPDATE t SET text='/*! example' WHERE a=1;\n-- /*! in a comment\n",
     ],
-    ids=["prose", "double-quoted", "dotted-in-string", "use-in-string"],
+    ids=["prose", "double-quoted", "dotted-in-string", "use-in-string", "exec-marker-in-text"],
 )
 def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path, text: str) -> None:
     """Cold review of T531, SHOULD 2: a refused file blocks every later update, so a false

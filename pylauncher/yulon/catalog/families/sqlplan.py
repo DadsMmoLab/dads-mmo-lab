@@ -1598,21 +1598,26 @@ markers, or plain text. Whichever starts first wins, so an apostrophe in a comme
 the comment's and a `--` in a string is the string's (Codex, T531)."""
 
 
-def _code_only(text: str) -> str:
-    """The SQL MySQL would execute: string bodies emptied, comments made spaces, and an
-    executable comment's body kept (only its `/*!NNNNN` and `*/` go)."""
+def _code_only(text: str) -> tuple[str, bool]:
+    """The SQL MySQL would execute, and whether it holds an executable comment: string
+    bodies emptied, comments made spaces, an executable comment's body kept (only its
+    `/*!NNNNN` and `*/` go). A `/*!` inside a string or a plain comment is text."""
     parts: list[str] = []
+    executable = False
     for match in _SQL_TOKENS.finditer(text):
         token = match.group(0)
         if token[0] in "'\"":
             parts.append(" '' ")
-        elif token.startswith("/*!") or token == "*/":
+        elif token.startswith("/*!"):
+            executable = True
+            parts.append(" ")
+        elif token == "*/":
             parts.append(" ")
         elif token.startswith(("--", "#", "/*")):
             parts.append(" ")
         else:
             parts.append(token)
-    return "".join(parts)
+    return "".join(parts), executable
 
 
 def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
@@ -1631,8 +1636,7 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
     """
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    text = _code_only(raw)
+    text, executable = _code_only(path.read_text(encoding="utf-8", errors="replace"))
     found = [
         name
         for name in sorted({*others, *_SYSTEM_SCHEMAS})
@@ -1640,7 +1644,7 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     ]
     if re.search(r"(?im)(^|;)\s*USE\s", text):
         found.append("USE")
-    if "/*!" in raw:
+    if executable:
         found.append("an executable comment")
     if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
         found.append("a whole-database statement")
