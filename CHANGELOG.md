@@ -24,9 +24,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A tool container Yu'lon could not remove is named with the command that removes it; host git never clones under one.
 - Installing a module never writes into another folder through a link in your game client; it names the link instead.
 - On Windows, a link inside the server folder no longer stops a finished build from being kept for the next rebuild.
+- **Stop** during a quiet build step ends the build at once, not at its next line.
+- **Stop** during a clone with your own git also ends the helpers git started.
 
 ### Changed
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
+- A stopped install or rebuild says what the Stop left, after **Stopped:**.
 
 ## v0.9.14-Public — 2026-10-07
 

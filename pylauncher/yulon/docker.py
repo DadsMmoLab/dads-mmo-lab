@@ -5682,11 +5682,19 @@ def run_attached(
     `DOCKER_CLI_MISSING_HELP`, the same shape `_docker()` gives it, rather than
     as an exception — the callers here already have to handle a failed run.
 
-    `cancel`, when set mid-run, stops reading and lets `runner.stream()`'s
-    generator-abandonment path end the compose client. The result comes
-    back as `CANCELLED_RETURNCODE`. What a Stop does to work already handed to
-    the daemon differs by platform. A one-shot container keeps running to
-    completion everywhere, unless its caller ends it by name, as
+    `cancel`, when set mid-run, ends the docker CLI at once and the result
+    comes back as `CANCELLED_RETURNCODE`, whether the CLI was ended by the
+    watcher (`_cli_ended_on`) or abandoned when its next line arrived. The
+    watcher is T526: the install engine runs this on its own worker thread
+    (`native._pump()`), out of reach of the panel's Stop, and a build step that
+    prints nothing used to keep the Stop waiting -- measured 2026-10-07, a step
+    silent for 60 s ended 57 s after Stop. The code is the Stop's own, never the
+    CLI's -15/143 or Windows' 1, because callers decide on
+    `== CANCELLED_RETURNCODE` (the build's "may have tagged", the import).
+
+    What a Stop does to work already handed to the daemon differs by platform.
+    A one-shot container keeps running to completion everywhere, unless its
+    caller ends it by name, as
     `run_container()` does for the extraction tools (T303). A build ends with
     its client: on Linux only the docker CLI is ended, and the T298 probes of
     2026-10-06 saw compose and its `buildx bake` end within 2 s and the build
@@ -5731,9 +5739,12 @@ def run_attached(
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
-        with closing(
-            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
-        ) as lines:
+        with (
+            _cli_ended_on(cancel),
+            closing(
+                runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr, env=env)
+            ) as lines,
+        ):
             for line in lines:
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
@@ -5750,6 +5761,10 @@ def run_attached(
                         logger.warning(f"the output sink stopped accepting lines: {exc}")
                         live = None
     except subprocess.CalledProcessError as exc:
+        if isinstance(exc, runner.StreamEnded) and cancel is not None and cancel.is_set():
+            # The Stop ended the CLI (T526): said as the Stop, as the line check above says it.
+            logger.warning(f"docker {' '.join(argv)} was cancelled; its client was ended")
+            return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
         # Replaced rather than appended: on a missing distro every line in
         # `tail` IS the complaint, arriving as UTF-16 with a NUL after each
         # character, and showing that above the explanation would bury it in
@@ -6873,10 +6888,11 @@ def run_container(
             # Stopped while Docker was creating it: it exists and has not started.
             run = AttachedRun(CANCELLED_RETURNCODE)
         else:
-            with _cli_ended_on(cancel):
-                run = run_attached(
-                    ["start", "-a", name], Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True
-                )
+            # `run_attached()` ends the CLI on the cancel itself (T526); the container
+            # is ended by its name below.
+            run = run_attached(
+                ["start", "-a", name], Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True
+            )
     except BaseException:
         # Abandoned: whatever took the run away mid-tool left its container running.
         # A refusal cannot travel in a result here, so it stays in `_UNENDED`.
@@ -7075,10 +7091,11 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
 
 @contextmanager
 def _cli_ended_on(cancel: threading.Event | None) -> Iterator[None]:
-    """While inside, a set `cancel` ends the docker CLI this thread started (T303).
+    """While inside, a set `cancel` ends the docker CLI this thread started (T303, T526).
 
     `run_attached()` reads the token only when a line arrives, and a tool can be
-    silent for minutes (`vmap4assembler`), so a watcher ends the CLI through
+    silent for minutes (`vmap4assembler`), as can a build step, so a watcher
+    around `run_attached()`'s stream ends the CLI through
     `runner.end_streams_started_on()` -- the panel's own Stop for a stream -- and
     the read returns. It keeps ending while it watches, for a CLI started a
     moment after the token was set. Ending the CLI does not end the container on

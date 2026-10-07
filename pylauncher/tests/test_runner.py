@@ -2015,7 +2015,7 @@ def test_on_windows_an_error_while_ending_the_child_still_closes_its_job(
     root = _TreeRoot([])
     job = _FakeJob()
 
-    def broken(proc: object, job: object = None) -> None:
+    def broken(proc: object, job: object = None, **kw: object) -> None:
         raise PermissionError(5, "Access is denied")
 
     monkeypatch.setattr(runner, "_end_child", broken)
@@ -2584,3 +2584,131 @@ def test_on_windows_a_stream_started_in_a_job_still_gets_the_environment_it_was_
     )
 
     assert lines == ["given"]
+
+
+# ------------------------------------------------- T529: a Stop ends what git started too
+
+# A root that starts a child of its own and lets it hold the output pipe, as `git
+# clone` leaves `index-pack` and `git checkout` its own `git fetch` (T529, m910q
+# 2026-10-07): the grandchild's pid is the first line, then both sleep.
+_GRANDCHILD_HOLDS_THE_PIPE = (
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+    "print(kid.pid, flush=True); time.sleep(600)"
+)
+
+
+def _gone(pid: int) -> bool:
+    """Has `pid` exited? A zombie waiting for its new parent to reap it counts as exited."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        return stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns() -> None:
+    """T529: the Stop reaches the whole clone, not just the `git` it started.
+
+    Measured on m910q 2026-10-07 (`.notes/gates/probe-t529-t526-2026-10-07/`): a
+    Stop during `Resolving deltas` signalled `git clone` alone, `index-pack` ran on
+    for 13.8 s with PPID 1, and because it held the stream's pipe the read -- and
+    so the Stop -- did not end until it did. A blob-less checkout's own `git fetch`
+    kept downloading for 36 s the same way.
+
+    Mutation this catches: `_progress_lines()` started without its own session, or
+    `_end_child()` signalling the root and not its group. The grandchild sleeps
+    600 s and holds the pipe, so the worker is still reading at `HANG_BOUND`.
+    """
+    generator = runner.stream_progress(_python_cmd(_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t529-worker")
+    worker.start()
+    grandchild = int(fragments.get(timeout=HANG_BOUND))
+    try:
+        assert runner.end_streams_started_on(worker.ident or 0) == 1
+        worker.join(timeout=HANG_BOUND)
+        assert not worker.is_alive(), "the read waited on a grandchild the Stop never reached"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+        deadline = time.monotonic() + HANG_BOUND
+        while not _gone(grandchild) and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert _gone(grandchild), f"the root's own child {grandchild} outlived the Stop"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions; Windows is unchanged")
+def test_only_stream_progress_starts_its_child_in_a_session_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T529's scope: host git gets a session (and no terminal input); docker streams do not.
+
+    `stream()` runs only the docker CLI off Windows, and T298 measured that ending
+    the CLI alone ends compose and its build. A group signal would also reach
+    compose directly, which for `compose run` could stop a container its stage
+    says keeps running, so `stream()` stays root-only until that is probed.
+    `stdin` is closed for the session's child because a git that asks for input
+    must fail, not wait on a terminal it no longer owns.
+
+    Mutation this catches: dropping `start_new_session` from `_progress_lines()`,
+    or adding it to `_stream_lines()`.
+    """
+    asked: list[dict[str, object]] = []
+
+    class _Spy(_Recorded):
+        def __init__(self, *a: object, **kw: object) -> None:
+            asked.append(dict(kw))
+            super().__init__(*a, **kw)
+
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"", 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Spy)
+    list(runner.stream_progress(["git", "clone", "x"]))
+    # Never a real spawn (`_Spy`), and not spelled `docker`: the suite refuses that argv.
+    list(runner.stream(["the-docker-cli", "compose", "build"]))
+
+    git_spawn, docker_spawn = asked
+    assert git_spawn.get("start_new_session") is True
+    assert git_spawn.get("stdin") == subprocess.DEVNULL
+    assert not docker_spawn.get("start_new_session")
+
+
+def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group signal goes only to a group a real child of ours leads (T529 adversarial focus).
+
+    `os.killpg(pid, ...)` reaches every process in group `pid`. The double here has
+    a pid (4321) that may well be some real process's group on the box running the
+    suite; nothing this module spawned leads it, so nothing may be sent to it.
+
+    Mutation this catches: taking the group from `proc.pid` alone, without asking
+    whether `proc` is a child this module started as its session's leader.
+    """
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"Receiving objects:   1%\r" * 50, 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Recorded)
+    generator = runner.stream_progress(["git", "clone", "x"])
+    next(generator)
+    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    generator.close()
+    assert signalled == []
