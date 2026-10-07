@@ -276,6 +276,36 @@ def with_record(evidence: Evidence, record: ToolRecord) -> Evidence:
     return replace(evidence, tools=(*kept, record))
 
 
+def learn_required_file(current: Evidence, expected: Evidence) -> Evidence:
+    """`current` with this run's required-file facts, when it lacks them and they are sure.
+
+    The record `_same_required_file()` lets through -- complete, written when the
+    game named no required file -- is kept by `run_plan()` as it is, so the file's
+    size and date would never be recorded and a `dbc.MPQ` swapped later would
+    never be noticed (T523). Both sides must have measured everything, and this
+    run must have something to learn; otherwise `current` comes back unchanged.
+    Only the two facts are added: the tool records are the ones already earned.
+
+    The limit, accepted (T523, as T521 accepted it): an old record never knew the
+    file, so a `dbc.MPQ` swapped BEFORE the first press that learns it is taken to
+    be the one the data came from. Forcing a re-extract of every old install
+    instead is the hours-long cost `_same_required_file()` exists to avoid.
+    """
+    if (
+        current.client_facts_complete
+        and expected.client_facts_complete
+        and current.required_file_size is None
+        and current.required_file_mtime is None
+        and (expected.required_file_size is not None or expected.required_file_mtime is not None)
+    ):
+        return replace(
+            current,
+            required_file_size=expected.required_file_size,
+            required_file_mtime=expected.required_file_mtime,
+        )
+    return current
+
+
 def same_stage(evidence: Evidence, expected: Evidence) -> bool:
     """Do two evidences describe one extraction? Tool records are not part of that.
 
@@ -315,12 +345,8 @@ def _same_required_file(evidence: Evidence, expected: Evidence) -> bool:
     does not match here, so `run_plan()` replaces it rather than appending new
     tool records to a claim that can never license a skip.
 
-    What this allowance leaves open (2026-10-06, a known gap, behaviour kept as
-    it was): `run_plan()` keeps the old record as it is and does not add the
-    required file's facts to it. So for a Tortoise `data/` extracted before
-    T521, a `dbc.MPQ` repaired or swapped later in the same client folder is
-    not noticed, and its tools are skipped, as they were before T521. A record
-    written after T521 carries the facts and does notice it.
+    `run_plan()` closes the allowance behind it: it writes this run's facts into
+    such a record (`learn_required_file()`), so a `dbc.MPQ` swapped later is noticed.
     """
     if (evidence.required_file_size, evidence.required_file_mtime) == (
         expected.required_file_size,
@@ -1272,6 +1298,11 @@ def run_plan(
     if current is None:
         current = expected
         write_evidence(data_dir, current)
+    else:
+        learned = learn_required_file(current, expected)
+        if learned is not current:
+            current = learned
+            write_evidence(data_dir, current)
 
     def spec_for(which: ExtractTool) -> docker.ContainerRun:
         """One `tool_run` for both attempts: a retry is the same container, run again."""
