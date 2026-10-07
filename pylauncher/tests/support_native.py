@@ -350,6 +350,8 @@ class Recorder:
     """A substring; any stream containing it exits 1 with a mariadb-shaped stderr."""
 
     query_answer: str = "20000\n"
+    realm_port: str = "8085\n"
+    """What the realm row's port reads back as (T552); a second server's install asks it."""
     realm_row: str = "127.0.0.1\t127.0.0.1\n"
     """What the realm query answers. A FRESH install holds loopback.
 
@@ -728,7 +730,9 @@ class Recorder:
         self.sql_calls.append(statement)
         self.sql_secrets.append(password)
         self.distros.append(wsl_distro)
-        # The realm row is answered separately; see `realm_row`.
+        # The realm row is answered separately; see `realm_row` and `realm_port`.
+        if "SELECT port FROM" in statement and "realmlist" in statement:
+            return self.realm_port
         if "realmlist" in statement:
             return self.realm_row
         if self.column_answer is not None and "information_schema.columns" in statement:

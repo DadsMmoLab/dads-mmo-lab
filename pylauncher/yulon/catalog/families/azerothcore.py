@@ -24,7 +24,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import git, networking
+from yulon import docker, git, networking
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
@@ -560,6 +560,8 @@ class AzerothCoreInstaller(StagedInstaller):
         if port == SEEDED_WORLD_PORT:
             return
         failed = self._run_auth_statement(networking.realm_port_sql(self.entry), ctx)
+        if not failed:
+            failed = self._realm_port_reads(port, ctx)
         if failed:
             raise InstallerError(
                 f"The realm could not be given this server's world port {port} ({failed}), so "
@@ -567,6 +569,27 @@ class AzerothCoreInstaller(StagedInstaller):
                 "world. Press Install again to retry."
             )
         yield f"The realm hands players this server's world port, {port}."
+
+    def _realm_port_reads(self, port: int, ctx: StageContext) -> str:
+        """`""` when the realm row reads back `port`, else what it read (T552).
+
+        An UPDATE that matched no row exits 0 like one that changed it, so the
+        row is read back rather than the exit code trusted (Codex review).
+        """
+        try:
+            answer = self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                networking.realm_port_query(self.entry),
+            )
+        except docker.DockerCommandError as exc:
+            return f"its row could not be read back: {exc}"
+        said = answer.split()
+        if said == [str(port)]:
+            return ""
+        return f"its row reads {' '.join(said) or 'nothing'}"
 
     def _confs_from_dist(self, ctx: StageContext) -> Iterator[str]:
         """One line per conf: written, already there, or why not. Never fails the install.

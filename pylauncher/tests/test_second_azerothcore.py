@@ -197,6 +197,7 @@ def _install_second(tmp_path: Path, **recorder: object) -> tuple[list[str], obje
     from yulon.catalog.families.azerothcore import AzerothCoreInstaller
     from yulon.catalog.installer import InstallOptions
 
+    recorder.setdefault("realm_port", "8086\n")
     rec = Recorder(**recorder)  # type: ignore[arg-type]
     engine = AzerothCoreInstaller(
         second_ac_entry(),
@@ -551,3 +552,27 @@ def test_a_wotlk_start_has_no_port_step() -> None:
         load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
     )
     assert services.controller.before_servers is None
+
+
+@pytest.mark.parametrize("row", ["8085\n", "", "8086\n8086\n"])
+def test_an_install_whose_realm_row_does_not_read_back_the_port_stops(
+    tmp_path: Path, row: str
+) -> None:
+    """An UPDATE that matched no row exits 0 too (Codex review and adversarial, round 4)."""
+    from yulon.catalog.installer import InstallerError
+
+    with pytest.raises(InstallerError, match="8086"):
+        _install_second(tmp_path, realm_port=row)
+
+
+def test_an_azerothcore_entry_with_no_container_prefix_is_refused() -> None:
+    """The renderer refuses an empty prefix; the catalog now refuses it first (Codex, r4)."""
+    bare = {
+        "db": "database",
+        "auth": "authserver",
+        "world": "worldserver",
+        "db_import": "db-import",
+        "client_data": "client-data-init",
+    }
+    with pytest.raises(ValidationError, match="prefix"):
+        second_ac_entry(containers=bare)

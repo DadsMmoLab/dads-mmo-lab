@@ -3051,6 +3051,12 @@ class CatalogEntry(_Strict):
             return self
         c = self.containers
         prefix = _shared_prefix((c.db, c.auth, c.world))
+        if not prefix:
+            raise ValueError(
+                f"{self.id}: the containers {c.db!r}, {c.auth!r} and {c.world!r} share no prefix "
+                "ending in '-', and the AzerothCore templates name every service "
+                "<prefix><suffix>; give them one, as in ub-database, ub-authserver, ub-worldserver"
+            )
         given = {
             "db": c.db,
             "auth": c.auth,
