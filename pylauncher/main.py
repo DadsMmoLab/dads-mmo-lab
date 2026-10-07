@@ -100,9 +100,6 @@ ABSURD_URL_CHARS = 2000
 PANEL_JOIN_MS = 5000
 """How long the exit waits for each log panel's job after asking it to stop."""
 
-SETTINGS_BUTTON = "yulon-settings"
-"""The header's Settings… button (T540): the tray's two switches."""
-
 UPDATE_JOIN_MS = 8000
 """How long the exit waits for the launch update check's thread."""
 
@@ -597,6 +594,7 @@ def build_window() -> object:
         CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
+        SETTINGS_BUTTON,
         TAB_BUTTONS,
         apply_dadcraft_theme,
     )

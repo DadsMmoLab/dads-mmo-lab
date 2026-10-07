@@ -119,24 +119,26 @@ class ServerCard(QFrame):
         super().__init__(parent)
         self.setObjectName("tray-card")
         self.view: Any = None
-        column = QVBoxLayout(self)
-        column.setContentsMargins(10, 8, 10, 8)
-        column.setSpacing(4)
-        top = QHBoxLayout()
+        # One row: the name (with the count line under it), the pill, the button.
+        # A second row only for the count, so a stopped server's card is one line.
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 8, 6)
+        row.setSpacing(8)
+        words = QVBoxLayout()
+        words.setSpacing(2)
         self.title = QLabel(self)
         self.title.setObjectName("tray-card-title")
-        self.pill = QLabel(self)
-        self.pill.setObjectName("tray-pill")
-        top.addWidget(self.title, 1)
-        top.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignRight)
-        column.addLayout(top)
-        bottom = QHBoxLayout()
         self.detail = QLabel(self)
         self.detail.setObjectName("tray-card-detail")
+        words.addWidget(self.title)
+        words.addWidget(self.detail)
+        row.addLayout(words, 1)
+        self.pill = QLabel(self)
+        self.pill.setObjectName("tray-pill")
+        row.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignVCenter)
         self.action = QPushButton(self)
-        bottom.addWidget(self.detail, 1)
-        bottom.addWidget(self.action, 0, Qt.AlignmentFlag.AlignRight)
-        column.addLayout(bottom)
+        self.action.setMinimumWidth(72)
+        row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def show_server(self, view: Any, title: str, status: str, words: str) -> str:
         """Fill the card; answers which button it shows (PLAY, START, OPEN or "")."""
@@ -218,6 +220,7 @@ class TrayFlyout(QWidget):
             QLabel#tray-header {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
             QLabel#tray-card-detail {{ color: {COLOR_TEXT_MUTED}; }}
+            QToolButton {{ color: {COLOR_GOLD_BRIGHT}; font-size: 16px; }}
             """)
         column = QVBoxLayout(self)
         column.setContentsMargins(12, 10, 12, 12)
@@ -226,7 +229,8 @@ class TrayFlyout(QWidget):
         self.header = QLabel(self)
         self.header.setObjectName("tray-header")
         self.settings_button = QToolButton(self)
-        self.settings_button.setText("⚙")
+        # U+FE0E asks for the text glyph, so it takes the amber like the rest.
+        self.settings_button.setText("⚙\ufe0e")
         self.settings_button.setToolTip("Settings")
         self.settings_button.setAccessibleName("Settings")
         self.settings_button.setAutoRaise(True)
