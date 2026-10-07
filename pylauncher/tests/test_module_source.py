@@ -612,3 +612,152 @@ def test_copy_folder_stops_in_a_folder_that_became_a_link_after_its_parent_was_l
     os.symlink(home, src / "swapped", target_is_directory=True)
     with pytest.raises(OSError, match="became a link"):
         module_source._git_and_links(str(src / "swapped"), ["secret"])
+
+
+# -- T538: the old copy stays until the new one is whole ---------------------
+
+
+def _a_copy_in_place(tmp_path: Path) -> tuple[Path, Path, dict[str, bytes]]:
+    """A chosen folder, and `modules/<id>` holding an earlier copy of it; that copy's bytes."""
+    src = tmp_path / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "new.cpp").write_text("new\n", encoding="utf-8")
+    dest = tmp_path / "server" / "modules" / "mod-my-thing"
+    (dest / "src").mkdir(parents=True)
+    (dest / "src" / "old.cpp").write_text("the copy that works\n", encoding="utf-8")
+    (dest / "include.sh").write_text("", encoding="utf-8")
+    return src, dest, _bytes_under(dest)
+
+
+def _bytes_under(folder: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()
+    }
+
+
+def _modules_holds_only(dest: Path) -> None:
+    """Nothing beside `modules/<id>` but what was there: no staging copy, no old copy."""
+    assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+
+
+def test_a_copy_that_fails_half_way_leaves_the_old_copy_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T538: the old copy was removed first, so a failed copy left a part of the new one.
+
+    `Applier._copy_folder()` says "Nothing was changed" on any `OSError` from here;
+    the copy now goes into a folder beside the target and is swapped in only whole.
+    """
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = module_source.shutil.copytree
+
+    depth = [0]
+
+    def copy_then_fail(*args: Any, **kwargs: Any) -> Any:
+        # `shutil` itself is patched, so its own recursion comes here too: fail the whole
+        # copy once it is done, never a folder inside it.
+        depth[0] += 1
+        try:
+            done = real(*args, **kwargs)
+        finally:
+            depth[0] -= 1
+        if depth[0] == 0:
+            raise OSError(28, "No space left on device")
+        return done
+
+    monkeypatch.setattr(module_source.shutil, "copytree", copy_then_fail)
+
+    with pytest.raises(OSError, match="No space left"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_swap_that_fails_puts_the_old_copy_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The new copy cannot take the name (Windows: a file in it is open): the old one is back."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    real = os.rename
+
+    def refuse_the_new_one(old: Any, new: Any) -> None:
+        if Path(new) == dest and "partial" in Path(old).name:
+            raise PermissionError(13, "Access is denied", str(old))
+        real(old, new)
+
+    monkeypatch.setattr(module_source.os, "rename", refuse_the_new_one)
+
+    with pytest.raises(OSError, match="Access is denied"):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_successful_copy_leaves_nothing_beside_the_module(tmp_path: Path) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
+
+
+def test_an_old_copy_a_crash_left_aside_is_put_back_when_the_next_copy_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A crash between the two renames leaves the old copy aside and no module at the name."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    aside = dest.with_name(f".{dest.name}.yulon-old")
+    os.rename(dest, aside)
+    partial = dest.with_name(f".{dest.name}.yulon-partial")
+    (partial / "half").mkdir(parents=True)
+
+    def fail(*_a: Any, **_k: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(module_source.shutil, "copytree", fail)
+
+    with pytest.raises(OSError):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_stale_old_copy_beside_a_good_module_is_cleared(tmp_path: Path) -> None:
+    """A crash after the swap leaves the old copy aside AND the new one in place: old goes."""
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    (dest.with_name(f".{dest.name}.yulon-old") / "src").mkdir(parents=True)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_link_met_while_copying_leaves_the_old_copy_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T530's belt stops the copy; since T538 that no longer costs the copy that worked."""
+    src, dest, before = _a_copy_in_place(tmp_path)
+    os.symlink(tmp_path, src / "src" / "up", target_is_directory=True)
+    monkeypatch.setattr(module_source, "_first_link", lambda _src: None)
+
+    with pytest.raises(OSError):
+        module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == before
+    _modules_holds_only(dest)
+
+
+def test_a_partial_copy_a_crash_left_does_not_stop_the_next_copy(tmp_path: Path) -> None:
+    src, dest, _before = _a_copy_in_place(tmp_path)
+    (dest.with_name(f".{dest.name}.yulon-partial") / "half").mkdir(parents=True)
+
+    module_source.copy_folder(src, dest)
+
+    assert _bytes_under(dest) == {"src/new.cpp": b"new\n"}
+    _modules_holds_only(dest)
