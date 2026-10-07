@@ -469,3 +469,17 @@ def test_two_servers_of_one_game_are_told_apart(tray: YulonTray, window: FakeWin
     texts = _texts(tray.build_menu())
     assert "WotLK — a — Realm online" in texts
     assert "WotLK — b — Stopped" in texts
+
+
+def test_the_menu_is_filled_before_anyone_asks_to_show_it(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """yulon-ubuntu 2026-10-07: GNOME's AppIndicator reads the exported menu's items before
+    it ever shows it, and with none it ignored every click on the icon. The menu was filled
+    only in aboutToShow, which never came."""
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    assert isinstance(tray.icon, FakeTrayIcon) and tray.icon.menu is not None
+    texts = _texts(tray.icon.menu)
+    assert "Open Yu'lon" in texts and "WotLK — Realm online" in texts
+    window.yulon_controllers[0].realm_badge.set_status("stopped")
+    assert "WotLK — Stopped" in _texts(tray.icon.menu), "the filled menu went stale"

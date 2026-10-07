@@ -566,6 +566,11 @@ class YulonTray(QObject):
             self.icon.setToolTip(tray_tooltip([(title, status) for _, title, status in servers]))
         if self.flyout is not None and self.flyout.isVisible():
             self._fill_flyout(servers)
+        if self._menu is not None and not self._menu.isVisible():
+            # Kept filled, not only on aboutToShow: GNOME's AppIndicator reads the
+            # exported menu's items first, and with none it ignores every click
+            # on the icon (yulon-ubuntu, 2026-10-07).
+            self.build_menu(self._menu)
         if changed:
             self.state_changed.emit(state)
 
