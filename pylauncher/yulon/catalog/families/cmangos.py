@@ -873,7 +873,8 @@ class CmangosInstaller(StagedInstaller):
                 ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),)
             )
             refused: list[sqlplan.PhaseRun] = []
-            yield from self._stream(
+            said: list[str] = []
+            for line in self._stream(
                 _apply_one(
                     run,
                     container=container,
@@ -884,8 +885,16 @@ class CmangosInstaller(StagedInstaller):
                 ),
                 cancel=None,
                 stage="world-updates",
+            ):
+                said.append(line)
+                yield line
+            # Only the client's own "Duplicate key name" (ERROR 1061) says the indexes are
+            # there; any other refusal of an index file is a failure (Codex, T534 round 2).
+            there = (
+                bool(refused)
+                and sqlplan.only_creates_indexes(run.path)
+                and any("ERROR 1061" in line or "Duplicate key name" in line for line in said)
             )
-            there = bool(refused) and sqlplan.only_creates_indexes(run.path)
             state = sqlplan.FILE_FAILED if refused and not there else sqlplan.FILE_APPLIED
             self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
             if there:

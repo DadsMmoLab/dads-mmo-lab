@@ -170,13 +170,46 @@ def test_an_index_file_whose_indexes_are_there_is_recorded_and_not_retried(
     rec, server_dir, db, world = _installed(tmp_path)
     index = BOT_FILES[0]
     _lay(server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\n")
-    rec.failing_sql = "create index"
+    _refuse_index_files(db, "ERROR 1061 (42000) at line 2: Duplicate key name 'idx_a'")
     lines = _press(rec, server_dir, db, world)
     assert db.rows[("playerbots world", index)][1] == "applied"
     assert any(index in line and "already there" in line for line in lines), lines
     rec.sql_calls.clear()
     _press(rec, server_dir, db, world)
     assert _sent(rec, index) == 0
+
+
+def test_an_index_file_refused_for_any_other_reason_is_failed_and_tried_again(
+    tmp_path: Path,
+) -> None:
+    """Codex round 2: a missing table or a permission error is not "the indexes are there"."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    index = BOT_FILES[0]
+    _lay(server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\n")
+    _refuse_index_files(db, "ERROR 1146 (42S02) at line 2: Table 'mangos.t' doesn't exist")
+    _press(rec, server_dir, db, world)
+    assert db.rows[("playerbots world", index)][1] == "failed"
+    rec.sql_calls.clear()
+    _press(rec, server_dir, db, world)
+    assert _sent(rec, index) == 1
+
+
+def _refuse_index_files(db: object, stderr: str) -> None:
+    """Every script holding a CREATE INDEX exits 1 with `stderr`, as the client would."""
+    import subprocess
+
+    real = db.exec_stdin  # type: ignore[attr-defined]
+
+    def exec_stdin(container, argv, source, *, env, wsl_distro=None):  # type: ignore[no-untyped-def]
+        data = source.read()
+        if b"create index" in data:
+            db.rec.sql_calls.append(data.decode().splitlines()[0])  # type: ignore[attr-defined]
+            return subprocess.CompletedProcess(list(argv), 1, "", stderr)
+        import io
+
+        return real(container, argv, io.BytesIO(data), env=env, wsl_distro=wsl_distro)
+
+    db.exec_stdin = exec_stdin  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise", "wow-wotlk"])
@@ -205,7 +238,13 @@ def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_gener
         ("DELETE FROM t;\nINSERT INTO t VALUES (1);\nUPDATE t SET a = a + 1;\n", None),
         ("delete FROM gossip_menu_option where option_id = 99;\n", None),
         ("create index i on creature_loot_template(item);\n", None),
-        ("REPLACE INTO t VALUES (1);\nINSERT IGNORE INTO u VALUES (1);\n", None),
+        (
+            "DELETE FROM t;\nREPLACE INTO t VALUES (1);\n"
+            "TRUNCATE u;\nINSERT IGNORE INTO u VALUES (1);\n",
+            None,
+        ),
+        ("REPLACE INTO t VALUES (1);\n", "it writes t without emptying"),
+        ("INSERT IGNORE INTO u VALUES (1);\n", "it writes u without emptying"),
         ("INSERT INTO t VALUES (1);\n", "it writes t without emptying it first"),
         ("DELETE FROM t WHERE a = 1;\nINSERT INTO t VALUES (1);\n", "it writes t without emptying"),
         ("UPDATE t SET a = a + 1;\n", "it writes t without emptying"),
@@ -222,6 +261,8 @@ def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_gener
         "gossip",
         "index",
         "replace",
+        "replace-unemptied",
+        "insert-ignore-unemptied",
         "insert",
         "where",
         "update",

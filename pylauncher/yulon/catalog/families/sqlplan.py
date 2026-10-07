@@ -1730,8 +1730,8 @@ def whole_table_problem(path: Path) -> str | None:
 
     Whole-table means: every table the file INSERTs into or UPDATEs is dropped
     (`DROP TABLE IF EXISTS`) or emptied (`DELETE FROM t` / `TRUNCATE t`, no WHERE)
-    earlier in the same file. `REPLACE`/`INSERT IGNORE`, `CREATE TABLE`/`INDEX`,
-    `DELETE … WHERE`, `SET`, `SELECT`, `LOCK`/`UNLOCK TABLES` and mysqldump's
+    earlier in the same file -- `REPLACE` and `INSERT IGNORE` included. `CREATE
+    TABLE`/`INDEX`, `DELETE … WHERE`, `SET`, `SELECT`, `LOCK`/`UNLOCK TABLES` and mysqldump's
     `ALTER TABLE … DISABLE/ENABLE KEYS` are idempotent as statements; an executable
     comment's body is read as the statement it is. Anything else (`ALTER`, `RENAME`,
     `USE`, a procedure) is a reason.
@@ -1773,9 +1773,9 @@ def whole_table_problem(path: Path) -> str | None:
             if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
                 continue  # deletes the same rows however often it runs
             return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
-        if re.match(r"(?i)(REPLACE INTO|INSERT IGNORE INTO) ", sql):
-            continue
-        match = re.match(rf"(?i)(?:INSERT INTO|UPDATE) {_TABLE}", sql)
+        # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
+        # the table emptied first like a plain INSERT does (Codex, T534 round 2).
+        match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
         if match:
             if match.group(1).lower() not in emptied:
                 return f"it writes {match.group(1)} without emptying it first"
