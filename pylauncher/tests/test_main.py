@@ -6016,11 +6016,6 @@ def build_window():
         print(f"T540 visible={window.isVisible()}", flush=True)
         app = QApplication.instance()
         print(f"T540 app={type(app).__name__}", flush=True)
-        if os.environ.get("YULON_T540_QUIT"):
-            from PySide6.QtCore import QEvent
-
-            app.quit_requested.connect(lambda: print("T540 quit_requested", flush=True))
-            QApplication.sendEvent(app, QEvent(QEvent.Type.Quit))
         QApplication.exit(0)
 
     QTimer.singleShot(400, look)
@@ -6073,8 +6068,6 @@ def test_an_ordinary_start_shows_the_window_with_the_tray_up(tmp_path: Path) -> 
     out = _run_t540_child(tmp_path, "", YULON_T540_TRAY="1")
     assert "T540 visible=True" in out, out
     assert "T540 app=YulonApplication" in out, out
-    quit_out = _run_t540_child(tmp_path, "", YULON_T540_TRAY="1", YULON_T540_QUIT="1")
-    assert "T540 quit_requested" in quit_out, quit_out
 
 
 def test_a_sign_in_start_that_finds_yulon_stuck_leaves_without_a_box(tmp_path: Path) -> None:

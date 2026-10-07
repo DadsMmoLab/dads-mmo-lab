@@ -435,6 +435,7 @@ class YulonTray(QObject):
                 except (RuntimeError, TypeError):  # pragma: no cover - never connected
                     pass
             self.window.yulon_quit = self.window.close  # type: ignore[attr-defined]
+            self.window.yulon_quit_for_good = self.window.close  # type: ignore[attr-defined]
             if self._previous_settings is not None:
                 self.window.yulon_open_settings = self._previous_settings  # type: ignore[attr-defined]
         self._let_go_of_servers()
@@ -919,6 +920,11 @@ class YulonTray(QObject):
         so a missing tray is waited for, a try every `TRAY_WAIT_MS`; if none
         comes, the window opens after all rather than Yu'lon running unseen.
         """
+        # Hidden under the tray (or waiting for one): a dialog that opens now --
+        # main()'s log-file warning is the first -- must bring the window back
+        # (cold re-review: this start never went through `hide_window()`).
+        if self.window.isHidden():
+            self._watch_app(True)
         if self.keeping:
             logger.info("tray: started at sign-in; Yu'lon is in the tray")
             return

@@ -589,3 +589,80 @@ def test_the_lost_lock_exit_asks_for_a_quit_for_good(
 ) -> None:
     window, tray, _guard = guarded
     assert window.yulon_quit_for_good == tray.quit_for_good  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------- cold re-review, 2026-10-07
+
+
+def test_a_dialog_opened_after_a_sign_in_start_brings_the_window_back(
+    window: FakeWindow,
+) -> None:
+    """Re-review MUST: `--tray` kept the window hidden without the dialog watch, so the
+    first box main() shows after it (the log-file warning) sat unseen."""
+    from PySide6.QtWidgets import QDialog
+
+    window.hide()
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    made.install()
+    try:
+        made.start_hidden()
+        assert window.isHidden()
+        dialog = QDialog(window)
+        dialog.setModal(True)
+        dialog.show()
+        QApplication.processEvents()
+        assert window.isVisible(), "a question was asked behind the hidden window"
+        dialog.reject()
+        dialog.deleteLater()
+    finally:
+        made.uninstall()
+
+
+def test_a_dialog_opened_while_waiting_for_a_late_tray_brings_the_window_back(
+    window: FakeWindow,
+) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    window.hide()
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: False)
+    made.install()
+    try:
+        made.start_hidden()
+        dialog = QDialog(window)
+        dialog.setModal(True)
+        dialog.show()
+        QApplication.processEvents()
+        assert window.isVisible()
+        dialog.reject()
+        dialog.deleteLater()
+    finally:
+        made.uninstall()
+
+
+def test_the_trays_quit_hook_is_wired_to_the_applications_quit_request(
+    window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review: the wiring checked fast, without a child process."""
+    from PySide6.QtCore import Signal
+
+    class _Asks(QObject):
+        quit_requested = Signal()
+
+    asks = _Asks()
+    app = QApplication.instance()
+    monkeypatch.setattr(app, "quit_requested", asks.quit_requested, raising=False)
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    made.install()
+    try:
+        assert made.keeping
+        asks.quit_requested.emit()
+        assert not made.keeping, "a quit request did not reach the tray"
+    finally:
+        made.uninstall()
+
+
+def test_uninstall_gives_back_the_quit_for_good(window: FakeWindow) -> None:
+    made = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    made.install()
+    made.uninstall()
+    assert window.yulon_quit_for_good == window.close  # type: ignore[attr-defined]
