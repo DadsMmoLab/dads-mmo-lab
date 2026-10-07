@@ -78,7 +78,8 @@ class TraySettingsDialog(QDialog):
             sign_in_why = ""
         self.sign_in.setEnabled(not sign_in_why)
         self.sign_in.setToolTip(sign_in_why)
-        text = self._said_problem or (NO_TRAY if not has_tray else "")
+        # The reason is said on the dialog, not only in a greyed box's tooltip.
+        text = self._said_problem or sign_in_why
         self.note.setText(text)
         self.note.setVisible(bool(text))
 

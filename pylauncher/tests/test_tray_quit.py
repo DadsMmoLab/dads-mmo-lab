@@ -292,6 +292,9 @@ def test_a_source_checkout_greys_the_sign_in_switch_with_the_reason(
     try:
         assert not dialog.sign_in.isEnabled()
         assert dialog.sign_in.toolTip() == autostart.NOT_INSTALLED
+        # On the dialog, not only in a tooltip (yulon-win11: a greyed box with no reason).
+        assert dialog.note.text() == autostart.NOT_INSTALLED
+        assert not dialog.note.isHidden()
     finally:
         dialog.deleteLater()
 
