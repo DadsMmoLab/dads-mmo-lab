@@ -2974,3 +2974,47 @@ def test_closing_a_stream_whose_pipes_are_closed_signals_no_group(
     monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
     stale.close()
     assert signalled == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_group_id_that_is_now_another_processs_pid_is_never_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546, Codex adversarial review: a held pipe does not prove the group id is still ours.
+
+    A descendant that left the group can hold the pipe while the group empties and its id
+    goes to a new group leader. That leader's pid IS the id; this stream's own leader was
+    reaped, so a live process with that pid is someone else's, never ours (POSIX keeps a
+    pid from reuse only while a group of that id exists). Stood in for by a real process
+    leading its own session, under a stream whose root exited and was reaped.
+
+    Mutation this catches: asking the group's liveness (`killpg(id, 0)`) without asking
+    whether the id is now another process's pid.
+    """
+    foreign = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True
+    )
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait(timeout=HANG_BOUND)  # this stream's root: exited and reaped
+
+    class _Reading:
+        def is_alive(self) -> bool:
+            return True  # a pipe still held: the condition a left-the-group descendant meets
+
+    child = runner._Child()
+    child.proc = gone
+    child.group = foreign.pid  # the id, now a foreign group leader's pid
+    child.readers = (_Reading(),)  # type: ignore[assignment]
+    sent: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(
+        runner.os, "killpg", lambda pid, sig: sent.append((pid, sig)) or real_killpg(pid, sig)
+    )
+    try:
+        assert runner._group_unsettled(child) is False
+        runner._finish(gone, None, child=child, drained=False)
+        assert [s for s in sent if s[1] != 0] == [], sent
+        assert foreign.poll() is None, "a process Yu'lon did not start was signalled"
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=HANG_BOUND)

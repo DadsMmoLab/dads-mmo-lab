@@ -278,15 +278,15 @@ def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
     `proc` alone, as before T529.
     """
     deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
-    if not _signal_group(group, signal.SIGTERM):
+    if not _group_still_ours(proc, group) or not _signal_group(group, signal.SIGTERM):
         return False
     try:
         proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         pass
-    while _signal_group(group, 0) and time.monotonic() < deadline:
+    while _group_still_ours(proc, group) and time.monotonic() < deadline:
         time.sleep(_GROUP_POLL_SECONDS)
-    if _signal_group(group, 0):
+    if _group_still_ours(proc, group):
         _signal_group(group, getattr(signal, "SIGKILL"))  # noqa: B009 - POSIX-only attribute
     if proc.poll() is None:
         proc.kill()
@@ -296,6 +296,30 @@ def _end_group(proc: _AnyPopen, group: int, *, bounded: bool) -> bool:
 
 
 _GROUP_POLL_SECONDS = 0.05
+
+
+def _group_still_ours(proc: _AnyPopen, group: int) -> bool:
+    """Is process group `group` still the one `proc` led, with a member in it? (T546)
+
+    While `proc` runs, or has exited unreaped, the id is pinned to it. Once it is
+    reaped, POSIX keeps the id from reuse only while a member of the group lives, so
+    a group left with members and no leader is still ours. A live process whose pid
+    IS the id is not: ours was reaped, so that pid is someone else's, and so is any
+    group it leads (Codex's adversarial review: a held pipe alone did not prove it).
+    """
+    if sys.platform == "win32":
+        return False  # no process groups there; a Stop ends a job (T299)
+    if proc.poll() is None:
+        return True
+    try:
+        os.getpgid(group)
+    except ProcessLookupError:
+        return _signal_group(group, 0)  # no leader: members of ours, if any are left
+    except OSError:
+        return False
+    return False
+
+
 """How often `_end_group` asks whether anything of a group it signalled is still there."""
 
 
@@ -749,7 +773,7 @@ def _group_unsettled(child: _Child) -> bool:
         and child.group is not None
         and not child.settled
         and _pipe_held(child)
-        and _signal_group(child.group, 0)
+        and _group_still_ours(child.proc, child.group)
     )
 
 
