@@ -1586,7 +1586,7 @@ _SQL_TOKENS = re.compile(
     r"'(?:[^'\\]|\\.|'')*'?"
     r'|"(?:[^"\\]|\\.|"")*"?'
     r"|`[^`]*`?"
-    r"|--[^\n]*|#[^\n]*"
+    r"|--(?=[\s\x00-\x1f]|$)[^\n]*|#[^\n]*"
     r"|/\*![0-9]*|\*/"
     r"|/\*.*?(?:\*/|$)"
     r"|[^'\"`#/*-]+"
@@ -1623,10 +1623,11 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     `characters.x` would write there (Codex, T531). Read as the SQL MySQL runs
     (`_code_only()`): comments become spaces -- a separator, as they are to MySQL --
     an executable comment's body is kept and the file is flagged for having one,
-    and string literals are emptied, so a schema name
-    counts only at a SQL boundary and with the dot right after it (`logs.x`,
-    `` `logs`.`x` ``), because a refused file holds back every later update and
-    quest text says "ten logs. Then …" (cold review of T531). Measured
+    and string literals are emptied -- quest text says "ten logs. Then …" (cold
+    review of T531), and a refused file holds back every later update -- so a
+    schema name counts at a SQL boundary followed by a dot, whitespace around the
+    dot allowed as MySQL allows it (`logs . x`). `--` is a comment only with
+    whitespace after it, as in MySQL (`a--1` is arithmetic). Measured
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
     """
@@ -1635,7 +1636,7 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     found = [
         name
         for name in sorted({*others, *_SYSTEM_SCHEMAS})
-        if re.search(rf"(?:^|[\s(,=;])`?{re.escape(name)}`?\.`?[A-Za-z_]", text, re.I | re.M)
+        if re.search(rf"(?:^|[\s(,=;])`?{re.escape(name)}`?\s*\.\s*`?[A-Za-z_]", text, re.I | re.M)
     ]
     if re.search(r"(?im)(^|;)\s*USE\s", text):
         found.append("USE")
