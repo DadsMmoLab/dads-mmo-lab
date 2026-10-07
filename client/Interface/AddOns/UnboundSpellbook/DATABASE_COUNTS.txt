@@ -1,0 +1,14 @@
+ACTIVE SPELL-ID DATABASE COUNTS
+
+Warrior: 143
+Paladin: 192
+Hunter: 182
+Rogue: 134
+Priest: 257
+Death Knight: 97
+Shaman: 291
+Mage: 300
+Warlock: 251
+Druid: 315
+
+Total checks: 2162

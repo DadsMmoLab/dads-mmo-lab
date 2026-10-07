@@ -1,0 +1,2 @@
+# Keep every file byte for byte as released (the addons use CRLF line endings).
+* -text

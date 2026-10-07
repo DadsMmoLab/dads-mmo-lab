@@ -1,0 +1,34 @@
+## Interface: 30300
+## Title: |cff00ff00Multiclass|r Talents UI
+## Notes: Multiclass talent UI — Unbound GM bridge for cross-class talents
+## Author: AzerothCore
+## Version: 2.9.27-unbound-gm
+## SavedVariables: Adventurer2DB
+
+Data\Constants.lua
+Data\TalentData.lua
+Data\AllSpells.lua
+Data\Racials.lua
+Data\Morphs.lua
+Data\Talents_Warrior.lua
+Data\Talents_Paladin.lua
+Data\Talents_Hunter.lua
+Data\Talents_Rogue.lua
+Data\Talents_Priest.lua
+Data\Talents_DeathKnight.lua
+Data\Talents_Shaman.lua
+Data\Talents_Mage.lua
+Data\Talents_Warlock.lua
+Data\Talents_Druid.lua
+Core.lua
+UI\Layout.lua
+UI\Helpers.lua
+UI\TalentButton.lua
+UI\CenterPanel.lua
+UI\SpecPanel.lua
+UI\TopTabBar.lua
+UI\SpecTabBar.lua
+UI\SpellGridPanel.lua
+UI\SearchSidebar.lua
+UI\MainFrame.lua
+Integration.lua

@@ -1,0 +1,7 @@
+## Interface: 30300
+## Title: Multiclass Resources
+## Notes: Displays multiple power types (Mana/Rage/Energy/Focus/Runic) + Combo Points simultaneously.
+## Author: Dead
+## Version: 1.3
+## SavedVariables: AdventurerResourcesDB
+multiclass-resources.lua

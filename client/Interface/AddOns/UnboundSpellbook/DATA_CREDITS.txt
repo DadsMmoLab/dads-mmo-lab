@@ -1,0 +1,12 @@
+DATA CREDITS
+
+Standard WotLK trainer spell and rank data:
+What's Training? WotLK by anhility
+https://github.com/anhility/WhatsTraining_WotLK
+MIT License
+
+Talent rank source used by the wider Unbound project:
+Talented_WoTLK by bkader
+https://github.com/bkader/Talented_WoTLK
+
+Addon code in this package was written for this project.
