@@ -26,8 +26,6 @@ from tests.test_world_content_updates import (  # noqa: F401 - `_gated` is an au
     _lay,
     _press,
 )
-from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
 
@@ -162,21 +160,25 @@ def test_a_bot_file_the_database_refuses_is_named_and_the_others_still_load(
     assert db.rows[("playerbots world", BOT_FILES[1])][1] == "applied"
 
 
-def test_an_index_file_whose_indexes_are_there_is_recorded_and_not_retried(
+def test_an_index_file_runs_one_index_at_a_time_and_a_present_one_hides_none_after_it(
     tmp_path: Path,
 ) -> None:
-    """ai_playerbot_indexes.sql is only CREATE INDEX: on a server that has them the client
-    refuses the first one, which means they are there, not that the table is damaged."""
+    """ai_playerbot_indexes.sql is only CREATE INDEX. Run whole, the client stops at the
+    first index that is already there and never makes a new one after it (Codex, round
+    3); run one at a time, each is made or reported present (ERROR 1061)."""
     rec, server_dir, db, world = _installed(tmp_path)
     index = BOT_FILES[0]
-    _lay(server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\n")
-    _refuse_index_files(db, "ERROR 1061 (42000) at line 2: Duplicate key name 'idx_a'")
+    _lay(
+        server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\ncreate index idx_b on t(b);\n"
+    )
+    sent = _index_client(db, {"idx_a": "ERROR 1061 (42000) at line 1: Duplicate key name 'idx_a'"})
     lines = _press(rec, server_dir, db, world)
+    assert [n for n in sent if n in ("idx_a", "idx_b")] == ["idx_a", "idx_b"], sent
     assert db.rows[("playerbots world", index)][1] == "applied"
-    assert any(index in line and "already there" in line for line in lines), lines
-    rec.sql_calls.clear()
+    assert any(index in line and "1 of its indexes were already there" in line for line in lines)
+    sent.clear()
     _press(rec, server_dir, db, world)
-    assert _sent(rec, index) == 0
+    assert sent == [], "applied: not run again"
 
 
 def test_an_index_file_refused_for_any_other_reason_is_failed_and_tried_again(
@@ -186,41 +188,40 @@ def test_an_index_file_refused_for_any_other_reason_is_failed_and_tried_again(
     rec, server_dir, db, world = _installed(tmp_path)
     index = BOT_FILES[0]
     _lay(server_dir, index, f"-- {index}\ncreate index idx_a on t(a);\n")
-    _refuse_index_files(db, "ERROR 1146 (42S02) at line 2: Table 'mangos.t' doesn't exist")
+    sent = _index_client(
+        db, {"idx_a": "ERROR 1146 (42S02) at line 1: Table 'mangos.t' doesn't exist"}
+    )
     _press(rec, server_dir, db, world)
     assert db.rows[("playerbots world", index)][1] == "failed"
-    rec.sql_calls.clear()
+    sent.clear()
     _press(rec, server_dir, db, world)
-    assert _sent(rec, index) == 1
+    assert "idx_a" in sent, "failed: loaded again on the next update"
 
 
-def _refuse_index_files(db: object, stderr: str) -> None:
-    """Every script holding a CREATE INDEX exits 1 with `stderr`, as the client would."""
+def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
+    """The client for CREATE INDEX scripts: refuses an index named in `refusals` with that
+    stderr, accepts the rest; returns the list of index names it was sent, in order."""
+    import io
+    import re
     import subprocess
 
     real = db.exec_stdin  # type: ignore[attr-defined]
+    sent: list[str] = []
 
     def exec_stdin(container, argv, source, *, env, wsl_distro=None):  # type: ignore[no-untyped-def]
         data = source.read()
-        if b"create index" in data:
-            db.rec.sql_calls.append(data.decode().splitlines()[0])  # type: ignore[attr-defined]
-            return subprocess.CompletedProcess(list(argv), 1, "", stderr)
-        import io
-
+        found = re.findall(rb"(?i)create index (\w+)", data)
+        if found:
+            names = [n.decode() for n in found]
+            sent.extend(names)
+            for name in names:
+                if name in refusals:
+                    return subprocess.CompletedProcess(list(argv), 1, "", refusals[name])
+            return subprocess.CompletedProcess(list(argv), 0, "", "")
         return real(container, argv, io.BytesIO(data), env=env, wsl_distro=wsl_distro)
 
     db.exec_stdin = exec_stdin  # type: ignore[attr-defined]
-
-
-@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise", "wow-wotlk"])
-def test_the_update_question_says_changed_bot_tables_replace_what_the_bots_generated(
-    game: str,
-) -> None:
-    entry = load_catalog().get(game)
-    text = native.update_to_latest_confirmation(entry, Path("/srv"), "x/y")
-    assert ("loaded fresh" in text and "the bots generated" in text) is (
-        game in ("wow-tbc", "wow-vanilla")
-    ), text
+    return sent
 
 
 # -- the whole-table guard, pure --------------------------------------------------

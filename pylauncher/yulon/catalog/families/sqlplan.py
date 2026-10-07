@@ -1802,6 +1802,15 @@ def only_creates_indexes(path: Path) -> bool:
     return seen
 
 
+def index_statements(path: Path) -> list[str]:
+    """Each `CREATE [UNIQUE] INDEX` statement of an index-only file, as written (T534)."""
+    return [
+        " ".join(raw.split())
+        for raw in _statements(path.read_text(encoding="utf-8", errors="replace"))
+        if " ".join(raw.split()).upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))
+    ]
+
+
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:
     """`seeded` rows for every file of a phase the ledger holds NO row of, in run order. Pure
     but for reading each file's bytes.

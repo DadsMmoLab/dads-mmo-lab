@@ -872,33 +872,50 @@ class CmangosInstaller(StagedInstaller):
             self._record_world_files(
                 ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),)
             )
-            refused: list[sqlplan.PhaseRun] = []
-            said: list[str] = []
-            for line in self._stream(
-                _apply_one(
-                    run,
-                    container=container,
-                    client=db.client,
-                    password=password,
-                    exec_stdin=self._seams.exec_stdin,
-                    refused=refused,
-                ),
-                cancel=None,
-                stage="world-updates",
-            ):
-                said.append(line)
-                yield line
-            # Only the client's own "Duplicate key name" (ERROR 1061) says the indexes are
-            # there; any other refusal of an index file is a failure (Codex, T534 round 2).
-            there = (
-                bool(refused)
-                and sqlplan.only_creates_indexes(run.path)
-                and any("ERROR 1061" in line or "Duplicate key name" in line for line in said)
+            # An index-only file runs one CREATE INDEX at a time: the client stops a script
+            # at its first error, so one index already there would hide every later one
+            # (Codex, T534 round 3). Each is created or reported present ("Duplicate key
+            # name", ERROR 1061); any other refusal fails the file.
+            pieces = (
+                [
+                    sqlplan.PhaseRun(
+                        run.phase, run.schema, None, f"{stmt};", False, f"{run.rel} [{n}]"
+                    )
+                    for n, stmt in enumerate(sqlplan.index_statements(run.path), start=1)
+                ]
+                if sqlplan.only_creates_indexes(run.path)
+                else [run]
             )
-            state = sqlplan.FILE_FAILED if refused and not there else sqlplan.FILE_APPLIED
+            refused: list[sqlplan.PhaseRun] = []
+            present = 0
+            for piece in pieces:
+                said: list[str] = []
+                before = len(refused)
+                for line in self._stream(
+                    _apply_one(
+                        piece,
+                        container=container,
+                        client=db.client,
+                        password=password,
+                        exec_stdin=self._seams.exec_stdin,
+                        refused=refused,
+                    ),
+                    cancel=None,
+                    stage="world-updates",
+                ):
+                    said.append(line)
+                    yield line
+                if (
+                    len(refused) > before
+                    and piece is not run
+                    and any("ERROR 1061" in line or "Duplicate key name" in line for line in said)
+                ):
+                    refused.pop()
+                    present += 1
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
             self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
-            if there:
-                yield f"{run.rel}: its indexes are already there; recorded, not run again."
+            if present and not refused:
+                yield f"{run.rel}: {present} of its indexes were already there; the rest made."
                 loaded += 1
                 continue
             if refused:
