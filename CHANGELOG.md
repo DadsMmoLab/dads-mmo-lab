@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - TBC and Vanilla servers no longer risk a crash when bots fight Netherspite in Karazhan or pick certain mounts.
 - Two Yu'lons pressing **Re-extract map data** on one server folder at the same moment: only one goes ahead.
 - When another Yu'lon is extracting into the folder, **Re-extract map data** says so and never offers to remove its run.
