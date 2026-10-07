@@ -161,3 +161,34 @@ def test_a_server_with_no_dashboard_shows_none(tray: YulonTray, window: FakeWind
     tray.toggle_flyout()
     assert tray.flyout is not None
     assert tray.flyout.cards()[0].dashboard.isHidden()
+
+
+def test_the_cards_dashboard_entry_is_never_cut_short(tray: YulonTray, window: FakeWindow) -> None:
+    """yulon-ubuntu 2026-10-07: "Turn on the bot dashb" - the entry shared the name's column."""
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    palette = QPalette(app.palette())
+    apply_dadcraft_theme(app)
+    try:
+        view = _add(window, TortoiseView("running", switch_on=False))
+        from datetime import timedelta
+
+        from yulon import dashboard
+
+        view.last_verdict = dashboard.Verdict(
+            "up", players=0, bots=242, uptime=timedelta(minutes=3)
+        )
+        card = _card(tray)
+        QApplication.processEvents()
+        assert card.dashboard.width() >= card.dashboard.sizeHint().width(), (
+            card.dashboard.width(),
+            card.dashboard.sizeHint().width(),
+        )
+    finally:
+        app.setStyleSheet("")
+        app.setPalette(palette)

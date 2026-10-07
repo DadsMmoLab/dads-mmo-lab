@@ -121,8 +121,13 @@ class ServerCard(QFrame):
         self.view: Any = None
         # One row: the name (with the count line under it), the pill, the button.
         # A second row only for the count, so a stopped server's card is one line.
-        row = QHBoxLayout(self)
-        row.setContentsMargins(10, 6, 8, 6)
+        # A Tortoise server's dashboard entry is a row of its own under them, the
+        # card's whole width: in the name's column it was cut to "Turn on the
+        # bot dashb" (yulon-ubuntu, 2026-10-07).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 6, 8, 6)
+        outer.setSpacing(2)
+        row = QHBoxLayout()
         row.setSpacing(8)
         words = QVBoxLayout()
         words.setSpacing(2)
@@ -137,13 +142,6 @@ class ServerCard(QFrame):
             label.setWordWrap(True)
         words.addWidget(self.title)
         words.addWidget(self.detail)
-        # A Tortoise server's TortoiseBots dashboard, under its name (T540).
-        self.dashboard = QPushButton(self)
-        self.dashboard.setFlat(True)
-        self.dashboard.setObjectName("tray-card-dashboard")
-        self.dashboard.setVisible(False)
-        self.dashboard_kind = ""
-        words.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignLeft)
         row.addLayout(words, 1)
         self.pill = QLabel(self)
         self.pill.setObjectName("tray-pill")
@@ -151,6 +149,13 @@ class ServerCard(QFrame):
         self.action = QPushButton(self)
         self.action.setMinimumWidth(72)
         row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addLayout(row)
+        self.dashboard = QPushButton(self)
+        self.dashboard.setFlat(True)
+        self.dashboard.setObjectName("tray-card-dashboard")
+        self.dashboard.setVisible(False)
+        self.dashboard_kind = ""
+        outer.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignLeft)
 
     def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
         """Fill the card; answers which button it shows (PLAY, START, OPEN or "")."""
