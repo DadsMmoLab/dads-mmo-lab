@@ -1647,6 +1647,10 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
         found.append("USE")
     if executable:
         found.append("an executable comment")
+    if re.search(r"(?i)\bsql_mode\b", text):
+        # ANSI_QUOTES or NO_BACKSLASH_ESCAPES would change what is a string from that
+        # point on, which this reading cannot follow (Codex, T531): refused, not guessed.
+        found.append("a change of sql_mode")
     if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
         found.append("a whole-database statement")
     return tuple(found)
