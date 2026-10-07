@@ -1658,28 +1658,42 @@ def foreign_schemas(
     Updates/*.sql files trips it.
 
     `executable_comments_ok` is the bot reload's reading (T534 cold review): the
-    bots' mysqldump files open with `/*!40101 SET … SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */`,
-    so an executable comment or a session sql_mode is not by itself a reason there --
-    the comment bodies are still read for schema names, and both quote readings are
-    still taken.
+    bots' mysqldump files carry `/*!40101 … */` lines, so an executable comment is not
+    by itself a reason there -- its body is still read for schema names, and both
+    quote readings are still taken. Of sql_mode changes, only mysqldump's own pair
+    (`_DUMP_SQL_MODE`) is accepted; any other one is refused as in a world update.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     found: list[str] = []
     # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
     # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
+    if executable_comments_ok:
+        # mysqldump's own pair, and nothing else, may set sql_mode in a bot file: a switch
+        # part-way (NO_BACKSLASH_ESCAPES) changes what is a string from there on and can
+        # hide a statement from both readings (re-review of T534).
+        raw = _DUMP_SQL_MODE.sub(" ", raw)
     for escapes in (True, False):
         text, executable = _code_only(raw, backslash_escapes=escapes)
-        for reason in _foreign_in(
-            text, executable and not executable_comments_ok, others, executable_comments_ok
-        ):
+        for reason in _foreign_in(text, executable and not executable_comments_ok, others):
             if reason not in found:
                 found.append(reason)
     return tuple(found)
 
 
-def _foreign_in(
-    text: str, executable: bool, others: Collection[str], mode_ok: bool = False
-) -> list[str]:
+_DUMP_SQL_MODE = re.compile(
+    r"/\*!40101\s+SET\s+(?:@OLD_SQL_MODE\s*=\s*@@SQL_MODE\s*,\s*SQL_MODE\s*=\s*"
+    r"'NO_AUTO_VALUE_ON_ZERO'|SQL_MODE\s*=\s*IFNULL\(\s*@OLD_SQL_MODE\s*,\s*''\s*\))\s*\*/",
+    re.I,
+)
+"""mysqldump's header and footer SQL_MODE lines, exactly: the only sql_mode a bot file may set."""
+
+_CLIENT_COMMAND = re.compile(r"(?im)^[ \t]*(?:\\[a-z.!#?]|(?:connect|source|system)\b)")
+"""A mysql/mariadb CLIENT command at the start of a line (T548): `\\u db` and `connect`
+switch schema, `\\.`/`source` read another file, `\\!`/`system` run a shell. The client
+acts on them itself, so no SQL reading sees them; on a line of their own they are refused."""
+
+
+def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[str]:
     """`foreign_schemas()` over one reading of the file's SQL."""
     found = [
         name
@@ -1690,7 +1704,9 @@ def _foreign_in(
         found.append("USE")
     if executable:
         found.append("an executable comment")
-    if not mode_ok and re.search(r"(?i)\bsql_mode\b", text):
+    if _CLIENT_COMMAND.search(text):
+        found.append("a mysql client command")
+    if re.search(r"(?i)\bsql_mode\b", text):
         # ANSI_QUOTES or NO_BACKSLASH_ESCAPES would change what is a string from that
         # point on, which this reading cannot follow (Codex, T531): refused, not guessed.
         found.append("a change of sql_mode")

@@ -13,6 +13,7 @@ question says the reload replaces what the bots generated into those tables.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -497,3 +498,69 @@ def test_a_bot_table_that_landed_counts_even_when_its_ledger_row_cannot_be_writt
     assert any(
         "The 1 bot table file(s) loaded before the new build started" in line for line in said
     ), said
+
+
+# -- re-review of d2abf7a3 ---------------------------------------------------------------
+
+
+def test_the_bot_scan_refuses_a_sql_mode_switch_part_way_through(tmp_path: Path) -> None:
+    """Re-review of d2abf7a3: only mysqldump's own two SQL_MODE lines are accepted in a bot
+    file. A switch to NO_BACKSLASH_ESCAPES part-way changes what the scan must read as a
+    string from there on, and here it hides a write to characters."""
+    text = (
+        "SELECT 'a\\''; SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; SELECT '\\'; "
+        "UPDATE characters.x SET y=1; -- ';\n"
+    )
+    path = _lay(tmp_path, "x.sql", text)
+    found = sqlplan.foreign_schemas(path, {"characters"}, executable_comments_ok=True)
+    assert found != (), found
+
+
+def test_the_mysqldump_sql_mode_lines_are_the_only_ones_a_bot_file_may_carry(
+    tmp_path: Path,
+) -> None:
+    dump = (
+        "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n"
+        "DROP TABLE IF EXISTS `t`;\n"
+        "/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;\n"
+    )
+    path = _lay(tmp_path, "dump.sql", dump)
+    assert sqlplan.foreign_schemas(path, set(), executable_comments_ok=True) == ()
+    path.write_text(dump + "SET SESSION sql_mode='ANSI_QUOTES';\n", encoding="utf-8")
+    assert sqlplan.foreign_schemas(path, set(), executable_comments_ok=True) == (
+        "a change of sql_mode",
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "\\u realmd",
+        "\\. /tmp/other.sql",
+        "\\! rm -rf /",
+        "connect realmd",
+        "source /tmp/x.sql",
+        "system id",
+    ],
+    ids=["use", "source-short", "shell", "connect", "source", "system"],
+)
+@pytest.mark.parametrize("bots", [False, True], ids=["world-update", "bot-file"])
+def test_a_mysql_client_command_on_its_own_line_is_refused(
+    tmp_path: Path, line: str, bots: bool
+) -> None:
+    """T548: the client runs `\\u realmd`, `connect`, `source` and `system` itself, at the
+    start of a line -- they switch schema, read other files or run a shell."""
+    path = _lay(tmp_path, "x.sql", f"UPDATE t SET a=1;\n{line}\nUPDATE x SET b=1;\n")
+    found = sqlplan.foreign_schemas(path, {"realmd"}, executable_comments_ok=bots)
+    assert "a mysql client command" in found, found
+
+
+def test_every_vendored_insert_keeps_a_real_first_row() -> None:
+    """Re-review: the cut must end each INSERT on its first row, never inside a comment."""
+    for path in REAL_BOT_FILES:
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?is)INSERT INTO[^;]*?VALUES\s*(.*?);", text):
+            body = match.group(1).lstrip()
+            while body.startswith("--"):
+                body = body.split("\n", 1)[1].lstrip()
+            assert body.startswith("("), (path.name, match.group(0)[:120])

@@ -11,4 +11,5 @@ CREATE TABLE `ai_playerbot_enchants` (
 
 
 INSERT INTO `ai_playerbot_enchants` (`class`, `spec`, `spellid`, `slotid`, `name`) VALUES
--- Arms Warrior (Spec ID: 10);
+-- Arms Warrior (Spec ID: 10)
+(1, 10, 35452, 0, 'Head: Glyph of Ferocity');
