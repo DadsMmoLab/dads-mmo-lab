@@ -11,9 +11,12 @@ is the same. The fingerprint is a sha256 over one canonical stream:
   them out, which `*` does on every family that renders one;
 * the entries of the build context, filtered by the `.dockerignore`, depth first,
   with the names in each folder sorted by their UTF-8 bytes. A regular file gives
-  its path, size, content and mode; a folder its path and mode; a symlink its
-  path, mode and target string (it is never followed). An excluded folder that
-  holds a re-admitted entry is given too, because BuildKit sends it.
+  its path, size, content and mode; a folder its path and mode; a link its
+  path, mode and target string (it is never followed). A link is a symlink or,
+  on Windows, a junction or other name-surrogate reparse point (`yulon.links`,
+  T375): Python 3.11 reports a junction as a folder, and entering it gave no
+  answer at all. An excluded folder that holds a re-admitted entry is given too,
+  because BuildKit sends it.
 
 Which entries depends on the recipe (T230). BuildKit sends only the context paths
 the built stages COPY, ADD or bind-mount (`llb.FollowPaths`), not the whole
@@ -67,8 +70,8 @@ answer": the build is then not kept. It is never a guess. The cases are:
   `additional_contexts`; also a `build:` key in the base or override compose
   file, and a missing recipe;
 * in the tree: a name that is not UTF-8, a socket, FIFO or device that Docker
-  would send, a junction, any OSError, a file that changed while it was read,
-  and either cap (`MAX_BYTES`, `MAX_ENTRIES`).
+  would send, a link whose target cannot be read, any other OSError, a file
+  that changed while it was read, and either cap (`MAX_BYTES`, `MAX_ENTRIES`).
 
 Deliberately left out: Yu'lon's own `.yulon*` files at the context root. They
 are never compiled, and writing the record of a kept build would otherwise change
@@ -118,6 +121,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from yulon import links
 from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
 from yulon.catalog.git_head import resolve_head
 from yulon.log import get_logger
@@ -631,10 +635,27 @@ def _walk(stream: _Stream, context: Path, rules: Rules, known: _Known | None = N
         if known is not None and not _on_a_read(rel, known.reads):
             continue
         decision = rules.decide(rel, frame.decision)
-        is_junction = getattr(entry, "is_junction", None)
-        if is_junction is not None and is_junction():
-            raise _NoAnswer(f"{rel} is a junction")
         info = entry.stat(follow_symlinks=False)
+        if links.stat_is_link(info):
+            # A symlink, or a junction or other link on Windows, which Python
+            # reports as a folder (T375). Never entered: BuildKit's context walk
+            # (fsutil, Go's `filepath.WalkDir`) enters only what Go calls a folder,
+            # and Go has not called a name-surrogate reparse point one since 1.23
+            # (`os/types_windows.go`; before 1.23 a junction was a symlink to it).
+            if decision.excluded:
+                continue
+            try:
+                target = os.readlink(entry.path)
+            except ValueError as exc:
+                # CPython on Windows reads only symlinks and junctions; any other
+                # link (a WSL symlink) is "not a symbolic link", and so is it to Go.
+                raise _NoAnswer(f"{rel} is a link whose target cannot be read: {exc}") from exc
+            _send_folders(stream, stack)
+            stream.put(b"l")
+            stream.put(_utf8(rel))
+            stream.put(oct(stat.S_IMODE(info.st_mode)).encode("ascii"))
+            stream.put(_utf8(target))
+            continue
         if stat.S_ISDIR(info.st_mode):
             if decision.excluded and not rules.may_admit_under(parts):
                 continue
@@ -655,12 +676,7 @@ def _walk(stream: _Stream, context: Path, rules: Rules, known: _Known | None = N
         if decision.excluded:
             continue
         _send_folders(stream, stack)
-        if stat.S_ISLNK(info.st_mode):
-            stream.put(b"l")
-            stream.put(_utf8(rel))
-            stream.put(oct(stat.S_IMODE(info.st_mode)).encode("ascii"))
-            stream.put(_utf8(os.readlink(entry.path)))
-        elif stat.S_ISREG(info.st_mode):
+        if stat.S_ISREG(info.st_mode):
             stream.put(b"f")
             stream.put(_utf8(rel))
             mode, _ = stream.file(Path(entry.path))
