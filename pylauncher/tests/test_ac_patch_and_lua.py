@@ -365,7 +365,7 @@ def test_a_short_count_refuses_before_the_world_starts(
     assert not (server_dir / LAID).exists(), "the scripts were laid over a refused database"
 
 
-def test_a_missing_table_is_a_short_count_and_an_unanswered_one_is_said(
+def test_a_missing_table_is_a_short_count_and_an_unanswered_one_refuses(
     tmp_path: Path,
 ) -> None:
     from yulon.catalog.catalog import SqlCheck
@@ -381,8 +381,12 @@ def test_a_missing_table_is_a_short_count_and_an_unanswered_one_is_said(
     def down(schema: str, statement: str) -> str:
         raise docker.DockerCommandError("container is not running")
 
-    said = list(scriptdeploy.check_sql([check], {"world": "w"}, down, "Scratch"))
-    assert len(said) == 1 and said[0].startswith("Could not check w.unbound_catalog"), said
+    # Fail closed (Codex): "could not tell" is not "it is there".
+    with pytest.raises(InstallerError, match="could not be checked"):
+        list(scriptdeploy.check_sql([check], {"world": "w"}, down, "Scratch"))
+
+    with pytest.raises(InstallerError, match="not a count"):
+        list(scriptdeploy.check_sql([check], {"world": "w"}, lambda s, q: "Warning\n", "S"))
 
 
 def test_an_edited_lua_is_kept_and_said_on_the_next_press(tmp_path: Path, installers: Path) -> None:
@@ -525,8 +529,22 @@ def test_a_lua_dest_must_be_a_folder_of_its_own_under_the_script_dir(dest: str) 
         scratch_entry(lua_scripts=[{"src": LUA_SRC, "dest": dest}])
 
 
-@pytest.mark.parametrize("where", ["1; DROP TABLE x", "1 -- x", "1 /* x */", "`a` = 1"])
-def test_an_sql_check_is_one_expression(where: str) -> None:
+@pytest.mark.parametrize(
+    "where",
+    [
+        "1; DROP TABLE x",
+        "1 -- x",
+        "1 /* x */",
+        "`a` = 1",
+        "entry = 1 INTO OUTFILE '/tmp/x'",
+        "entry = 1 UNION SELECT 1",
+        "SLEEP(5) = 0",
+        "entry IN (SELECT 1)",
+        "entry = 1 OR 1 = 1",
+        "name = 'a' 'b'",
+    ],
+)
+def test_an_sql_check_is_comparisons_only(where: str) -> None:
     with pytest.raises(ValidationError):
         scratch_entry(sql_checks=[{"db": "world", "table": "t", "where": where, "reason": "r"}])
 
@@ -568,3 +586,85 @@ def test_a_refused_update_patches_the_put_back_checkout_again(
 
     assert rec.heads[server_dir] == OLD
     assert (server_dir / TARGET).read_text(encoding="utf-8") == PATCHED
+
+
+@pytest.mark.parametrize("where", ["entry = 900001", "ID >= 10000 AND ClassMask = 0", "n <> 'x y'"])
+def test_an_sql_check_takes_plain_comparisons(where: str) -> None:
+    scratch_entry(sql_checks=[{"db": "world", "table": "t", "where": where, "reason": "r"}])
+
+
+def test_a_file_that_was_there_first_and_matches_is_not_claimed(tmp_path: Path) -> None:
+    """Identical bytes are not ownership: a later shipped change must not replace it (Codex)."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("same\n", encoding="utf-8")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua"
+    laid.parent.mkdir(parents=True)
+    laid.write_text("same\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+
+    list(scriptdeploy.lay(server_dir, [spec]))
+    assert f"{LUA_SCRIPTS_DIR}/m/a.lua" not in scriptdeploy.read_record(server_dir)
+    (src / "a.lua").write_text("shipped v2\n", encoding="utf-8")
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert laid.read_text(encoding="utf-8") == "same\n"
+    assert any("was changed on this machine" in line for line in said), said
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["../outside.lua", f"{LUA_SCRIPTS_DIR}/../../../../../../outside.lua", "/abs/outside.lua"],
+)
+def test_a_record_key_outside_the_script_folder_is_never_deleted(tmp_path: Path, key: str) -> None:
+    """The record is an editable file; its keys are not trusted as deletion paths (Codex)."""
+    import hashlib
+
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua").mkdir(parents=True)
+    (server_dir / "modules/m/lua/a.lua").write_text("a\n", encoding="utf-8")
+    outside = tmp_path / "outside.lua"
+    outside.write_text("victim\n", encoding="utf-8")
+    digest = hashlib.sha256(b"victim\n").hexdigest()
+    record = scriptdeploy.record_path(server_dir)
+    record.parent.mkdir(parents=True)
+    target = str(outside) if key.startswith("/") else key
+    record.write_text(json.dumps({"version": 1, "files": {target: digest}}), encoding="utf-8")
+
+    list(
+        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")])
+    )
+
+    assert outside.read_text(encoding="utf-8") == "victim\n"
+
+
+def test_a_recorded_folder_that_became_a_link_is_not_deleted_through(tmp_path: Path) -> None:
+    """A stale script under a folder now linked elsewhere stays where the link points (Codex)."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("a\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    list(scriptdeploy.lay(server_dir, [spec]))
+    laid_dir = server_dir / LUA_SCRIPTS_DIR / "m"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.lua").write_text("a\n", encoding="utf-8")
+    shutil.rmtree(laid_dir)
+    laid_dir.symlink_to(elsewhere, target_is_directory=True)
+    (src / "a.lua").unlink()
+    (src / "b.lua").write_text("b\n", encoding="utf-8")
+
+    said = list(
+        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/n")])
+    )
+
+    assert (elsewhere / "a.lua").read_text(encoding="utf-8") == "a\n"
+    assert any("nothing was removed through it" in line for line in said), said

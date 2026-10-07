@@ -23,8 +23,8 @@ once per module install.
 
 The SQL checks (`AzerothCoreData.sql_checks`) are read-only counts asked after the
 import has applied the modules' SQL (`AC_UPDATES_ALLOWED_MODULES=all` with
-`./modules` mounted, `base.yml.tmpl`): a count that falls short refuses the press
-before the world starts, with the entry's own sentence for what is missing.
+`./modules` mounted, `base.yml.tmpl`): a count that falls short, or that cannot be
+read, refuses the press before the world starts.
 """
 
 from __future__ import annotations
@@ -85,7 +85,29 @@ def read_record(server_dir: Path) -> dict[str, str]:
     files = parsed.get("files") if isinstance(parsed, dict) else None
     if not isinstance(files, dict):
         return {}
-    return {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+    return {
+        k: v
+        for k, v in files.items()
+        if isinstance(k, str) and isinstance(v, str) and _inside_the_script_dir(k)
+    }
+
+
+def _inside_the_script_dir(rel: str) -> bool:
+    """Is a record key a plain relative path strictly below `LUA_SCRIPTS_DIR`?
+
+    The record is a file anyone can edit, so a key is a path this module may
+    delete only when it could have written it (Codex, both reviews): no absolute
+    path, no `..`, no backslash, and inside the script folder.
+    """
+    path = PurePosixPath(rel)
+    root = PurePosixPath(LUA_SCRIPTS_DIR).parts
+    return (
+        "\\" not in rel
+        and not path.is_absolute()
+        and ".." not in path.parts
+        and len(path.parts) > len(root)
+        and path.parts[: len(root)] == root
+    )
 
 
 def _write_record(server_dir: Path, files: dict[str, str]) -> None:
@@ -208,7 +230,10 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             except FileNotFoundError:
                 old = None
             if old == new:
-                kept_record[item.rel] = new
+                # Claimed only if it was already Yu'lon's: a file that was there
+                # first and happens to match stays the player's (Codex review).
+                if item.rel in record:
+                    kept_record[item.rel] = new
                 current += 1
                 continue
             if old is not None and record.get(item.rel) != old:
@@ -229,6 +254,13 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 continue
             path = server_dir.joinpath(*PurePosixPath(rel).parts)
             kept_record.pop(rel, None)
+            link = _through_a_link(server_dir, path)
+            if link is not None:
+                yield (
+                    f"{rel} is no longer shipped, but {link.relative_to(server_dir).as_posix()} "
+                    "is a link, so nothing was removed through it."
+                )
+                continue
             try:
                 same = not path.is_symlink() and _sha(path.read_bytes()) == digest
             except FileNotFoundError:
@@ -260,15 +292,17 @@ SqlAsk = Callable[[str, str], str]
 def check_sql(
     checks: Sequence[SqlCheck], schemas: dict[Db, str], ask: SqlAsk, server_name: str
 ) -> Iterator[str]:
-    """Ask every count; refuse the first that falls short, with the entry's own sentence.
+    """Ask every count; refuse the first that falls short or cannot be read.
 
-    A count that cannot be asked at all (the database would not answer) is said
-    and passed over: the world's own start is then the check, and refusing an
-    install over a question that could not be put would take a working server
-    away on a guess.
+    Fail closed (Codex, adversarial review): a count that could not be asked, or
+    an answer that is not a number, refuses as a short count does. The check is
+    there because the world must not start without that data, and "could not
+    tell" is not "it is there". The press can be run again once the database
+    answers; nothing was started.
 
     Raises:
-        InstallerError: a count fell short, or its table is not there.
+        InstallerError: a count fell short, its table is not there, or it could
+            not be read.
     """
     for check in checks:
         schema = schemas[check.db]
@@ -276,18 +310,21 @@ def check_sql(
             answer = ask(schema, check.statement(schema))
         except docker.DockerCommandError as exc:
             if NO_SUCH_TABLE not in str(exc):
-                yield (
-                    f"Could not check {schema}.{check.table} ({exc}); the server's own start "
-                    "will show whether it is there."
-                )
-                continue
+                raise InstallerError(
+                    f"{server_name}'s {check.db} database could not be checked for what it "
+                    f"needs ({schema}.{check.table}: {exc}). The server was not started; "
+                    "press the same button again once the database answers."
+                ) from exc
             answer = "0"
         first = answer.strip().splitlines()[0].strip() if answer.strip() else "0"
         try:
             found = int(first)
         except ValueError:
-            yield f"Could not read the count of {schema}.{check.table} ({first!r}); passing on."
-            continue
+            raise InstallerError(
+                f"{server_name}'s {check.db} database answered {first!r} when asked how many "
+                f"rows {schema}.{check.table} has, which is not a count. The server was not "
+                "started."
+            ) from None
         if found < check.at_least:
             raise InstallerError(
                 f"{server_name}'s {check.db} database is missing what it needs: {check.reason} "

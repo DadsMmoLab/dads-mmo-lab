@@ -242,8 +242,19 @@ class LuaScripts(_Strict):
         return value
 
 
-_SQL_CHECK_FORBIDDEN = (";", "--", "/*", "#", "`")
-"""What a `SqlCheck.where` may not contain: a second statement, a comment, a quoted name."""
+_SQL_COMPARISON = (
+    r"[A-Za-z_][A-Za-z0-9_]*\s*(?:=|<>|!=|>=|<=|>|<)\s*(?:-?[0-9]+|'[A-Za-z0-9 _.:-]*')"
+)
+_SQL_CHECK_WHERE = re.compile(
+    rf"^\s*{_SQL_COMPARISON}(?:\s+AND\s+{_SQL_COMPARISON})*\s*$", re.IGNORECASE
+)
+"""What a `SqlCheck.where` may be: `column op literal`, joined by AND, and nothing else.
+
+A grammar rather than a list of forbidden marks (Codex, adversarial review): any
+free text after `WHERE` can still turn the count into something that is not a read
+(`... INTO OUTFILE '...'`) or that runs for ever (`SLEEP(...)`), so the condition
+is a column name, a comparison, and an integer or a plain quoted word.
+"""
 
 
 class SqlCheck(_Strict):
@@ -257,7 +268,10 @@ class SqlCheck(_Strict):
 
     db: Db = Field(description="Which of the entry's databases, by role.")
     table: str = Field(min_length=1, description="One table name, letters, digits and `_`.")
-    where: str = Field(default="", description="An optional condition, one expression.")
+    where: str = Field(
+        default="",
+        description="An optional condition: `column op literal`, joined by AND (`entry = 900001`).",
+    )
     at_least: int = Field(default=1, ge=1)
     reason: str = Field(
         min_length=1,
@@ -273,11 +287,11 @@ class SqlCheck(_Strict):
 
     @field_validator("where")
     @classmethod
-    def _where_is_one_expression(cls, value: str) -> str:
-        bad = [mark for mark in _SQL_CHECK_FORBIDDEN if mark in value]
-        if bad:
+    def _where_is_comparisons_only(cls, value: str) -> str:
+        if value.strip() and not _SQL_CHECK_WHERE.match(value):
             raise ValueError(
-                f"sql check where must be one expression with no {bad[0]!r}, got {value!r}"
+                "sql check where must be `column op literal` comparisons joined by AND, with an "
+                f"integer or a plain quoted word as each literal; got {value!r}"
             )
         return value
 
