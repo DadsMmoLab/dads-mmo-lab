@@ -3514,9 +3514,7 @@ def test_services_that_name_one_buildx_group_build_on_the_first_members_config(
     assert alpha.parent == beta.parent == delta.parent
 
 
-@pytest.mark.parametrize(
-    "value", ["../elsewhere", "$GROUP", "a b", "", "'unclosed", ".", "..", "-x"]
-)
+@pytest.mark.parametrize("value", ["../elsewhere", "$GROUP", "a b", "", "[a, b]", ".", "..", "-x"])
 def test_a_buildx_group_that_is_not_a_plain_name_is_not_a_group(
     build_cli: Path, tmp_path: Path, value: str
 ) -> None:
