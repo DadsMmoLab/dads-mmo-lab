@@ -3070,3 +3070,55 @@ def test_a_stop_that_lands_while_the_child_is_being_started_is_not_lost(
         if child is not None and child.proc is not None and child.proc.poll() is None:
             child.proc.kill()
         worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
+def test_a_held_stop_ends_the_group_of_a_root_that_exited_while_it_was_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546, Codex review of 047c9d4c: a held Stop acted on before the readers existed.
+
+    The root exits having started a child that holds the pipe, all before the stream has
+    written down its readers; the held Stop's stopper then found no pipe held and left the
+    group, and the read waited on the child for its whole sleep.
+
+    Mutation this catches: `_started()` acting before `child.readers` is written.
+    """
+    real_spawn = runner._spawn
+
+    def spawn_exit_then_stop(start):  # type: ignore[no-untyped-def]
+        proc, job = real_spawn(start)
+        # The leader exits (a zombie: not reaped, as nothing has polled it yet); its
+        # child holds the pipe.
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        runner.end_streams_started_on(threading.get_ident())
+        return proc, job
+
+    monkeypatch.setattr(runner, "_spawn", spawn_exit_then_stop)
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t546-held-exited")
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    grandchild = None
+    try:
+        grandchild = int(fragments.get(timeout=HANG_BOUND))
+        assert not worker.is_alive(), "the held Stop left the group of a root that had exited"
+        assert _gone(grandchild), f"{grandchild} outlived the held Stop"
+    finally:
+        if grandchild is not None:
+            try:
+                os.kill(grandchild, signal.SIGKILL)
+            except OSError:
+                pass
+        worker.join(timeout=HANG_BOUND)

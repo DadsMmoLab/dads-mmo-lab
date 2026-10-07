@@ -819,7 +819,8 @@ def _pipe_held(child: _Child) -> bool:
     member that holds the pipe keeps the id this group's. (A descendant that left the
     session and kept the pipe would not; git's detached helpers close theirs.)
     """
-    return any(reader.is_alive() for reader in child.readers)
+    # A reader not started yet counts as holding: its pipe is open and unread.
+    return any(reader.is_alive() or reader.ident is None for reader in child.readers)
 
 
 def _stop_child(child: _Child, *, bounded: bool = False) -> None:
@@ -1279,7 +1280,6 @@ def _progress_lines(
             start_new_session=own_session,
         )
     )
-    _started(child, proc, job, group=_group_led_by(proc))
     fragments: queue.Queue[str | None] = queue.Queue()
 
     def read(pipe: object) -> None:
@@ -1308,6 +1308,9 @@ def _progress_lines(
         for pipe in (proc.stdout, proc.stderr)
     ]
     child.readers = tuple(readers)
+    # Written down only now, readers and all (Codex review): a Stop held while the
+    # child started is acted on here, and its stopper reads `_pipe_held()`.
+    _started(child, proc, job, group=_group_led_by(proc))
     try:
         for reader in readers:
             reader.start()
