@@ -337,3 +337,19 @@ def test_the_panel_and_an_open_settings_dialog_never_disagree(
         assert not panel.switches.sign_in.isChecked()
     finally:
         dialog.deleteLater()
+
+
+def test_start_is_a_power_symbol_not_the_server_glyph(tray: YulonTray, window: FakeWindow) -> None:
+    """Lead, 2026-10-07: the server glyph's two bars did not read as Start; Play has ▶."""
+    _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+    row = _row(_open(tray), "Vanilla")
+    assert row.action.accessibleName() == "Start"
+    assert row.action.toolTip() == "Start Vanilla"
+    assert row.action.icon().cacheKey() == tray_flyout.power_icon().cacheKey()
+    image = tray_flyout.power_icon().pixmap(32, 32).toImage()
+    amber = [
+        image.pixelColor(x, y).alpha() > 0
+        for x, y in ((16, 4), (4, 18), (28, 18), (16, 29))  # the line's top, the ring's sides
+    ]
+    assert all(amber), amber
+    assert image.pixelColor(16, 22).alpha() == 0, "the ring is open inside"

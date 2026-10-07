@@ -24,11 +24,12 @@ global pad button would fire in the middle of a game.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -253,7 +254,10 @@ class ServerCard(QFrame):
         self.action.setEnabled(enabled)
         self.action.setToolTip(why)
         self.action.setAccessibleName(which)
-        self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
+        if which == START:
+            self.action.setIcon(power_icon())
+        else:
+            self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
         self.dashboard.setVisible(entry is not None)
         self.dashboard_kind = ""
         if entry is not None:
@@ -264,8 +268,32 @@ class ServerCard(QFrame):
         return which
 
 
-_ICONS = {PLAY: "play", START: "server", OPEN: "wrench"}
-"""Each row action's icon: Play is the sidebar ▶'s, Start the server glyph, Open a wrench."""
+_ICONS = {PLAY: "play", OPEN: "wrench"}
+"""Play is the sidebar ▶'s icon and Open a wrench; Start is `power_icon()`."""
+
+
+@functools.cache
+def power_icon() -> QIcon:
+    """Start's icon: the power symbol, an open ring with a line through its top (lead,
+    T551: the server glyph's two bars did not read as Start, and ▶ is Play's)."""
+    icon = QIcon()
+    for size in (16, 24, 32, 48):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(COLOR_GOLD_BRIGHT), max(1.5, size * 0.11))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        inset = size * 0.14
+        ring = QRectF(inset, inset + size * 0.04, size - 2 * inset, size - 2 * inset)
+        # Qt angles are in 1/16 degree, counter-clockwise from 3 o'clock: leave
+        # a 60° gap at the top for the line.
+        painter.drawArc(ring, 120 * 16, 300 * 16)
+        painter.drawLine(QPointF(size / 2, size * 0.1), QPointF(size / 2, size * 0.48))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 class TrayFlyout(QWidget):
