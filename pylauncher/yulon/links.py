@@ -23,7 +23,11 @@ Where it is applied:
   in a ready-to-play client, which Yu'lon makes without any, a link anywhere on
   the way is refused before anything is copied; in the player's own client a
   linked folder is theirs to have chosen and is followed, but a linked file is
-  refused, because writing it would change the file it points to.
+  refused, because writing it would change the file it points to;
+* a module's own checkout (`apply.Applier._refuse_checkout_links()`, T530): what
+  Yu'lon reads or writes there is never reached through a link, inside the
+  checkout or out of it, so a repository cannot hand the server, the client or
+  the database a file from elsewhere on the player's disk; `walk()` is the walk.
 
 `play_client` takes its own link test from here.
 """
@@ -32,6 +36,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 
 # Defined here, not taken from `stat`: there they exist only on Windows builds, and
 # the test must be exercisable everywhere.
@@ -65,3 +70,39 @@ def is_link(path: str | os.PathLike[str]) -> bool:
     except (FileNotFoundError, NotADirectoryError):
         return False
     return stat_is_link(st)
+
+
+def walk(top: str | os.PathLike[str]) -> Iterator[tuple[str, list[str], list[str], list[str]]]:
+    """`os.walk(top)` top-down, that never enters a link and names the links it met.
+
+    Yields `(folder, dirs, files, linked)`: `linked` holds every name in `folder`
+    that is a link (`is_link()`), of any kind, and those names are in neither of
+    the other two lists. `dirs` may be pruned in place, as with `os.walk`.
+    `os.walk(followlinks=False)` is not this: on Python 3.11 under Windows a
+    junction is a folder to it and it walks in. A folder that cannot be listed is
+    passed over, as `os.walk` does by default; one entry that cannot be looked
+    at counts as a link, the cautious answer.
+    """
+    folder = os.fspath(top)
+    try:
+        with os.scandir(folder) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError:
+        return
+    dirs: list[str] = []
+    files: list[str] = []
+    linked: list[str] = []
+    for name in names:
+        path = os.path.join(folder, name)
+        try:
+            if is_link(path):
+                linked.append(name)
+            elif stat.S_ISDIR(_lstat(path).st_mode):
+                dirs.append(name)
+            else:
+                files.append(name)
+        except OSError:
+            linked.append(name)
+    yield folder, dirs, files, linked
+    for name in dirs:
+        yield from walk(os.path.join(folder, name))

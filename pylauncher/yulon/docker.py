@@ -25,6 +25,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -6885,10 +6886,13 @@ class ContainerRun:
         it with `docker start -a <name>`, so the name exists before anything can be
         stopped (`container_end`'s module docstring has why).
         """
-        writes = [folder_label(mount.host) for mount in self.mounts if not mount.read_only]
         labels = ["--label", f"{OWNER_LABEL}={owner_id()}"]
-        if writes:
-            labels += ["--label", f"{WRITES_LABEL}={','.join(writes)}"]
+        writes = [folder_id(mount.host) for mount in self.mounts if not mount.read_only]
+        named = [ident for ident in writes if ident is not None]
+        # T536: a folder with no id to name it by says nothing of where this writes,
+        # so every Yu'lon's guard counts the container -- the safe side.
+        if writes and len(named) == len(writes):
+            labels += ["--label", f"{WRITES_LABEL}={','.join(named)}"]
         return ["create", *labels, *self.to_argv(name=name)[1:]]
 
     def to_detached_argv(self, name: str) -> list[str]:
@@ -7153,6 +7157,11 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     Windows, on the same daemon -- is its own live run and is left out (cold review),
     unless its `WRITES_LABEL` names `folder` or names nothing: two Yu'lons may share a
     server folder, and that one may be writing into it (Codex review of that fix).
+    "Names `folder`" is by `folder_id()`, the folder's own id file, so a Windows and a
+    WSL Yu'lon, or a symlink alias, reaching one folder under two spellings name it
+    once (T536). An older Yu'lon's label (`yulon.writes`, a path hash) is not read:
+    a hash cannot tell an alias from another folder, so its container counts, and a
+    folder here with no id to compare leaves no other Yu'lon's container out.
 
     A Docker that does not answer adds none. The guard's question is "could a tool
     still be writing?", and a daemon that is down runs nothing; the press asks Docker
@@ -7177,7 +7186,7 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     # started, while Docker answered is this app's own and not one left behind.
     with _UNENDED_LOCK:
         known |= set(_UNENDED)
-    mine, here = owner_id(), folder_label(folder)
+    mine, here = owner_id(), folder_id(folder)
     left = []
     for row in proc.stdout.splitlines():
         name, owner, writes = ([*row.strip().split("\t"), "", ""])[:3]
@@ -7185,9 +7194,11 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
             continue
         # Another Yu'lon's live run is not ours to count, unless it says it writes
         # here or says nothing of where. One with no label was made before the label
-        # was, so it still counts: one user is no less guarded.
+        # was, so it still counts: one user is no less guarded. Only an id can say
+        # "elsewhere" (T536): none here, or none on the container, counts it.
         others = owner.strip() and owner.strip() != mine
-        if others and writes.strip() and here not in writes.strip().split(","):
+        named = {part for part in writes.strip().split(",") if part}
+        if others and here is not None and named and here not in named:
             continue
         left.append(name)
     left.sort()
@@ -7196,19 +7207,93 @@ def tool_containers_left_running(folder: Path) -> tuple[str, ...]:
     return tuple(left)
 
 
-WRITES_LABEL = "yulon.writes"
+WRITES_LABEL = "yulon.writes-ids"
 """The label `docker create` puts on an extraction tool container: the folders it writes,
-each as `folder_label()`, comma-separated (Codex review of the owner label)."""
+each as `folder_id()`, comma-separated (Codex review of the owner label; T536).
+
+A new key, not the `yulon.writes` of before T536, which named a folder by a hash of
+its path (Codex adversarial review of T536). An older Yu'lon reads only that key, so
+it finds nothing on a container made here and counts it, the safe side, rather than
+matching a path hash that an alias spells differently."""
 
 
-def folder_label(folder: Path) -> str:
-    """A folder as `WRITES_LABEL` names it: a hash of its normalised path on this host.
+FOLDER_ID_FILE = ".yulon-folder-id"
+"""In a folder an extraction tool writes (`data/`): a random id naming that folder (T536)."""
 
-    Hashed rather than spelled, so a label never carries a player's paths, and so two
-    spellings of one folder (case on Windows, a trailing separator) name it once.
+_FOLDER_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def folder_id(folder: Path) -> str | None:
+    """The id in `folder`'s `FOLDER_ID_FILE`, made on first use; None when there is none to be had.
+
+    T536: two Yu'lons on one daemon can reach one folder under two spellings -- a
+    Windows one by `C:\\...`, a WSL one by `/mnt/c/...`, or either through a symlink
+    -- and a path hash names it twice. A file in the folder is read the same way
+    under every spelling. Made whole in a temporary sibling and published with
+    `os.link()`, which refuses a name that is taken, so a reader sees no file or the
+    whole one and two Yu'lons making it at once end with the one that won.
+
+    None, and the caller takes the safe side, when it can be neither read nor made:
+    no folder, one that refuses the write, a filesystem with no hard links (vfat), or
+    a file that does not hold an id. Not remembered, so the next ask tries again.
+
+    A folder copied by hand carries its id: a guard on the copy then counts the
+    original's tool as writing into it, a refusal and never a mix. Device and inode
+    cannot tell a copy apart here, because Windows and WSL read different ones for
+    the same NTFS folder.
     """
-    path = os.path.normcase(os.path.abspath(folder))
-    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+    target = folder / FOLDER_ID_FILE
+    found = _read_folder_id(target)
+    if found is not None or os.path.lexists(target):
+        return found
+    try:
+        fd, name = tempfile.mkstemp(prefix=f"{FOLDER_ID_FILE}.", suffix=".yulon-new", dir=folder)
+    except OSError as exc:
+        logger.info(f"could not make an id for {folder}: {exc}")
+        return None
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(f"{uuid.uuid4().hex}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            # `mkstemp` makes it owner-only; another user's Yu'lon reads it. Refused, the
+            # id is still this user's to use (cold review).
+            os.chmod(tmp, 0o644)
+        except OSError as exc:
+            logger.info(f"could not make {tmp} readable to other users: {exc}")
+        os.link(tmp, target)
+    except FileExistsError:
+        pass  # another Yu'lon made it meanwhile: theirs is the id
+    except OSError as exc:
+        logger.info(f"could not make an id for {folder}: {exc}")
+        return None
+    finally:
+        _drop_temp(tmp)
+    return _read_folder_id(target)
+
+
+def _drop_temp(tmp: Path) -> None:
+    """Remove `folder_id()`'s temp file; a refusal is logged, never raised (cold review).
+
+    On Windows another process reading it (a sharing violation) refuses the removal,
+    and an exception here would leave `docker create` or the press with no answer at
+    all instead of the id, or None and the safe side.
+    """
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.info(f"could not remove the temporary file {tmp}: {exc}")
+
+
+def _read_folder_id(target: Path) -> str | None:
+    """`FOLDER_ID_FILE`'s id; None when it is not there, not readable, or not an id."""
+    try:
+        text = target.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if _FOLDER_ID.fullmatch(text) else None
 
 
 OWNER_LABEL = "yulon.owner"
