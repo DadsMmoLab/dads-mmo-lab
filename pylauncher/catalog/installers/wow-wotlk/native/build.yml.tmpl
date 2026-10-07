@@ -30,27 +30,27 @@
 # identical may share a group: a shared copy is synced to whatever the current
 # target reads. Compose ignores `x-` keys; `docker.build_staged()` reads it.
 services:
-  ac-worldserver:
+  {{CONTAINER_PREFIX}}worldserver:
     x-yulon-buildx-group: server-source
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile
       target: worldserver
 
-  ac-authserver:
+  {{CONTAINER_PREFIX}}authserver:
     x-yulon-buildx-group: server-source
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile
       target: authserver
 
-  ac-db-import:
+  {{CONTAINER_PREFIX}}db-import:
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile
       target: db-import
 
-  ac-client-data-init:
+  {{CONTAINER_PREFIX}}client-data-init:
     build:
       context: {{BUILD_CONTEXT}}
       dockerfile: apps/docker/Dockerfile

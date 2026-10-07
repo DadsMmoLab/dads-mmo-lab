@@ -621,6 +621,10 @@ def render(
             "ENVIRONMENT": _env_block(env),
             "BIND_LABEL": bind_label,
             "CHANNEL_SERVICE": _channel_service(entry, base, server_dir),
+            # T552: the world's service key is `{{CONTAINER_PREFIX}}worldserver`
+            # in the AzerothCore override, so a second AzerothCore server
+            # overrides its own world and not WotLK's.
+            **entry_tokens(entry),
         },
     )
     installed = server_dir / BASE_FILE

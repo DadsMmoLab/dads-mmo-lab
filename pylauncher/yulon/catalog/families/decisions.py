@@ -215,6 +215,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=("'trinitycore'", ".trinitycore"),
     ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._azerothcore_containers_are_the_templates_names",
+        "an AzerothCore entry's containers are the names its templates write (T552)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable(
+                "shared/cmangos names three services; the rendered file is checked instead"
+            ),
+            "trinitycore": not_applicable(
+                "shared/trinitycore names three services; the rendered file is checked instead"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
         "yulon.catalog.families.__init__",

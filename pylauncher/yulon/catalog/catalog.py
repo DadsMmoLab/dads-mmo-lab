@@ -1721,6 +1721,30 @@ class Install(_Strict):
         return platform_id in self.platforms
 
 
+AZEROTHCORE_CONTAINER_SUFFIXES: dict[str, str] = {
+    "db": "database",
+    "auth": "authserver",
+    "world": "worldserver",
+    "db_import": "db-import",
+    "client_data": "client-data-init",
+}
+"""`containers` field -> the suffix `wow-wotlk/native/*.yml.tmpl` writes after the prefix (T552)."""
+
+
+def _shared_prefix(names: tuple[str, ...]) -> str:
+    """What every name starts with, up to and including its last `-` (`ac-`, `ub-`), or ``.
+
+    Up to a separator and not character-wise: `ac-database`, `ac-authserver` and
+    `ac-worldserver` share `ac-`, and a character-wise prefix of `ab-x`/`ab-y`
+    would agree, but one of `db`/`dbauth` would answer `db` and render `dbdatabase`.
+    """
+    first = names[0]
+    cut = first.rfind("-") + 1
+    while cut and not all(name.startswith(first[:cut]) for name in names):
+        cut = first.rfind("-", 0, cut - 1) + 1
+    return first[:cut]
+
+
 class Containers(_Strict):
     """The three container names the controller manages, their services, and the import job."""
 
@@ -1736,8 +1760,9 @@ class Containers(_Strict):
             "`composegen._container_prefix()`, whatever the value, for any entry with an "
             "`install.native` block — and every shipped entry has one (bug-checklist §30): the "
             "generated compose file takes its service keys from the templates "
-            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, the "
-            "literal ac-database and friends in wow-wotlk/native/base.yml.tmpl), so the entry "
+            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, "
+            "{{CONTAINER_PREFIX}}database and friends in wow-wotlk/native/base.yml.tmpl), so the "
+            "entry "
             "has nothing to declare and the only correct state of this field is absent. The "
             "entry still loads; `composegen.render()` refuses it, so `write_plan()` never gets "
             "a plan to write. "
@@ -2999,6 +3024,50 @@ class CatalogEntry(_Strict):
                     )
         return self
 
+    @model_validator(mode="after")
+    def _azerothcore_containers_are_the_templates_names(self) -> CatalogEntry:
+        """An AzerothCore entry's five names are its prefix and the template's suffixes (T552).
+
+        `wow-wotlk/native/*.yml.tmpl` spells every service and container as
+        `{{CONTAINER_PREFIX}}<suffix>`, the prefix being what the three server
+        names share. The engine then selects services by the names this block
+        gives — `db_import` for the import, `client_data` for the data fetch,
+        the three servers for every start — and a name the rendered file does
+        not define is `no such service` after a build that took hours. So the
+        names are checked here against what the template writes, and the SOAP
+        port the base file publishes (`install.native.soap_port`) against the
+        one the command channel dials (`operations.port`): two fields saying
+        one thing, and a second server needs both moved.
+        """
+        native = self.install.native
+        if native is None or native.family != "azerothcore":
+            return self
+        c = self.containers
+        prefix = _shared_prefix((c.db, c.auth, c.world))
+        given = {
+            "db": c.db,
+            "auth": c.auth,
+            "world": c.world,
+            "db_import": c.db_import,
+            "client_data": c.client_data,
+        }
+        for field, suffix in AZEROTHCORE_CONTAINER_SUFFIXES.items():
+            want = prefix + suffix
+            if given[field] != want:
+                raise ValueError(
+                    f"{self.id}: containers.{field} is {given[field]!r}, but the AzerothCore "
+                    f"templates name that service {want!r} (the prefix {prefix!r} the three "
+                    f"server containers share, then {suffix!r}); name it {want!r}"
+                )
+        ops = self.operations
+        if ops is not None and ops.channel == "soap" and ops.port != native.soap_port:
+            raise ValueError(
+                f"{self.id}: operations.port {ops.port} is not install.native.soap_port "
+                f"{native.soap_port}; the base file publishes the second and the command "
+                "channel dials the first, so they must be one number"
+            )
+        return self
+
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""
         return self.databases.schema_map()
@@ -3051,6 +3120,30 @@ class Catalog(_Strict):
 
     schema_version: Literal[1] = 1
     games: tuple[CatalogEntry, ...] = ()
+
+    @model_validator(mode="after")
+    def _every_container_name_is_handed_out_once(self) -> Catalog:
+        """No two entries name one container (T552).
+
+        A container name is global to a Docker daemon, unlike the compose
+        project's networks and volumes, so two entries naming `ac-database` are
+        two servers that cannot both be installed on one machine: the second
+        `compose up` answers "container name is already in use", even with the
+        first one stopped.
+        """
+        owner: dict[str, str] = {}
+        for entry in self.games:
+            c = entry.containers
+            for name in dict.fromkeys((c.db, c.auth, c.world, c.db_import, c.client_data)):
+                if name is None:
+                    continue
+                if name in owner:
+                    raise ValueError(
+                        f"{entry.id} names the container {name!r}, which {owner[name]} already "
+                        "names; container names are global to Docker, so each entry needs its own"
+                    )
+                owner[name] = entry.id
+        return self
 
     def get(self, game_id: str) -> CatalogEntry:
         """Look an entry up by id; `KeyError` if unknown."""
