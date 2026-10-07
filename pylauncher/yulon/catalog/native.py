@@ -5749,6 +5749,8 @@ class Seams:
     # `sqlplan.ExecStdin`/`SqlQuery` declare the keyword for the opposite
     # reason. Nobody has reconciled the two — undecided.
     run_container: Callable[..., docker.AttachedRun] = docker.run_container
+    folder_claim: Callable[[Path, str], AbstractContextManager[bool]] = docker.folder_claim
+    """T543: a Re-extract's claim on its `data/`, made by the daemon that runs the tools."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -5956,6 +5958,7 @@ class Seams:
             # end-to-end argv test). No SELinux, so no filesystem to ask about.
             fs_type=lambda _path: None,
             run_container=refused("Running an install container"),
+            folder_claim=refused("Claiming a server folder for an extraction"),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),

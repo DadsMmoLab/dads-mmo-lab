@@ -4501,6 +4501,20 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "T303: asks about containers `run_container()` started, which run on the local "
         "daemon for its own reason (above)"
     ),
+    **{
+        name: (
+            "T543: the Re-extract's folder claim, made on the daemon that runs the extraction "
+            "tools, which is the local one for `run_container`'s reason (above)"
+        )
+        for name in (
+            "folder_claim",
+            "_take_claim",
+            "_claim_in_use",
+            "_claim_facts",
+            "_release_claim",
+            "_remove_claim",
+        )
+    },
     "tool_containers_left_running": (
         "T303 (Codex review): asks for the tool containers `run_container()` starts, which run "
         "on the local daemon for its own reason (above)"

@@ -54,6 +54,7 @@ import re
 import threading
 import time
 from collections.abc import Generator, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
@@ -2059,6 +2060,30 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"“{REEXTRACT_BUTTON}” again. Nothing was changed."
             )
         self._refuse_a_running_world_for_maps()
+        image = self._image_ref(probe, self._tc().extract.image)
+        with ExitStack() as claim:
+            # T543: before anything is asked or moved, so of two presses on one folder
+            # -- two Yu'lons on one daemon -- only one gets past here.
+            try:
+                claim.enter_context(self._seams.folder_claim(data_dir, image))
+            except docker.FolderClaimed as claimed:
+                raise InstallerError(self._claimed_note(data_dir, claimed)) from claimed
+            yield from self._reextract_claimed(server_dir, probe, data_dir, client)
+
+    def _claimed_note(self, data_dir: Path, claimed: docker.FolderClaimed) -> str:
+        """What a press refused by another press's claim on `data_dir` says (T543)."""
+        again = f"press \u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+        if claimed.ours:
+            return (
+                f"{self.entry.name}'s map data is already being extracted again into "
+                f"{data_dir} by this Yu'lon. Wait for it to finish, then {again}"
+            )
+        return f"{another_yulon_extracting(data_dir)} Wait for it to finish, then {again}"
+
+    def _reextract_claimed(
+        self, server_dir: Path, probe: StageContext, data_dir: Path, client: Path
+    ) -> Iterator[str]:
+        """`reextract()` from its first question on, with the folder claimed (T543)."""
         self._refuse_a_tool_still_writing(data_dir)
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
         background = mmaps.background_block(self.entry) is not None
