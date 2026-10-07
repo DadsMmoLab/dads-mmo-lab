@@ -1607,7 +1607,11 @@ def _code_only(text: str) -> tuple[str, bool]:
     executable = False
     for match in _SQL_TOKENS.finditer(text):
         token = match.group(0)
-        if token[0] in "'\"":
+        if token[0] == '"' and re.fullmatch(r'"\w+"', token):
+            # Under ANSI_QUOTES -- set in the file, globally, or by a client -- this is
+            # an identifier, `"characters"."foo"`; read as one either way (Codex, T531).
+            parts.append(f" {token[1:-1]}")
+        elif token[0] in "'\"":
             parts.append(" '' ")
         elif token.startswith(("/*!", "/*M!")):
             executable = True

@@ -810,8 +810,9 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         ("/*M!100100 UPDATE characters.foo SET a=1 */;\n", ("characters", "an executable comment")),
         (
             'SET sql_mode=\'ANSI_QUOTES\';\nUPDATE "characters"."foo" SET a=1;\n',
-            ("a change of sql_mode",),
+            ("characters", "a change of sql_mode"),
         ),
+        ('UPDATE "characters"."foo" SET a=1;\n', ("characters",)),
     ],
     ids=[
         "apostrophe-in-dash-comment",
@@ -824,6 +825,7 @@ def test_quest_text_and_other_strings_never_trip_the_schema_scan(tmp_path: Path,
         "spaced-backticked-dot",
         "mariadb-executable-comment",
         "ansi-quotes",
+        "ansi-quotes-set-elsewhere",
     ],
 )
 def test_comments_are_separators_and_never_hide_a_statement(
