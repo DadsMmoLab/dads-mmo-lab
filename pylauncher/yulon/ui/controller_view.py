@@ -3007,7 +3007,19 @@ def _for_wotlk(
     client_dir: Path | None,
     wsl_distro: str | None,
 ) -> ControllerServices:
-    """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
+    """AzerothCore: the base `Controller`, the only import gate, the only manifest store.
+
+    Every seam is bound to `entry`'s own containers, never to WotLK's
+    `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
+    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
+    entry that names another tree is refused rather than handed WotLK's.
+    """
+    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
+            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
+            "Nothing was opened."
+        )
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
     settings_mods = _settings_mods(wotlk_modules.store())
@@ -3139,6 +3151,7 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            db_container=spec.db,
         )
         if entry.has_manifests
         else None
@@ -3260,7 +3273,7 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
                 )
             )
             if spec.import_service

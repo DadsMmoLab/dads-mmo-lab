@@ -16400,7 +16400,7 @@ def _real_module_sql(
     services = _services(ps, tmp_path, [])
     held = ledger if ledger is not None else _UpdatesLedger()
     services.module_sql = lambda output: modules.apply_module_sql(
-        tmp_path, output=output, ledger=held
+        tmp_path, spec=WOTLK.container_spec(), output=output, ledger=held
     )
     return ControllerView(WOTLK, services, status_poll_ms=0)
 

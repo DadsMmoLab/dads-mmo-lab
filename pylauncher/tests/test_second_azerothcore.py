@@ -288,7 +288,129 @@ def test_every_realmlist_writer_call_passes_its_entrys_auth_port() -> None:
                 continue
             found += 1
             port = next((k.value for k in node.keywords if k.arg == "auth_port"), None)
-            assert port is not None and ast.unparse(port).endswith("entry.ports.auth"), (
-                f"{path.name}:{node.lineno}"
-            )
+            assert port is not None and ast.unparse(port).endswith(
+                "entry.ports.auth"
+            ), f"{path.name}:{node.lineno}"
     assert found == 3
+
+
+# -- P1b: the AzerothCore tab works on the server it was opened for -----------
+
+
+def test_the_wotlk_package_spec_is_the_catalog_entrys() -> None:
+    from yulon.controller_wow_wotlk import docker_ctl
+
+    assert docker_ctl.SPEC == load_catalog().get("wow-wotlk").container_spec()
+
+
+def test_module_sql_runs_the_importer_of_the_server_it_was_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon import docker
+    from yulon.controller_wow_wotlk import modules
+
+    seen: list[docker.ContainerSpec] = []
+
+    def fake(spec: docker.ContainerSpec, server_dir: Path, **_kw: object) -> docker.AttachedRun:
+        seen.append(spec)
+        return docker.AttachedRun(0, ("done",))
+
+    monkeypatch.setattr(docker, "apply_module_sql", fake)
+    modules.apply_module_sql(tmp_path, spec=second_ac_entry().container_spec(), ledger=None)
+    assert [s.import_service for s in seen] == [SECOND_CONTAINERS["db_import"]]
+    assert seen[0].db == SECOND_CONTAINERS["db"]
+
+
+def test_the_tab_for_a_second_server_binds_every_seam_to_its_own_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Built through the real AzerothCore factory, then pressed where Docker is reached."""
+    from yulon import docker
+    from yulon.ui import controller_view
+
+    seen: list[docker.ContainerSpec] = []
+
+    def fake(spec: docker.ContainerSpec, server_dir: Path, **_kw: object) -> docker.AttachedRun:
+        seen.append(spec)
+        return docker.AttachedRun(0, ("done",))
+
+    monkeypatch.setattr(docker, "apply_module_sql", fake)
+    entry = second_ac_entry(manifests_from="wow-wotlk")
+    services = controller_view._for_wotlk(entry, tmp_path, None, None)
+    assert services.controller.spec == entry.container_spec()
+    assert services.module_sql is not None
+    services.module_sql(lambda _line: None)
+    assert [s.import_service for s in seen] == [SECOND_CONTAINERS["db_import"]]
+
+
+def test_an_entry_with_its_own_manifest_tree_is_not_given_wotlks() -> None:
+    """The package's module seams read `manifests/wow-wotlk/`; another tree is refused."""
+    from yulon.ui import controller_view
+
+    with pytest.raises(controller_view.UnsupportedGameError, match="manifests"):
+        controller_view._for_wotlk(second_ac_entry(), Path("/nonexistent"), None, None)
+
+
+def test_manifests_from_names_the_tree_an_entry_reads() -> None:
+    assert load_catalog().get("wow-wotlk").manifest_game() == "wow-wotlk"
+    assert second_ac_entry().manifest_game() == "wow-second-ac"
+    assert second_ac_entry(manifests_from="wow-wotlk").manifest_game() == "wow-wotlk"
+
+
+def test_no_wotlk_bound_default_is_left_to_the_azerothcore_factory() -> None:
+    """Every call `_for_wotlk` makes into the WotLK package passes what its default would bind.
+
+    A parameter whose default is WotLK's container, spec or manifest tree is
+    right for WotLK and wrong for every other server built by the same factory,
+    silently: `apply_module_sql()` ran `ac-db-import` for any server until T552.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from yulon.controller_wow_wotlk import accounts, console, docker_ctl, maintenance, modules
+    from yulon.ui import controller_view
+
+    bound = {
+        id(docker_ctl.SPEC),
+        id(docker_ctl.SPEC.db),
+        id(docker_ctl.SPEC.world),
+        id(docker_ctl.SPEC.auth),
+    }
+    packages = {
+        "wotlk_modules": modules,
+        "wotlk_console": console,
+        "wotlk_maintenance": maintenance,
+        "wotlk_accounts": accounts,
+    }
+    tree = ast.parse(textwrap.dedent(inspect.getsource(controller_view._for_wotlk)))
+    checked = 0
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Name) and owner.id in packages):
+            continue
+        target = getattr(packages[owner.id], node.func.attr)
+        if not callable(target) or inspect.isclass(target):
+            continue
+        checked += 1
+        body = ast.parse(textwrap.dedent(inspect.getsource(target))).body[0]
+        assert isinstance(body, ast.FunctionDef)
+        for inner in body.body:
+            for ref in ast.walk(inner):
+                if isinstance(ref, ast.Attribute) and ast.unparse(ref).startswith(
+                    "docker_ctl.SPEC"
+                ):
+                    problems.append(f"{owner.id}.{node.func.attr} reads {ast.unparse(ref)}")
+        passed = {k.arg for k in node.keywords}
+        params = list(inspect.signature(target).parameters.values())
+        for i, param in enumerate(params):
+            if param.default is inspect.Parameter.empty or i < len(node.args):
+                continue
+            wotlk_bound = id(param.default) in bound or param.default == modules.GAME
+            if wotlk_bound and param.name not in passed:
+                problems.append(f"{owner.id}.{node.func.attr}({param.name}=)")
+    assert checked >= 10
+    assert not problems, problems

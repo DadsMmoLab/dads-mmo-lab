@@ -136,7 +136,7 @@ def _importer(monkeypatch: pytest.MonkeyPatch, said: list[str], exit_code: int) 
 def _view(ps: _Ps, tmp_path: Path, ledger: _Ledger) -> ControllerView:
     services = _services(ps, tmp_path, [])
     services.module_sql = lambda output: modules.apply_module_sql(
-        tmp_path, output=output, ledger=ledger
+        tmp_path, spec=WOTLK.container_spec(), output=output, ledger=ledger
     )
     return ControllerView(WOTLK, services, status_poll_ms=0)
 

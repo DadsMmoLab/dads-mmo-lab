@@ -385,7 +385,9 @@ def test_every_realmlist_of_a_ready_to_play_client_is_written(tmp_path: Path) ->
     """Finding 5: a client reads its locale's file; one left alone names another server."""
     files = _two_locales(tmp_path / "play")
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
+    written = networking.write_ready_to_play_realmlists(
+        tmp_path / "play", "127.0.0.1", auth_port=3724
+    )
 
     assert sorted(written) == sorted(files)
     for f in files:
@@ -403,7 +405,9 @@ def test_the_first_found_writer_is_unchanged_for_its_other_callers(tmp_path: Pat
 def test_a_ready_to_play_client_with_no_realmlist_gets_one(tmp_path: Path) -> None:
     (tmp_path / "play").mkdir()
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
+    written = networking.write_ready_to_play_realmlists(
+        tmp_path / "play", "127.0.0.1", auth_port=3724
+    )
 
     assert written == (tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf",)
     assert written[0].read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
@@ -487,7 +491,9 @@ def test_a_fresh_realmlist_goes_into_the_lowercase_data_folder_already_there(
         (folder / "data" / "common.MPQ").write_bytes(b"MPQ")
 
     out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
-    (written,) = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
+    (written,) = networking.write_ready_to_play_realmlists(
+        tmp_path / "play", "127.0.0.1", auth_port=3724
+    )
 
     assert out == tmp_path / "client" / "data" / "enus" / "realmlist.wtf"
     assert written == tmp_path / "play" / "data" / "enus" / "realmlist.wtf"
@@ -510,7 +516,9 @@ def test_every_realmlist_under_a_lowercase_data_folder_of_a_ready_to_play_client
     gb.write_text("set realmlist logon.example.com\n", encoding="utf-8")
     os.chmod(us, 0o444)
 
-    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1", auth_port=3724)
+    written = networking.write_ready_to_play_realmlists(
+        tmp_path / "play", "127.0.0.1", auth_port=3724
+    )
 
     assert sorted(written) == sorted([us, gb])
     for f in (us, gb):

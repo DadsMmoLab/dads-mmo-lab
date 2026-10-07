@@ -2908,6 +2908,13 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+    manifests_from: Slug | None = Field(
+        default=None,
+        description=(
+            "The entry whose manifests/<id>/ tree this one reads, when it shares another's "
+            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id."
+        ),
+    )
     help_places: tuple[HelpPlace, ...] = Field(
         default=(),
         description=(
@@ -3067,6 +3074,10 @@ class CatalogEntry(_Strict):
                 "channel dials the first, so they must be one number"
             )
         return self
+
+    def manifest_game(self) -> str:
+        """The `manifests/<game>/` tree this entry's modules come from (T552)."""
+        return self.manifests_from or self.id
 
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""

@@ -261,11 +261,13 @@ def applier(
     client_dir: Path | None = None,
     dbc: DbcCopier | None = None,
     db_root_password: str = DEFAULT_DB_ROOT_PASSWORD,
+    db_container: str = docker_ctl.SPEC.db,
 ) -> Applier:
-    """An `Applier` for the WotLK install at `server_dir`.
+    """An `Applier` for the AzerothCore install at `server_dir`.
 
-    Defaults to running direct SQL through the WotLK DB container
-    (`docker_ctl.SPEC.db`); pass `sql=None` explicitly via a caller that has no
+    Defaults to running direct SQL through `db_container`, WotLK's database
+    unless the caller names its own server's (T552: the AzerothCore factory
+    always does); pass `sql=None` explicitly via a caller that has no
     database to get every SQL step reported as skipped instead.
 
     `world_running` is REQUIRED, and that is the whole of T7 on this function.
@@ -287,7 +289,7 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        runner = DockerSql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
+        runner = DockerSql(db_container, db_root_password, client=docker_ctl.DB_CLIENT)
     return Applier(
         server_dir,
         git=git,
@@ -378,6 +380,7 @@ def apply_module(
 def apply_module_sql(
     server_dir: Path,
     *,
+    spec: docker.ContainerSpec,
     output: Callable[[str], None] | None = None,
     wsl_distro: str | None = None,
     ledger: LedgerReader | None,
@@ -395,9 +398,12 @@ def apply_module_sql(
     the list compiled into the image and not the folder on disk
     (`docker.allowed_modules()` has the numbers).
 
-    Per-game and nothing else: which compose service imports is
-    `docker_ctl.SPEC.import_service`, asked rather than respelled here
-    (style-guide §3). Every refusal — ownership, strangers, and 8.7a's "not
+    Per-server and nothing else: which compose service imports is
+    `spec.import_service`, the server's own (`entry.container_spec()`), asked
+    rather than respelled here (style-guide §3). Required since T552: it
+    defaulted to WotLK's `docker_ctl.SPEC`, so a second AzerothCore server's
+    Modules tab would have run WotLK's importer against WotLK's databases.
+    Every refusal — ownership, strangers, and 8.7a's "not
     while the world is running" — belongs to `docker.apply_module_sql()`, so
     this route and the repair cannot come to disagree about whose install it is
     or when it is safe to write.
@@ -445,7 +451,7 @@ def apply_module_sql(
     """
     say: Callable[[str], None] = output if output is not None else logger.info
     plan = module_sql_plan(server_dir, _module_manifests(), docker.module_dir_names(server_dir))
-    service = docker_ctl.SPEC.import_service or "the importer"
+    service = spec.import_service or "the importer"
     say(f"Modules {service} is allowed to update: {plan.allowed or 'none'}")
     seen: list[str] = []
 
@@ -455,7 +461,7 @@ def apply_module_sql(
 
     try:
         run = docker.apply_module_sql(
-            docker_ctl.SPEC,
+            spec,
             server_dir,
             output=collect,
             modules=plan.allowed,
