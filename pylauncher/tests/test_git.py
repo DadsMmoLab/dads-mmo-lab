@@ -3843,6 +3843,10 @@ def test_a_timed_out_clone_create_whose_late_container_will_not_go_is_said_not_c
     assert fake_containers(state) == late, "the ground: the daemon kept it"
     assert said and said[-1].startswith(f"The clone's container {late[0]} could not be removed")
     assert f"docker rm -f {late[0]}" in said[-1], said[-1]
+    assert ("after Stop" in said[-1]) is stopped, said[-1]
+    if not stopped:
+        # Cold review: a create that timed out is a daemon that hangs; `rm -f` hung too.
+        assert "restart Docker" in str(failed.value), failed.value
     assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
 
 
@@ -3899,6 +3903,7 @@ def test_a_clone_docker_would_not_start_or_remove_is_said_and_not_cloned_again(
     (name,) = fake_containers(state)
     assert host == []
     assert said[-1].startswith(f"The clone's container {name} could not be removed"), said
+    assert "after Stop" not in said[-1], "nobody pressed Stop (cold review)"
 
 
 def test_a_clone_whose_container_was_left_is_not_retried_for_the_mount_race(

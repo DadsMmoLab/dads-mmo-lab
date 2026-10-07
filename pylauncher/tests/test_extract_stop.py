@@ -663,4 +663,77 @@ def test_a_tool_docker_would_not_start_and_would_not_remove_is_still_known_to_wr
     name = _created(state)
     assert run.container_left == name, run
     assert said[-1].startswith(f"The extraction tool's container {name} could not be removed")
+    assert "after Stop" not in said[-1], "nobody pressed Stop (cold review)"
     assert docker.tool_containers_writing_into(out) == (name,)
+
+
+def test_a_tool_container_another_yulon_made_on_the_same_daemon_is_not_counted(
+    fake_docker: tuple[Path, Path], tmp_path: Path, real_left_tool_read: None
+) -> None:
+    """Cold review: a second Linux user, or a Windows and a WSL Yu'lon, share one daemon. A
+    running tool labelled by another Yu'lon is that one's live run, not one left by ours; an
+    unlabelled one (made before the label) still counts, so one user is no less guarded."""
+    _cli, state = fake_docker
+    boxes, labels = state / "containers", state / "labels"
+    labels.mkdir(exist_ok=True)
+    for name, owner in (
+        ("yulon-extract-aaaaaaaaaaaa", "someone-else"),
+        ("yulon-extract-bbbbbbbbbbbb", docker.owner_id()),
+        ("yulon-extract-cccccccccccc", None),
+    ):
+        (boxes / name).write_text("4242", encoding="utf-8")
+        if owner is not None:
+            (labels / name).write_text(f"{docker.OWNER_LABEL}={owner}", encoding="utf-8")
+
+    assert docker.tool_containers_writing_into(tmp_path) == (
+        "yulon-extract-bbbbbbbbbbbb",
+        "yulon-extract-cccccccccccc",
+    )
+
+
+def test_a_tool_container_is_created_with_this_yulons_owner_label(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    _cli, state = fake_docker
+
+    def interrupted(_line: str) -> None:
+        raise KeyboardInterrupt  # the create is what is read; the fake tool need not run on
+
+    with pytest.raises(KeyboardInterrupt):
+        docker.run_container(SPEC, sink=interrupted, cancel=None)
+
+    (create,) = [call for call in fake_calls(state) if call.startswith("create ")]
+    assert f"--label {docker.OWNER_LABEL}={docker.owner_id()}" in create, create
+
+
+def test_another_yulon_on_this_machine_has_another_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Per config folder: a second user, or a WSL Yu'lon beside a Windows one, has its own."""
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "one")
+    one = docker.owner_id()
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "two")
+    assert docker.owner_id() != one
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "one")
+    assert docker.owner_id() == one
+
+
+@pytest.mark.parametrize("change", ["ended", "started"])
+def test_a_run_of_this_app_changing_while_docker_is_asked_is_not_called_left(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_left_tool_read: None, change: str
+) -> None:
+    """Cold review: what this process knows is read before AND after the `ps`. A run that
+    ended (or started) while Docker answered is this app's own, not one left behind."""
+    name = "yulon-extract-dddddddddddd"
+    monkeypatch.setattr(docker, "_UNENDED", {name: (tmp_path,)} if change == "ended" else {})
+
+    def ps(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        if change == "ended":
+            docker._UNENDED.pop(name, None)
+        else:
+            docker._UNENDED[name] = (tmp_path / "other",)
+        return subprocess.CompletedProcess(argv, 0, f"{name}\t{docker.owner_id()}\n", "")
+
+    monkeypatch.setattr(docker, "_docker", ps)
+
+    assert docker.tool_containers_left_running() == ()

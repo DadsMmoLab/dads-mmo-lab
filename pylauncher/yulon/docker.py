@@ -6606,7 +6606,12 @@ class ContainerRun:
         it with `docker start -a <name>`, so the name exists before anything can be
         stopped (`container_end`'s module docstring has why).
         """
-        return ["create", *self.to_argv(name=name)[1:]]
+        return [
+            "create",
+            "--label",
+            f"{OWNER_LABEL}={owner_id()}",
+            *self.to_argv(name=name)[1:],
+        ]
 
     def to_detached_argv(self, name: str) -> list[str]:
         """`to_argv()` for a job that outlives this process: `-d --name <name>`, and NO `--rm`.
@@ -6791,7 +6796,7 @@ def run_container(
             _ended(name)
             return run
         try:
-            sink(tool_container_left_line(name, refused))
+            sink(tool_container_left_line(name, refused, stopped=False))
         except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
             logger.warning(f"the output sink stopped accepting lines: {exc}")
         return AttachedRun(run.returncode, run.tail, container_left=name)
@@ -6860,33 +6865,67 @@ def tool_containers_left_running() -> tuple[str, ...]:
     goes with it. A container whose removal Docker refused, followed by the player
     closing Yu'lon, would be forgotten, and the next press would put old map data
     back under a tool still writing into `data/` -- the very thing the guard is for.
-    So Docker is asked for every running `yulon-extract-*`; one this process does not
-    know was started by an earlier one. Its mounts are not read: a bind's source is
-    spelled the daemon's way (a Docker Desktop VM path on Windows), and only one Yu'lon
-    runs at a time, so a tool nobody here started is counted as writing into any
-    server's `data/`, the safe side.
+    So Docker is asked for every running `yulon-extract-*` labelled as this Yu'lon's
+    (`OWNER_LABEL`, `owner_id()`) or not labelled at all (made before the label was);
+    one this process does not know was started by an earlier one. Its mounts are not
+    read: a bind's source is spelled the daemon's way (a Docker Desktop VM path on
+    Windows), so a tool nobody here started is counted as writing into any server's
+    `data/`, the safe side. Another Yu'lon's -- a second user, or a WSL one beside
+    Windows, on the same daemon -- is its own live run and is left out (cold review).
 
     A Docker that does not answer adds none. The guard's question is "could a tool
     still be writing?", and a daemon that is down runs nothing; the press asks Docker
     for the tool's own container next and says so if it cannot.
     """
+    with _UNENDED_LOCK:
+        known = set(_UNENDED)
     proc = _docker(
-        ["ps", "--filter", f"name={TOOL_CONTAINER_PREFIX}", "--format", "{{.Names}}"],
+        [
+            "ps",
+            "--filter",
+            f"name={TOOL_CONTAINER_PREFIX}",
+            "--format",
+            f'{{{{.Names}}}}\t{{{{.Label "{OWNER_LABEL}"}}}}',
+        ],
         timeout=_ASK_AGAIN_TIMEOUT,
     )
     if proc.returncode != 0:
         logger.info(f"could not list the running extraction tool containers: {proc.stderr.strip()}")
         return ()
+    # Before AND after the question (cold review): a run of this app that ended, or
+    # started, while Docker answered is this app's own and not one left behind.
     with _UNENDED_LOCK:
-        known = set(_UNENDED)
-    left = sorted(
-        name
-        for name in proc.stdout.split()
-        if name.startswith(TOOL_CONTAINER_PREFIX) and name not in known
-    )
+        known |= set(_UNENDED)
+    mine = owner_id()
+    left = []
+    for row in proc.stdout.splitlines():
+        name, _tab, owner = row.strip().partition("\t")
+        if not name.startswith(TOOL_CONTAINER_PREFIX) or name in known:
+            continue
+        # Another Yu'lon's live run is not ours to count. One with no label was made
+        # before the label was, so it still counts: one user is no less guarded.
+        if owner.strip() and owner.strip() != mine:
+            continue
+        left.append(name)
+    left.sort()
     for name in left:
         logger.warning(f"the extraction tool container {name} was left running by an earlier run")
     return tuple(left)
+
+
+OWNER_LABEL = "yulon.owner"
+"""The label `docker create` puts on every extraction tool container: whose Yu'lon made it."""
+
+
+def owner_id() -> str:
+    """This Yu'lon's owner label value: a hash of its config folder (cold review).
+
+    One daemon can serve more than one Yu'lon -- two Linux users, or a Windows and
+    a WSL one on Docker Desktop -- each with its own config folder. So a running
+    tool labelled with another value is that Yu'lon's live run, not one ours left.
+    """
+    folder = os.path.normcase(os.path.abspath(platform.config_dir()))
+    return hashlib.sha256(folder.encode("utf-8")).hexdigest()[:16]
 
 
 _ASK_AGAIN_TIMEOUT = 20.0
@@ -6903,10 +6942,14 @@ _STOP_POLL_SECONDS = 0.1
 """How often a running tool looks at its cancel token: a Stop's cost before the CLI ends."""
 
 
-def tool_container_left_line(name: str, reason: str) -> str:
-    """The log line for a stopped tool whose container could not be removed (T303)."""
+def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) -> str:
+    """The log line for a tool whose container could not be removed (T303).
+
+    `stopped` False for a tool that failed on its own: nobody pressed Stop (cold review).
+    """
+    after = " after Stop" if stopped else ""
     return (
-        f"The extraction tool's container {name} could not be removed after Stop ({reason}), "
+        f"The extraction tool's container {name} could not be removed{after} ({reason}), "
         f"so it may still be writing into the server's data folder. "
         f"{container_end.remove_it()}\ndocker rm -f {name}"
     )

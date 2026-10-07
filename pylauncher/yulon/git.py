@@ -1213,10 +1213,15 @@ def _falls_back(exc: GitError) -> bool:
     return not isinstance(exc, (GitStopped, GitContainerLeft))
 
 
-def container_left_line(name: str, dest: Path, reason: str) -> str:
-    """The log line for a stopped clone whose container could not be removed (T240)."""
+def container_left_line(name: str, dest: Path, reason: str, *, stopped: bool = True) -> str:
+    """The log line for a clone whose container could not be removed (T240).
+
+    `stopped` False for a clone that failed on its own (a create that timed out, a
+    start Docker refused): nobody pressed Stop, so the line does not say so (cold review).
+    """
+    after = " after Stop" if stopped else ""
     return (
-        f"The clone's container {name} could not be removed after Stop ({reason}), so it may "
+        f"The clone's container {name} could not be removed{after} ({reason}), so it may "
         f"still be writing into {dest}. {container_end.remove_it()}\ndocker rm -f {name}"
     )
 
@@ -3029,10 +3034,13 @@ class ContainerGit:
             # still clone into `dest`, so it is said, and host git is not started.
             said = (made.stderr or made.stdout).strip() or "no answer"
             if refused_late is not None:
-                yield container_left_line(name, dest, refused_late)
+                yield container_left_line(name, dest, refused_late, stopped=False)
+                # Only a create that timed out hands back a refusal: a daemon that
+                # hangs, which hung the `rm -f` too (cold review), so it says what helps.
                 raise GitContainerLeft(
                     f"docker create exited {made.returncode}: {said}; its container {name} "
-                    "could not be removed"
+                    "could not be removed. Docker did not answer in time: restart Docker, "
+                    "then try again."
                 )
             raise GitError(f"docker create exited {made.returncode}: {said}")
         try:
@@ -3062,7 +3070,7 @@ class ContainerGit:
             # answers this failure with host git; one that ran and failed is gone.
             refused = self._end_container(launcher, name)
             if refused is not None:
-                yield container_left_line(name, dest, refused)
+                yield container_left_line(name, dest, refused, stopped=False)
                 raise GitContainerLeft(f"{exc}; its container {name} could not be removed") from exc
             # The docker CLI's own absence, arriving from `Popen` rather than
             # from `docker_program()`: the resolution cache pins a hit for the

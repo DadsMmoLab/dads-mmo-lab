@@ -76,6 +76,11 @@ if args[:1] == ["create"]:
         sys.stderr.write("Error response from daemon: pull access denied\\n")
         sys.exit(125)
     box.write_text("created", encoding="utf-8")
+    if "--label" in args:
+        # Cold review of the stop-paths branch: whose Yu'lon made it, read back by `ps`.
+        labels = state / "labels"
+        labels.mkdir(exist_ok=True)
+        (labels / name).write_text(args[args.index("--label") + 1], encoding="utf-8")
     sys.stdout.write(name + "-id\\n")
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
@@ -93,15 +98,18 @@ if args[:2] == ["start", "-a"]:
 if args[:1] == ["run"]:
     attached(box)
 if args[:1] == ["ps"]:
-    # `docker ps --filter name=<part> --format {{{{.Names}}}}` (Codex review of T303): the
-    # RUNNING containers only, as the real `ps` lists without `-a` -- not one merely created.
+    # `docker ps --filter name=<part> --format '{{{{.Names}}}}<tab>{{{{.Label ...}}}}'` (Codex
+    # review of T303): the RUNNING containers only, as the real `ps` lists without `-a` --
+    # not one merely created -- each with its owner label's value (empty without one).
     if (state / "no-answer").exists():
         sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
         sys.exit(1)
     part = args[args.index("--filter") + 1].split("=", 1)[1] if "--filter" in args else ""
     for box in sorted((state / "containers").iterdir()):
         if part in box.name and box.read_text(encoding="utf-8") != "created":
-            sys.stdout.write(box.name + "\\n")
+            label = state / "labels" / box.name
+            owner = label.read_text(encoding="utf-8").split("=", 1)[-1] if label.exists() else ""
+            sys.stdout.write(box.name + "\\t" + owner + "\\n")
     sys.exit(0)
 if args[:1] == ["inspect"]:
     # `docker.container_exit()`'s question (T303): a container still there is running.
