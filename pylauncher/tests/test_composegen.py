@@ -250,8 +250,16 @@ def test_the_build_overlay_is_only_build_blocks_and_names_its_dockerfile(tmp_pat
     plan = render(tmp_path / "wow")
     assert plan.build.count("dockerfile: apps/docker/Dockerfile") == 4
     assert plan.build.count("target:") == 4
-    # Nothing structural: no image refs, no env, no volumes, no ports.
-    assert keys_in(plan.build) <= {"services", "build", "context", "dockerfile", "target"} | {
+    # Nothing structural: no image refs, no env, no volumes, no ports. The one
+    # extra key is Yu'lon's own buildx group (T525), which compose ignores.
+    assert keys_in(plan.build) <= {
+        "services",
+        "build",
+        "context",
+        "dockerfile",
+        "target",
+        "x-yulon-buildx-group",
+    } | {
         "ac-worldserver",
         "ac-authserver",
         "ac-db-import",
@@ -260,6 +268,113 @@ def test_the_build_overlay_is_only_build_blocks_and_names_its_dockerfile(tmp_pat
     # And the base file, which IS auto-loaded, carries no build block at all —
     # or a bare `docker compose up` would start a multi-hour rebuild.
     assert "build" not in keys_in(plan.base)
+
+
+def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) -> None:
+    """They read exactly the same files, so they may keep one cached copy of the context (T525).
+
+    A group shares one BuildKit snapshot, which is synced to whatever the current
+    target reads; db-import also reads `data` and client-data only `apps`, so
+    either in the group would re-send the difference on every call (T376's race,
+    one call at a time).
+    """
+    services = yaml.safe_load(render(tmp_path / "wow").build)["services"]
+    groups = {name: body.get("x-yulon-buildx-group") for name, body in services.items()}
+    assert groups == {
+        "ac-worldserver": "server-source",
+        "ac-authserver": "server-source",
+        "ac-db-import": None,
+        "ac-client-data-init": None,
+    }
+
+
+PINNED_WOTLK_DOCKERFILE = (
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e" / "Dockerfile"
+)
+"""The catalog pin's `apps/docker/Dockerfile`; `test_build_context` fails a pin bump until it is
+vendored again, which re-runs the check below on the new recipe."""
+
+
+def _context_reads(dockerfile: str) -> dict[str, frozenset[str]]:
+    """Per stage: the context paths it and the stages it builds on COPY, ADD or bind-mount.
+
+    The Dockerfile's own words, read the way BuildKit follows them: a stage takes
+    what its base stage takes, what every `--from=<stage>` it copies from takes,
+    and its own COPY/ADD sources and `RUN --mount=type=bind,source=` paths. A
+    `--from` naming an image, and cache mounts, read nothing from the context.
+    """
+    logical: list[str] = []
+    for raw in dockerfile.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if logical and logical[-1].endswith("\\"):
+            logical[-1] = logical[-1][:-1] + " " + line
+        else:
+            logical.append(line)
+    own: dict[str, set[str]] = {}
+    needs: dict[str, set[str]] = {}
+    stage = ""
+    for line in logical:
+        words = line.split()
+        verb = words[0].upper()
+        if verb == "FROM":
+            stage = words[3] if len(words) >= 4 and words[2].upper() == "AS" else words[1]
+            own[stage], needs[stage] = set(), set()
+            if words[1] in own:
+                needs[stage].add(words[1])
+        elif verb in ("COPY", "ADD"):
+            flags = [w for w in words[1:] if w.startswith("--")]
+            args = [w for w in words[1:] if not w.startswith("--")]
+            source = next((f.split("=", 1)[1] for f in flags if f.startswith("--from=")), None)
+            if source is None:
+                own[stage].update(args[:-1])
+            elif source in own:
+                needs[stage].add(source)
+        elif verb == "RUN":
+            for word in words[1:]:
+                if not word.startswith("--mount="):
+                    continue
+                opts = dict(o.split("=", 1) for o in word[8:].split(",") if "=" in o)
+                if opts.get("type", "bind") != "bind":
+                    continue
+                if "from" in opts:
+                    if opts["from"] in own:
+                        needs[stage].add(opts["from"])
+                else:
+                    own[stage].add(opts.get("source", "."))
+
+    def reads(name: str) -> frozenset[str]:
+        return frozenset(own[name]).union(*(reads(n) for n in needs[name]))
+
+    return {name: reads(name) for name in own}
+
+
+def test_every_buildx_group_joins_targets_that_read_the_same_context_paths(
+    tmp_path: Path,
+) -> None:
+    """The safety rule of a group, checked against the pinned recipe itself (T525).
+
+    Members of a group share ONE cached copy of the context, which BuildKit syncs to
+    whatever the current target reads. Two targets that read different paths would
+    trade the difference back and forth on every Rebuild: T376's re-send, one call at
+    a time. So every group's targets must read exactly the same context paths in the
+    Dockerfile the catalog pins.
+    """
+    reads = _context_reads(PINNED_WOTLK_DOCKERFILE.read_text(encoding="utf-8"))
+    # The reader sees a difference where there is one, or the equality below is empty.
+    assert reads["db-import"] > reads["worldserver"]
+    assert reads["client-data"] == {"apps"}
+    assert ".git" in reads["worldserver"] and "src" in reads["worldserver"]
+    services = yaml.safe_load(render(tmp_path / "wow").build)["services"]
+    groups: dict[str, set[frozenset[str]]] = {}
+    for body in services.values():
+        group = body.get("x-yulon-buildx-group")
+        if group is not None:
+            groups.setdefault(group, set()).add(reads[body["build"]["target"]])
+    assert groups, "the WotLK overlay names no buildx group"
+    for group, read_sets in groups.items():
+        assert len(read_sets) == 1, (group, read_sets)
 
 
 def test_the_base_file_gives_the_import_its_playerbots_database(tmp_path: Path) -> None:
