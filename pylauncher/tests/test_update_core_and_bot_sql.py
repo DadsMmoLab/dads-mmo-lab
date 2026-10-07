@@ -249,6 +249,12 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         ("delete FROM gossip_menu_option where option_id = 99;\n", None),
         ("create index i on creature_loot_template(item);\n", None),
         (
+            "DROP TABLE IF EXISTS t;\nCREATE TABLE IF NOT EXISTS t (a int);\n"
+            "CREATE INDEX i ON t(a);\n",
+            None,
+        ),
+        ("DELETE FROM t;\nCREATE INDEX i ON t(a);\n", "adds an index to t, which it did not drop"),
+        (
             "DELETE FROM t;\nREPLACE INTO t VALUES (1);\n"
             "TRUNCATE u;\nINSERT IGNORE INTO u VALUES (1);\n",
             None,
@@ -264,8 +270,8 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         ("ALTER TABLE t ADD COLUMN b int;\n", "not safe to repeat"),
         ("CREATE TABLE t (a int);\n", "creates t without dropping it first"),
         (
-            "CREATE TABLE IF NOT EXISTS t (a int);\nDELETE FROM t;\nINSERT INTO t VALUES (1);\n",
-            None,
+            "CREATE TABLE IF NOT EXISTS t (a int);\nDELETE FROM t;\n",
+            "creates t without dropping it first",
         ),
         ("/*!50000 ALTER TABLE t ADD COLUMN b int */;\n", "not safe to repeat"),
         ("INSERT INTO t VALUES ('x;DROP TABLE IF EXISTS t');\n", "it writes t without emptying"),
@@ -275,6 +281,8 @@ def _index_client(db: object, refusals: dict[str, str]) -> list[str]:
         "emptied",
         "gossip",
         "index",
+        "drop-create-index",
+        "index-in-mixed-file",
         "replace",
         "replace-unemptied",
         "insert-ignore-unemptied",

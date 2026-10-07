@@ -1738,6 +1738,8 @@ def whole_table_problem(path: Path) -> str | None:
     Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
     world/classic file passes.
     """
+    if only_creates_indexes(path):
+        return None  # run one index at a time by the reload, each made fresh
     emptied: set[str] = set()
     dropped: set[str] = set()
     for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
@@ -1745,25 +1747,24 @@ def whole_table_problem(path: Path) -> str | None:
             continue
         sql = " ".join(raw.split())
         head = sql.upper()
-        if head.startswith(
-            (
-                "SET ",
-                "SELECT ",
-                "CREATE INDEX",
-                "CREATE UNIQUE INDEX",
-                "LOCK TABLES",
-                "UNLOCK TABLES",
-            )
-        ):
+        if head.startswith(("SET ", "SELECT ", "LOCK TABLES", "UNLOCK TABLES")):
             continue
         if re.fullmatch(rf"(?i)ALTER TABLE {_TABLE} (DISABLE|ENABLE) KEYS", sql):
             continue
-        match = re.match(rf"(?i)CREATE TABLE (IF NOT EXISTS )?{_TABLE}", sql)
+        match = re.match(rf"(?i)CREATE TABLE (?:IF NOT EXISTS )?{_TABLE}", sql)
         if match:
-            # A plain CREATE fails the second time unless the table was dropped first
-            # (Codex, T534 round 4); IF NOT EXISTS is repeatable on its own.
-            if match.group(1) is None and match.group(2).lower() not in dropped:
-                return f"it creates {match.group(2)} without dropping it first"
+            # Dropped first, or the second run fails (plain) or keeps the OLD table's
+            # definition (IF NOT EXISTS) -- not what a fresh install has (Codex, T534 r4-5).
+            if match.group(1).lower() not in dropped:
+                return f"it creates {match.group(1)} without dropping it first"
+            continue
+        match = re.match(rf"(?i)CREATE (?:UNIQUE )?INDEX \S+ ON {_TABLE}", sql)
+        if match:
+            # In a mixed file an index that is already there stops the script part-way;
+            # only on a table this file dropped is it new for certain (index-only files
+            # are run one index at a time instead, and never reach here).
+            if match.group(1).lower() not in dropped:
+                return f"it adds an index to {match.group(1)}, which it did not drop first"
             continue
         match = re.match(rf"(?i)DROP TABLE IF EXISTS {_TABLE}", sql)
         if match:
