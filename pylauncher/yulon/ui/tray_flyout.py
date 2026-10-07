@@ -53,8 +53,8 @@ from yulon.ui.theme import (
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
-FLYOUT_WIDTH = 360
-"""Wide enough for "WoW WotLK — DadsMmoLab" and a pill on one line."""
+FLYOUT_WIDTH = 400
+"""Wide enough for "WoW WotLK — DadsMmoLab", a pill and a button on one row."""
 FLYOUT_MAX_HEIGHT = 560
 """Past this the cards scroll: six servers fit, a seventh scrolls."""
 GAP = 8
@@ -130,6 +130,11 @@ class ServerCard(QFrame):
         self.title.setObjectName("tray-card-title")
         self.detail = QLabel(self)
         self.detail.setObjectName("tray-card-detail")
+        # The words give way, never the buttons: a long name or count line wraps
+        # inside the card instead of pushing Play past the flyout's edge
+        # (yulon-win11, 2026-10-07: "0 players · 345 bots · up 4m" did).
+        for label in (self.title, self.detail):
+            label.setWordWrap(True)
         words.addWidget(self.title)
         words.addWidget(self.detail)
         row.addLayout(words, 1)

@@ -248,3 +248,31 @@ def test_the_click_that_took_the_focus_away_does_not_open_it_again(tray: YulonTr
     flyout.dismissed.emit()
     tray.toggle_flyout()
     assert not flyout.isVisible(), "the closing click opened it again"
+
+
+def test_every_cards_button_is_inside_the_flyout_with_a_count_line(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """yulon-win11 2026-10-07: a card with its count line pushed Play off the flyout's edge."""
+    from PySide6.QtGui import QPalette
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    palette = QPalette(app.palette())
+    apply_dadcraft_theme(app)
+    try:
+        up = _add(window, FakeView("WoW WotLK", "/srv/a", "running"))
+        up.last_verdict = dashboard.Verdict(
+            "up", players=12, bots=1345, uptime=timedelta(hours=12, minutes=45)
+        )
+        _add(window, FakeView("Centurion", "/srv/b", "stopped"))
+        flyout = _open(tray)
+        QApplication.processEvents()
+        for card in flyout.cards():
+            right = card.action.mapTo(flyout, card.action.rect().topRight()).x()
+            assert right < flyout.width() - 8, (card.title.text(), right, flyout.width())
+    finally:
+        app.setStyleSheet("")
+        app.setPalette(palette)
