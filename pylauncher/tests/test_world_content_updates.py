@@ -286,6 +286,7 @@ class WorldDb:
         self.rec = rec
         self.rows: dict[tuple[str, str], tuple[str, str]] = {}
         self.writes: list[str] = []
+        self.rival: set[str] = set()
 
     def exec_stdin(
         self,
@@ -298,6 +299,18 @@ class WorldDb:
     ) -> subprocess.CompletedProcess[str]:
         data = source.read()
         text = data.decode("utf-8", errors="replace")
+        if f"INSERT INTO `mangos`.`{sqlplan.FILE_TABLE}`" in text:
+            # A claim: the key is (phase, file), so ANY row already there refuses it,
+            # as the client would with ERROR 1062. `rival` is another press that
+            # claimed the file between this press's ledger read and its claim.
+            for phase, file, sha, _state in ROW.findall(text):
+                if file in self.rival:
+                    self.rows[(phase, file)] = (sha, "started")
+                if (phase, file) in self.rows:
+                    self.rec.calls.append(f"claim-refused:{file}")
+                    return subprocess.CompletedProcess(
+                        list(argv), 1, "", f"ERROR 1062 (23000) at line 2: Duplicate entry '{file}'"
+                    )
         if sqlplan.FILE_TABLE in text:
             for phase, file, sha, state in ROW.findall(text):
                 self.rows[(phase, file)] = (sha, state)
@@ -614,3 +627,56 @@ def test_a_world_database_checkout_with_the_players_own_work_is_refused_before_t
     assert "build" not in rec.calls
     assert rec.heads[db_dest] == OLD and _sent(rec, U3) == 0 and db.rows == {}
     assert {rec.heads[server_dir / s.dest] for s in TBC.emulator.sources} == {OLD}
+
+
+def test_two_presses_cannot_both_claim_a_file_so_it_never_runs_twice(tmp_path: Path) -> None:
+    """Codex on T531: the `started` row is a plain INSERT on (phase, file), so a second
+    press (another Yu'lon, the CLI) that read the same ledger loses the claim and stops
+    before it runs the file, instead of running it a second time."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    db.rival = {U3}
+    with pytest.raises(InstallerError, match="claiming a world update"):
+        _press(rec, server_dir, db, world)
+    assert f"claim-refused:{U3}" in rec.calls
+    assert _sent(rec, U3) == 0 and _sent(rec, U4) == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "USE characters;\nDELETE FROM character_inventory;\n",
+        "UPDATE `characters`.`characters` SET money = 0;\n",
+        "DELETE FROM realmd.account WHERE id = 1;\n",
+    ],
+    ids=["use", "backticked", "bare"],
+)
+def test_a_world_update_that_reaches_characters_or_accounts_is_never_applied(
+    tmp_path: Path, body: str
+) -> None:
+    """Codex on T531: `into` is only the client's default schema. A file that names
+    another schema is named and not run, nothing after it runs, and nothing is claimed."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    db_dest = server_dir / TBC_DB.dest
+
+    def the_pin_brings(dest: Path) -> None:
+        if dest == db_dest:
+            _lay(server_dir, U3, f"-- {U3}\n{body}")
+            _lay(server_dir, U4, f"-- {U4}\nSELECT 4;\n")
+
+    rec.on_clone = the_pin_brings
+    lines = _press(rec, server_dir, db, world)
+    assert _sent(rec, U3) == 0 and _sent(rec, U4) == 0
+    assert ("content updates", U3) not in db.rows
+    assert any(U3 in line and "reaches outside mangos" in line for line in lines), lines
+
+
+def test_the_schema_scan_reads_statements_not_comments(tmp_path: Path) -> None:
+    path = _lay(
+        tmp_path,
+        "x.sql",
+        "-- fixes characters.lua text\n/* realmd.conf note */\n# logs.x\n"
+        "UPDATE creature_template SET Name = 'x' WHERE entry = 1;\n",
+    )
+    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ()
+    path.write_text("UPDATE logs.logs_x SET a = 1;\n", encoding="utf-8")
+    assert sqlplan.foreign_schemas(path, {"characters", "realmd", "logs"}) == ("logs",)

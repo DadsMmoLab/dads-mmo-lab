@@ -1504,8 +1504,13 @@ def recordable(rel: str) -> bool:
     return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
 
 
-def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int) -> str:
+def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: bool = False) -> str:
     """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
+
+    `claim` writes a plain `INSERT` instead: the key is `(phase, file)`, so it fails
+    when ANY row for that file is already there, which is what makes the `started`
+    row a claim two presses cannot both win (Codex, T531) -- the client refuses the
+    second, and that press stops before it runs the file.
 
     InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
     capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
@@ -1532,7 +1537,8 @@ def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int) -> str:
     )
     return (
         text
-        + f"REPLACE INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+        + f"{'INSERT' if claim else 'REPLACE'} INTO `{marker_db}`.`{FILE_TABLE}` "
+        + "(phase, file, sha256, state, at_unix) "
         + f"VALUES {values};\n"
     )
 
@@ -1549,6 +1555,7 @@ def record_world_files(
     password: str,
     exec_stdin: ExecStdin,
     wsl_distro: str | None = None,
+    claim: bool = False,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
 
@@ -1556,8 +1563,12 @@ def record_world_files(
         InstallerError: the client refused the script, or could not be reached.
     """
     _run_sql(
-        file_rows_sql(marker_db, rows, int(time.time())),
-        what="recording which world updates this server has",
+        file_rows_sql(marker_db, rows, int(time.time()), claim=claim),
+        what=(
+            "claiming a world update (another update of this server may be applying it)"
+            if claim
+            else "recording which world updates this server has"
+        ),
         container=container,
         client=client,
         password=password,
@@ -1565,6 +1576,28 @@ def record_world_files(
         exec_stdin=exec_stdin,
         wsl_distro=wsl_distro,
     )
+
+
+_SQL_COMMENTS = re.compile(r"/\*.*?\*/|--[^\n]*|#[^\n]*", re.S)
+
+
+def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
+    """Which of `others` a world update's text reaches, plus `USE` if it switches schema.
+
+    The update runs with `into` as the client's DEFAULT schema only -- the account
+    can reach every schema -- so a file that says `USE characters` or
+    `characters.x` would write there (Codex, T531). Read as text, comments
+    stripped; a false alarm costs a file named and not applied, never a write.
+    """
+    text = _SQL_COMMENTS.sub(" ", path.read_text(encoding="utf-8", errors="replace"))
+    found = [
+        name
+        for name in sorted(others)
+        if re.search(rf"`?\b{re.escape(name)}\b`?\s*\.\s*`?[A-Za-z_]", text, re.I)
+    ]
+    if re.search(r"(?im)^\s*USE\s", text):
+        found.append("USE")
+    return tuple(found)
 
 
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:

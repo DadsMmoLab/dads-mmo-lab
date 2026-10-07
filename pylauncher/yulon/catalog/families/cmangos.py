@@ -670,11 +670,30 @@ class CmangosInstaller(StagedInstaller):
             f"Applying {len(owed.new)} new world update(s) to {world} while the servers are "
             "stopped, each once, in order, before the new build starts."
         )
+        others = {
+            name
+            for name in (self.entry.databases.auth, self.entry.databases.characters)
+            + tuple(self.entry.databases.extra)
+            if name != world
+        }
         for number, run in enumerate(owed.new):
             self._check_cancel(ctx.cancel)
             assert run.path is not None
+            reaches = sqlplan.foreign_schemas(run.path, others)
+            if reaches:
+                yield (
+                    f"The world update {run.rel} reaches outside {world} "
+                    f"({', '.join(reaches)}), so Yu'lon does not apply it, and the "
+                    f"{len(owed.new) - number - 1} after it wait behind it: an update never "
+                    "writes your characters or accounts. A fresh install of the server applies it."
+                )
+                return
             sha = sqlplan.file_digest(run.path)
-            record((sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),))
+            self._record_world_files(
+                ctx,
+                (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),),
+                claim=True,
+            )
             refused: list[sqlplan.PhaseRun] = []
             yield from self._stream(
                 _apply_one(
@@ -718,7 +737,9 @@ class CmangosInstaller(StagedInstaller):
             f"file='{rel}'), or install this server fresh to get every world update."
         )
 
-    def _record_world_files(self, ctx: StageContext, rows: Sequence[sqlplan.FileRow]) -> None:
+    def _record_world_files(
+        self, ctx: StageContext, rows: Sequence[sqlplan.FileRow], *, claim: bool = False
+    ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
         db = self._native().db
         sqlplan.record_world_files(
@@ -728,6 +749,7 @@ class CmangosInstaller(StagedInstaller):
             client=db.client,
             password=ctx.secrets.db_password,
             exec_stdin=self._seams.exec_stdin,
+            claim=claim,
         )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
