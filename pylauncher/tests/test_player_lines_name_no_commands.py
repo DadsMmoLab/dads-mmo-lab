@@ -197,6 +197,13 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         f"removing a clone's container that Stop could not remove: {_TYPED}",
         frozenset({"docker rm -f {…}"}),
     ),
+    **{
+        ("yulon/catalog/native.py", owner): (
+            f"removing a database importer a Stop or a retry could not end (T539): {_TYPED}",
+            frozenset({"docker rm -f {…}"}),
+        )
+        for owner in ("_one_shot_left_sentence", "stage_import")
+    },
     ("yulon/catalog/families/trinitycore.py", "_refuse_a_tool_still_writing"): (
         f"removing, on Linux, a map tool's container an earlier press left running: {_TYPED}",
         frozenset({"docker rm -f {…}"}),

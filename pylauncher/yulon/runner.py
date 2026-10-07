@@ -682,6 +682,7 @@ def end_stream(generator: Generator[str, None, None]) -> bool:
 def _end_chosen(candidates: list[_Child]) -> int:
     """Claim each of `candidates` that is a Stop's to end, and end it off this thread. How many."""
     children = []
+    held = 0
     for child in candidates:
         # Chosen and marked under the child's own lock, so `_finish` cannot
         # decide between release and close in between (Codex's fourth
@@ -700,30 +701,60 @@ def _end_chosen(candidates: list[_Child]) -> int:
                 # Claimed again it got a new SIGTERM on every poll of a watcher, and
                 # `docker compose up` reads a second SIGTERM as "force".
                 continue
+            if child.proc is None and child.started_on is not None:
+                # Being started this instant (T546): the claim is held, and the
+                # stream ends its child as soon as it has one (`_started`).
+                if not child.ended:
+                    child.ended = True
+                    held += 1
+                continue
             if _still_running(child.proc) or _job_unsettled(child) or _group_unsettled(child):
                 child.ended = True
                 child.stopping_since = time.monotonic()
                 child.cut_short = child.job is not None or child.group is not None
                 children.append(child)
     for child in children:
-        proc = child.proc
-        assert proc is not None  # both filters need a started child; narrows for mypy
-        try:
-            threading.Thread(
-                target=_stop_child_claimed,
-                args=(child,),
-                daemon=True,
-                name=f"yulon-end-stream-{proc.pid}",
-            ).start()
-        except Exception as exc:  # noqa: BLE001 - any refusal must not lose this Stop or the next
-            # T365: `RuntimeError: can't start new thread` in a process that has
-            # run out of them. The child is already marked as ended, so it is
-            # ended here instead, with every wait bounded, and the loop goes on.
-            logger.warning(
-                f"could not start a thread to end pid {proc.pid} ({exc!r}); ending it here"
-            )
-            _stop_child_here(child)
-    return len(children)
+        _start_stopper(child)
+    return len(children) + held
+
+
+def _start_stopper(child: _Child) -> None:
+    """End a claimed child on a thread of its own, or here, bounded, if none will start."""
+    proc = child.proc
+    assert proc is not None  # a claimed child has started; narrows for mypy
+    try:
+        threading.Thread(
+            target=_stop_child_claimed,
+            args=(child,),
+            daemon=True,
+            name=f"yulon-end-stream-{proc.pid}",
+        ).start()
+    except Exception as exc:  # noqa: BLE001 - any refusal must not lose this Stop or the next
+        # T365: `RuntimeError: can't start new thread` in a process that has
+        # run out of them. The child is already marked as ended, so it is
+        # ended here instead, with every wait bounded.
+        logger.warning(f"could not start a thread to end pid {proc.pid} ({exc!r}); ending it here")
+        _stop_child_here(child)
+
+
+def _started(
+    child: _Child, proc: _AnyPopen, job: winjob.Job | None, *, group: int | None = None
+) -> None:
+    """Write down what a stream started; a Stop held while it started ends it now (T546).
+
+    Under `child.lock`, the lock a Stop's claim is made under, so a Stop either finds
+    the child here or held its claim before it existed -- never neither.
+    """
+    with child.lock:
+        child.job = job
+        child.group = group
+        child.proc = proc
+        held = child.ended and not child.answered
+        if held:
+            child.stopping_since = time.monotonic()
+            child.cut_short = job is not None or group is not None
+    if held:
+        _start_stopper(child)
 
 
 _RECLAIM_AFTER_SECONDS = 2 * _SHUTDOWN_TIMEOUT_SECONDS
@@ -1067,6 +1098,9 @@ def _stream_lines(
 ) -> Generator[str, None, None]:
     """`stream()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream() called: command={command} cwd={cwd} merge_stderr={merge_stderr}")
+    # Before the spawn (T546): the child runs the moment `Popen` returns, and a Stop
+    # in between has to find this stream to hold its claim for it (`_started`).
+    child.started_on = threading.get_ident()
     proc, job = _spawn(
         lambda flags: subprocess.Popen(
             command,
@@ -1080,9 +1114,7 @@ def _stream_lines(
             creationflags=flags,
         )
     )
-    child.job = job
-    child.proc = proc
-    child.started_on = threading.get_ident()
+    _started(child, proc, job)
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
@@ -1226,6 +1258,7 @@ def _progress_lines(
 ) -> Generator[str, None, None]:
     """`stream_progress()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream_progress() called: command={command} cwd={cwd}")
+    child.started_on = threading.get_ident()  # before the spawn; see `_stream_lines` (T546)
     # Binary pipes, deliberately. `text=True` puts both through universal-newline
     # translation, which rewrites every `\r` as `\n` before this function can
     # see it — and then the carriage returns this exists for are gone, silently,
@@ -1246,10 +1279,7 @@ def _progress_lines(
             start_new_session=own_session,
         )
     )
-    child.job = job
-    child.group = _group_led_by(proc)
-    child.proc = proc
-    child.started_on = threading.get_ident()
+    _started(child, proc, job, group=_group_led_by(proc))
     fragments: queue.Queue[str | None] = queue.Queue()
 
     def read(pipe: object) -> None:

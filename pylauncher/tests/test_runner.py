@@ -2698,7 +2698,9 @@ def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
     # earlier test left on the main thread, and that was T546's flake on fork CI.
     assert runner.end_stream(generator) is True
     generator.close()
-    assert signalled == []
+    # Only the double's own id: a stopper thread an earlier test started may still be
+    # polling its own group (`_end_group`) while this test runs (T546, fork CI flake).
+    assert [call for call in signalled if call[0] == _Recorded.pid] == [], signalled
 
 
 # The root has gone and its child still holds the pipe: what a Stop meets when the
@@ -3018,3 +3020,53 @@ def test_a_group_id_that_is_now_another_processs_pid_is_never_signalled(
     finally:
         foreign.kill()
         foreign.wait(timeout=HANG_BOUND)
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_a_stop_that_lands_while_the_child_is_being_started_is_not_lost(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """T546 (fork CI flake `assert 0 == 1` in test_git's stopped clone): the start window.
+
+    The child runs as soon as `Popen` returns, before its stream has written down
+    which thread started it and which process it is. A Stop in that window found
+    nothing to end, and the child ran on -- under CI load the fake docker had already
+    marked its container running. The Stop is now held for the stream, which ends the
+    child the moment it has one.
+
+    Mutation this catches: `started_on` written after the spawn, or a pending claim
+    the spawner does not act on (the child sleeps 600 s; the worker is still reading).
+    """
+    stops: list[int] = []
+    real_spawn = runner._spawn
+
+    def spawn_then_stop(start):  # type: ignore[no-untyped-def]
+        started = real_spawn(start)
+        stops.append(runner.end_streams_started_on(threading.get_ident()))
+        return started
+
+    monkeypatch.setattr(runner, "_spawn", spawn_then_stop)
+    start = stream if entry == "stream" else runner.stream_progress
+    generator = start(_python_cmd(_PID_THEN_SLEEP))
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for _ in generator:
+                pass
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t546-start-window")
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    try:
+        assert stops == [1], stops
+        assert not worker.is_alive(), "a Stop that landed as the child started was lost"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+    finally:
+        with runner._LIVE_STREAMS_LOCK:
+            child = runner._LIVE_STREAMS.get(generator)
+        if child is not None and child.proc is not None and child.proc.poll() is None:
+            child.proc.kill()
+        worker.join(timeout=HANG_BOUND)
