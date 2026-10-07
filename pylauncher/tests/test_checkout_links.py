@@ -341,8 +341,8 @@ def test_remove_works_with_a_link_deep_in_a_deploy_folder(tmp_path: Path) -> Non
 def test_a_variable_file_name_at_the_top_looks_only_at_the_top(tmp_path: Path) -> None:
     """Cold review SHOULD 2: `Hearthstone_{cooldown}.sql` walked the whole checkout, `.git` too.
 
-    A `{key}` or glob in the file name can match only names in its own folder, so
-    only that folder's entries are looked at; a link deeper down, or in `.git`, is
+    The path is rendered before the look, as the SQL step renders it, so only
+    `Hearthstone_5.sql` is looked at; a link in the module's docs, or in `.git`, is
     where nothing of Yu'lon's reads, and the install goes ahead.
     """
     manifest = parse_manifest(
@@ -536,8 +536,8 @@ def test_the_deploy_copy_stops_in_a_folder_that_became_a_link_after_its_parent_w
     assert "lua/swapped" in str(stopped.value)
 
 
-def test_a_variable_folder_at_the_top_leaves_git_alone(tmp_path: Path) -> None:
-    """`{kind}/world.sql` walks the whole checkout but `.git`, git's own, where nothing reads."""
+def test_a_field_folder_is_looked_at_as_the_folder_it_renders_to(tmp_path: Path) -> None:
+    """`{kind}/world.sql` is looked at as `sql/world.sql`, not as the whole checkout."""
     manifest = parse_manifest(
         {
             **MODULE,
@@ -546,6 +546,40 @@ def test_a_variable_folder_at_the_top_leaves_git_alone(tmp_path: Path) -> None:
         }
     )
     run = _Run(tmp_path, {".git/a-link": "objects"}, manifest)
+
+    run.applier.install(run.manifest)
+
+    assert run.sql.files == [("world", "world.sql")]
+
+
+@pytest.mark.parametrize(
+    ("path", "link", "prompts"),
+    [
+        pytest.param(
+            "{file}",
+            "sub/x.sql",
+            [{"key": "file", "question": "which", "kind": "string", "default": "sub/*.sql"}],
+            id="a field that renders to a folder and a glob",
+        ),
+        pytest.param("**/*.sql", ".git/x.sql", [], id="a glob that reaches into .git"),
+    ],
+)
+def test_what_a_rendered_or_hidden_path_reaches_is_looked_at_before_anything_is_done(
+    tmp_path: Path, path: str, link: str, prompts: list[dict[str, str]]
+) -> None:
+    """Codex review of 05abfc0f: the look before the install missed both, so the step's own
+    look stopped it only after the deploy had run."""
+    manifest = parse_manifest(
+        {**MODULE, "sql": [{"db": "world", "path": path}], "prompts": prompts}
+    )
+    run = _Run(tmp_path, {link: "{outside}/notes.lua"}, manifest)
+    run.refused(link)
+
+
+def test_a_glob_in_the_file_name_looks_only_at_its_own_folder(tmp_path: Path) -> None:
+    """`sql/*.sql` matches only `sql/`'s own entries: a link in a folder under it is not read."""
+    manifest = parse_manifest({**MODULE, "sql": [{"db": "world", "path": "sql/*.sql"}]})
+    run = _Run(tmp_path, {"sql/deeper/x.sql": "{outside}/notes.lua"}, manifest)
 
     run.applier.install(run.manifest)
 
