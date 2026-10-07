@@ -151,6 +151,16 @@ class InstallerError(RuntimeError):
             self.detail = detail
 
 
+class OneShotLeftRunning(InstallerError, TrueAfterStop):
+    """A one-shot the engine had to end -- the database importer -- is still running (T539).
+
+    Raised after a Stop whose importer could not be ended, and before a retry's
+    reset that would DROP the databases under one. `TrueAfterStop`, because after
+    a Stop it is not a clean cancel: something may still be writing, and the
+    sentence says what and how to end it.
+    """
+
+
 class InstallStopped(InstallerError, StopSaid):
     """The player's Stop, taking effect in an install, a rebuild or a server press (T250).
 

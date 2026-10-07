@@ -202,6 +202,9 @@ MODULE_SURFACE_AFTER_7_2 = {
     # ready wait. Exception types, not machinery.
     "StopSaid",
     "InstallStopped",
+    # Added deliberately with T539: an importer a Stop or a retry could not end, still
+    # writing. An exception type, not machinery.
+    "OneShotLeftRunning",
     "ReadyWaitStopped",
     "cancelled_install_message",
     "compose_file",

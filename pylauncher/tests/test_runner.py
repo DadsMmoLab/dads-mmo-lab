@@ -2599,6 +2599,7 @@ _GRANDCHILD_HOLDS_THE_PIPE = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_stop_ends_what_a_stream_progress_child_started_and_the_read_returns() -> None:
     """T529: the Stop reaches the whole clone, not just the `git` it started.
 
@@ -2693,9 +2694,13 @@ def test_a_process_this_module_did_not_start_is_never_signalled_as_a_group(
     monkeypatch.setattr(runner.subprocess, "Popen", _Recorded)
     generator = runner.stream_progress(["git", "clone", "x"])
     next(generator)
-    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    # This stream alone: `end_streams_started_on(this thread)` also reached whatever an
+    # earlier test left on the main thread, and that was T546's flake on fork CI.
+    assert runner.end_stream(generator) is True
     generator.close()
-    assert signalled == []
+    # Only the double's own id: a stopper thread an earlier test started may still be
+    # polling its own group (`_end_group`) while this test runs (T546, fork CI flake).
+    assert [call for call in signalled if call[0] == _Recorded.pid] == [], signalled
 
 
 # The root has gone and its child still holds the pipe: what a Stop meets when the
@@ -2708,6 +2713,7 @@ _ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited() -> None:
     """T529, Codex's P1: a leader that exited does not take its group out of the Stop's reach.
 
@@ -2754,6 +2760,7 @@ def test_a_stop_ends_the_group_of_a_stream_progress_root_that_has_already_exited
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_host_git_stream_closed_before_its_end_ends_the_group_its_exited_root_left() -> None:
     """T495's rule, on POSIX: a stream closed before EOF did not run out, root gone or not.
 
@@ -2800,6 +2807,7 @@ _GRANDCHILD_IGNORES_SIGTERM = (
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
 def test_a_group_member_that_ignores_sigterm_is_killed_after_the_timeout() -> None:
     """T529's second step (cold review): what of the group outlives SIGTERM gets SIGKILL.
 
@@ -2861,9 +2869,282 @@ def test_an_undrained_close_ends_the_group_when_its_root_exits_as_the_close_chec
         def poll(self) -> int | None:
             return None
 
+    class _Reading:
+        def is_alive(self) -> bool:
+            return True  # a member still holds the pipe (T546's condition)
+
     child = runner._Child()
     child.group = 424242
+    child.readers = (_Reading(),)  # type: ignore[assignment]
     runner._finish(_Running(), None, child=child, drained=False)  # type: ignore[arg-type]
 
     assert ended_groups == [424242]
     assert child.settled
+
+
+def test_a_stop_whose_ending_failed_can_be_claimed_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T541, Codex adversarial review: claiming once must not make a failed ending final.
+
+    The claim stops a watcher's polls from re-sending SIGTERM while an ending is under
+    way. An ending that RAISED is not under way: the next Stop claims it again.
+
+    Mutation this catches: the claim kept after `_stop_child` failed (the second call
+    finds the child claimed and returns 0).
+    """
+    failed = threading.Event()
+
+    def broken(child: object, **kw: object) -> None:
+        failed.set()
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(runner, "_stop_child", broken)
+
+    class _Running:
+        pid = 4321
+        returncode = None
+
+        def poll(self) -> int | None:
+            return None
+
+    child = runner._Child()
+    child.proc = _Running()  # type: ignore[assignment]
+    assert runner._end_chosen([child]) == 1
+    assert failed.wait(HANG_BOUND), "the ending never ran"
+    deadline = time.monotonic() + HANG_BOUND
+    while child.stopping_since is not None and time.monotonic() < deadline:
+        time.sleep(POLL_PACE)
+    # Let go, not lapsed: the claim's own window is shorter than this wait could be.
+    assert child.stopping_since is None, "the claim of a failed ending was kept"
+    assert runner._end_chosen([child]) == 1, "a Stop whose ending failed could not be retried"
+
+
+# T546: a host-git stream that ran out but was never closed, and the group id it had.
+_SAYS_DONE_AND_EXITS = "print('done', flush=True)"
+
+
+def _stale_host_git_stream() -> tuple[Generator[str, None, None], runner._Child]:
+    """A `stream_progress()` whose child exited and whose pipes reached EOF, left suspended."""
+    stale = runner.stream_progress(_python_cmd(_SAYS_DONE_AND_EXITS))
+    assert next(stale) == "done"
+    with runner._LIVE_STREAMS_LOCK:
+        child = runner._LIVE_STREAMS[stale]
+    assert child.proc is not None
+    child.proc.wait(timeout=HANG_BOUND)
+    deadline = time.monotonic() + HANG_BOUND
+    while any(reader.is_alive() for reader in child.readers) and time.monotonic() < deadline:
+        time.sleep(POLL_PACE)
+    return stale, child
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_stop_never_signals_the_group_id_of_a_stream_whose_pipes_are_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546 (fork CI flake `assert [(16437, 0)] == []`): a Stop asked a dead group's id.
+
+    A stream that ran out and was never closed stays registered and unsettled. Its
+    group had no member left, so its id was free for any new process group, and the
+    Stop probed it -- and, its root having exited, would have sent it SIGTERM. Only a
+    pipe still held keeps a group this stream's: nothing reads from a pipe nobody holds.
+
+    Mutation this catches: `_group_unsettled` without the held-pipe condition.
+    """
+    stale, child = _stale_host_git_stream()
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    try:
+        assert runner.end_stream(stale) is False
+        assert signalled == []
+    finally:
+        monkeypatch.undo()
+        stale.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_closing_a_stream_whose_pipes_are_closed_signals_no_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546: the early-close ending (T495's POSIX twin) is for a pipe still held.
+
+    Closed long after it ran out -- a generator finalised by a garbage collection hours
+    later -- its root and every member are gone, and the group id may be another's.
+
+    Mutation this catches: the twin without the held-pipe condition (SIGTERM recorded).
+    """
+    stale, child = _stale_host_git_stream()
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    stale.close()
+    assert signalled == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+def test_a_group_id_that_is_now_another_processs_pid_is_never_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546, Codex adversarial review: a held pipe does not prove the group id is still ours.
+
+    A descendant that left the group can hold the pipe while the group empties and its id
+    goes to a new group leader. That leader's pid IS the id; this stream's own leader was
+    reaped, so a live process with that pid is someone else's, never ours (POSIX keeps a
+    pid from reuse only while a group of that id exists). Stood in for by a real process
+    leading its own session, under a stream whose root exited and was reaped.
+
+    Mutation this catches: asking the group's liveness (`killpg(id, 0)`) without asking
+    whether the id is now another process's pid.
+    """
+    foreign = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True
+    )
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait(timeout=HANG_BOUND)  # this stream's root: exited and reaped
+
+    class _Reading:
+        def is_alive(self) -> bool:
+            return True  # a pipe still held: the condition a left-the-group descendant meets
+
+    child = runner._Child()
+    child.proc = gone
+    child.group = foreign.pid  # the id, now a foreign group leader's pid
+    child.readers = (_Reading(),)  # type: ignore[assignment]
+    sent: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(
+        runner.os, "killpg", lambda pid, sig: sent.append((pid, sig)) or real_killpg(pid, sig)
+    )
+    try:
+        assert runner._group_unsettled(child) is False
+        runner._finish(gone, None, child=child, drained=False)
+        assert [s for s in sent if s[1] != 0] == [], sent
+        assert foreign.poll() is None, "a process Yu'lon did not start was signalled"
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=HANG_BOUND)
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_a_stop_that_lands_while_the_child_is_being_started_is_not_lost(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """T546 (fork CI flake `assert 0 == 1` in test_git's stopped clone): the start window.
+
+    The child runs as soon as `Popen` returns, before its stream has written down
+    which thread started it and which process it is. A Stop in that window found
+    nothing to end, and the child ran on -- under CI load the fake docker had already
+    marked its container running. The Stop is now held for the stream, which ends the
+    child the moment it has one.
+
+    Mutation this catches: `started_on` written after the spawn, or a pending claim
+    the spawner does not act on (the child sleeps 600 s; the worker is still reading).
+    """
+    stops: list[int] = []
+    real_spawn = runner._spawn
+
+    def spawn_then_stop(start):  # type: ignore[no-untyped-def]
+        started = real_spawn(start)
+        stops.append(runner.end_streams_started_on(threading.get_ident()))
+        return started
+
+    monkeypatch.setattr(runner, "_spawn", spawn_then_stop)
+    start = stream if entry == "stream" else runner.stream_progress
+    generator = start(_python_cmd(_PID_THEN_SLEEP))
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for _ in generator:
+                pass
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t546-start-window")
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    try:
+        assert stops == [1], stops
+        assert not worker.is_alive(), "a Stop that landed as the child started was lost"
+        assert isinstance(outcome[0], runner.StreamEnded), outcome
+    finally:
+        with runner._LIVE_STREAMS_LOCK:
+            child = runner._LIVE_STREAMS.get(generator)
+        if child is not None and child.proc is not None and child.proc.poll() is None:
+            child.proc.kill()
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows ends a job")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="`_gone()` reads /proc")
+def test_a_held_stop_ends_the_group_of_a_root_that_exited_while_it_was_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T546, Codex review of 047c9d4c: a held Stop acted on before the readers existed.
+
+    The root exits having started a child that holds the pipe, all before the stream has
+    written down its readers; the held Stop's stopper then found no pipe held and left the
+    group, and the read waited on the child for its whole sleep.
+
+    Mutation this catches: `_started()` acting before `child.readers` is written.
+    """
+    real_spawn = runner._spawn
+
+    def spawn_exit_then_stop(start):  # type: ignore[no-untyped-def]
+        proc, job = real_spawn(start)
+        # The leader exits (a zombie: not reaped, as nothing has polled it yet); its
+        # child holds the pipe.
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        runner.end_streams_started_on(threading.get_ident())
+        return proc, job
+
+    monkeypatch.setattr(runner, "_spawn", spawn_exit_then_stop)
+    generator = runner.stream_progress(_python_cmd(_ROOT_GONE_GRANDCHILD_HOLDS_THE_PIPE))
+    fragments: queue.Queue[str] = queue.Queue()
+    outcome: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            for fragment in generator:
+                fragments.put(fragment)
+        except BaseException as exc:  # noqa: BLE001 - the shape under test
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, daemon=True, name="test-t546-held-exited")
+    worker.start()
+    worker.join(timeout=HANG_BOUND)
+    grandchild = None
+    try:
+        grandchild = int(fragments.get(timeout=HANG_BOUND))
+        assert not worker.is_alive(), "the held Stop left the group of a root that had exited"
+        assert _gone(grandchild), f"{grandchild} outlived the held Stop"
+    finally:
+        if grandchild is not None:
+            try:
+                os.kill(grandchild, signal.SIGKILL)
+            except OSError:
+                pass
+        worker.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_a_child_that_could_not_be_started_leaves_no_claim_behind(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Cold review of 9bc9da0a: `started_on` is written before the spawn (T546), so a Popen
+    that raises left a stream that read as started -- and as Stopped, if a Stop had held its
+    claim -- for a child that never existed. The record is cleared with the failure.
+
+    Mutation this catches: the spawn's failure leaving `started_on` and the held claim.
+    """
+
+    def stop_then_fail(start):  # type: ignore[no-untyped-def]
+        runner.end_streams_started_on(threading.get_ident())
+        raise FileNotFoundError(2, "No such file or directory: 'docker'")
+
+    monkeypatch.setattr(runner, "_spawn", stop_then_fail)
+    start = stream if entry == "stream" else runner.stream_progress
+    generator = start(["docker", "compose", "build"])
+    with runner._LIVE_STREAMS_LOCK:
+        child = runner._LIVE_STREAMS[generator]
+    with pytest.raises(FileNotFoundError):
+        next(generator)
+    assert child.started_on is None, "a child that never started reads as started"
+    assert not child.ended, "a Stop's claim was kept for a child that never existed"

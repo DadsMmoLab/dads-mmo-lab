@@ -2582,6 +2582,11 @@ def _repair_doubles(
             if inspect_fails:
                 return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
             return _completed(stdout="" if owner is None else owner + chr(10))
+        if cmd[:2] == ["docker", "ps"] and any(
+            arg.startswith(f"label={docker.SERVICE_LABEL}=") for arg in cmd
+        ):
+            # T539: Repair asks for a leftover importer first; none is running here.
+            return _completed()
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         return _completed()

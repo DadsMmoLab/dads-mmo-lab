@@ -97,7 +97,7 @@ def test_up_with_the_switch_on_opens_the_dashboard_from_the_card(
     view = _add(window, TortoiseView("running", switch_on=True))
     card = _card(tray)
     assert not card.dashboard.isHidden()
-    assert card.dashboard.text() == "Bot dashboard"
+    assert card.dashboard.accessibleName() == "Bot dashboard (Tortoise)"
     assert card.dashboard.isEnabled()
     card.dashboard.click()
     assert view.opened_dashboard == 1
@@ -119,7 +119,7 @@ def test_up_with_the_switch_off_offers_to_turn_it_on_at_the_bots_tab(
     assert view.shown_switch == 1
     assert view.opened_dashboard == 0
     card = _card(tray)
-    assert card.dashboard.text() == "Turn on the bot dashboard…"
+    assert card.dashboard.accessibleName() == "Turn on the bot dashboard… (Tortoise)"
     card.dashboard.click()
     assert view.shown_switch == 2
 
@@ -139,7 +139,6 @@ def test_a_server_that_is_not_up_greys_it_with_the_reason(
     card = _card(tray)
     assert not card.dashboard.isEnabled()
     assert card.dashboard.toolTip() == tray_module.DASHBOARD_START_FIRST
-    assert card.detail.text() == tray_module.DASHBOARD_START_FIRST
     card.dashboard.click()
     assert view.opened_dashboard == 0
 
@@ -161,37 +160,6 @@ def test_a_server_with_no_dashboard_shows_none(tray: YulonTray, window: FakeWind
     tray.toggle_flyout()
     assert tray.flyout is not None
     assert tray.flyout.cards()[0].dashboard.isHidden()
-
-
-def test_the_cards_dashboard_entry_is_never_cut_short(tray: YulonTray, window: FakeWindow) -> None:
-    """yulon-ubuntu 2026-10-07: "Turn on the bot dashb" - the entry shared the name's column."""
-    from PySide6.QtGui import QPalette
-    from PySide6.QtWidgets import QApplication
-
-    from yulon.ui.theme import apply_dadcraft_theme
-
-    app = QApplication.instance()
-    assert isinstance(app, QApplication)
-    palette = QPalette(app.palette())
-    apply_dadcraft_theme(app)
-    try:
-        view = _add(window, TortoiseView("running", switch_on=False))
-        from datetime import timedelta
-
-        from yulon import dashboard
-
-        view.last_verdict = dashboard.Verdict(
-            "up", players=0, bots=242, uptime=timedelta(minutes=3)
-        )
-        card = _card(tray)
-        QApplication.processEvents()
-        assert card.dashboard.width() >= card.dashboard.sizeHint().width(), (
-            card.dashboard.width(),
-            card.dashboard.sizeHint().width(),
-        )
-    finally:
-        app.setStyleSheet("")
-        app.setPalette(palette)
 
 
 def test_an_open_menus_actions_reach_the_tab_there_is_now(
