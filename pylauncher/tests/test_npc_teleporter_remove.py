@@ -171,7 +171,11 @@ def _removed_ids() -> dict[str, set[int]]:
 
 def test_remove_clears_exactly_the_ids_the_install_clears() -> None:
     """Every table, every id: the union of the two `.dist` DELETE blocks, no more and no less."""
-    assert _removed_ids() == _dist_ids()
+    # T564: plus the free range the install now moves the teleporter's gossip menus to.
+    expected = _dist_ids()
+    for table in ("gossip_menu", "gossip_menu_option", "conditions"):
+        expected[table] = expected[table] | set(range(60000, 60011))
+    assert _removed_ids() == expected
 
 
 def test_remove_keeps_the_install_s_other_conditions_on_the_row_it_matches() -> None:
