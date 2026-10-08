@@ -28,10 +28,12 @@ rather than the one for a verb nobody had tried.
 T218 was fixed in the fork (thomasjteachey/TrinityCore112 #1767, in CENTURION 4948d1a9): the
 handler treats a command without a session as full permission. So Revive is offered again, but
 only on a server whose build carries that fix (`revive_is_fixed()`): the catalog's pin must be
-one that does (`REVIVE_FIXED_PINS`), and the install's checkout must be on that pin, or have
-been moved by Update to latest or Return to the tested pin while the catalog had it. A server
-made before the pin moved is still the crashing build, and pressing Revive there would take its
-world down, so it keeps the sentence that says to update the server first.
+one that does (`REVIVE_FIXED_PINS`), and the build the server runs must have been compiled from
+that pin, or from where Update to latest or Return to the tested pin moved it while the catalog
+had it (T589: the record of the build, not the checkout, which an update moves hours before its
+compile ends). A server made before the pin moved is still the crashing build, and pressing
+Revive there would take its world down, so it keeps the sentence that says to update the
+server first.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-from yulon import git, play, server_build_presses
+from yulon import play, server_build_presses
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.native import read_state
+from yulon.catalog.native import built_carries_pin, read_built_from, read_state
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -69,12 +71,15 @@ REVIVE_CRASHED = (
 """Why Revive is not drawn when the catalog's pin does not carry the fix (T218)."""
 
 REVIVE_NEEDS_UPDATE = (
-    "this server was built before Revive was fixed (it crashed the world server), so it stays "
-    "off until the server is updated: press "
-    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}, "
-    "then open Yu'lon again"
+    "it crashed the world server on builds made before its fix, and this server has no finished "
+    "build Yu'lon knows to have the fix, so it stays off until one finishes: press "
+    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} (or let "
+    "the install finish), then open Yu'lon again"
 )
-"""Why Revive is not drawn on a server whose build may be the one that crashes (T218)."""
+"""Why Revive is not drawn on a server whose build may be the one that crashes (T218, T589).
+
+Said of a server built before the pin moved, of one whose last press did not finish, and of a
+fresh install whose build has not finished, so it claims nothing about when the build was made."""
 
 
 def _core_source(entry: CatalogEntry) -> tuple[str, str, str] | None:
@@ -115,37 +120,32 @@ def _checkout_head(checkout: Path) -> str | None:
 
 
 def revive_is_fixed(entry: CatalogEntry, server_dir: Path | None) -> bool:
-    """Does the build this server was made from answer a console `revive`? (T218)
+    """Does the build this server runs answer a console `revive`? (T218, T589)
 
-    Yes only when the catalog's pin carries the fix AND the install's checkout is on that
-    pin, or on a commit an Update to latest / Return to the tested pin moved it to while the
-    catalog had this pin (the install record's `source_revs` row names the pin it was made
-    against, and the checkout's head begins with the commit it recorded) AND the install
-    record says the build finished with no failed or stopped press since (`last_error`).
-    Anything that cannot be read answers no: the cost is a button that appears after an
-    update, not a world server that goes down. Not covered: a crash that kills Yu'lon itself
-    part way through an update, which leaves the moved checkout and no `last_error`.
+    Yes only when the catalog's pin carries the fix AND the install record says the build
+    finished with no failed or stopped press since (`last_error`) AND the record of the running
+    build (`native.BUILT_FROM_FILE`) names the commit the core was compiled from, the checkout is
+    on that commit, and it is the pin or where an Update to latest / Return to the tested pin
+    made while the catalog had this pin moved it (`native.built_carries_pin()`).
+
+    The checkout alone is not enough (T589): an update moves it hours before the compile ends,
+    and a Yu'lon killed in between leaves the old, crashing binary beside a checkout on the pin.
+    The record is written only once a build is the one the tags name and forgotten when a press
+    starts changing them, so that state has no record. Anything that cannot be read answers no:
+    the cost is a button that appears after an update, not a world server that goes down.
     """
     core = _core_source(entry)
     if core is None or core[2] not in REVIVE_FIXED_PINS or server_dir is None:
         return False
     repo, dest, pin = core
     head = _checkout_head(server_dir / dest)
-    # The checkout is where the SOURCE is, not what was compiled (Codex): an update that
-    # moved it and then failed or was stopped leaves the old binary running. A finished
-    # build, and no unfinished press recorded since, is the evidence the binary is this code.
     # `valid=()`: not asking about stages, so no "stages this build does not know" warning;
     # every recorded name then reads back in `unknown`.
     state = read_state(server_dir, valid=())
     if head is None or state is None or "build" not in state.unknown or state.last_error:
         return False
-    if head == pin:
-        return True
-    row = state.rev_for(repo)
-    if row is None or row.pin != pin:
-        return False
-    built = row.built.split(git.VERSION_SEPARATOR)[0].strip()
-    return len(built) >= 7 and head.startswith(built)
+    built = read_built_from(server_dir).get(repo, "")
+    return head == built and built_carries_pin(built, pin, state.rev_for(repo))
 
 
 def withheld(entry: CatalogEntry, server_dir: Path | None = None) -> Mapping[str, str]:

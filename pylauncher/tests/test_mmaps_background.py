@@ -46,7 +46,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
 )
 from tests.test_purge import Recorder as PurgeRecorder
 from yulon import docker, platform, purge
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import extract, mmaps
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -1402,11 +1402,25 @@ def test_a_rebuild_keeps_a_complete_set_whatever_its_generation(server: Path) ->
     assert "mmap.enablePathFinding = 1\n" in conf_text(server)
 
 
+def built_on_its_pin(server_dir: Path, entry: CatalogEntry, *, head: str | None = None) -> None:
+    """T589: the record of a build that finished on `entry`'s pin, and the checkout (`head`) on it.
+
+    `head` defaults to the pin; another commit is a checkout moved after the build.
+    """
+    (source,) = entry.emulator.sources
+    assert source.rev is not None
+    git_dir = server_dir / source.dest / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / "HEAD").write_text(f"{head or source.rev}\n", encoding="utf-8")
+    native.remember_built_from(server_dir, {source.repo: source.rev})
+
+
 def test_a_complete_set_from_the_current_generator_survives_the_updating_routes(
     server: Path,
 ) -> None:
     fake = FakeMmapsDocker()
     current = with_generation(2)
+    built_on_its_pin(server, current)
     finish_a_run(server, current, fake)
     assert record(server)["generation"] == 2
     assert route(server, current, fake, clear=True) is None
@@ -1433,6 +1447,63 @@ def test_a_run_that_finishes_while_an_updating_route_waits_is_thrown_away_too(
     assert said is not None
     assert output(server) == [] and not (server / mmaps.RECORD_FILE).exists()
     assert "mmap.enablePathFinding = 0\n" in conf_text(server)
+
+
+def test_a_run_is_stamped_with_the_generation_of_the_build_not_of_the_catalog(
+    server: Path,
+) -> None:
+    """T589: the generator that runs is the one in the built image, not the catalog's pin.
+
+    With no record of a build that finished on the pin (an install older than the record, or
+    an Update killed between the checkout move and its compile), the run is stamped 1: made by
+    a generator nobody can name, so the next Update or Return makes the set again.
+    """
+    current = with_generation(2)
+    fake = FakeMmapsDocker()
+    finish_a_run(server, current, fake)
+    assert record(server)["generation"] == 1, "no record of what was built"
+    mmaps.discard(server, current, install_id=INSTALL_ID)
+    built_on_its_pin(server, current, head="e" * 40)
+    finish_a_run(server, current, fake)
+    assert record(server)["generation"] == 1, "the checkout is not what the record says was built"
+    mmaps.discard(server, current, install_id=INSTALL_ID)
+    built_on_its_pin(server, current)
+    finish_a_run(server, current, fake)
+    assert record(server)["generation"] == 2
+
+
+def test_kept_tiles_of_another_generator_are_not_continued(server: Path) -> None:
+    """T589: a failed run's tiles from the old generator are not finished by the new one."""
+    current = with_generation(2)
+    fake = FakeMmapsDocker()
+    mmaps.start_mmaps(
+        server,
+        current,
+        runner=fake,
+        clock=Clock(),
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=("--user", "1000:1000"),
+    )
+    fake.write_tiles(3)
+    fake.finish(139)
+    now = mmaps.mmaps_status(server, current, runner=fake, clock=Clock(), install_id=INSTALL_ID)
+    assert now.kept == 3 and not now.begins_again_because, "same build: it would continue"
+    built_on_its_pin(server, current)
+    now = mmaps.mmaps_status(server, current, runner=fake, clock=Clock(), install_id=INSTALL_ID)
+    assert now.begins_again_because, "the line says the start begins again"
+    assert mmaps.continues_from(server, current, install_id=INSTALL_ID) == 0
+    mmaps.start_mmaps(
+        server,
+        current,
+        runner=fake,
+        clock=Clock(),
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=("--user", "1000:1000"),
+    )
+    assert fake.mmaps_at_run[-1] == []
+    assert record(server)["generation"] == 2 and record(server)["kept"] == 0
 
 
 def test_a_record_written_before_generations_reads_as_the_first(server: Path) -> None:

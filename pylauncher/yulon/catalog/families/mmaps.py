@@ -84,7 +84,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from yulon import docker, platform, rmtree, server_build_presses
-from yulon.catalog import composegen, world_data
+from yulon.catalog import composegen, native, world_data
 from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, MmapTileHeader, TrinityCoreData
 from yulon.catalog.families import conf, extract
 from yulon.catalog.installer import InstallerError
@@ -469,6 +469,12 @@ class Job:
     block: TrinityCoreData
     container: str
     world_container: str
+    generation: int = 1
+    """T589: the generation of the generator in the BUILT image: the entry's `mmaps.generation`
+    when the running build is known to be compiled from its pin or past it
+    (`native.build_on_its_pins()`), else 1. What a run is stamped with and what kept tiles must
+    match to be continued; `block.mmaps.generation` stays what a complete set is measured
+    against (`_drop_outdated()`)."""
 
     @property
     def data_dir(self) -> Path:
@@ -501,7 +507,22 @@ def job_for(server_dir: Path, entry: CatalogEntry, install_id: str) -> Job:
         block=block,
         container=container_name(entry, install_id),
         world_container=entry.containers.world,
+        generation=_built_generation(server_dir, entry, block),
     )
+
+
+def _built_generation(server_dir: Path, entry: CatalogEntry, block: TrinityCoreData) -> int:
+    """The generation of the generator the built image holds (T589); 1 when it is not known.
+
+    The catalog's `mmaps.generation` is the PIN's generator, and the generator that runs is
+    the one in the image this server was compiled into, which an update killed part way, or
+    an install older than the build record, does not match. A set stamped 1 is made again by
+    the next Update to latest or Return to the tested pin, which is the safe side.
+    """
+    wanted = block.mmaps.generation
+    if wanted <= 1:
+        return wanted
+    return wanted if native.build_on_its_pins(entry, server_dir) else 1
 
 
 def _install_id(server_dir: Path, platform_id: Callable[[], str] | None) -> str:
@@ -618,7 +639,7 @@ def start_mmaps(
             started=started,
             evidence=evidence,
             kept=kept,
-            generation=job.block.mmaps.generation,
+            generation=job.generation,
         )
         _write_record(server_dir, queued)
         spec = docker.ContainerRun(
@@ -1456,6 +1477,9 @@ def _why_it_begins_again(job: Job, record: Record) -> str:
     files took 55 ms on WSL (2026-10-05), once per poll and only while a failed run
     with kept tiles is shown.
     """
+    if record.generation != job.generation:
+        # T589: tiles of two generators must not make one set (T244: the navmesh origin moved).
+        return "it was made by another version of the pathfinding tool than the one built now"
     if not record.evidence:
         return "Yu'lon could not tell which map data it was made from"
     if _evidence(job) == record.evidence:
@@ -1481,6 +1505,13 @@ def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
     here, because files can change between the failure and the start.
     """
     resumable = _resumable(job, before)
+    if resumable and before is not None and before.generation != job.generation:
+        logger.warning(
+            f"the pathfinding run that stopped part-way in {job.data_dir} was made by another "
+            f"version of the generator than the one built now, so its {before.kept} finished "
+            "tiles were removed and the run starts again from the beginning"
+        )
+        resumable = False
     if resumable and before is not None and (not before.evidence or before.evidence != evidence):
         logger.warning(
             f"the map data in {job.data_dir} changed since the pathfinding run that stopped "

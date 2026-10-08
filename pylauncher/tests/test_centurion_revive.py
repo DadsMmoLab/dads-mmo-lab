@@ -30,8 +30,15 @@ OLD_PIN = "6c6472c3b6aeb89169d7d49c45af7f7eab326743"
 LATER = "f" * 40
 
 
-def _server(tmp_path: Path, head: str | None = PIN, *, ref: str | None = None) -> Path:
-    """A Centurion folder whose checkout is on `head` (detached), or on a branch `ref`."""
+def _server(
+    tmp_path: Path, head: str | None = PIN, *, ref: str | None = None, built: str | None = ""
+) -> Path:
+    """A Centurion folder whose checkout is on `head` (detached), or on a branch `ref`.
+
+    `built` is the commit the running build was compiled from (`native.BUILT_FROM_FILE`, T589):
+    "" means `head` (a build that finished on this checkout, or the pin for a branch), None no
+    record at all.
+    """
     server = tmp_path / "centurion"
     git_dir = server / SOURCE.dest / ".git"
     git_dir.mkdir(parents=True)
@@ -41,7 +48,14 @@ def _server(tmp_path: Path, head: str | None = PIN, *, ref: str | None = None) -
     elif head is not None:
         (git_dir / "HEAD").write_text(f"{head}\n", encoding="utf-8")
     _state(server)
+    if built is not None:
+        _built(server, built or (head if ref is None and head is not None else PIN))
     return server
+
+
+def _built(server: Path, sha: str) -> None:
+    """What a build that finished writes: the commit it was compiled from (T589)."""
+    native.remember_built_from(server, {SOURCE.repo: sha})
 
 
 def _state(
@@ -161,6 +175,46 @@ def test_a_record_that_names_another_commit_than_the_checkout_is_not_trusted(
     assert not characters.revive_is_fixed(ENTRY, server)
 
 
+def test_a_checkout_on_the_pin_beside_the_old_build_withholds_revive(tmp_path: Path) -> None:
+    """T589: an Update or Return killed between the checkout move and the build's outcome.
+
+    The checkout is on the fixed pin, the install record still says `build` with no error (a
+    Yu'lon that died wrote none), and the binary is the old one that crashes on `revive`.
+    """
+    server = _server(tmp_path, built=OLD_PIN)
+    assert not characters.revive_is_fixed(ENTRY, server)
+    assert dict(characters.withheld(ENTRY, server)) == {"revive": characters.REVIVE_NEEDS_UPDATE}
+    (server / native.BUILT_FROM_FILE).unlink()
+    assert not characters.revive_is_fixed(ENTRY, server), "no record of any finished build"
+    _built(server, PIN)
+    assert characters.revive_is_fixed(ENTRY, server)
+
+
+def test_a_record_of_the_pin_under_a_checkout_elsewhere_is_not_trusted(tmp_path: Path) -> None:
+    """Sources (and tags) moved by something that does not write the record: an older Yu'lon."""
+    server = _server(tmp_path, head=OLD_PIN, built=PIN)
+    assert not characters.revive_is_fixed(ENTRY, server)
+
+
+def test_an_update_to_latest_needs_the_record_of_its_build_too(tmp_path: Path) -> None:
+    server = _server(tmp_path, head=LATER, built=None)
+    _recorded(server, built=f"{LATER[:7]} · 2026-10-09", pin=PIN)
+    assert not characters.revive_is_fixed(ENTRY, server), "moved, never built"
+    _built(server, PIN)
+    assert not characters.revive_is_fixed(ENTRY, server), "built on the pin, then moved"
+    _built(server, LATER)
+    assert characters.revive_is_fixed(ENTRY, server)
+
+
+def test_the_sentence_does_not_claim_when_the_build_was_made(tmp_path: Path) -> None:
+    """A fresh install whose build has not finished was not 'built before Revive was fixed'."""
+    assert "built before" not in characters.REVIVE_NEEDS_UPDATE
+    assert "Update the server to latest" in characters.REVIVE_NEEDS_UPDATE
+    server = _server(tmp_path, built=None)
+    _state(server, completed=())
+    assert dict(characters.withheld(ENTRY, server)) == {"revive": characters.REVIVE_NEEDS_UPDATE}
+
+
 def test_a_pin_that_nobody_has_checked_withholds_revive_with_the_old_sentence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -193,7 +247,7 @@ def test_the_tab_draws_revive_on_a_server_on_the_pin_and_not_on_the_old_one(
     stale = ControllerView(ENTRY, old, status_poll_ms=0, job_runner=run_inline)
     assert stale.revive_button not in stale.character_buttons()
     assert stale.characters_withheld_label.text().startswith(
-        "Not offered on this server yet: Revive — this server was built before Revive was fixed"
+        "Not offered on this server yet: Revive — " + characters.REVIVE_NEEDS_UPDATE
     )
 
 
