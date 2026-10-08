@@ -149,7 +149,9 @@ def test_the_snapshot_is_of_the_catalogs_wotlk_pin() -> None:
     core = load_catalog().get("wow-wotlk").emulator.sources[0]
     assert core.rev == PIN, (
         f"the WotLK pin moved to {core.rev}: re-read the PIN_COLUMNS tables at it "
-        "(base SQL plus every db_world update that alters them) and update PIN_COLUMNS"
+        "(base SQL plus every db_world update that alters them) and update PIN_COLUMNS; "
+        "re-copy test_npc_teleporter_remove.py's _BASE_ROWS from the new base SQL and "
+        "re-check that no base row moved into the teleporter's removed ranges"
     )
 
 
