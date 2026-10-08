@@ -430,11 +430,61 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerRefusal(problem)
-        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        refusal = _port_refusal(proc.stderr)
+        if refusal is not None:
+            raise DockerRefusal(refusal)
+        said = (
+            f"docker {' '.join(argv)} exited {proc.returncode}: "
+            f"{_daemon_lines(proc.stderr) or proc.stderr.strip()}"
+        )
         if timeout is not None and runner.timed_out(proc):
             raise DockerTimedOutError(said)
         raise DockerCommandError(said)
     return proc
+
+
+_DAEMON_LINE = re.compile(r"^[ \t]*(Error response from daemon:.*?)[ \t]*$", re.MULTILINE)
+_PORT_NOT_AVAILABLE = re.compile(
+    r"ports are not available: exposing port TCP \S*?:(\d+) -> \S+: listen tcp\d*"
+    r" \S+: bind: (?P<why>[^\r\n]*)"
+)
+
+
+def _daemon_lines(stderr: str) -> str:
+    """The daemon's own `Error response from daemon:` lines in compose's output, else "" (T574).
+
+    `docker compose up` prints its pull and create progress first and the reason
+    it failed last, so the head of stderr names an image layer, not the
+    failure. Several lines are joined; the same line twice is kept once.
+    """
+    found: list[str] = []
+    for match in _DAEMON_LINE.finditer(stderr):
+        if match.group(1) not in found:
+            found.append(match.group(1))
+    return " / ".join(found)
+
+
+def _port_refusal(stderr: str) -> str | None:
+    """The plain sentence for the daemon's `ports are not available` error, or None (T574).
+
+    The preflight bind check covers a port blocked when the install starts; this
+    covers one that became blocked afterwards (a range Windows reserved at the
+    next boot). Only the daemon's own wording is read, so no host is asked:
+    Windows' "forbidden by its access permissions" (WSAEACCES) and a Linux
+    "permission denied" are `reserved`, everything else the bind said is `in_use`.
+    A message without the port number in the shape Docker prints it is left alone.
+    """
+    for line in _daemon_lines(stderr).split(" / "):
+        match = _PORT_NOT_AVAILABLE.search(line)
+        if match is None:
+            continue
+        why = match.group("why").lower()
+        windows = "forbidden by its access permissions" in why
+        kind: Literal["reserved", "in_use"] = (
+            "reserved" if windows or "permission denied" in why else "in_use"
+        )
+        return blocked_port_sentence(int(match.group(1)), kind, windows=windows)
+    return None
 
 
 def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
