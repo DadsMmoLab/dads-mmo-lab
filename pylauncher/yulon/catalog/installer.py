@@ -151,6 +151,14 @@ class InstallerError(RuntimeError):
             self.detail = detail
 
 
+class SelfExplainedError(InstallerError):
+    """An `InstallerError` whose sentence already says what to do (T563).
+
+    A wrapper that would add its own remedy ("press X again") passes this one
+    through unchanged: its remedy is the right one, and the wrapper's may not be.
+    """
+
+
 class OneShotLeftRunning(InstallerError, TrueAfterStop):
     """A one-shot the engine had to end -- the database importer -- is still running (T539).
 
