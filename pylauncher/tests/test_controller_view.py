@@ -5546,6 +5546,33 @@ def test_a_start_that_fails_on_the_channel_port_rolls_the_channel_back(
     assert "command channel" in said.lower()
 
 
+def test_a_start_that_fails_on_the_channel_port_in_docker_desktops_words_rolls_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T574: `docker._run` says that failure in a plain sentence; the rollback must still see it.
+
+    Docker Desktop's own text (measured on yulon-win11, 2026-10-08) names the port
+    on a `listen tcp4 ...: bind:` line. The sentence Yu'lon shows has no such line,
+    so the raw daemon text has to reach the predicate beside it, as the error's detail.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    daemon = (
+        "Error response from daemon: ports are not available: exposing port TCP "
+        "127.0.0.1:7878 -> 127.0.0.1:0: listen tcp4 127.0.0.1:7878: bind: Only one usage "
+        "of each socket address (protocol/network address/port) is normally permitted."
+    )
+
+    view._start_failed(_compose_up_said(" Container ac-database Started\n" + daemon + "\n"))
+
+    assert stub.rollbacks == 1
+    said = view.problem_label.text()
+    assert "7878" in said
+    assert "command channel" in said.lower()
+
+
 def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
