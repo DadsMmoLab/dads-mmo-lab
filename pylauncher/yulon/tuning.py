@@ -606,6 +606,21 @@ def is_one_of(name: str, names: Iterable[str]) -> bool:
     return any(file_key(other) == key for other in names)
 
 
+MAX_EDIT_BYTES = 2 * 1024 * 1024
+"""The largest conf the raw editor opens: 2 MB (T573 item 4).
+
+The shipped `worldserver.conf` is about 150 KB. The editor reads on the window's
+own thread, so a file of hundreds of megabytes (a log renamed to `.conf`, say)
+would freeze the app and fill the editor; past this size the file opens empty and
+read-only with `TOO_BIG` instead.
+"""
+
+TOO_BIG = (
+    "{file} is too big to edit here: this editor opens files up to {limit} MB. "
+    "Open it in a text editor, or keep it under that size."
+)
+
+
 BOM = "\ufeff"
 _TERMINATOR = re.compile(r"\r\n|\n|\r")
 

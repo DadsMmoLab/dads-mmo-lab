@@ -19611,7 +19611,17 @@ class ControllerView(QWidget):
             # and another file's Save (T573): shown empty and read-only.
             tuning.check_inside(path, server_dir)
             with open(path, encoding="utf-8", newline="") as handle:
-                raw = handle.read()
+                # One character past the cap, so a file over it is seen without being read whole.
+                raw = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(raw) > tuning.MAX_EDIT_BYTES:
+                self.tuning_panel.set_file_text(
+                    "",
+                    read_only=True,
+                    note=tuning.TOO_BIG.format(
+                        file=file, limit=tuning.MAX_EDIT_BYTES // (1024 * 1024)
+                    ),
+                )
+                return
         except tuning.TuningError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=str(exc))
             return

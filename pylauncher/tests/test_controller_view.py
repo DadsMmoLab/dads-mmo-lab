@@ -13751,6 +13751,30 @@ def test_the_picker_lists_a_core_conf_once_whatever_the_case_of_a_module_rows_sp
     assert [f.lower() for f in files] == ["env/dist/etc/worldserver.conf"], files
 
 
+def test_a_conf_over_the_editors_size_cap_opens_empty_and_read_only_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 4. Mutation: read the whole file again and a huge file stalls the window.
+
+    The cap is lowered so the test does not write megabytes; the read is also asserted to stop
+    one character past it, which is what keeps the GUI thread's read bounded.
+    """
+    monkeypatch.setattr(tuning, "MAX_EDIT_BYTES", 100)
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_text("BeastMaster.Enable = 1\n" * 50, encoding="utf-8")
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+    assert "too big" in view.tuning_panel.file_note.text()
+    path.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    view.open_tuning_file(file)
+    assert view.tuning_panel.editor.toPlainText() == "BeastMaster.Enable = 1\n"
+
+
 def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
 
