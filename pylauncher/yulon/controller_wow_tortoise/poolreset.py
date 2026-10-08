@@ -202,7 +202,7 @@ def _write_value(
         with path.open(encoding="utf-8", newline="") as handle:
             before = handle.read()
         text = _with_value(entry, before, value)
-        made = tuning.backup(path) if backup else None
+        made = tuning.backup(path, root=server_dir) if backup else None
     except (OSError, UnicodeDecodeError, InstallerError, tuning.TuningError) as exc:
         raise PoolResetError(f"could not write {path.name}: {exc}") from exc
     try:

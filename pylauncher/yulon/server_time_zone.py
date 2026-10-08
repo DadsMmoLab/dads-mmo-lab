@@ -232,7 +232,7 @@ def write(entry: CatalogEntry, server_dir: Path, zone: str) -> Written:
     if after == text:
         return Written(FILE, rule, None, reading.shown, zone)
     try:
-        made = tuning.backup(path)
+        made = tuning.backup(path, root=server_dir)
     except (OSError, tuning.TuningError) as exc:
         raise TimeZoneSettingError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     try:

@@ -2537,6 +2537,26 @@ def _with_custom_route(
     return route
 
 
+def _with_the_card_buttons(services: ControllerServices) -> None:
+    """Give the custom-module card its two presses and nothing else (T596).
+
+    A game with no install seam draws a sentence in that card instead of the
+    buttons, so a layout test about the card WotLK really has must wire the seams
+    -- but not `_with_custom_route`'s layered store, whose rows those tests count.
+    """
+    route = _FakeCustomRoute(cast(Any, services.store))
+    services.module_from_link = route.derive_link
+    services.module_from_folder = route.derive_folder
+    services.module_install_custom = route.install
+
+
+def _services_with_the_card_buttons(ps: _Ps, tmp_path: Path) -> ControllerServices:
+    """`_services` for WotLK's layout tests: the card has its two presses, as the game's does."""
+    services = _services(ps, tmp_path, [])
+    _with_the_card_buttons(services)
+    return services
+
+
 def _listed(view: ControllerView) -> list[str]:
     """Every row's name and description, the way the cards read them out."""
     return [f"{r.data.name} — {r.data.description}" for r in view.modules_panel.rows()]
@@ -12675,6 +12695,118 @@ def test_saving_a_card_writes_what_changed_and_names_the_backup(
     assert not redrawn.changed
 
 
+def _link_out(path: Path, tmp_path: Path) -> Path:
+    """Replace `path` with a symlink to a same-text file outside `tmp_path`'s server folder."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.conf"
+    outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    return outside
+
+
+def test_a_card_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning` and the outside file is rewritten."""
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
+
+
+def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning_file` and `open(path, "w")` writes through."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out(tmp_path / file, tmp_path)
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert outside.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
+
+
+def _card_key(view: ControllerView, module_id: str) -> tuple[str, str]:
+    card = view.tuning_panel.card(module_id).card
+    return (card.family, card.module_id)
+
+
+def _link_out_with_a_backup(path: Path, tmp_path: Path) -> Path:
+    """`_link_out`, plus a `.bak` of the old text beside the link (what an upgrader has)."""
+    outside = _link_out(path, tmp_path)
+    old = path.with_name(path.name + ".20260101-000000-000000.bak")
+    old.write_text("Key = OLD\n", encoding="utf-8")
+    return outside
+
+
+def test_a_card_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. `tuning.restore` is `shutil.copy2` onto the target and follows a link.
+
+    Mutation: drop the `check_inside` in `_put_back` and "Key = OLD" lands in the outside file.
+    """
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out_with_a_backup(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+
+    view.revert_tuning(*_card_key(view, "mod-transmog"))
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. Same defect on the raw editor's Revert. Mutation: as the card's."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out_with_a_backup(tmp_path / file, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    view.open_tuning_file(file)
+
+    view.revert_tuning_file()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_the_raw_editor_opens_a_conf_that_links_out_read_only_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `open_tuning_file` and another file's text is on offer."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    _link_out(tmp_path / file, tmp_path)
+
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+
+
 def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -12963,6 +13095,78 @@ def test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad(
     assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
     assert tuning.backups_of(tmp_path / own) == ()
     assert tuning.backups_of(tmp_path / core) == ()
+
+
+def test_a_multi_file_card_writes_nothing_when_the_second_file_links_out_of_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the path pre-check in `save_tuning` and the first file lands alone."""
+    own = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    core = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, own, "[worldserver]\nBeastMaster.Enable = 1\n")
+    _deploy(tmp_path, core, '[worldserver]\nCreatures.CustomIDs = "1,2"\n')
+    outside = _link_out(tmp_path / core, tmp_path)
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-npc-beastmaster"}))
+    before = (tmp_path / own).read_bytes()
+    card = view.tuning_panel.card("mod-npc-beastmaster")
+    card.editors["BeastMaster.Enable"].control.setChecked(False)
+    card.editors["Creatures.CustomIDs"].control.setText("3")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
+    assert tuning.backups_of(tmp_path / own) == ()
+    assert outside.read_text(encoding="utf-8") == '[worldserver]\nCreatures.CustomIDs = "1,2"\n'
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The boundary is the SERVER folder, not the file's own folder.
+
+    Mutation: leave `root=server_dir` off the save's backup and a link into a sibling folder is
+    refused as if it had left the install.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    real = tmp_path / "shared" / "beast.conf"
+    real.parent.mkdir()
+    real.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    (tmp_path / file).unlink()
+    try:
+        (tmp_path / file).symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert real.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+
+
+def test_a_card_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: leave `root=server_dir` off the card's `tuning.write` and this is refused."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    real = tmp_path / "shared" / "transmog.conf"
+    real.parent.mkdir()
+    real.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.reload_tuning()
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert "Transmogrification.Enable = 0" in path.read_text(encoding="utf-8")
+    assert "outside the server folder" not in view.tuning_report.toPlainText()
 
 
 def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
@@ -13556,6 +13760,150 @@ def test_the_raw_revert_restores_from_the_backup_and_says_which(
 
     assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
     assert ".bak" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_save_keeps_the_bom_and_every_untouched_lines_own_ending(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The real editor's text goes through `save_tuning_file`, as the Save press does.
+
+    Mutation: write `text.replace("\\n", newline)` again and the BOM goes, the LF line becomes
+    CRLF and the lone CR becomes a line ending of the file's usual kind.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_bytes("\ufeffA = 1\r\nBeastMaster.Enable = 1\nC = 3\rD = 4\r\n".encode())
+    view.open_tuning_file(file)
+    editor = view.tuning_panel.editor
+    assert "\ufeff" not in editor.toPlainText()
+    editor.setPlainText(
+        editor.toPlainText().replace("BeastMaster.Enable = 1", "BeastMaster.Enable = 0")
+    )
+
+    view.save_tuning_file(editor.toPlainText())
+
+    assert path.read_bytes() == "\ufeffA = 1\r\nBeastMaster.Enable = 0\nC = 3\rD = 4\r\n".encode()
+
+
+def test_a_second_spelling_of_a_core_conf_is_read_only_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. On macOS `Worldserver.conf` IS `worldserver.conf`: a Save writes the core's.
+
+    Mutation: compare `file in core` exactly again and the second spelling is saved.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    # On this (case-sensitive) test disk it is a file of its own; on the Mac it is the core's.
+    other = "env/dist/etc/Worldserver.conf"
+    core = _deploy(tmp_path, other, "[worldserver]\n")
+    view.tuning_panel.set_files((other,), read_only=())
+    view.open_tuning_file(other)
+    assert view.tuning_panel.editor.isReadOnly()
+
+    view.save_tuning_file("[worldserver]\nMotd = hi\n")
+
+    assert core.read_text(encoding="utf-8") == "[worldserver]\n"
+
+
+def test_revert_leaves_a_second_spelling_of_a_core_conf_alone_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: compare `file in core` exactly in Revert and it restores over it."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    other = "env/dist/etc/Worldserver.conf"
+    path = _deploy(tmp_path, other, "[worldserver]\nMotd = old\n")
+    tuning.backup(path)
+    path.write_text("[worldserver]\nMotd = new\n", encoding="utf-8")
+    view.tuning_panel.set_files((other,), read_only=())
+
+    view.revert_tuning_file()
+
+    assert path.read_text(encoding="utf-8") == "[worldserver]\nMotd = new\n"
+
+
+def test_the_picker_lists_a_core_conf_once_whatever_the_case_of_a_module_rows_spelling(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: test `name not in found` exactly and the Mac gets two buttons."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    core = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\n")
+    assert core.is_file()
+    row = tuning.TuningRow(
+        module_id="m",
+        module_name="M",
+        family="module",
+        file="env/dist/etc/Worldserver.conf",
+        key="K",
+        label="K",
+        explain=None,
+        type=None,
+        min=None,
+        max=None,
+        default=None,
+        current=None,
+        installed=True,
+        backend="conf",
+        read_only_reason=None,
+    )
+    view._tuning_rows = (row,)
+    # The folder holds one file, spelled as the module spells it.
+    monkeypatch.setattr(Path, "is_file", lambda self: self.name.lower() == "worldserver.conf")
+
+    files = view._tuning_files()
+
+    # The folder's other confs (the view lists every module .conf since T569) are not the point.
+    assert [f.lower() for f in files if f.lower().endswith("/worldserver.conf")] == [
+        "env/dist/etc/worldserver.conf"
+    ], files
+
+
+def test_a_conf_over_the_editors_size_cap_opens_empty_and_read_only_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 4. Mutation: read the whole file again and a huge file stalls the window.
+
+    The cap is lowered so the test does not write megabytes; the read is also asserted to stop
+    one character past it, which is what keeps the GUI thread's read bounded.
+    """
+    monkeypatch.setattr(tuning, "MAX_EDIT_BYTES", 100)
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_text("BeastMaster.Enable = 1\n" * 50, encoding="utf-8")
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+    assert "too big" in view.tuning_panel.file_note.text()
+    path.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    view.open_tuning_file(file)
+    assert view.tuning_panel.editor.toPlainText() == "BeastMaster.Enable = 1\n"
+
+
+def test_the_size_cap_counts_bytes_not_characters(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 4, Codex P2: 40 three-byte characters are 120 bytes, over a 100-byte cap.
+
+    Mutation: read `MAX_EDIT_BYTES + 1` characters again and the 120-byte file opens editable.
+    """
+    monkeypatch.setattr(tuning, "MAX_EDIT_BYTES", 100)
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_text("\u20ac" * 40, encoding="utf-8")
+    assert path.stat().st_size == 120
+
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert "too big" in view.tuning_panel.file_note.text()
 
 
 def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -20057,7 +20405,7 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -20304,6 +20652,8 @@ def _past_its_pin(
     services, spy = _latest(ps, tmp_path)
     if custom_route:
         _with_custom_route(services)
+    else:
+        _with_the_card_buttons(services)
     view = ControllerView(WOTLK, services, status_poll_ms=0, **kwargs)
     spy.revs = (
         native.SourceRev("mod-playerbots/azerothcore-wotlk", "7f12e89 · 2026-09-20", pin=_PIN),
@@ -20544,6 +20894,99 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view.module_folder_button.setEnabled(True)
     process_events()
     assert folder.isEnabled(), "the line did not follow its card's button back"
+
+
+def test_a_game_with_no_outside_module_route_says_so_instead_of_two_dead_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Tortoise's box offered two greyed buttons and never said why.
+
+    A game with no custom-module route at all (no install seam: every game but
+    WotLK) draws no "Install from link…" / "Install from folder…" in the box,
+    card or line; it says in one sentence that the server cannot take modules
+    from outside yet and that the list above is what it can take. The busy lock
+    finishing must not hand the hidden buttons back.
+    """
+    services = _services(ps, tmp_path, [])
+    assert services.module_install_custom is None
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert TORTOISE.name in said and "from outside" in said and "listed above" in said
+    assert said != controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for dead in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert dead.isHidden(), f"{dead.text()!r} is still offered with no route behind it"
+    assert not view.custom_module_card.isHidden()
+    assert not view.custom_module_line_note.isHidden()
+    assert view.custom_module_line_note.toolTip() == said
+
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_no_add_on_modules_does_not_promise_a_list_above(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Centurion's list is empty on purpose; the box must not point at it."""
+    centurion = load_catalog().get("wow-centurion")
+    services = _services(ps, tmp_path, [])
+    services.no_modules_note = controller_view_module.NO_ADDON_MODULES.format(game=centurion.name)
+    view = ControllerView(centurion, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert centurion.name in said and "no add-on modules" in said
+    assert "listed above" not in said
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: WotLK's box is not touched by the explanation."""
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for live in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert not live.isHidden() and live.isEnabled()
+    assert view.custom_module_line_note.isHidden()
+
+
+def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T596: the shipped games split cleanly; WotLK and Unbound (its sibling) take outside modules.
+
+    Unbound is built by WotLK's factory, so its box must keep both presses and
+    the card's own sentence; every other game must show the "can't take" sentence.
+    """
+    takes = {"wow-wotlk", "wow-unbound"}
+    for entry in load_catalog().games:
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
+        view = ControllerView(entry, services, status_poll_ms=0)
+        if entry.id in takes:
+            assert services.module_install_custom is not None, entry.id
+            assert not view.module_link_button.isHidden(), entry.id
+            assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+        else:
+            assert services.module_install_custom is None, entry.id
+            assert view.module_link_button.isHidden(), entry.id
+            assert view.module_folder_button.isHidden(), entry.id
+            assert "outside" in view.custom_module_note.text() or "no add-on" in (
+                view.custom_module_note.text()
+            ), entry.id
 
 
 THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))
@@ -21823,7 +22266,9 @@ def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
     import main
 
     for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
-        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        view = ControllerView(
+            WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0
+        )
         window, _tab = _controller_in_the_real_window(view, "Modules")
         _at(window, DESKTOP_1080P)
         _ran_a_job(view)
@@ -21882,7 +22327,7 @@ def test_folding_the_log_by_hand_gives_the_report_its_height_back(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -21932,7 +22377,7 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     """
     from yulon.ui.theme import apply_dadcraft_theme
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -22008,7 +22453,7 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)

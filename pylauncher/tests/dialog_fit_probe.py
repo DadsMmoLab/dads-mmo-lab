@@ -163,7 +163,7 @@ def dialogs(server_dir: Path) -> dict[str, tuple[Callable[..., object], str, str
         ),
         "return-to-pin": (
             _yes_no,
-            f"Put {TORTOISE.name} back on the tested commit?",
+            f"Move {TORTOISE.name} onto the tested commit?",
             pin,
         ),
         "repair": (_yes_no, "Repair server files…", _repair_text()),

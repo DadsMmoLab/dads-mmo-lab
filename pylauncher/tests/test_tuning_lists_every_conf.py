@@ -9,6 +9,7 @@ below is that player's, name for name.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from PySide6.QtCore import Qt
 
 from tests.conftest import process_events
 from tests.test_controller_view import _deploy, _Ps, _services, _with_the_core_confs
-from yulon import runner
+from yulon import runner, tuning
 from yulon.catalog.catalog import load_catalog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerView
@@ -239,23 +240,26 @@ def test_the_open_files_button_is_scrolled_into_view(
     assert 0 <= top and top + last.height() <= area.viewport().height() + 1
 
 
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
 def test_a_conf_the_file_system_calls_the_same_file_gets_one_button(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
 ) -> None:
     """Codex review: on Windows `PlayerBots.conf` IS `playerbots.conf`, and must stay read-only.
 
-    `os.path.normcase` is what folds case there; it is folded here the same way
-    so the rule is tested on this file system. A conf the cards name in another
-    case than the folder does is one button too.
+    The same holds on a Mac's case-blind volume (T573 item 3; `os.path.normcase` is the
+    identity there). This test disk tells names apart, so a second spelling is made a hard
+    link of the first: the file system answering "same file", as the real disk does.
+    A conf the cards name in another case than the folder does is one button too.
 
     Mutation: compare the raw names and both spellings get a button.
     """
-    import os
-
-    monkeypatch.setattr(os.path, "normcase", lambda name: name.lower())
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: platform in ("win32", "darwin"))
     view = _players_view(ps, tmp_path, frozenset({"mod-npc-beastmaster", "mod-transmog"}))
-    _deploy(tmp_path, f"{MODULES}/PlayerBots.conf", "# other case\n")
-    _deploy(tmp_path, f"{MODULES}/Mod_NPC_BeastMaster.conf", "# other case\n")
+    for real, other in (
+        ("playerbots.conf", "PlayerBots.conf"),
+        ("mod_npc_beastmaster.conf", "Mod_NPC_BeastMaster.conf"),
+    ):
+        os.link(tmp_path / MODULES / real, tmp_path / MODULES / other)
     files = view._tuning_files()
     assert [f for f in files if f.lower().endswith("/playerbots.conf")] == [
         f"{MODULES}/playerbots.conf"
@@ -263,6 +267,21 @@ def test_a_conf_the_file_system_calls_the_same_file_gets_one_button(
     assert [f for f in files if f.lower().endswith("/mod_npc_beastmaster.conf")] == [
         f"{MODULES}/mod_npc_beastmaster.conf"
     ]
+
+
+def test_two_spellings_that_are_two_files_each_get_a_button_on_a_case_sensitive_mac_volume(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: a case-sensitive APFS volume holds `Foo.conf` and `foo.conf` as two files.
+
+    Mutation: dedupe on the platform's key alone and the second spelling vanishes from the list.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _players_view(ps, tmp_path, frozenset({"mod-npc-beastmaster", "mod-transmog"}))
+    _deploy(tmp_path, f"{MODULES}/Extra.conf", "# a\n")
+    _deploy(tmp_path, f"{MODULES}/extra.conf", "# b\n")
+    files = view._tuning_files()
+    assert {f"{MODULES}/Extra.conf", f"{MODULES}/extra.conf"} <= set(files)
 
 
 def test_the_scroll_box_restates_its_height_when_the_bar_wraps_without_the_box_resizing(
