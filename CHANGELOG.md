@@ -45,6 +45,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 - **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
+- Install now checks every port the server needs before the build, and says if Windows has reserved the database port.
+- A port the server cannot use is said in plain words, and a failed start shows Docker's error first.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
