@@ -186,3 +186,23 @@ def test_the_update_s_sentence_now_points_at_the_press() -> None:
 
     said = tbc_engine(Recorder(), entry=ENTRY)._say_so(U2)
     assert native.CORRECTIONS_BUTTON_LABEL in said and "DELETE" not in said
+
+
+def test_a_refusal_on_the_first_of_two_stuck_files_stops_before_the_second(tmp_path: Path) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    sqlplan.record_world_files(
+        (sqlplan.FileRow("content updates", U3, sqlplan.file_digest(server_dir / U3), "started"),),
+        marker_db="mangos",
+        container="tbc-db",
+        client="mariadb",
+        password="x",
+        exec_stdin=db.exec_stdin,
+    )
+    engine = an_engine(PLAN, db)
+    check = engine.correction_check(folder(tmp_path))
+    assert [s.file for s in check.stuck] == [U2, U3]
+    db.refuse = "t2"
+    lines = list(engine.apply_corrections(check, folder(tmp_path)))
+    assert any("refused" in line and U2 in line for line in lines), lines
+    assert "t3" not in db.tables("mangos")
+    assert _ledger(db)[U2] == "failed" and _ledger(db)[U3] == "started"

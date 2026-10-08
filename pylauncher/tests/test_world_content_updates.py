@@ -480,7 +480,8 @@ def test_a_file_a_stopped_press_left_started_is_named_and_nothing_after_it_runs(
     lines = _press(rec, server_dir, db, world)
     assert _sent(rec, U3) == 0 and _sent(rec, U4) == 0
     assert any(
-        U3 in line and "cannot tell" in line and "not in the app yet" in line for line in lines
+        U3 in line and "cannot tell" in line and "Apply database corrections" in line
+        for line in lines
     )
     assert any("wait behind it" in line for line in lines), lines
     assert ("content updates", U4) not in db.rows
@@ -490,7 +491,7 @@ def test_a_file_that_fails_stops_the_world_updates_there_and_is_never_retried_un
     tmp_path: Path,
 ) -> None:
     """The lead's rule: a refused file stops the catch-up at that file, and the player is
-    told which and how to let the next update try it again (delete its ledger row)."""
+    told which and how to run it again (the Apply database corrections press, T545)."""
     rec, server_dir, db, world = _installed(tmp_path)
     rec.failing_sql = "SELECT 3;"
     lines = _press(rec, server_dir, db, world)
@@ -498,7 +499,7 @@ def test_a_file_that_fails_stops_the_world_updates_there_and_is_never_retried_un
     assert _sent(rec, U4) == 0, "nothing after the refused file runs"
     stop = [line for line in lines if "refused the world update" in line]
     assert (
-        stop and U3 in stop[0] and "mangos.yulon_install_file" in stop[0] and "fresh" in stop[0]
+        stop and U3 in stop[0] and "Apply database corrections" in stop[0] and "fresh" in stop[0]
     ), lines
     assert "recreate" in rec.calls, "the new build still starts"
 
