@@ -1133,6 +1133,51 @@ def test_a_blank_line_added_after_a_lone_cr_line_stays_a_blank_line() -> None:
     assert tuning.editor_view(out) == edited
 
 
+@pytest.mark.parametrize("cap", [1500, 0, 2])
+def test_an_edit_in_place_keeps_every_untouched_lines_raw_ending(
+    monkeypatch: pytest.MonkeyPatch, cap: int
+) -> None:
+    """T573 re-review, fuzz: changing lines without adding or removing any keeps the rest.
+
+    Run with the real cap and with caps of 0 and 2, which force the over-size path on tiny
+    files. The oracle is on the RAW endings: line i that was not changed ends as it did.
+    """
+    import random
+
+    def split(text: str) -> tuple[list[str], list[str]]:
+        lines, found, at = [], [], 0
+        for m in tuning._TERMINATOR.finditer(text):
+            lines.append(text[at : m.start()])
+            found.append(m.group())
+            at = m.end()
+        return [*lines, text[at:]], [*found, ""]
+
+    monkeypatch.setattr(tuning, "MAX_DIFF_LINES", cap)
+    rng = random.Random(cap + 1)
+    words = ["A", "B", "", "# note", "[s]"]
+    for _ in range(3000):
+        raw = "".join(
+            f"{rng.choice(words)}{i}" + rng.choice(["\n", "\r\n", "\r"])
+            for i in range(rng.randint(1, 9))
+        )
+        raw += rng.choice(["", "tail"])
+        old, old_ends = split(raw)
+        new = list(old)
+        for _ in range(rng.randint(0, 3)):
+            at = rng.randrange(len(new))
+            new[at] = f"{rng.choice(words)}chg{at}"
+        edited = "\n".join(new)
+
+        out = tuning.save_text(raw, edited)
+
+        assert tuning.editor_view(out) == edited, (raw, edited, out)
+        got, got_ends = split(out)
+        assert len(got) == len(old)
+        for i in range(len(old) - 1):
+            if new[i] == old[i]:
+                assert got_ends[i] == old_ends[i], (raw, edited, out, i)
+
+
 def test_whatever_is_typed_comes_back_as_the_same_lines_after_a_save() -> None:
     """T573 review, fuzz: a save never merges or splits lines, and keeps untouched bytes.
 
@@ -1191,6 +1236,43 @@ def test_a_big_conf_saves_fast_and_keeps_the_lines_that_were_not_touched() -> No
     again = tuning.save_text(raw, everything)
     assert tuning.editor_view(again) == everything
     assert time.perf_counter() - started < 2.0
+
+
+def test_two_far_apart_edits_in_a_big_mixed_ending_file_keep_every_other_lines_bytes() -> None:
+    """T573 re-review: past `MAX_DIFF_LINES` the lines between two edits lost their endings.
+
+    2000 lines, every 5th LF, every 50th a lone CR, the rest CRLF; edit the first and the last.
+    Mutation: give every line of an over-size middle the file's usual ending again and 399 LF
+    lines turn CRLF and 40 lone CRs vanish.
+    """
+    n = 3200
+    lines = [f"Key{i % 40} = {i % 7}" for i in range(n)]
+    ends = ["\r" if i % 50 == 0 else "\n" if i % 5 == 0 else "\r\n" for i in range(n)]
+    raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+    edited = list(lines)
+    edited[0], edited[n - 1] = "First = changed", "Last = changed"
+
+    out = tuning.save_text(raw, "\n".join(edited) + "\n")
+
+    expected = "".join(line + end for line, end in zip(edited, ends, strict=True))
+    assert out == expected
+
+
+def test_a_line_added_in_a_big_file_leaves_the_lines_after_it_their_endings() -> None:
+    """The bottom-aligned half of the fallback: lines after an insertion keep their bytes."""
+    n = 3200
+    lines = [f"Key{i % 40} = {i % 7}" for i in range(n)]
+    ends = ["\r" if i % 50 == 0 else "\n" if i % 5 == 0 else "\r\n" for i in range(n)]
+    raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+    edited = ["Inserted = 1", *lines]
+    edited[n - 5] = "Changed = last"  # near the end, so the unchanged tail is short
+
+    out = tuning.save_text(raw, "\n".join(edited) + "\n")
+
+    # Every line from the old first to the one before the change sits one place lower
+    # than it did, and keeps its bytes.
+    middle = "".join(line + end for line, end in zip(lines[: n - 6], ends[: n - 6], strict=True))
+    assert out.startswith("Inserted = 1" + tuning._newline_of(raw) + middle)
 
 
 def test_an_emptied_editor_writes_an_empty_file() -> None:

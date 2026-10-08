@@ -736,6 +736,21 @@ def save_text(raw: str, edited: str) -> str:
                     ends[at] = old_ends[head + i1 + k] or default
                 elif at > 0:
                     ends[at] = ends[at - 1]
+    else:
+        # Too big to diff, but not to keep: each new line takes the ending of the old line
+        # it sits on -- the one at the same place counted from the top, or from the bottom --
+        # when that line has the same text, and every line of an in-place edit (as many
+        # lines before as after) keeps the ending of the line it replaced. Only a line that
+        # is truly new takes the file's usual one. Linear in the file, so the window stays
+        # responsive, and an untouched line keeps its own bytes (a lone CR stays a lone CR).
+        in_place = len(old_mid) == len(new_mid)
+        for at in range(head, high - tail):
+            from_top = at
+            from_bottom = low - (high - at)
+            if in_place or (from_top < low and old_lines[from_top] == new_lines[at]):
+                ends[at] = old_ends[from_top] or default
+            elif 0 <= from_bottom < low and old_lines[from_bottom] == new_lines[at]:
+                ends[at] = old_ends[from_bottom] or default
     ends[-1] = ""
     # A lone-CR line followed by an empty line that ends in a bare LF would read back as ONE
     # CRLF: the blank line gone. Such an empty line takes a lone CR as well.
@@ -746,7 +761,10 @@ def save_text(raw: str, edited: str) -> str:
 
 
 MAX_DIFF_LINES = 1500
-"""The most lines of either side `save_text` lines up with a diff (about a second at worst)."""
+"""The most lines of either side `save_text` lines up with a diff (about a second at worst).
+
+Past it the lines are matched by their place from the top and from the bottom instead
+(`save_text`), which keeps every untouched line's ending without a diff."""
 
 
 PRIVATE_MODE = 0o600
