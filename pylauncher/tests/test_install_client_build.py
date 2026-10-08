@@ -137,6 +137,11 @@ def test_the_right_client_passes_the_install_preflight(
     _versioned(client, *parts)
 
     assert _refusals(game, client, tmp_path) == []
+    got = _client_gather(load_catalog().get(game), tmp_path / "server", client_dir=client)
+    row = next(c for c in got.client_checks if c.name == clientdir.BUILD_CHECK)
+    assert row.verdict == "pass"
+    major, minor, patch, build = parts
+    assert f"{major}.{minor}.{patch} ({build})" in row.detail
 
 
 def test_an_exe_with_no_version_resource_is_not_refused_at_install(

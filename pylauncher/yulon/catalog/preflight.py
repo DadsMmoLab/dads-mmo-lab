@@ -474,7 +474,7 @@ def gather(
             wrong_build = clientdir.build_check(client_dir, entry.client)
             if wrong_build is not None:
                 client_checks = (*client_checks, wrong_build)
-                refused = True
+                refused = wrong_build.verdict == "refuse"
         if ready and client_dir is not None and not refused:
             client_bind = probe(client_dir)
     return Facts(
