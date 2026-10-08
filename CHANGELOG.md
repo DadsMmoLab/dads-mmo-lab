@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
