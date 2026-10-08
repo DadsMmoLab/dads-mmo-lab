@@ -291,3 +291,29 @@ def test_the_switches_read_the_file_once_so_a_save_in_between_cannot_make_them_o
 def test_a_conf_that_is_not_there_is_off_not_unknown(tmp_path: Path) -> None:
     got = unbound_settings.switches_for(tmp_path, dict.fromkeys(KEYS, False))
     assert [s.conf for s in got] == [False] * 3
+
+
+@pytest.mark.parametrize(
+    ("key", "current", "on"),
+    [
+        # Read by the C++ `GetOption<bool>`: StringTo<bool> non-strict, any case.
+        ("Unbound.ReagentFree", "yes", True),
+        ("Unbound.ReagentFree", "On", True),
+        ("Unbound.InstantSummons", "y", True),
+        ("Unbound.InstantSummons", "no", False),
+        ("Unbound.InstantSummons", "01", False),
+        # Read only by dml_autobuff.lua through ALE's GetConfigValue: `true` in any
+        # case becomes a boolean, a whole number a number, anything else stays text,
+        # and the script turns on for the text `1` or `true` (GlobalMethods.h:64-97).
+        ("Unbound.AutoBuff", "yes", False),
+        ("Unbound.AutoBuff", "01", True),
+        ("Unbound.AutoBuff", "TRUE", True),
+    ],
+)
+def test_a_switch_is_on_where_the_code_that_reads_that_key_says_so(
+    tmp_path: Path, key: str, current: str, on: bool
+) -> None:
+    put(tmp_path, DIST.replace(f"{key} = 0", f"{key} = {current}"))
+    by_key = {row.key: row for row in unbound_settings.rows(tmp_path)}
+    assert by_key[key].current == current
+    assert unbound_settings.is_on(by_key[key]) is on

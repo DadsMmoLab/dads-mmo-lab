@@ -33,10 +33,13 @@ The four ways, each with its own sentence in `preconditions()`:
    this and neither can a module marker — `modules/mod-ale` can be cloned and
    the running binary still have no Lua in it, because the module is C++ and
    arrives at a rebuild. Read from the binary (`read_engine_in_binary`).
-2. **`ALE.Enabled` is off.** Its compiled default is `false`
-   (`ALE src/LuaEngine/ALEConfig.cpp:20`) while the shipped conf's own comment
-   says `true` — the code wins, so a conf that never sets the key runs no
-   scripts at all.
+2. **`ALE.Enabled` is off.** Its compiled default is not what the source spells:
+   `ALE src/LuaEngine/ALEConfig.cpp:20` passes the STRING `"false"` as the default
+   of `SetConfigValue<bool>`, and a string literal converts to `true`, so a key
+   nobody set runs the engine (read at mod-ale 1cb86c96 on 2026-10-08; it was
+   believed `false` here until then). This module does not rely on that accident:
+   a missing or unreadable `ALE.Enabled` is reported as unknown and My Party is not
+   offered, which errs on the safe side.
 3. **`ALE.ScriptPath` points elsewhere.** It ships as `"lua_scripts"`, relative,
    resolved against the worldserver's cwd where nothing is. This is the
    2026-08-20 bug by name (`rust-main:crates/dml-wow/src/bridge.rs:189-195`).
@@ -72,6 +75,7 @@ from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.tuning import core_bool
 
 logger = get_logger(__name__)
 
@@ -325,7 +329,8 @@ def preconditions(facts: Facts) -> tuple[Precondition, ...]:
             "conf_present",
             facts.conf_present,
             f"the Lua engine has no mod_ale.conf in {ALE_CONF}, so it is running on its "
-            "compiled defaults — and the compiled default for ALE.Enabled is off.",
+            "compiled defaults — and with those it looks for scripts in its relative "
+            f"lua_scripts folder, not in {ALE_SCRIPT_PATH} where the bridge is.",
         ),
         Precondition(
             "engine_enabled",
@@ -375,13 +380,13 @@ def _binary_sentence(engine: bool | None) -> str:
 def _enabled_sentence(enabled: bool | None) -> str:
     if enabled is None:
         return (
-            "the value of ALE.Enabled could not be read from mod_ale.conf or the server's "
-            "environment, so whether the Lua engine will run any script is unknown."
+            "ALE.Enabled is missing from mod_ale.conf and the server's environment, or says "
+            "something that is neither on nor off, so whether the Lua engine will run any "
+            "script is not known. My Party is offered once it says 1 (or true)."
         )
     return (
-        "the Lua engine is switched off: ALE.Enabled is not set to 1 (or true) in mod_ale.conf "
-        "or the server's environment. Its compiled default is off, whatever the comment beside "
-        "it in the shipped file says."
+        "the Lua engine is switched off: ALE.Enabled says off in mod_ale.conf or the server's "
+        "environment. Set it to 1 (or true)."
     )
 
 
@@ -462,10 +467,9 @@ def read_conf(path: Path, env: Mapping[str, str] | None = None) -> ConfRead:
     """Read both of ALE's keys as the server will hold them, column 0 only.
 
     Column 0 is `conf.patch()`'s rule and it is here for the reason that rule
-    exists: the shipped `mod_ale.conf.dist` carries a commented `ALE.Enabled =
-    true` beside a compiled default of `false` (`ALEConfig.cpp:20`), so a
+    exists: the shipped `mod_ale.conf.dist` carries commented `ALE.*` lines, so a
     pattern that matches indented or commented lines reads the file's own
-    prose as its settings and reports an engine that is off as on.
+    prose as its settings.
 
     `env` is the worldserver's environment as the entry declares it. An
     `AC_ALE_*` variable in it wins over the file, because AzerothCore's config
@@ -482,7 +486,9 @@ def read_conf(path: Path, env: Mapping[str, str] | None = None) -> ConfRead:
         present = False
     enabled = _effective_value(text, "ALE.Enabled", env)
     script = _effective_value(text, "ALE.ScriptPath", env)
-    return ConfRead(present, None if enabled is None else core_bool(enabled) is True, script)
+    # A value the core cannot parse is `None`, not off: the core then takes the
+    # compiled default, which is not relied on here (point 2 of the module doc).
+    return ConfRead(present, None if enabled is None else core_bool(enabled), script)
 
 
 def _effective_value(text: str, key: str, env: Mapping[str, str] | None) -> str | None:
@@ -491,22 +497,6 @@ def _effective_value(text: str, key: str, env: Mapping[str, str] | None) -> str 
     if from_env is not None:
         return from_env.strip().strip('"')
     return _conf_value(text, key)
-
-
-def core_bool(value: str) -> bool | None:
-    """What AzerothCore's `GetOption<bool>` makes of `value`, or `None`.
-
-    `StringTo<bool>` non-strict (`StringConvert.h:94-122` at 7f12e89e): `1`,
-    `y`, `on`, `yes`, `true` are on and `0`, `n`, `off`, `no`, `false` are off,
-    letters in any case. `None` is a bad value, for which the core logs and
-    uses the option's compiled default.
-    """
-    word = value.strip()
-    if word == "1" or word.lower() in ("y", "on", "yes", "true"):
-        return True
-    if word == "0" or word.lower() in ("n", "off", "no", "false"):
-        return False
-    return None
 
 
 def _conf_value(text: str, key: str) -> str | None:
@@ -1000,8 +990,9 @@ def max_player_level(server_dir: Path) -> int | None:
     `None` rather than the compiled default, and that is a deliberate refusal
     rather than an omission: AzerothCore's built-in cap has not been measured on
     this tree, and answering 80 for a conf that never sets the key would be this
-    app inventing a fact about somebody's fork — the same mistake `ALE.Enabled`'s
-    shipped comment makes about ITS compiled default. A cap nobody could read
+    app inventing a fact about somebody's fork — `ALE.Enabled`'s own compiled
+    default turned out to be the opposite of what its source spells (point 2 of
+    the module doc). A cap nobody could read
     means no level is offered, and the sentence says which key to set.
     """
     text = _conf_text(server_dir / WORLD_CONF)

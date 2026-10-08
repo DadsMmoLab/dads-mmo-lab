@@ -180,7 +180,7 @@ def test_the_install_checks_what_the_unbound_sql_must_have_made() -> None:
     assert [(c.db, c.table, c.where, c.at_least) for c in checks] == [
         ("world", "unbound_class_catalog", "", 1000),
         ("world", "unbound_milestones", "", 5),
-        ("world", "creature", "id = 900001", 9),
+        ("world", "creature", "id = 900001 AND guid >= 9000101 AND guid <= 9000109", 9),
         ("world", "creature_template", "entry = 900001", 1),
         ("world", "item_template", "entry = 900100", 1),
         ("world", "skillraceclassinfo_dbc", "ID >= 10000", 1),

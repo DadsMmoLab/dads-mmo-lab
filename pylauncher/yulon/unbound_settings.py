@@ -184,14 +184,27 @@ def shown_for(entry: CatalogEntry) -> bool:
     return block is not None and FILE in block.confs_from_dist
 
 
-def is_on(row: tuning.TuningRow) -> bool:
-    """Whether this row's switch is on: `1` or `true` in any case. `0`, `false`, no value: off.
+LUA_READ = frozenset({"Unbound.AutoBuff"})
+"""The switches only `dml_autobuff.lua` reads; the other two are read by the C++."""
 
-    Any case because every reader lowers it: the C++ `GetOption<bool>` compares without
-    case, and ALE's `GetConfigValue` turns `True` into the boolean `true` before
-    `dml_autobuff.lua` sees it (`GlobalMethods.h:77-84` at 1cb86c96).
+
+def is_on(row: tuning.TuningRow) -> bool:
+    """Whether this row's switch is on, as the code that reads that key would say. No value: off.
+
+    `Unbound.ReagentFree` and `Unbound.InstantSummons` are read by the C++ with
+    `GetOption<bool>`, which is `StringTo<bool>` non-strict: 1/y/on/yes/true in any case
+    (`tuning.core_bool`). `Unbound.AutoBuff` is read only by `dml_autobuff.lua` through
+    ALE's `GetConfigValue`, which turns `true`/`false` in any case into a boolean and a
+    whole number into a number and leaves anything else as text (`GlobalMethods.h:64-97`
+    at 1cb86c96); the script then turns on for the text `1` or `true`, so `01` is on
+    there and `yes` is not.
     """
-    return row.current is not None and row.current.strip().lower() in ("1", "true")
+    if row.current is None:
+        return False
+    value = row.current.strip()
+    if row.key in LUA_READ:
+        return value.lower() == "true" or (value.isascii() and value.isdigit() and int(value) == 1)
+    return tuning.core_bool(value) is True
 
 
 def write(server_dir: Path, edits: Mapping[str, str], *, now: datetime | None = None) -> Path:
