@@ -390,7 +390,22 @@ class Dashboard:
             self._realm = realm_flag.keeper_for(entry, spec, server_dir, sql, wsl_distro=wsl_distro)
         else:
             self._realm = None
+        if self._realm is not None:
+            self._realm.said_ready = self._world_said_ready
         self._seen = docker.ContainerState()
+
+    def _world_said_ready(self, run: str) -> bool:
+        """Whether the world still runs run `run` and its log shows the ready marker (T581).
+
+        Positive evidence only, for the realm keeper's clear: no marker to look for, a world
+        that is not running that run any more, or a log without the marker all say no.
+        """
+        if self._banner is None:
+            return False
+        state = self._state_of(self.spec.world)
+        if state.status != "running" or state.started_at != run:
+            return False
+        return self._saw_ready(run)
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned.

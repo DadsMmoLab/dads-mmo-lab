@@ -255,11 +255,12 @@ class Keeper:
     - The world `restarting`, or `running` on a run that has not said ready: mark the realm
       offline, once per run, only with the database already up. That is Docker's restart
       policy reviving a crashed world without this app, which the core never marks.
-    - The world `running` on a run seen ready at least `CLEAR_AFTER` ago, and the bit still
-      set (read once a minute): take it off, unless a deliberate hold
+    - The world `running` on a run seen ready at least `CLEAR_AFTER` ago, its log showing the
+      ready marker (`said_ready`; uptime alone is no proof), and the bit still set (read once
+      a minute): take it off, unless a deliberate hold
       (`deliberately_offline`) is in force or began or ended since the tick started. That is
-      a cancelled Stop whose own put-back failed, or a mark that landed just after the core
-      cleared the bit.
+      a cancelled Stop whose own put-back failed. A mark of a running world is followed by
+      the same check, so a mark that landed just after the core cleared the bit comes off.
     - Anything else (stopped, gone, unread): nothing. Yu'lon's own Stop and Start mark it.
 
     Says once per spell what it did, never per tick, and never raises.
@@ -291,6 +292,13 @@ class Keeper:
         self._ready_run: str | None = None
         self._ready_at: datetime | None = None
         self._read_at: datetime | None = None
+        self._unconfirmed_run: str | None = None
+        self.said_ready: Callable[[str], bool] | None = None
+        """Whether the world is still running run `run` and its log shows the ready marker.
+
+        Set by the dashboard that feeds this keeper. The only evidence a clear is written on:
+        the tab's own "ready" also counts ten minutes of uptime, which is no proof that a
+        world listens (Codex adversarial review). None clears nothing."""
 
     def begin(self) -> int:
         """Called before the tick reads the container: the hold epoch the clear must match."""
@@ -306,7 +314,7 @@ class Keeper:
     def _after_tick(self, status: str, run: str, ready: bool, begun: int) -> None:
         if status == "restarting" or (status == "running" and not ready):
             self._ready_run = None
-            self._make_offline(status, run)
+            self._make_offline(status, run, begun)
         elif status == "running":
             self._spell_said.clear()
             self._unstick(run, begun)
@@ -315,7 +323,7 @@ class Keeper:
             self._spell_said.clear()
             self._ready_run = None
 
-    def _make_offline(self, status: str, run: str) -> None:
+    def _make_offline(self, status: str, run: str, begun: int) -> None:
         if self._marked_run == run:
             return
         now = self._now()
@@ -331,6 +339,13 @@ class Keeper:
             quiet=True,
         )
         what = "restarting" if status == "restarting" else "loading"
+        if ok and status == "running" and self.said_ready is not None and self.said_ready(run):
+            # The world printed its ready marker and cleared the bit between this tick's read
+            # and the mark (the marker comes first, `World.cpp:2399` before `Master.cpp:228`),
+            # so the mark is the stale one: take it off again now (Codex review).
+            self._clear_unless_held(begun)
+            self._marked_run = run
+            return
         if ok:
             self._marked_run = run
             if "marked" not in self._spell_said:
@@ -367,18 +382,38 @@ class Keeper:
             return
         if not flags & REALM_FLAG_OFFLINE:
             return
-        # Checked under the lock a Stop's hold takes, right before the write: a hold in force,
-        # or one that began or ended since this tick read the container, leaves the bit alone.
-        with _HOLD_LOCK:
-            if _holds.get(self.spec.db) or _epochs.get(self.spec.db, 0) != begun:
-                return
-            ok = self._clear(
-                self.entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, quiet=True
-            )
-        if ok:
+        if not self._confirmed(run):
+            return
+        if self._clear_unless_held(begun):
             logger.info(
                 f"{self.entry.id}: the realm was still listed Offline over a world that has "
                 "been up for a while; listed Online again"
+            )
+
+    def _confirmed(self, run: str) -> bool:
+        """Whether run `run` said ready, asked once per run: a no is not asked again."""
+        if self._unconfirmed_run == run or self.said_ready is None:
+            return False
+        if self.said_ready(run):
+            return True
+        self._unconfirmed_run = run
+        logger.info(
+            f"{self.entry.id}: the realm is listed Offline over a running world whose log does "
+            "not show it ready; left as it is"
+        )
+        return False
+
+    def _clear_unless_held(self, begun: int) -> bool:
+        """Take the bit off, unless a deliberate hold is in force or moved since `begun`.
+
+        Checked under the lock a Stop's hold takes, right before the write, so a Stop that
+        begins now waits for this clear and marks after it.
+        """
+        with _HOLD_LOCK:
+            if _holds.get(self.spec.db) or _epochs.get(self.spec.db, 0) != begun:
+                return False
+            return self._clear(
+                self.entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, quiet=True
             )
 
 

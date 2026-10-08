@@ -95,14 +95,18 @@ class World:
         self.run = RUN_A
         self.log = READY_LINE
         self.after_read: Callable[[], None] | None = None
+        self.log_reads = 0
+        self.state_reads = 0
 
     def state(self, _container: str) -> docker.ContainerState:
+        self.state_reads += 1
         answer = docker.ContainerState(self.status, self.run, 0)
         if self.after_read is not None:
             self.after_read()
         return answer
 
     def log_of(self, _container: str, _since: str) -> str:
+        self.log_reads += 1
         return self.log
 
 
@@ -216,6 +220,64 @@ def test_a_bit_still_set_a_minute_after_ready_is_cleared(rig: Rig) -> None:
     assert sql.reads == [f"auth:{FLAGS_READ}"]
 
 
+def test_an_old_run_that_never_said_ready_is_never_cleared(rig: Rig) -> None:
+    """Ten minutes of uptime calls the header ready; it is no proof the world listens (Codex)."""
+    watch, world, sql, writes, clock = rig
+    world.log = "Loading maps..."  # RUN_A is an hour old: the tab calls it settled
+    sql.flags = 2
+    for _ in range(40):
+        watch.tick()
+        clock.advance(5)
+    assert "clear" not in writes.names
+    assert world.log_reads == 1, "a run's log is searched once for the keeper, not every minute"
+
+
+def test_a_mark_that_lands_after_the_core_cleared_is_taken_off_at_once(rig: Rig) -> None:
+    """The world said ready and cleared the bit between the tick's read and its mark (Codex)."""
+    watch, world, sql, writes, clock = rig
+    world.run, world.log = RUN_B, "Loading maps..."
+    real_mark = writes.mark
+
+    def the_world_gets_there_first(*a: Any, **k: Any) -> bool:
+        world.log = READY_LINE
+        sql.flags &= ~2  # the core's own clear, Master.cpp:228
+        return real_mark(*a, **k)
+
+    writes.mark = the_world_gets_there_first  # type: ignore[method-assign]
+    watch._realm._mark = the_world_gets_there_first  # type: ignore[union-attr]
+    watch.tick()
+    assert writes.names == ["mark", "clear"]
+    assert sql.flags == 0
+
+
+def test_a_world_that_died_again_before_the_recheck_stays_marked(rig: Rig) -> None:
+    watch, world, sql, writes, clock = rig
+    world.run, world.log = RUN_B, "Loading maps..."
+    real_mark = writes.mark
+
+    def it_dies(*a: Any, **k: Any) -> bool:
+        world.log, world.status = READY_LINE, "restarting"
+        return real_mark(*a, **k)
+
+    watch._realm._mark = it_dies  # type: ignore[union-attr]
+    watch.tick()
+    assert writes.names == ["mark"]
+    assert sql.flags & 2
+
+
+def test_a_world_restarting_after_it_had_said_ready_stays_marked(rig: Rig) -> None:
+    """The dead run's log has the marker; that says nothing about the run Docker is starting."""
+    watch, world, sql, writes, clock = rig
+    watch.tick()
+    world.status = "restarting"  # log still READY_LINE: the run that crashed
+    for _ in range(3):
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["mark"]
+    assert sql.flags & 2
+    assert world.state_reads == 4, "no recheck is asked of a world that is not running"
+
+
 def test_a_start_in_progress_is_never_cleared(rig: Rig) -> None:
     watch, world, sql, writes, clock = rig
     world.run, world.log = RUN_B, "Loading maps..."
@@ -281,6 +343,7 @@ def test_a_stop_that_ends_during_a_tick_is_not_put_back_online(
     sql.flags = 2
 
     def stop_ends_after_the_read() -> None:
+        world.after_read = None  # once: the tick's own read of the container
         with realm_flag.deliberately_offline(SPEC):
             pass
 
