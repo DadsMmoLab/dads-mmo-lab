@@ -810,6 +810,26 @@ def test_a_rebuild_whose_lua_source_is_a_link_refuses_before_anything_is_touched
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
 
 
+def test_a_script_that_cannot_be_laid_with_the_world_stopped_rolls_the_rebuild_back(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    (server_dir / MODULE / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    monkeypatch.setattr(
+        scriptdeploy, "_publish", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError, match="could not be laid"):
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate"), rec.calls
+    assert rec.calls.count("recreate") == 1, "only the rollback's start: the new build never began"
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+
+
 def _spec(src: str) -> Any:
     from yulon.catalog.catalog import LuaScripts
 
