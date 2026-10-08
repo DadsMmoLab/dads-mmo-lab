@@ -20901,18 +20901,18 @@ def test_a_game_with_no_outside_module_route_says_so_instead_of_two_dead_buttons
 ) -> None:
     """T596: Tortoise's box offered two greyed buttons and never said why.
 
-    A game with no custom-module route at all (no install seam: every game but
-    WotLK) draws no "Install from link…" / "Install from folder…" in the box,
-    card or line; it says in one sentence that the server cannot take modules
-    from outside yet and that the list above is what it can take. The busy lock
-    finishing must not hand the hidden buttons back.
+    A game with no custom-module route at all (no install seam: TBC, Vanilla;
+    Tortoise until T596 step 2) draws no "Install from link…" / "Install from
+    folder…" in the box, card or line; it says in one sentence that the server
+    cannot take modules from outside yet and that the list above is what it can
+    take. The busy lock finishing must not hand the hidden buttons back.
     """
     services = _services(ps, tmp_path, [])
     assert services.module_install_custom is None
-    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    view = ControllerView(TBC, services, status_poll_ms=0)
 
     said = view.custom_module_note.text()
-    assert TORTOISE.name in said and "from outside" in said and "listed above" in said
+    assert TBC.name in said and "from outside" in said and "listed above" in said
     assert said != controller_view_module.CUSTOM_MODULE_CARD_NOTE
     for dead in (
         view.module_link_button,
@@ -20967,12 +20967,13 @@ def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
 def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
     qapp: object, tmp_path: Path
 ) -> None:
-    """T596: the shipped games split cleanly; WotLK and Unbound (its sibling) take outside modules.
+    """T596: the shipped games split cleanly; WotLK, Unbound (its sibling) and Tortoise take some.
 
-    Unbound is built by WotLK's factory, so its box must keep both presses and
-    the card's own sentence; every other game must show the "can't take" sentence.
+    Unbound is built by WotLK's factory and Tortoise has its own route since T596
+    step 2, so their boxes keep both presses and the card's own sentence; every
+    other game must show the "can't take" sentence.
     """
-    takes = {"wow-wotlk", "wow-unbound"}
+    takes = {"wow-wotlk", "wow-unbound", "wow-tortoise"}
     for entry in load_catalog().games:
         services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
         view = ControllerView(entry, services, status_poll_ms=0)
@@ -20987,6 +20988,74 @@ def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
             assert "outside" in view.custom_module_note.text() or "no add-on" in (
                 view.custom_module_note.text()
             ), entry.id
+
+
+def test_tortoise_is_given_the_custom_route_over_its_own_guarded_applier(tmp_path: Path) -> None:
+    """T596 step 2: the five seams, all over the SAME guarded applier the shipped rows use.
+
+    The install seam is a closure over the applier object, so an install through
+    it that does not reach `services.applier.install` was bound to another one.
+    """
+    from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    services = ControllerServices.for_entry(TORTOISE, tmp_path)
+    applier = services.applier
+    assert isinstance(applier, tortoise_autoupdate.GuardedApplier)
+    assert services.module_from_link is tortoise_modules.derive_link
+    assert services.module_from_folder is tortoise_modules.derive_folder
+    assert services.module_forget is tortoise_modules.forget
+    assert services.module_replacement_question is not None
+    assert isinstance(applier.sql_backup, tortoise_modules.OutsideSqlBackup)
+    assert applier.sql_backup.schemas == TORTOISE.schema_map()
+    assert services.custom_module_tips == (
+        controller_view_module.TORTOISE_LINK_TIP,
+        controller_view_module.TORTOISE_FOLDER_TIP,
+    )
+    reached: list[str] = []
+
+    def install(manifest: Manifest, values: object = None, **kwargs: object) -> object:
+        reached.append(manifest.id)
+        assert kwargs["complete"] is not None
+        return apply_module.ApplyReport("install", manifest.id, family=manifest.type)
+
+    applier.install = install  # type: ignore[method-assign]
+    assert services.module_install_custom is not None
+    services.module_install_custom(tortoise_modules.derive_link("refaim/MobStats"), None)
+    assert reached == ["mobstats"]
+
+
+def test_tortoises_box_offers_both_buttons_with_its_own_tips(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Step 1's sentence gives way to the buttons; the tips say what Tortoise takes."""
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    services.custom_module_tips = (
+        controller_view_module.TORTOISE_LINK_TIP,
+        controller_view_module.TORTOISE_FOLDER_TIP,
+    )
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+
+    assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    assert not view.module_link_button.isHidden() and view.module_link_button.isEnabled()
+    assert not view.module_folder_button.isHidden() and view.module_folder_button.isEnabled()
+    assert view.module_link_button.toolTip() == controller_view_module.TORTOISE_LINK_TIP
+    assert view.module_folder_button.toolTip() == controller_view_module.TORTOISE_FOLDER_TIP
+    assert (
+        "mod-" in view.module_link_button.toolTip() and "later" in view.module_link_button.toolTip()
+    )
+
+
+def test_wotlks_tips_are_unchanged_by_tortoises(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.module_link_button.toolTip() == controller_view_module.MODULE_LINK_TIP
+    assert view.module_folder_button.toolTip() == controller_view_module.MODULE_FOLDER_TIP
+    assert controller_view_module.MODULE_LINK_TIP.startswith(
+        "Paste an https link to a module repository"
+    )
 
 
 THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))

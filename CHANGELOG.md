@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
+- Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
 - **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
 - WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
 - The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.

@@ -2249,6 +2249,14 @@ class ControllerServices:
     Empty keeps the panel's own sentence (`modules_panel.NO_MODULES_NOTE`).
     """
 
+    custom_module_tips: tuple[str, str] | None = None
+    """This game's tooltips for "Install from link…" and "Install from folder…" (T596).
+
+    None keeps WotLK's (`MODULE_LINK_TIP`, `MODULE_FOLDER_TIP`), which name the
+    `mod-` rule and the rebuild; a game whose custom route takes other kinds says
+    what it takes instead.
+    """
+
     @classmethod
     def for_entry(
         cls,
@@ -2835,9 +2843,9 @@ def _assemble(
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
         module_notes=module_notes,
-        # Defaulted for the same reason again: the four seams behind "Install
-        # from link…" and "Install from folder…" belong to the one game whose
-        # modules are checkouts under `modules/`, and that factory passes them.
+        # Defaulted for the same reason again: the seams behind "Install from
+        # link…" and "Install from folder…" belong to the games with a custom
+        # route (WotLK; Tortoise since T596), and those factories pass them.
         module_from_link=module_from_link,
         module_from_folder=module_from_folder,
         module_install_custom=module_install_custom,
@@ -4137,6 +4145,63 @@ def _for_tortoise(
     lifecycle = tortoise_controller.controller_for(
         server_dir, wsl_distro=wsl_distro, pre_stop=recorder
     )
+    # 8.7d's guarded applier (see the `applier=` comment below), built before
+    # `_assemble()` since T596 because the custom route is bound over it too.
+    module_applier = (
+        tortoise_modules.applier(
+            server_dir,
+            sql=sql,
+            arming=lambda: tortoise_autoupdate.read_arming(
+                server_dir,
+                world_container=spec.world,
+                schemas=entry.schema_map(),
+                sql=sql,
+                wsl_distro=wsl_distro,
+            ),
+            # `docker.world_running()` since T7, which is this expression
+            # with one difference: an unreadable inspect is `None` rather
+            # than `False`. It answers TWO guards on this game — 2504's
+            # updater check on the subclass and 8.7a's direct-SQL check on
+            # the base — so they cannot disagree about the world. 2504's
+            # behaviour is unchanged: `GuardedApplier._guard()` narrows it
+            # back with `is True`, which is what `settled` used to give it.
+            # `status == "running"` alone was never enough either: a
+            # container that is RESTARTING is on its way back up and its
+            # next start is exactly the one the guard is about.
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+            start_database=lambda: docker.start_database(
+                spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+            ),
+            # T30. `applier()` has taken this keyword since 8.7d and this
+            # factory was the one caller that swallowed it, so a manifest
+            # `client` step on this game reported "no client dir configured"
+            # and copied nothing (`apply.py:2175-2177`). Nothing in
+            # `manifests/wow-tortoise/` had one until the two Turtle addons
+            # arrived, which is why the gap could sit here unseen -- tbc
+            # (`:1441`) and vanilla (`:1603`) have always passed it.
+            #
+            # It is the folder the user chose as their WoW client, the same
+            # value `requires_client_dir` makes the installer ask for --
+            # through `_client_dir_for_addons()`, which is where the second
+            # refusal lives: a record with no client dir, and a client dir
+            # with no `Interface/`, both arrive here as `None` and the step
+            # is skipped with a sentence rather than creating a directory
+            # tree in a folder nobody has shown to be a game client.
+            client_dir=_client_dir_for_addons(client_dir),
+            # T596 (E2): before an outside add-on's or package's database
+            # changes, a backup of only the databases it writes (owner,
+            # 2026-10-08), named in the report and again by Remove.
+            sql_backup=tortoise_modules.OutsideSqlBackup(
+                server_dir,
+                lambda only, label: tortoise_maintenance.backup(
+                    server_dir, mysql, only=only, label=label, wsl_distro=wsl_distro
+                ),
+                entry.schema_map(),
+            ),
+        )
+        if entry.has_manifests
+        else None
+    )
     services = _assemble(
         entry,
         server_dir,
@@ -4202,51 +4267,23 @@ def _for_tortoise(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
         module_version=(RunnerGit().head_version if entry.has_manifests else None),
-        applier=(
-            tortoise_modules.applier(
-                server_dir,
-                sql=sql,
-                arming=lambda: tortoise_autoupdate.read_arming(
-                    server_dir,
-                    world_container=spec.world,
-                    schemas=entry.schema_map(),
-                    sql=sql,
-                    wsl_distro=wsl_distro,
-                ),
-                # `docker.world_running()` since T7, which is this expression
-                # with one difference: an unreadable inspect is `None` rather
-                # than `False`. It answers TWO guards on this game — 2504's
-                # updater check on the subclass and 8.7a's direct-SQL check on
-                # the base — so they cannot disagree about the world. 2504's
-                # behaviour is unchanged: `GuardedApplier._guard()` narrows it
-                # back with `is True`, which is what `settled` used to give it.
-                # `status == "running"` alone was never enough either: a
-                # container that is RESTARTING is on its way back up and its
-                # next start is exactly the one the guard is about.
-                world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
-                start_database=lambda: docker.start_database(
-                    spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
-                ),
-                # T30. `applier()` has taken this keyword since 8.7d and this
-                # factory was the one caller that swallowed it, so a manifest
-                # `client` step on this game reported "no client dir configured"
-                # and copied nothing (`apply.py:2175-2177`). Nothing in
-                # `manifests/wow-tortoise/` had one until the two Turtle addons
-                # arrived, which is why the gap could sit here unseen -- tbc
-                # (`:1441`) and vanilla (`:1603`) have always passed it.
-                #
-                # It is the folder the user chose as their WoW client, the same
-                # value `requires_client_dir` makes the installer ask for --
-                # through `_client_dir_for_addons()`, which is where the second
-                # refusal lives: a record with no client dir, and a client dir
-                # with no `Interface/`, both arrive here as `None` and the step
-                # is skipped with a sentence rather than creating a directory
-                # tree in a folder nobody has shown to be a game client.
-                client_dir=_client_dir_for_addons(client_dir),
-            )
-            if entry.has_manifests
+        applier=module_applier,
+        # T596: an add-on or a database package from a link or a folder, over
+        # the SAME guarded applier the shipped rows use (WotLK's rule), so the
+        # updater guard, the running-world refusal, the database start and the
+        # backup all stand in front of it. Step 1's sentence then gives way to
+        # the two buttons with no change in the box.
+        module_from_link=tortoise_modules.derive_link if module_applier is not None else None,
+        module_from_folder=tortoise_modules.derive_folder if module_applier is not None else None,
+        module_install_custom=(
+            tortoise_modules.install_custom(module_applier) if module_applier is not None else None
+        ),
+        module_replacement_question=(
+            tortoise_modules.replacement_question(module_applier)
+            if module_applier is not None
             else None
         ),
+        module_forget=tortoise_modules.forget if module_applier is not None else None,
         backup=lambda: tortoise_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
         plan_restore=lambda path, can_start_database=False: tortoise_maintenance.plan_restore(
             path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
@@ -4295,6 +4332,7 @@ def _for_tortoise(
     )
     return replace(
         services,
+        custom_module_tips=(TORTOISE_LINK_TIP, TORTOISE_FOLDER_TIP),
         bot_dashboard=dashboard_switch,
         bot_pool_rebuild=pool_rebuild,
         update_to_latest=tortoise_botpool.wrap_route(
@@ -7067,10 +7105,10 @@ CUSTOM_MODULE_NO_ROUTE_NOTE = (
 )
 """The card's sentence on a game with no custom-module route at all (T596).
 
-Said instead of two buttons that are greyed with no reason on them. Only the
-WotLK-built games (WoW WotLK and WoW Unbound) have the install seam behind them;
-the sentence is true of every other game because it claims nothing but "not yet"
-and "the list above is what works".
+Said instead of two buttons that are greyed with no reason on them. The
+WotLK-built games (WoW WotLK and WoW Unbound) and, since T596 step 2, Tortoise
+have the install seam behind them; the sentence is true of every other game
+because it claims nothing but "not yet" and "the list above is what works".
 """
 
 CUSTOM_MODULE_NO_ROUTE_LINE = "not available on this server yet"
@@ -7110,6 +7148,22 @@ MODULE_CUSTOM_NO_ROUTE = (
 Only reachable with a partly wired route: a game with none at all shows the
 card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 """
+
+TORTOISE_LINK_TIP = (
+    "Paste an https link to a repository on github.com, gitlab.com or codeberg.org holding a "
+    "client add-on (a .toc file) or database changes (.sql files in data/sql/auth, character "
+    "or world). Database changes need the world server stopped, and Yu'lon backs up the "
+    "databases they change first. Server modules (named mod-… or tw-mod-…) come in a later "
+    "Yu'lon."
+)
+"""Tortoise's link tooltip (T596): the two kinds it takes, the stop-the-world rule, the backup."""
+
+TORTOISE_FOLDER_TIP = (
+    "Choose a folder on this computer holding a client add-on or database changes, laid out "
+    "as for a link. It is copied; the original is not touched. Database changes need the world "
+    "server stopped, and Yu'lon backs up the databases they change first."
+)
+"""As `TORTOISE_LINK_TIP`, for a folder: read before it is copied, never written into."""
 
 MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
 
@@ -16829,10 +16883,12 @@ class ControllerView(QWidget):
         folder = route is not None and self.services.module_from_folder is not None
         self.module_link_button.setEnabled(link)
         self.module_folder_button.setEnabled(folder)
-        self.module_link_button.setToolTip(MODULE_LINK_TIP if link else MODULE_CUSTOM_NO_ROUTE)
-        self.module_folder_button.setToolTip(
-            MODULE_FOLDER_TIP if folder else MODULE_CUSTOM_NO_ROUTE
+        link_tip, folder_tip = self.services.custom_module_tips or (
+            MODULE_LINK_TIP,
+            MODULE_FOLDER_TIP,
         )
+        self.module_link_button.setToolTip(link_tip if link else MODULE_CUSTOM_NO_ROUTE)
+        self.module_folder_button.setToolTip(folder_tip if folder else MODULE_CUSTOM_NO_ROUTE)
 
     def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
         """T596: a game with no route has a sentence in the box and no presses in it.

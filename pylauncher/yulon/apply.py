@@ -5768,11 +5768,7 @@ class Applier:
                 path,
                 digest,
                 record,
-                MIGRATIONS_TABLE_DDL
-                + "START TRANSACTION;\n"
-                + body
-                + record
-                + "\nCOMMIT;\n",
+                MIGRATIONS_TABLE_DDL + "START TRANSACTION;\n" + body + record + "\nCOMMIT;\n",
                 "",
             )
         return found

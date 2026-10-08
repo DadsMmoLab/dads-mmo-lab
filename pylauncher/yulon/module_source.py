@@ -139,8 +139,15 @@ class Layout(Protocol):
     written, as this module's own are.
     """
 
-    link_description: str
-    folder_description: str
+    @property
+    def link_description(self) -> str:
+        """The list's description of an item from a link."""
+        ...
+
+    @property
+    def folder_description(self) -> str:
+        """The list's description of an item from a folder."""
+        ...
 
     def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
         """`(type, id, name)` for a repository or folder basename, or a `DeriveError`."""
@@ -210,12 +217,12 @@ def derive_link(
             f"{_NOTHING_CHANGED}"
         ) from exc
     if layout is not None:
-        kind, item_id, name = layout.identify(
+        kind, laid_id, name = layout.identify(
             _basename(text.rstrip("/").rsplit("/", 1)[-1]), folder=False
         )
-        _refuse_shipped(item_id, shipped_ids)
+        _refuse_shipped(laid_id, shipped_ids)
         return _manifest(
-            item_id,
+            laid_id,
             game,
             description=layout.link_description,
             source=source,
@@ -264,13 +271,13 @@ def derive_folder(
     if not path.is_dir():
         raise DeriveError(f"{path} is not a folder this app can read. {_NOTHING_CHANGED}")
     if layout is not None:
-        kind, item_id, name = layout.identify(path.name, folder=True)
+        kind, laid_id, name = layout.identify(path.name, folder=True)
         refusal = layout.refuse_folder(path, name)
         if refusal:
             raise DeriveError(f"{refusal} {_NOTHING_CHANGED}")
-        _refuse_shipped(item_id, shipped_ids)
+        _refuse_shipped(laid_id, shipped_ids)
         return _manifest(
-            item_id,
+            laid_id,
             game,
             description=layout.folder_description,
             source=None,
