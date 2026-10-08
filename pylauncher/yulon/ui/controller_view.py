@@ -16910,7 +16910,9 @@ class ControllerView(QWidget):
         acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
-        self.module_report.setPlainText(_format_report(result))
+        self.module_report.setPlainText(
+            _format_report(result, server_moves=self.services.update_to_latest is not None)
+        )
         self._note_session_facts(result, acted_on)
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
@@ -20160,7 +20162,7 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     return lines
 
 
-def _format_report(report: ApplyReport) -> str:
+def _format_report(report: ApplyReport, *, server_moves: bool = False) -> str:
     """The run, drawn so that every tick is something that happened.
 
     Two things were wrong with this function on 2026-09-07 and they are the same
@@ -20199,6 +20201,12 @@ def _format_report(report: ApplyReport) -> str:
     installed minutes earlier and never built, and a draft saying "its code was
     compiled into the worldserver" was false of both -- so it says which case
     would be bad rather than which case this is.
+
+    `server_moves` (T586) says the install has "Update the server to latest…"
+    (and so "Return to the tested pin…"). A module's new commit can need newer
+    server code than the server has -- mod-ale after #408 calls a core function
+    the older WotLK core lacks -- and the report cannot know that before the
+    build, so it names both routes and the order, once, as a condition.
 
     Nothing here is asserted about the machine. Every claim is about this app's
     own code, which is the same code on Windows as on the Linux box the
@@ -20239,6 +20247,16 @@ def _format_report(report: ApplyReport) -> str:
                 f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
                 "inert."
             )
+            if server_moves:
+                lines.append(
+                    f"  ⚠ If that build stops on an error in {item}'s code, {item} may need newer "
+                    "server code than this server has: press "
+                    f'"{server_build_presses.UPDATE_TO_LATEST}" or, when it is offered, '
+                    f'"{server_build_presses.RETURN_TO_PIN}" under '
+                    f'"{SERVER_BUILD_LABEL}" instead, which build the server code with {item}. If '
+                    f"Yu'lon put {item} back after that build, update it here again first, without "
+                    f'pressing "{REBUILD_BUTTON_LABEL}" in between.'
+                )
     elif report.restart_recommended and report.world_stopped:
         # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop

@@ -1357,20 +1357,25 @@ def source_revs_line(state: InstallState | None) -> str:
     statements about an unknown subject. WotLK moves two sources, so its line
     is two rows; a single-source family reads as the design's sentence exactly.
     """
-    if state is None or not state.source_revs:
+    return _revs_line(state.source_revs if state is not None else ())
+
+
+def _revs_line(revs: Sequence[SourceRev]) -> str:
+    """`source_revs_line()` over rows rather than a state: T588 reads them against the catalog."""
+    if not revs:
         return ""
-    if len(state.source_revs) == 1:
+    if len(revs) == 1:
         # Not `.capitalize()`, which lower-cases everything after the first
         # character: today every character after it happens to be lower case
         # already, so the two agree, and the day a branch name or a repo slug
         # with a capital in it reaches this line they would not.
-        said = commits_past_pin(state.source_revs[0])
+        said = commits_past_pin(revs[0])
         return said[0].upper() + said[1:]
     # A row that names its release names its source as well ("TortoiseBots
     # v2026-09-25, built from ..."), so the repo prefix would say it twice.
     return "\n".join(
         commits_past_pin(rev) if rev.release else f"{rev.repo}: {commits_past_pin(rev)}"
-        for rev in state.source_revs
+        for rev in revs
     )
 
 
@@ -1392,7 +1397,11 @@ class SourceVersion:
     """Whether "Return to the tested pin…" has anything to do."""
 
 
-def source_version(state: InstallState | None, off: Sequence[SourceOff] = ()) -> SourceVersion:
+def source_version(
+    state: InstallState | None,
+    off: Sequence[SourceOff] = (),
+    pins: Sequence[CatalogPin] = (),
+) -> SourceVersion:
     """Both halves of the version line, from one `InstallState`.
 
     Deliberately takes the state rather than reading it: the read is the
@@ -1405,9 +1414,19 @@ def source_version(state: InstallState | None, off: Sequence[SourceOff] = ()) ->
     offered whatever the record says, and each such folder's row says the commit
     it is really on: after the put-back the record reads "on the tested pin" for
     a folder that is not.
+
+    `pins` (T588) are the catalog's pins now and each checkout's HEAD
+    (`tested_pins()`): the record is read against THEM, so an install whose pin
+    the app moved is offered the press, and one an update left exactly on the
+    new pin is not (`_against_the_catalog()`). Empty, the record alone decides,
+    as before T588.
     """
     if not off:
-        return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
+        read, moved = _against_the_catalog(state.source_revs if state is not None else (), pins)
+        line = _revs_line(read)
+        if moved:
+            line = f"{line}\n{PIN_MOVED_NOTE}"
+        return SourceVersion(line=line, past_the_pin=any(not on_its_pin(row) for row in read))
     by_repo = {row.repo: row for row in off}
     rows = source_revs_line(state).splitlines() if state is not None else []
     revs = state.source_revs if state is not None else ()
@@ -1426,6 +1445,171 @@ def _off_row(row: SourceOff) -> str:
     return (
         f"{row.repo}: {now}not on {row.built[:7]}, the commit this server was built from, so "
         "it is off its build"
+    )
+
+
+@dataclass(frozen=True)
+class CatalogPin:
+    """One moving source's tested commit as THIS build of Yu'lon pins it, and its checkout (T588).
+
+    `rev` is `EmulatorSource.rev` read off the catalog now, which is not the
+    `SourceRev.pin` an earlier update press recorded: an app update can move
+    the catalog's pin (T389 moved WotLK's core from 7f12e89e to f19a1879) and
+    the record cannot know. `head` is what `.git/HEAD` says, read the way
+    `sources_still_off()` reads it (`read_head_file()`: no git run, no
+    network), so the Server tab can ask it on every reload.
+    """
+
+    repo: str
+    rev: str
+    head: str | None
+    """The checkout's commit, or None when `.git/HEAD` cannot be read as one."""
+
+
+def tested_pins(server_dir: Path, sources: Sequence[EmulatorSource]) -> tuple[CatalogPin, ...]:
+    """Each moving source's catalog pin and checkout; `()` when one of them pins nothing.
+
+    `()` then because "Return to the tested pin…" refuses an entry that does not
+    pin every source it moves (`update_to_latest(to_pin=True)`), so there is no
+    move to offer.
+    """
+    if any(not source.rev for source in sources):
+        return ()
+    return tuple(
+        CatalogPin(source.repo, source.rev or "", read_head_file(server_dir / source.dest))
+        for source in sources
+    )
+
+
+def _against_the_catalog(
+    revs: Sequence[SourceRev], pins: Sequence[CatalogPin]
+) -> tuple[tuple[SourceRev, ...], tuple[CatalogPin, ...]]:
+    """The record's rows read against the catalog's pins, and the pins that moved under one.
+
+    Three cases per source, and only the last two are T588's:
+
+    * a row whose recorded pin IS the catalog's: unchanged, today's reading;
+    * a row whose recorded pin is not (the pin moved since that press): read
+      against the catalog's pin, its count dropped -- it was counted against
+      the old pin, and a count against the wrong commit is worse than none;
+    * no row at all (an install that never pressed an update): the checkout
+      sits on the pin it was installed at, so a HEAD that is not the catalog's
+      pin is a pin that moved. A HEAD nobody could read says nothing: offering
+      a compile on "cannot say" is the failure that costs an hour.
+
+    A moved pin is returned only while its source is OFF it: an update that
+    landed exactly on the new pin is on it, and offered nothing.
+    """
+    by_repo = {pin.repo: pin for pin in pins}
+    rows: list[SourceRev] = []
+    moved: list[CatalogPin] = []
+    for row in revs:
+        pin = by_repo.pop(row.repo, None)
+        if pin is None or row.pin == pin.rev:
+            rows.append(row)
+            continue
+        now = replace(row, pin=pin.rev, ahead=None)
+        rows.append(now)
+        if not on_its_pin(now):
+            moved.append(pin)
+    for pin in by_repo.values():
+        if pin.head is None or pin.head == pin.rev:
+            continue
+        now = SourceRev(pin.repo, pin.head[:_SHORT_SHA], pin=pin.rev)
+        rows.append(now)
+        if not on_its_pin(now):
+            moved.append(pin)
+    return tuple(rows), tuple(moved)
+
+
+def moved_pins(state: InstallState | None, pins: Sequence[CatalogPin]) -> tuple[CatalogPin, ...]:
+    """The sources whose catalog pin moved since this server was built, and that are off it."""
+    return _against_the_catalog(state.source_revs if state is not None else (), pins)[1]
+
+
+PIN_MOVED_NOTE = (
+    "The commit this version of Yu'lon was tested with has changed since this server was built: "
+    f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} moves the "
+    "server onto it and builds it."
+)
+"""Under the version line when a catalog pin moved past (or away from) this server (T588)."""
+
+
+def _on_and_tested(moved: Sequence[CatalogPin]) -> str:
+    """`repo is on abc1234, tested with def5678`, per moved source, as one clause."""
+    return "; ".join(
+        (
+            f"{pin.repo} is on {pin.head[:_SHORT_SHA]}, tested with {pin.rev[:_SHORT_SHA]}"
+            if pin.head
+            else f"{pin.repo} is tested with {pin.rev[:_SHORT_SHA]}"
+        )
+        for pin in moved
+    )
+
+
+def moved_pin_confirmation(
+    entry: CatalogEntry, server_dir: Path, moved: Sequence[CatalogPin]
+) -> str:
+    """The "Return to the tested pin…" question when the pin moved under this server (T588).
+
+    `return_to_pin_confirmation()` is the way BACK off an update, and says so:
+    "back", and "anything the newer server already wrote". Neither is true of a
+    move onto a tested commit the app moved to, so this one says what the move
+    is without a direction (the reading has none: it is local, see
+    `CatalogPin`), and the module order T586 is about: the compile takes every
+    module as it is on disk.
+    """
+    return (
+        f"Move {entry.name} in {server_dir} onto the commits this version of Yu'lon was tested "
+        f"with?\n\nThey have changed since this server was built ({_on_and_tested(moved)}). This "
+        f"compiles the server from them ({MEASURED_BUILD_TIMES}), and your server is down while "
+        "its containers are replaced. If the build fails, the build you have now is put back. "
+        "Once the new server has come up, nothing undoes what it writes into your databases; a "
+        f"backup you take first covers that.{world_updates_note(entry)}\n\nThe build compiles your "
+        "modules as they are: if a module has an update written for these commits, update it on "
+        f"the Modules tab first, without pressing “{server_build_presses.REBUILD}” in between. Say "
+        "no and nothing happens at all."
+    )
+
+
+def core_off_its_moved_pin_note(moved: Sequence[CatalogPin], named: Sequence[str]) -> str:
+    """Said after a Rebuild that failed in a module while the server is off a moved pin (T586).
+
+    The Discord player's evening: mod-ale updated to a commit that calls the
+    newer core's `IsHeadless()`, Rebuild pressed on the old core, the compile
+    fails in mod-ale and mod-ale is put back. The press that builds the newer
+    tested core WITH the module is "Return to the tested pin…", and the module
+    has to be on its update when it runs -- so the order is said.
+    """
+    mods = _listed(named)
+    one = len(named) == 1
+    return (
+        f"This server is not on the commits this version of Yu'lon was tested with "
+        f"({_on_and_tested(moved)}), and {mods} may have been written for those commits. Press "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}: it builds "
+        f"the tested commits with your modules. If Yu'lon put {mods} back above, update "
+        f"{'it' if one else 'them'} on the Modules tab again first, without pressing "
+        f"“{server_build_presses.REBUILD}” in between."
+    )
+
+
+def module_order_note(named: Sequence[str], press: str) -> str:
+    """Said after "Update the server to latest…" or "Return to the tested pin…" failed in a module.
+
+    The other half of T586: an old mod-ale on the new core fails the same way
+    the new mod-ale fails on the old one. The press put the server's sources
+    back; what can change the outcome is the module's own update, made first,
+    with no Rebuild between (a Rebuild on the old core would fail on it and put
+    it back again).
+    """
+    mods = _listed(named)
+    one = len(named) == 1
+    return (
+        f"The build stopped on an error in {mods}, which may not build on the new server code "
+        f"yet. If {mods} {'has an update' if one else 'have updates'}, update "
+        f"{'it' if one else 'them'} on the Modules tab first, without pressing "
+        f"“{server_build_presses.REBUILD}” in between, then press "
+        f"{server_build_presses.under_server_build(press)} again."
     )
 
 
