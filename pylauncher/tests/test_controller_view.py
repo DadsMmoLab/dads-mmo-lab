@@ -22,6 +22,7 @@ from typing import Any, NoReturn, cast
 import pytest
 from PySide6.QtCore import QObject, Signal
 
+from tests import pe_fixture
 from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import (
     HANG_BOUND,
@@ -29280,3 +29281,121 @@ def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_en
     view._module_job_ended()
     assert view._module_jobs == 0, "the count went below zero"
     assert not view._module_job_running()
+
+
+# -- T576: a client that is not 3.3.5a --------------------------------------------------
+
+
+def _client_build(folder: Path, *parts: int) -> Path:
+    """`_game_client()` whose Wow.exe reports `parts` (major, minor, patch, build)."""
+    client = _game_client(folder)
+    exe = client / "Wow.exe"
+    exe.write_bytes(pe_fixture.pe(pe_fixture.resource_section(pe_fixture.version_info(*parts))))
+    return client
+
+
+def test_picking_a_client_folder_whose_wow_exe_is_not_12340_is_refused_naming_both_builds(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    warned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **k: warned.append(a)
+    )
+    old = _client_build(tmp_path / "old", 3, 3, 3, 11723)
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: old)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a 3.3.3 client was recorded"
+    assert failures and "3.3.3 (11723)" in failures[0] and "12340" in failures[0]
+    assert warned and "3.3.3 (11723)" in warned[0][2]
+
+
+def test_picking_a_stock_3_3_5a_client_folder_is_accepted(qapp: object, tmp_path: Path) -> None:
+    stock = _client_build(tmp_path / "stock", 3, 3, 5, 12340)
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: stock)
+
+    view.change_client_dir()
+
+    assert fake.written == [stock]
+
+
+def test_picking_an_exe_with_no_version_resource_is_accepted(qapp: object, tmp_path: Path) -> None:
+    unknown = _game_client(tmp_path / "unknown")  # a Wow.exe that is not a PE file
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: unknown)
+
+    view.change_client_dir()
+
+    assert fake.written == [unknown]
+
+
+def test_making_a_ready_to_play_client_from_a_non_12340_client_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 3, 11723)
+    asker = _Asked()
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=asker)
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+
+    view.make_play_client()
+
+    assert asker.offers == [], "the dialog was offered for a client the server drops"
+    assert not target.exists() and recorder.written == []
+    assert "3.3.3 (11723)" in view.play_label.text() and "12340" in view.play_label.text()
+
+
+def test_making_a_ready_to_play_client_from_a_12340_client_still_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 5, 12340)
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked())
+
+    view.make_play_client()
+
+    assert recorder.written == [play_client.default_target(original, WOTLK.name, tmp_path)]
+
+
+def test_the_build_a_pick_must_report_comes_from_the_catalog_entry(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Data-driven: an entry that asks for another build refuses a client that is 12340."""
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", lambda *a, **k: None)
+    stock = _client_build(tmp_path / "stock", 3, 3, 5, 12340)
+    other = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"required_build": 11723})}
+    )
+    view, fake = _client_dir_view(other, tmp_path / "server", pick_client_dir=lambda *_: stock)
+
+    view.change_client_dir()
+
+    assert fake.written == []
+
+
+def test_play_with_a_client_picked_before_the_check_is_refused_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 3, 11723)
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert launched == []
+    assert "3.3.3 (11723)" in view.play_label.text() and "12340" in view.play_label.text()
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+    assert view._play_pending is False
+
+
+def test_play_with_a_12340_client_starts_the_game(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 5, 12340)
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1
