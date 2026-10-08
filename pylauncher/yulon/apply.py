@@ -2354,6 +2354,8 @@ class _Log:
     client_ran: bool = False
     """`_client()` reached a client folder: its receipts replace the claim's."""
     client_left_behind: list[str] = field(default_factory=list)
+    kept_folders: list[str] = field(default_factory=list)
+    """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -3428,6 +3430,7 @@ class Applier:
         self._refuse_a_clash(manifest, clone)
         self._refuse_links(manifest, clone)
         self._deploy(manifest, clone, log)
+        self._folders(manifest, log)
         self._patches(manifest, clone, vals, "install", log)
         # Both SQL passes are refused as one, BEFORE either runs: the guard's
         # own sentence says no rows were written, and after the install-time
@@ -4385,6 +4388,7 @@ class Applier:
                 )
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
+        self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
         # files are this app's own live in the clone's claim file.
         self._unclient(manifest, clone, log)
@@ -5132,6 +5136,52 @@ class Applier:
             for old, new in step.rename:
                 (target / old).replace(target / new)
                 log.done.append(f"rename {old} → {new}")
+
+    def _folders(self, manifest: Manifest, log: _Log) -> None:
+        """Make each `folders` entry, empty, where it is not already a folder (T587).
+
+        A place the module reads and the player fills: mod-ale loads `.lua` files
+        from `lua_scripts` and nothing else made it, so a Lua engine installed
+        alone started with nothing to load. Idempotent, and never a write into a
+        folder that is there -- what the player put in one stays. A file or a link
+        on the path is reported and left: `mkdir` through it would land somewhere
+        this app did not choose.
+        """
+        for rel in manifest.folders:
+            path = self.server_dir / rel
+            if path.is_symlink() or (os.path.lexists(path) and not path.is_dir()):
+                log.skipped.append(
+                    f"{rel}: something that is not a plain folder is there, so the folder for "
+                    f"{manifest.name}'s files was not made"
+                )
+            elif path.is_dir():
+                log.done.append(f"folder {rel} (already there)")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                log.done.append(f"mkdir {rel}")
+
+    def _unfolders(self, manifest: Manifest, log: _Log) -> None:
+        """Take back each `folders` entry that is still empty; leave one that holds anything.
+
+        The player's scripts are not this app's to delete, so a folder with
+        anything in it stays and the report names it (`left_behind`). Only the
+        folder itself goes -- never a parent, and never through `rmtree`.
+        """
+        for rel in manifest.folders:
+            path = self.server_dir / rel
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                held = sum(1 for _ in path.iterdir())
+                if held == 0:
+                    path.rmdir()
+                    log.done.append(f"rmdir {rel}")
+                else:
+                    log.kept_folders.append(
+                        f"{rel} (kept: it holds {held} of your file(s) or folder(s))"
+                    )
+            except OSError as exc:
+                log.skipped.append(f"{rel}: could not be taken back ({exc})")
 
     def _undeploy(self, step: Deploy, clone: Path, log: _Log) -> None:
         """Delete exactly what `_deploy()` put under `dest` — never the dest dir itself.
@@ -6680,7 +6730,9 @@ class Applier:
             ),
             pending_sql=tuple(log.pending_sql),
             left_behind=(
-                _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
+                _left_behind(manifest, (*log.client_left_behind, *log.kept_folders))
+                if action == "remove"
+                else ()
             ),
             world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )
