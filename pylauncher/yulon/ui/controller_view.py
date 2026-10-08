@@ -7061,8 +7061,7 @@ MODULE_JOB_BLOCKS_REBUILD = (
 )
 """The Rebuild press while a Modules tab job runs: both write the module-update record (T557)."""
 REBUILD_BLOCKS_MODULE_JOB = (
-    "A server build is running, so {what} was not started. Wait for it to finish, then try "
-    "again. Nothing was changed."
+    "{what} was not started. {wait} Try again when it has finished. Nothing was changed."
 )
 
 PUT_BACK_ACTION = "Put back the last update…"
@@ -7424,6 +7423,10 @@ class ControllerView(QWidget):
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
         self._upstream_pending = False
         self._module_pending: str | None = None
+        # T557: how many Modules tab jobs are on a worker. `_module_pending` names one and
+        # the first to finish clears it while a second runs, so the guards that keep a
+        # Rebuild off the record of module updates read this count instead.
+        self._module_jobs = 0
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -9227,8 +9230,8 @@ class ControllerView(QWidget):
             return forgetting.BACKUP_RUNNING
         if self._restore_running:
             return forgetting.RESTORE_RUNNING
-        if self._module_pending is not None:
-            return forgetting.module_running(self._module_pending)
+        if self._module_job_running():
+            return forgetting.module_running(self._module_pending or "a Modules tab action")
         if self._network_applying:
             return forgetting.NETWORK_RUNNING
         if self.rebuild_log.running:
@@ -11055,9 +11058,10 @@ class ControllerView(QWidget):
         very folder Delete would remove, or racing the tab rebuild Make… and
         Delete end with. Then any Server action, and another of these four.
         """
-        if self._module_pending is not None:
+        if self._module_job_running():
             return (
-                f"“{self._module_pending}” is running on this server's Modules tab. "
+                f"“{self._module_pending or 'A Modules tab action'}” is running on this "
+                "server's Modules tab. "
                 "Wait for it to finish, then press this again. Nothing was changed."
             )
         if self._busy or self._play_client_running:
@@ -11275,7 +11279,7 @@ class ControllerView(QWidget):
         `_play_client_running` is Make…'s own, so only the other two halves of
         `_play_client_refusal()` are asked.
         """
-        if self._module_pending is None and not self._busy:
+        if not self._module_job_running() and not self._busy:
             return False
         self._play_client_running = False
         self._play_refused(
@@ -16543,7 +16547,9 @@ class ControllerView(QWidget):
         self._update_asked = (manifest, values) if action == "update" else None
         self.module_report.setPlainText(f"{self._module_pending}…")
         if again_tip is None:
-            self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
+            self._run_module_job(
+                lambda: run(manifest, values), self._module_done, self._module_failed
+            )
             return
 
         def update_anyway() -> ApplyReport:
@@ -16554,7 +16560,7 @@ class ControllerView(QWidget):
                 logger.warning(f"{manifest.id}'s put-back version stays hidden: {problem}")
             return run(manifest, values)
 
-        self._run(update_anyway, self._module_done, self._module_failed)
+        self._run_module_job(update_anyway, self._module_done, self._module_failed)
 
     def _module_values(
         self, manifest: Manifest, action: When, *, again: bool = False
@@ -16740,7 +16746,7 @@ class ControllerView(QWidget):
             return
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(
+        self._run_module_job(
             lambda: route(manifest, folder, replacing=question is not None),
             self._module_done,
             self._module_failed,
@@ -16835,6 +16841,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
+        self._module_job_ended()
         self._module_pending = None
         self._update_asked = None
         acted_on, self._acting_on = self._acting_on, None
@@ -16935,6 +16942,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
+        self._module_job_ended()
         asked, self._update_asked = self._update_asked, None
         if isinstance(exc, ReleaseDirectionUnknown) and asked is not None:
             self._ask_to_update_unchecked(exc, *asked)
@@ -16997,14 +17005,30 @@ class ControllerView(QWidget):
         # newest became another, comes back as a NEW question about that one.
         self._update_asked = (manifest, values)
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(
+        self._run_module_job(
             lambda: applier.update(manifest, values, approved=exc.approval),
             self._module_done,
             self._module_failed,
         )
 
+    def _run_module_job(
+        self,
+        work: Callable[[], object],
+        on_done: Callable[[object], None],
+        on_error: Callable[[object], None],
+    ) -> None:
+        """`_run()` for a Modules tab job: counted until its done or failed slot ends it."""
+        self._module_jobs += 1
+        self._run(work, on_done, on_error)
+
+    def _module_job_ended(self) -> None:
+        self._module_jobs = max(0, self._module_jobs - 1)
+
+    def _module_job_running(self) -> bool:
+        return self._module_jobs > 0 or self._module_pending is not None
+
     def _build_is_running(self, what: str) -> bool:
-        """True (and said in the module report) when a server build is on: nothing is started.
+        """True (and said in the module report) when a server job is on: nothing is started.
 
         The rows' buttons are greyed while the tab is busy, but the context menu and
         a press already in flight are not, and a module job writes the record of
@@ -17012,7 +17036,10 @@ class ControllerView(QWidget):
         """
         if not (self._busy or self.rebuild_log.running):
             return False
-        self.module_report.setPlainText(REBUILD_BLOCKS_MODULE_JOB.format(what=what))
+        job = self._busy_job if self._busy and self._busy_job else "the server build"
+        self.module_report.setPlainText(
+            REBUILD_BLOCKS_MODULE_JOB.format(what=what[:1].upper() + what[1:], wait=wait_for(job))
+        )
         return True
 
     @Slot()
@@ -17036,10 +17063,13 @@ class ControllerView(QWidget):
         self._module_pending = f"put back {manifest.id}"
         self._put_back_pending = None
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: applier.last_update(manifest), self._put_back_found, self._module_failed)
+        self._run_module_job(
+            lambda: applier.last_update(manifest), self._put_back_found, self._module_failed
+        )
 
     @Slot(object)
     def _put_back_found(self, result: object) -> None:
+        self._module_job_ended()
         manifest, applier = self._acting_on, self.services.applier
         if manifest is None or applier is None:
             self._module_pending = None
@@ -17063,7 +17093,7 @@ class ControllerView(QWidget):
             )
             return
         self._put_back_pending = result
-        self._run(
+        self._run_module_job(
             lambda: applier.put_back(manifest, None, last=result),
             self._put_back_done,
             self._module_failed,
@@ -17071,6 +17101,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _put_back_done(self, result: object) -> None:
+        self._module_job_ended()
         self._module_pending = None
         acted_on, self._acting_on = self._acting_on, None
         last, self._put_back_pending = self._put_back_pending, None
@@ -17108,10 +17139,11 @@ class ControllerView(QWidget):
         self._set_busy(True, "Check for updates")
         self._module_pending = "check for module updates"
         self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
-        self._run(route, self._module_updates_done, self._module_updates_failed)
+        self._run_module_job(route, self._module_updates_done, self._module_updates_failed)
 
     @Slot(object)
     def _module_updates_done(self, result: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_pending = None
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -17147,6 +17179,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_pending = None
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -17193,7 +17226,7 @@ class ControllerView(QWidget):
         self.module_report.setPlainText(MODULE_SQL_RUNNING)
         # The sink is the relay's emitter, not `_module_sql_line`: this lambda
         # runs on a worker thread and everything it calls runs there too.
-        self._run(
+        self._run_module_job(
             lambda: route(self._module_sql_relay.emit_line),
             self._module_sql_done,
             self._module_sql_failed,
@@ -17216,6 +17249,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_sql_done(self, result: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
@@ -17240,6 +17274,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_sql_failed(self, exc: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
@@ -17312,7 +17347,7 @@ class ControllerView(QWidget):
                 "Nothing was started.",
             )
             return False
-        if self._module_pending is not None:
+        if self._module_job_running():
             # T557: a module Update, Put back or Remove is on a worker and the Modules
             # tab's jobs do not set `_busy`. A failing Rebuild writes the same record of
             # module updates, and it puts modules back: two such writers at once is how
@@ -17320,7 +17355,9 @@ class ControllerView(QWidget):
             show_information(
                 self,
                 "Something else is running",
-                MODULE_JOB_BLOCKS_REBUILD.format(what=self._module_pending),
+                MODULE_JOB_BLOCKS_REBUILD.format(
+                    what=self._module_pending or "another Modules tab job"
+                ),
             )
             return False
         # T217 live proof, item 3: a refusal the press would make anyway comes BEFORE

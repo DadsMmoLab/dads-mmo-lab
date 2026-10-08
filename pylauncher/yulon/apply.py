@@ -3822,8 +3822,13 @@ class Applier:
         values: Mapping[str, str] | None = None,
         *,
         last: LastUpdate,
+        automatic: bool = False,
     ) -> ApplyReport:
         """Put `manifest`'s clone back on `last.from_sha` and re-apply it there (T557).
+
+        `automatic` is the put-back a failed Rebuild makes by itself, as against the
+        press on the row. Nothing here differs; a subclass's guard may (the Tortoise
+        updater guard is for a press, and the next Rebuild restarts the world anyway).
 
         Update's own install over the folder (`_install(restore=...)`), with two
         differences: the clone step is `restore_rev()` -- `checkout --detach
@@ -3966,7 +3971,7 @@ class Applier:
                 )
                 continue
             try:
-                self.put_back(manifest, last=last)
+                self.put_back(manifest, last=last, automatic=True)
             except PutBackRefused as exc:
                 handled.add(item_id)
                 other.append(

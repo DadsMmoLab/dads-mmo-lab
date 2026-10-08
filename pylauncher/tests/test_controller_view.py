@@ -28971,8 +28971,8 @@ def test_a_modules_job_is_refused_while_a_server_build_runs(
         view._module_action(which)
 
     assert view.module_report.toPlainText() == (
-        f"A server build is running, so {which} mod-transmog was not started. Wait for it to "
-        "finish, then try again. Nothing was changed."
+        f"{which.capitalize()} mod-transmog was not started. Wait: the server build is running. "
+        "Try again when it has finished. Nothing was changed."
     )
     assert applier.put_back_calls == [] and applier.installed == [] and applier.removed == []
     assert asked == [] and view._module_pending is None
@@ -28994,3 +28994,56 @@ def test_the_reload_after_a_failed_build_waits_for_a_stopped_distro(
 
     assert reads == [], "the record was read while the distro was stopped"
     assert "modules after a failed build" in view._waiting_on_distro
+
+
+def test_a_modules_job_during_another_server_job_names_that_job(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start, Stop or Check for updates also set `_busy`; none of them is a server build.
+
+    Mutation: say "the server build" whatever is busy.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._set_busy(True, "Start")
+
+    view._module_action("update")
+
+    assert view.module_report.toPlainText() == (
+        "Update mod-transmog was not started. Wait: Start is running. Try again when it has "
+        "finished. Nothing was changed."
+    )
+
+
+def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_ends(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_module_pending` is one slot: the first job to finish cleared it under the second.
+
+    Jobs are held here and finished by hand, in the order the test chooses.
+
+    Mutation: guard on `_module_pending` alone, or let the count go below zero.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    held: list[tuple[Any, Any, Any]] = []
+    view._jobs = lambda work, on_done, on_error: held.append((work, on_done, on_error))  # type: ignore[assignment]
+    monkeypatch.setattr(view, "_run", lambda w, d, e: held.append((w, d, e)))
+    shown: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_information", lambda _p, _t, text: shown.append(text)
+    )
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: iter(()))
+    view._module_action("update")
+    view._module_action("remove")
+    assert len(held) == 2 and view._module_jobs == 2
+
+    _work, done, _error = held[0]
+    done(None)  # the first finishes and clears the single slot
+    assert view._module_pending is None
+    assert view.rebuild_server() is False and len(shown) == 1, "Rebuild opened under a running job"
+
+    _work, done, _error = held[1]
+    done(None)
+    assert view._module_jobs == 0
+    view._module_job_ended()
+    assert view._module_jobs == 0, "the count went below zero"
+    assert not view._module_job_running()

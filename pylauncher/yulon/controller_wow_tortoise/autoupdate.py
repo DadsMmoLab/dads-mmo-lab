@@ -546,15 +546,25 @@ class GuardedApplier(Applier):
         values: Mapping[str, str] | None = None,
         *,
         last: LastUpdate,
+        automatic: bool = False,
     ) -> ApplyReport:
         """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
 
         `install()` is the override that runs the guard, and `put_back()` does not
         go through it: without this the restart a C++ module asks for would be
         let past the updater guard on this game only by way of the put-back press.
+
+        **The press, not the put-back a failed Rebuild makes by itself.** After a
+        failed build the old world is usually still up, so the guard would refuse the
+        automatic put-back ("Stop the world first") and take D1 away on this game,
+        while the next press, Rebuild, restarts the world with no such guard. The
+        automatic one skips it and says so in the report's note.
         """
-        note = self._guard(manifest, "install")
-        return _with_note(super().put_back(manifest, values, last=last), note)
+        if automatic:
+            note = "auto-update guard: not asked, this put-back follows a failed build"
+        else:
+            note = self._guard(manifest, "install")
+        return _with_note(super().put_back(manifest, values, last=last, automatic=automatic), note)
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")

@@ -6537,7 +6537,14 @@ def test_the_tortoise_applier_puts_a_put_back_through_its_guard(
     )
     ran: list[str] = []
 
-    def base(self: Applier, m: Manifest, values: object = None, *, last: LastUpdate) -> ApplyReport:
+    def base(
+        self: Applier,
+        m: Manifest,
+        values: object = None,
+        *,
+        last: LastUpdate,
+        automatic: bool = False,
+    ) -> ApplyReport:
         ran.append(m.id)
         return ApplyReport("install", m.id, family=m.type, done=("restore",))
 
@@ -6555,6 +6562,53 @@ def test_the_tortoise_applier_puts_a_put_back_through_its_guard(
     report = applier.put_back(manifest, last=LastUpdate(manifest.id, "a" * 40, "b" * 40, "ledger"))
     assert ran == [manifest.id]
     assert report.done[0] == "restore" and len(report.done) == 2, "the guard's note is missing"
+
+
+def test_the_tortoise_guard_is_for_the_put_back_press_and_not_the_one_a_failed_build_makes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a failed Rebuild the old world is usually up, so the guard would refuse ("Stop the
+    world first") and D1 would be gone on this game, while the next Rebuild restarts it anyway.
+
+    Mutation: ask the guard whatever `automatic` says.
+    """
+    from yulon.apply import LastUpdate
+    from yulon.controller_wow_tortoise import autoupdate
+
+    manifest = _unpinned_shipped("tortoise-bots-manager")
+    applier = autoupdate.GuardedApplier(
+        tmp_path / "server",
+        arming=lambda: autoupdate.Arming(enabled=False),
+        world_running=lambda: True,
+    )
+    ran: list[bool] = []
+
+    def base(
+        self: Applier,
+        m: Manifest,
+        values: object = None,
+        *,
+        last: LastUpdate,
+        automatic: bool = False,
+    ) -> ApplyReport:
+        ran.append(automatic)
+        return ApplyReport("install", m.id, family=m.type, done=("restore",))
+
+    def refuse(_manifest: Manifest, _action: object) -> str:
+        raise ApplyError("Stop the world first")
+
+    monkeypatch.setattr(Applier, "put_back", base)
+    monkeypatch.setattr(applier, "_guard", refuse)
+    last = LastUpdate(manifest.id, "a" * 40, "b" * 40, "ledger")
+
+    with pytest.raises(ApplyError, match="Stop the world first"):
+        applier.put_back(manifest, last=last)
+    assert ran == []
+
+    report = applier.put_back(manifest, last=last, automatic=True)
+
+    assert ran == [True]
+    assert report.done[-1].startswith("auto-update guard: not asked")
 
 
 # --------------------------------------------------------------------------
