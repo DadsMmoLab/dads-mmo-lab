@@ -2341,18 +2341,26 @@ class HelpPlace(_Strict):
 class PackSource(_Strict):
     """Where one client pack's zip comes from: the server's own checkout, or a URL.
 
-    One shape for both so a pack is one list entry either way; `kind` says
-    which half is filled, and the validator holds the two halves apart so a
+    One shape for all so a pack is one list entry either way; `kind` says
+    which half is filled, and the validator holds the halves apart so a
     pack can never be ambiguous about which of two places it trusts.
+
+    `checkout_folder` (T555 T1) is a folder of the checkout rather than a zip:
+    mod-unbound ships its addons as loose files with a `sha256sum` list beside
+    them. Each file is proved against that list and packed into a zip in the
+    cache (`client_packs.fetch_checkout_folder`), so everything after the fetch
+    is the zip path every other pack takes.
     """
 
-    kind: Literal["checkout", "url"]
+    kind: Literal["checkout", "checkout_folder", "url"]
     path: str | None = Field(
         default=None,
         min_length=1,
         description=(
             "The zip, relative to the server dir (`src/<core>/centurion/patches/patch-Y.zip`). "
-            "Where the plain file is absent, its `<path>.partNN` files are joined in name order."
+            "Where the plain file is absent, its `<path>.partNN` files are joined in name order. "
+            "For `checkout_folder`, the folder whose files are the pack "
+            "(`modules/mod-unbound/client/Interface/AddOns`)."
         ),
     )
     url: str | None = Field(default=None, description="The zip's https URL.")
@@ -2377,13 +2385,18 @@ class PackSource(_Strict):
 
     @model_validator(mode="after")
     def _kind_matches_the_half_that_is_filled(self) -> PackSource:
-        if self.kind == "checkout" and (
+        if self.from_checkout and (
             self.path is None or self.url is not None or self.version_url is not None
         ):
-            raise ValueError("a checkout source names a path, and no url or version_url")
+            raise ValueError(f"a {self.kind} source names a path, and no url or version_url")
         if self.kind == "url" and (self.url is None or self.path is not None):
             raise ValueError("a url source names a url, and no path")
         return self
+
+    @property
+    def from_checkout(self) -> bool:
+        """Is the pack read from the server's own checkout (a zip or a folder), not downloaded?"""
+        return self.kind in ("checkout", "checkout_folder")
 
 
 class InstallRule(_Strict):
@@ -2472,6 +2485,17 @@ class ClientPack(_Strict):
             "read at the commit the checkout is on."
         ),
     )
+    sha256_file: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Checkout-folder packs only, and required there: a file of `sha256sum` lines, "
+            "relative to the server dir (`modules/mod-unbound/MANIFEST.sha256`), naming files "
+            "relative to its own folder. Every file under `source.path` must have a line (two "
+            "for one file must agree), and every line under it a file, at the commit the "
+            "checkout is on."
+        ),
+    )
     install: tuple[InstallRule, ...] = Field(min_length=1)
     remove_when_off: tuple[str, ...] = Field(
         default=(),
@@ -2498,6 +2522,34 @@ class ClientPack(_Strict):
     @classmethod
     def _md5_file_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
         return value if value is None else _inside(value, "md5_file", names_a_file=True)
+
+    @field_validator("sha256_file")
+    @classmethod
+    def _sha256_file_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "sha256_file", names_a_file=True)
+
+    @model_validator(mode="after")
+    def _a_folder_is_proved_by_its_sha256_file(self) -> ClientPack:
+        """A checkout folder takes `sha256_file` and nothing else; nothing else takes it."""
+        if self.source.kind != "checkout_folder":
+            if self.sha256_file is not None:
+                raise ValueError(f"pack {self.id!r}: only a checkout_folder pack takes sha256_file")
+            return self
+        if self.sha256_file is None or any(
+            item is not None for item in (self.sha256, self.md5, self.md5_file)
+        ):
+            raise ValueError(
+                f"pack {self.id!r}: a checkout_folder pack takes exactly sha256_file, its "
+                "files' sha256sum list, and no sha256, md5 or md5_file"
+            )
+        assert self.source.path is not None  # PackSource: a checkout_folder names a path
+        folder = PurePosixPath(self.sha256_file).parent
+        if not PurePosixPath(self.source.path).is_relative_to(folder):
+            raise ValueError(
+                f"pack {self.id!r}: its folder {self.source.path!r} must be inside the folder "
+                f"of its sha256_file {self.sha256_file!r}, whose lines name files relative to it"
+            )
+        return self
 
     @model_validator(mode="after")
     def _checksum_and_choice_are_coherent(self) -> ClientPack:

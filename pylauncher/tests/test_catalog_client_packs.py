@@ -79,6 +79,18 @@ def _client() -> dict[str, Any]:
                 "default": False,
                 "size_hint": 1_450_000_000,
             },
+            {
+                # A folder of the checkout, each file proved against the module's own
+                # sha256sum list (T555 T1): mod-unbound ships its addons loose, no zip.
+                "id": "unbound-addons",
+                "label": "Unbound addons",
+                "source": {
+                    "kind": "checkout_folder",
+                    "path": "modules/mod-unbound/client/Interface/AddOns",
+                },
+                "sha256_file": "modules/mod-unbound/MANIFEST.sha256",
+                "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+            },
         ],
         "exe_patch": {
             "expect_sha256": "a" * 64,
@@ -123,8 +135,13 @@ def test_the_fixture_every_refusal_below_is_cut_from_loads() -> None:
         "addons",
         "client-tweaks",
         "hd-creatures",
+        "unbound-addons",
     ]
     assert client.packs[3].source.version_url is not None
+    folder = client.packs[4]
+    assert folder.source.kind == "checkout_folder" and folder.source.from_checkout
+    assert folder.sha256_file == "modules/mod-unbound/MANIFEST.sha256"
+    assert [pack.source.from_checkout for pack in client.packs] == [True, True, True, False, True]
     assert client.exe_patch is not None
     assert client.exe_patch.options["borderless"].default is True
     assert client.exe_patch.writes[1].length == 11
@@ -356,6 +373,58 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     "md5_file in another folder than the zip": (
         _set("packs.2.md5_file", "centurion/other/patches.md5"),
         "inside the folder of its md5_file",
+    ),
+    # A checkout folder: proved file by file against a sha256sum list, nothing else (T555 T1).
+    "folder source with a url": (
+        _set("packs.4.source.url", "https://packs.example.org/p.zip"),
+        "a checkout_folder source names a path",
+    ),
+    "folder source with a version url": (
+        _set("packs.4.source.version_url", "https://packs.example.org/p.version"),
+        "a checkout_folder source names a path",
+    ),
+    "folder source with no path": (
+        _drop("packs.4.source.path"),
+        "a checkout_folder source names a path",
+    ),
+    "folder path climbs out": (
+        _set("packs.4.source.path", "modules/../../etc"),
+        "relative POSIX path",
+    ),
+    "folder pack with no sha256_file": (
+        _drop("packs.4.sha256_file"),
+        "a checkout_folder pack takes exactly sha256_file",
+    ),
+    "folder pack with a pinned sha256 too": (
+        _set("packs.4.sha256", "3" * 64),
+        "a checkout_folder pack takes exactly sha256_file",
+    ),
+    "folder pack with a pinned md5 instead": (
+        _both(_drop("packs.4.sha256_file"), _set("packs.4.md5", "3" * 32)),
+        "a checkout_folder pack takes exactly sha256_file",
+    ),
+    "folder pack with an md5_file instead": (
+        _both(
+            _drop("packs.4.sha256_file"),
+            _set("packs.4.md5_file", "modules/mod-unbound/MANIFEST.md5"),
+        ),
+        "a checkout_folder pack takes exactly sha256_file",
+    ),
+    "folder outside the sha256_file's folder": (
+        _set("packs.4.sha256_file", "modules/other/MANIFEST.sha256"),
+        "inside the folder of its sha256_file",
+    ),
+    "sha256_file leaving the server dir": (
+        _set("packs.4.sha256_file", "../MANIFEST.sha256"),
+        "must be a relative POSIX path",
+    ),
+    "a zip pack naming a sha256_file": (
+        _set("packs.2.sha256_file", "centurion/patches/patches.sha256"),
+        "only a checkout_folder pack takes sha256_file",
+    ),
+    "a url pack naming a sha256_file": (
+        _set("packs.3.sha256_file", "centurion/patches/patches.sha256"),
+        "only a checkout_folder pack takes sha256_file",
     ),
     "sha256 not hex": (_set("packs.1.sha256", "z" * 64), "String should match pattern"),
     "required pack defaulting on": (

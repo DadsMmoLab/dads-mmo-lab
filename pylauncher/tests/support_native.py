@@ -21,6 +21,7 @@ rather than answering each question the way the code under test would like.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import urllib.error
@@ -33,7 +34,7 @@ from typing import BinaryIO
 from yulon import database_presence, docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import extract, patch
+from yulon.catalog.families import extract, patch, scriptdeploy
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
@@ -386,6 +387,15 @@ class Recorder:
     and with a single answer of `"20000"` every schema is always at every level, so
     the branch that refuses one that is not could never be reached. Set this to
     `"0\n"` to drive a schema that stopped part-way through the chain.
+    """
+
+    missing_tables: frozenset[str] = frozenset()
+    """Tables an `information_schema.tables` question does NOT list (T555 T3); every other
+    table it names is answered as there, one `schema<TAB>table` row each.
+
+    Answered from the question itself and never from `query_answer`: a row count read
+    as a table row would be a fixture answering itself, and every table would look
+    missing (or present) whatever the test said.
     """
 
     on_clone: Callable[[Path], None] | None = None
@@ -746,6 +756,15 @@ class Recorder:
             return self.file_ledger
         if self.column_answer is not None and "information_schema.columns" in statement:
             return self.column_answer
+        if statement.startswith(scriptdeploy.TABLES_QUESTION):
+            return "".join(
+                f"{where}\t{name}\n"
+                for where, names in re.findall(
+                    r"table_schema = '(\w+)' AND table_name IN \(([^)]*)\)", statement
+                )
+                for name in re.findall(r"'(\w+)'", names)
+                if name not in self.missing_tables
+            )
         return self.query_answer
 
     def volume_exists(self, name: str) -> bool:

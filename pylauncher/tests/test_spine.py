@@ -2838,6 +2838,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "because of it. A folder that cannot be listed answers no parts, and "
         "`fetch_checkout()` then refuses naming the file"
     ),
+    ("client_packs.py", "_folder_files"): (
+        "T555 T1. Walks a checkout-folder pack's folder in the server's own checkout "
+        "(mod-unbound's `client/Interface/AddOns`) for the files the pack is made of, never "
+        "through a link: a link anywhere inside refuses the pack, naming it. Every file found "
+        "must have its line in the module's `sha256sum` list and every line a file; each is "
+        "then READ, checked and packed into a zip in Yu'lon's own download cache "
+        "(`client-packs/<entry>/<pack>/<digest>/`), renamed into place only once every file "
+        "proved. Read-only on the checkout: nothing there is written or deleted because of it"
+    ),
     ("client_packs.py", "prune_cache"): (
         "T181 b/c. Lists one pack's folder in Yu'lon's own download cache "
         "(`client-packs/<entry>/<pack>/`) for the cached "
