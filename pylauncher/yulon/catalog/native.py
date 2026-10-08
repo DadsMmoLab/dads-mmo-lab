@@ -778,6 +778,21 @@ CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "un
 
 
 @dataclass(frozen=True)
+class StuckWorldUpdate:
+    """One world update a server's file ledger holds as `started` or `failed` (T545)."""
+
+    phase: str
+    file: str
+    state: str
+    """`started` (a press stopped while it ran) or `failed` (the database refused it)."""
+    repeatable: bool
+    """Every table it writes is dropped or emptied first (`sqlplan.whole_table_problem`), so
+    running it again leaves what one run leaves. False is most content updates."""
+    behind: int = 0
+    """How many newer world updates of its phase wait behind it and run after it."""
+
+
+@dataclass(frozen=True)
 class CorrectionCheck:
     """This install's SQL phases beside the ones this version of Yu'lon ships (T129).
 
@@ -804,6 +819,10 @@ class CorrectionCheck:
     reads the databases again and refuses whole unless both still say exactly
     this: an offer is agreement to change THIS record, not whatever is there by
     the time the press runs (Codex, T129 round 1)."""
+    stuck: tuple[StuckWorldUpdate, ...] = ()
+    """World updates an update to latest left `started` or `failed` (T545): the press runs
+    each again, then the ones held back behind it. Part of the provenance: the press
+    refuses whole unless the ledger still lists exactly these."""
 
 
 @dataclass(frozen=True)
@@ -1480,12 +1499,77 @@ def correction_phases(entry: CatalogEntry) -> tuple[SqlPhase, ...]:
     return correctable_phases(block.sql)
 
 
+_STOPS_THE_WORLD = (
+    "If the world server is running -- or restarting over and over after a crash -- this "
+    "press STOPS it first, before anything is written: a running world server holds these "
+    "tables in memory and writes back over whatever it finds in them. Anyone playing is "
+    "disconnected, and it saves as it does on Stop. It is left stopped: press Start on the "
+    "Server tab when this has finished. The database alone is started if it is down; the "
+    "world server is never started by this."
+)
+
+
+def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
+    """What the corrections dialog says about world updates an update left unfinished (T545).
+
+    Each file by name, what happened to it, and whether running it again is shown to be
+    safe; a file that is not is the person's to check first -- the dialog's Yes is the
+    consent T531 said no press would assume.
+    """
+    lines = []
+    for one in stuck:
+        what = (
+            "the database refused it" if one.state == "failed" else "an update stopped while it ran"
+        )
+        safe = (
+            "It empties every table it writes first, so running it again is safe."
+            if one.repeatable
+            else "Yu'lon cannot show that running it again is safe: it may have run part way, "
+            "and running it again could put rows in twice. Check what it does before you say yes."
+        )
+        after = (
+            f" {one.behind} newer world update(s) waiting behind it run after it, in order."
+            if one.behind
+            else ""
+        )
+        lines.append(f"    {one.file} -- {what}. {safe}{after}")
+    return (
+        "World updates an update to latest did not finish, which this runs again (each one, "
+        "then the ones held back behind it):\n\n" + "\n".join(lines)
+    )
+
+
+def corrections_banner_text(check: CorrectionCheck) -> str:
+    """The Server tab banner for a `stale` reading: corrected steps, unfinished updates, or both."""
+    said = []
+    if check.offered:
+        held = (
+            f" ({', '.join(check.withheld)} also changed, and only a new install gets "
+            f"{'it' if len(check.withheld) == 1 else 'them'}.)"
+            if check.withheld
+            else ""
+        )
+        said.append(
+            f"This version of Yu'lon corrects {', '.join(check.offered)} in this server's install "
+            f"plan, and these databases were imported before that.{held}"
+        )
+    if check.stuck:
+        names = ", ".join(one.file.rsplit("/", 1)[-1] for one in check.stuck)
+        said.append(f"A world update did not finish on this server: {names}.")
+    what = "applies it" if not check.stuck else "runs it again, with the ones after it"
+    return (
+        " ".join(said) + f" {CORRECTIONS_BUTTON_LABEL} {what} -- it asks first, names every step, "
+        "and stops the world server first if it is up. Nothing changes until you press it."
+    )
+
+
 def corrections_confirmation(
     entry: CatalogEntry,
     server_dir: Path,
     offered: Sequence[str],
     files: Sequence[str],
     withheld: Sequence[str],
+    stuck: Sequence[StuckWorldUpdate] = (),
 ) -> str:
     """What the user agrees to before a corrections press (T129). Pure, for Qt-free assertions.
 
@@ -1503,6 +1587,11 @@ def corrections_confirmation(
         if withheld
         else ""
     )
+    if not offered:
+        return f"Run the unfinished world updates of {entry.name} again?\n\n" + (
+            f"Folder: {server_dir}\n\n{stuck_world_updates_text(stuck)}\n\n{_STOPS_THE_WORLD}"
+        )
+    extra = f"{stuck_world_updates_text(stuck)}\n\n" if stuck else ""
     return (
         f"Apply the corrected install-plan steps to {entry.name}?\n\n"
         f"Folder: {server_dir}\n\n"
@@ -1517,12 +1606,8 @@ def corrections_confirmation(
         f"they now have, so a step is not offered again once it has landed. Your characters, "
         f"accounts and world are not otherwise written.\n\n"
         f"{held}"
-        f"If the world server is running -- or restarting over and over after a crash -- this "
-        f"press STOPS it first, before anything is written: a running world server holds these "
-        f"tables in memory and writes back over whatever it finds in them. Anyone playing is "
-        f"disconnected, and it saves as it does on Stop. It is left stopped: press Start on the "
-        f"Server tab when this has finished. The database alone is started if it is down; the "
-        f"world server is never started by this.\n\n"
+        f"{extra}"
+        f"{_STOPS_THE_WORLD}\n\n"
         f"If a step is refused, a step whose plan says to stop on errors stops the press there; "
         f"one whose plan says to warn and carry on does so. Either way a step that did not land "
         f"whole is not recorded, and is offered again."
@@ -6877,7 +6962,7 @@ class StagedInstaller:
         server_dir = self.server_dir(options or InstallOptions())
         files = self.correction_files(self._update_context(server_dir, None), check.offered)
         return corrections_confirmation(
-            self.entry, server_dir, check.offered, files, check.withheld
+            self.entry, server_dir, check.offered, files, check.withheld, check.stuck
         )
 
     def apply_corrections(
@@ -6911,7 +6996,7 @@ class StagedInstaller:
         """
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
-        if not correction_phases(self.entry):
+        if not correction_phases(self.entry) and not check.stuck:
             raise InstallerError(
                 f"{self.entry.name}'s install plan marks no step as safe to apply again to a "
                 f"server that already has data, so there is nothing for this to apply. Nothing "

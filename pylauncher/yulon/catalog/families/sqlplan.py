@@ -1499,6 +1499,29 @@ def parse_file_ledger(answer: str) -> dict[tuple[str, str], FileRow]:
     return rows
 
 
+def read_file_ledger(
+    sql_query: SqlQuery, *, container: str, client: str, password: str, marker_db: str
+) -> dict[tuple[str, str], FileRow]:
+    """`FILE_TABLE`'s rows, or none when the table is not there (no update has run). T545.
+
+    Asked whether the table exists first, `_TABLE_EXISTS`'s reason: a SELECT from a table
+    that is not there is an error, and an error here must not read as "no rows".
+    Raises `ValueError` for a row it cannot read, `parse_file_ledger()`'s reason.
+    """
+    there = sql_query(
+        container,
+        client,
+        password,
+        marker_db,
+        _TABLE_EXISTS.format(schema=marker_db, table=FILE_TABLE),
+    ).strip()
+    if there != "1":
+        return {}
+    return parse_file_ledger(
+        sql_query(container, client, password, marker_db, file_ledger_query(marker_db))
+    )
+
+
 def recordable(rel: str) -> bool:
     """Can `FILE_TABLE` hold this path? Not past 255, and nothing `'...'` cannot carry."""
     return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
