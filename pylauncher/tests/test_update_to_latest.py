@@ -1721,6 +1721,69 @@ def test_a_source_that_was_updated_and_returned_is_still_updatable_over_two_graf
     assert [real.head_sha(dest) for dest in dests] == [pin, pin], "the way back was refused"
 
 
+def test_the_return_reaches_a_tested_pin_that_moved_past_the_install(tmp_path: Path) -> None:
+    """T588: "Return to the tested pin…" moves a checkout FORWARD onto a pin that moved.
+
+    The Discord install: cloned (depth 1) at the pin of its day, never updated;
+    the catalog's pin then moved to a commit upstream made later, with the tip
+    further on still. The guard (`_refuse_unless_updatable()`: origin, edits,
+    `no_local_commits()` after its own fetch) must let it through, and the
+    pinned move (`_update_lines()` with no reset, `_pin_lines()`) must land on
+    the new pin, not on the tip and not where it was. Real git on both sides.
+
+    A characterization, not a RED: it passed before T588's code, which changes
+    only the OFFER (`native.source_version()`), never the press. It is here to
+    prove the press T588 now offers can do what the offer says.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    origin = tmp_path / "origin" / "src" / "mangos-tbc"
+    origin.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main", "."], origin)
+    _git(["config", "user.email", "t@example.invalid"], origin)
+    _git(["config", "user.name", "T"], origin)
+    lay_patch_sources(TBC)(origin)
+
+    def commit(text: str) -> str:
+        (origin / "README").write_text(f"{text}\n", encoding="utf-8", newline="\n")
+        _git(["add", "-A"], origin)
+        _git(["commit", "-qm", text], origin)
+        return _sha(origin)
+
+    old_pin = commit("the pin the install was made at")
+    rec, server_dir, _ = _tbc(tmp_path)
+    installed, entry = _real_git_tbc(rec, server_dir, origin, old_pin)
+    moving = [source for source in entry.emulator.sources if not native.held_at_its_pin(source)]
+    dests = [server_dir / source.dest for source in moving]
+    for dest in dests:
+        if dest.exists():
+            rmtree.remove_tree(dest)
+    for source, dest in zip(moving, dests, strict=True):
+        installed._seams.clone(
+            git.CloneSpec(
+                url=source.url,
+                dest=dest,
+                branch=source.branch,
+                sparse_path=source.sparse_path,
+                depth=source.depth,
+                rev=source.rev,
+            )
+        )
+    real = git.RunnerGit()
+    assert [real.head_sha(dest) for dest in dests] == [old_pin, old_pin]
+    rec.clones.clear()
+
+    new_pin = commit("the pin this version of Yu'lon is tested with")
+    tip = commit("upstream moved on again")
+    moved, _ = _real_git_tbc(rec, server_dir, origin, new_pin)
+
+    list(moved.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+
+    assert [spec.rev for spec in rec.clones] == [new_pin, new_pin]
+    assert [real.head_sha(dest) for dest in dests] == [new_pin, new_pin], "not on the new pin"
+    assert tip not in (new_pin, old_pin)
+
+
 def test_the_two_transports_parse_one_status_the_same_way() -> None:
     """A rename is `R  old -> new`, and a guard that meant different things per machine is a bug.
 

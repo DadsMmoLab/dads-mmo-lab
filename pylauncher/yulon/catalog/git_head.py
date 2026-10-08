@@ -56,5 +56,7 @@ def read_head_file(dest: Path) -> str | None:
     gitdir = dest / ".git"
     try:
         return resolve_head(gitdir, (gitdir / "HEAD").read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A HEAD, ref or packed-refs that is not text is "cannot say" too: the
+        # Server tab reads this on every reload and must not raise (cold review).
         return None

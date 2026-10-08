@@ -7061,6 +7061,24 @@ CUSTOM_MODULE_CARD_NOTE = (
 """The card's sentence: drawn in the card whole, and the line's tooltip (T153)."""
 
 
+CUSTOM_MODULE_NO_ROUTE_NOTE = (
+    "{game} can't take a module from outside yet, whether from a link or from a folder. "
+    "It works with the ones listed above."
+)
+"""The card's sentence on a game with no custom-module route at all (T596).
+
+Said instead of two buttons that are greyed with no reason on them. Only the
+WotLK-built games (WoW WotLK and WoW Unbound) have the install seam behind them;
+the sentence is true of every other game because it claims nothing but "not yet"
+and "the list above is what works".
+"""
+
+CUSTOM_MODULE_NO_ROUTE_LINE = "not available on this server yet"
+"""The one-line form's version of `CUSTOM_MODULE_NO_ROUTE_NOTE`; the note is its tooltip (T596)."""
+
+CUSTOM_MODULE_NO_ADDONS_LINE = "this server has no add-on modules"
+"""As `CUSTOM_MODULE_NO_ROUTE_LINE` for a game whose Modules tab is empty on purpose (T596)."""
+
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
     "Its name must start with mod-. The module is cloned into this server's modules folder; "
@@ -7084,14 +7102,13 @@ MODULE_FOLDER_TIP = (
 the user points at is read, never moved and never written into."""
 
 MODULE_CUSTOM_NO_ROUTE = (
-    "Only WoW WotLK takes modules you add yourself. On this game a module is a setting or a "
-    "database change, and the ones that work here are listed above."
+    "This game cannot take a module of this kind from outside yet. The modules that work "
+    "here are the ones listed above."
 )
-"""Why the two buttons are dead on the three CMaNGOS games.
+"""Why one of the card's two buttons is greyed on a game that has a route for the other.
 
-Measured per tree, not inherited: 8.7b and 8.7c gated that on those cores a
-module is a conf activation or a SQL mod and never a directory, so there is no
-`modules/` folder for a clone or a copy to land in.
+Only reachable with a partly wired route: a game with none at all shows the
+card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 """
 
 MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
@@ -15988,6 +16005,7 @@ class ControllerView(QWidget):
         custom_box = QVBoxLayout(custom)
         custom_note = QLabel(CUSTOM_MODULE_CARD_NOTE, custom)
         custom_note.setWordWrap(True)
+        self.custom_module_note = custom_note
         custom_box.addWidget(custom_note)
         custom_row = QHBoxLayout()
         custom_row.addWidget(self.module_link_button)
@@ -16008,6 +16026,11 @@ class ControllerView(QWidget):
         # The sentence the line leaves out, for a pointer that asks. Not the only
         # place it is: the card whole says it wherever the window has the room.
         line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+        self.custom_module_line_title = line_title
+        # T596: in place of the two presses on a game that has no route for them.
+        self.custom_module_line_note = QLabel("", self.custom_module_line)
+        self.custom_module_line_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.custom_module_line_note.setVisible(False)
         self.module_link_line_button = _RelayButton(
             self.module_link_button, self.custom_module_line
         )
@@ -16015,6 +16038,7 @@ class ControllerView(QWidget):
             self.module_folder_button, self.custom_module_line
         )
         line_box.addWidget(line_title)
+        line_box.addWidget(self.custom_module_line_note)
         line_box.addWidget(self.module_link_line_button)
         line_box.addWidget(self.module_folder_line_button)
         line_box.addStretch(1)
@@ -16800,6 +16824,7 @@ class ControllerView(QWidget):
         beats one that is pressed and then explains itself (roadmap 6.1).
         """
         route = self._custom_route()
+        self._say_where_the_custom_route_is_absent(route is None)
         link = route is not None and self.services.module_from_link is not None
         folder = route is not None and self.services.module_from_folder is not None
         self.module_link_button.setEnabled(link)
@@ -16808,6 +16833,40 @@ class ControllerView(QWidget):
         self.module_folder_button.setToolTip(
             MODULE_FOLDER_TIP if folder else MODULE_CUSTOM_NO_ROUTE
         )
+
+    def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
+        """T596: a game with no route has a sentence in the box and no presses in it.
+
+        Two greyed buttons with nothing beside them read as a broken app (a player
+        asked on Discord why they were grey). Where there is no install seam at all
+        the buttons, in the card and on its one-line form, are taken off and the box
+        says what is true of the game. Where there IS a route the card is as it was
+        built, WotLK's included, so a route that comes later needs no change here.
+        """
+        presses = (
+            self.module_link_button,
+            self.module_folder_button,
+            self.module_link_line_button,
+            self.module_folder_line_button,
+        )
+        for press in presses:
+            press.setVisible(not absent)
+        self.custom_module_line_note.setVisible(absent)
+        if not absent:
+            self.custom_module_note.setText(CUSTOM_MODULE_CARD_NOTE)
+            self.custom_module_line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+            return
+        # Centurion's list is empty on purpose; "the ones listed above" would point at nothing.
+        if self.services.no_modules_note:
+            said = self.services.no_modules_note
+            line = CUSTOM_MODULE_NO_ADDONS_LINE
+        else:
+            said = CUSTOM_MODULE_NO_ROUTE_NOTE.format(game=self.entry.name)
+            line = CUSTOM_MODULE_NO_ROUTE_LINE
+        self.custom_module_note.setText(said)
+        self.custom_module_line_note.setText(line)
+        self.custom_module_line_note.setToolTip(said)
+        self.custom_module_line_title.setToolTip(said)
 
     @Slot()
     def install_module_from_link(self) -> None:
@@ -16995,7 +17054,14 @@ class ControllerView(QWidget):
         acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
-        self.module_report.setPlainText(_format_report(result))
+        self.module_report.setPlainText(
+            _format_report(
+                result,
+                **self._module_report_options(
+                    getattr(self, "_last_source_version", None), self.services.update_to_latest
+                ),
+            )
+        )
         self._note_session_facts(result, acted_on)
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
@@ -17566,6 +17632,16 @@ class ControllerView(QWidget):
             any(a.isEnabled() for a in self.server_build_menu.actions())
         )
 
+    @staticmethod
+    def _module_report_options(
+        said: native.SourceVersion | None, route: native.LatestRoute | None
+    ) -> dict[str, bool]:
+        """What the module report may name (T586): the server presses, from the last reading."""
+        return {
+            "server_moves": route is not None,
+            "pin_moved": route is not None and said is not None and said.pin_moved,
+        }
+
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
@@ -17594,6 +17670,7 @@ class ControllerView(QWidget):
         offering nothing.
         """
         route = self.services.update_to_latest
+        self._last_source_version: native.SourceVersion | None = None
         if route is None:
             self.source_version_label.setVisible(False)
             self.return_to_pin_action.setVisible(False)
@@ -17605,6 +17682,7 @@ class ControllerView(QWidget):
         except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
             said = native.SourceVersion(line="", past_the_pin=False)
+        self._last_source_version = said
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
         self.return_to_pin_action.setVisible(said.past_the_pin)
@@ -17867,7 +17945,7 @@ class ControllerView(QWidget):
             return False
         if not ask_yes_no(
             self,
-            f"Put {self.entry.name} back on the tested commit?",
+            f"Move {self.entry.name} onto the tested commit?",
             route.pin_confirmation(),
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
@@ -20328,7 +20406,9 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     return lines
 
 
-def _format_report(report: ApplyReport) -> str:
+def _format_report(
+    report: ApplyReport, *, server_moves: bool = False, pin_moved: bool = False
+) -> str:
     """The run, drawn so that every tick is something that happened.
 
     Two things were wrong with this function on 2026-09-07 and they are the same
@@ -20367,6 +20447,14 @@ def _format_report(report: ApplyReport) -> str:
     installed minutes earlier and never built, and a draft saying "its code was
     compiled into the worldserver" was false of both -- so it says which case
     would be bad rather than which case this is.
+
+    `server_moves` (T586) says the install has "Update the server to latest…".
+    A module's new commit can need newer server code than the server has --
+    mod-ale after #408 calls a core function the older WotLK core lacks -- and
+    the report cannot know that before the build, so it names the route and the
+    order, once, as a condition. "Return to the tested pin…" is named as well
+    only when `pin_moved` (`SourceVersion.pin_moved`): off a pin that did not
+    move it is the way BACK off an update, to older code (Codex adversarial).
 
     Nothing here is asserted about the machine. Every claim is about this app's
     own code, which is the same code on Windows as on the Linux box the
@@ -20407,6 +20495,17 @@ def _format_report(report: ApplyReport) -> str:
                 f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
                 "inert."
             )
+            if server_moves:
+                lines.append(
+                    f"  ⚠ If that build stops on an error in {item}'s code, {item} may need newer "
+                    "server code than this server has: press "
+                    f'"{server_build_presses.UPDATE_TO_LATEST}"'
+                    + (f' or "{server_build_presses.RETURN_TO_PIN}"' if pin_moved else "")
+                    + f' under "{SERVER_BUILD_LABEL}" instead, which '
+                    f"{'build' if pin_moved else 'builds'} the server code with {item}. If "
+                    f"Yu'lon put {item} back after that build, update it here again first, without "
+                    f'pressing "{REBUILD_BUTTON_LABEL}" in between.'
+                )
     elif report.restart_recommended and report.world_stopped:
         # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
