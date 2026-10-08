@@ -145,13 +145,21 @@ WRONG_CLIENT_STAYS = timedelta(minutes=15)
 """How long the sentence stays after the last such line: the line only comes with an attempt."""
 
 WRONG_CLIENT_LINE = re.compile(
-    r"requested connecting with realm id \d+ but this realm has id \d+ set in config"
+    r"requested connecting with realm id (\d+) but this realm has id \d+ set in config"
 )
 """The world server's refusal of a client whose login packet is not 3.3.5a's (T576).
 
 AzerothCore reads the realm id out of CMSG_AUTH_SESSION at a fixed place; an older build
 puts other bytes there, so the number differs on every attempt. The authserver had
 already accepted the password, so the player sees a login that loads and drops.
+"""
+
+WRONG_CLIENT_MAX_REALM_ID = 255
+"""The largest realm id a real realm list holds (the realm id is one byte in the list).
+
+A correct client sends its realm list's id, so a line asking for a small id means the realm
+row and the world server's `RealmID` disagree (a hand edit, a second row), not a wrong client.
+Only an id above this, the random value of a packet that is not 3.3.5a's, blames the client.
 """
 
 
@@ -442,6 +450,17 @@ class Dashboard:
             self._restoring_until = None  # its database answered: the race is over
         return self._with_wrong_client(verdict, state.started_at)
 
+    def _first_since(self, run: str) -> str:
+        """Where a run's first read starts: the run, but not further back than the sentence lives.
+
+        A server up for days has old refused logins in its log; read whole they would show as
+        fresh for `WRONG_CLIENT_STAYS`, and a large log would be read in one go.
+        """
+        uptime = self._uptime(run)
+        if uptime is None or uptime <= WRONG_CLIENT_STAYS:
+            return run
+        return f"{int(WRONG_CLIENT_STAYS.total_seconds())}s"
+
     def _with_wrong_client(self, verdict: Verdict, run: str) -> Verdict:
         """`verdict`, saying so when the world log shows a client turned away (T576).
 
@@ -468,12 +487,15 @@ class Dashboard:
             # a Docker Desktop VM lets drift from this machine's, and an absolute stamp from
             # here would then skip lines or repeat them.
             since = (
-                run
+                self._first_since(run)
                 if elapsed is None
                 else f"{int((elapsed + WRONG_CLIENT_OVERLAP).total_seconds()) + 1}s"
             )
             self._login_read_at = now
-            if WRONG_CLIENT_LINE.search(self._login_log_of(self.spec.world, since)):
+            if any(
+                int(asked) > WRONG_CLIENT_MAX_REALM_ID
+                for asked in WRONG_CLIENT_LINE.findall(self._login_log_of(self.spec.world, since))
+            ):
                 self._wrong_client_at = now
         if self._wrong_client_at is None or now - self._wrong_client_at > WRONG_CLIENT_STAYS:
             return verdict

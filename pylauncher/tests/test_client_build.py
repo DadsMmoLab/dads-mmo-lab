@@ -185,3 +185,16 @@ def test_a_directory_offset_past_the_resource_directory_is_not_followed(tmp_path
     struct.pack_into("<I", image, RSRC_RAW + 0x14, 0x80000000 | 0x7000)
 
     assert client_build.read_version(_exe(tmp_path, "Wow.exe", bytes(image))) is None
+
+
+def test_a_zeroed_fixed_file_version_is_unknown_and_not_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    exe = _versioned(tmp_path, 0, 0, 0, 0)
+
+    with caplog.at_level("INFO"):
+        said = client_build.refusal(exe, version="3.3.5a", build=12340)
+
+    assert client_build.read_version(exe) is None
+    assert said is None
+    assert any("no version resource" in r.getMessage() for r in caplog.records)

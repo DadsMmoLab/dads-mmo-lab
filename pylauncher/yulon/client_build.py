@@ -163,6 +163,8 @@ def _fixed_version(block: bytes) -> ExeVersion | None:
     if struct.unpack_from("<I", block, _FIXED_AT)[0] != _FIXED_SIGNATURE:
         return None
     ms, ls = struct.unpack_from("<II", block, _FIXED_AT + 8)
+    if ls & 0xFFFF == 0:
+        return None  # a zeroed file version (a stripped or hand-made resource) names no build
     return ExeVersion(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
 
 

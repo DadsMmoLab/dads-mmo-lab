@@ -1576,3 +1576,61 @@ def test_the_warning_stays_a_while_after_the_line_and_then_goes(tmp_path: Path) 
     assert watch.tick().warning
     clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS + timedelta(seconds=1)
     assert watch.tick().warning == ""
+
+
+def _realm_line(asked: int, set_in_config: int = 1) -> str:
+    return (
+        "WorldSocket::HandleAuthSession: Client 172.19.0.1 requested connecting with realm id "
+        f"{asked} but this realm has id {set_in_config} set in config.\n"
+    )
+
+
+@pytest.mark.parametrize("asked", [1, 2, 255])
+def test_a_plausible_realm_id_in_that_line_does_not_blame_the_client(
+    tmp_path: Path, asked: int
+) -> None:
+    """A correct client sends the realm list's id; a realm row that differs from the config's
+    RealmID (a hand edit, a second row) must not read as a wrong client."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked, 7), [NOW])
+
+    assert watch.tick().warning == ""
+
+
+@pytest.mark.parametrize("asked", [256, 298563881, 2197369053])
+def test_a_realm_id_no_realm_list_would_hold_blames_the_client(tmp_path: Path, asked: int) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked), [NOW])
+
+    assert "3.3.5a" in watch.tick().warning
+
+
+def test_a_plausible_line_does_not_hide_a_later_random_one(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    text = _realm_line(1, 7) + _realm_line(941848916)
+    watch = _client_watch(tmp_path, run, lambda _c, _s: text, [NOW])
+
+    assert watch.tick().warning
+
+
+def test_the_first_read_of_a_long_running_server_covers_only_the_sentences_lifetime(
+    tmp_path: Path,
+) -> None:
+    """An old refused login in a days-old log must not read as fresh, nor a huge log be read."""
+    run = _stamp(NOW - timedelta(days=3))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [f"{int(dashboard.WRONG_CLIENT_STAYS.total_seconds())}s"]
+
+
+def test_the_first_read_of_a_young_run_starts_at_the_run(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=14))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [run]
