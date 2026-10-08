@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
 - **Save file** on the Tuning tab keeps the file's byte-order mark and the line endings of every line you did not edit.
 - A server setting file that is a link to a file outside the server folder is no longer opened, saved or backed up by the Tuning tab.
+- The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.

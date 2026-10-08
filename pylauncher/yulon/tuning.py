@@ -377,6 +377,36 @@ def rows_for(
     return tuple(rows)
 
 
+MODULE_CONF_DIR = "env/dist/etc/modules"
+"""Where an AzerothCore install keeps its modules' `.conf` files, under the server folder."""
+
+
+def module_conf_files(server_dir: Path) -> tuple[str, ...]:
+    """Every `.conf` in the server's modules folder, by name, relative to `server_dir`.
+
+    The raw editor's list used to come from `rows_for()` alone, so a module the
+    catalog does not describe -- or whose only declared key is a wildcard such as
+    `AutoBalance.Enable.*` -- had no button (T569: 16 of a player's 52). This
+    reads the folder itself. Plain files ending in `.conf` only: a `.conf.dist`
+    default, a sub-folder and a dangling link are not something to edit, and a
+    folder that is missing or cannot be listed answers nothing rather than
+    failing the tab. Sorted by lower-cased name so the order does not depend on
+    the file system's.
+    """
+    try:
+        with os.scandir(server_dir / MODULE_CONF_DIR) as entries:
+            names = [
+                entry.name
+                for entry in entries
+                if entry.name.lower().endswith(CONF_SUFFIX) and entry.is_file()
+            ]
+    except OSError as exc:
+        logger.debug(f"tuning: could not list {server_dir / MODULE_CONF_DIR}: {exc}")
+        return ()
+    names.sort(key=lambda name: (name.lower(), name))
+    return tuple(f"{MODULE_CONF_DIR}/{name}" for name in names)
+
+
 # -- the writer -------------------------------------------------------------
 
 
