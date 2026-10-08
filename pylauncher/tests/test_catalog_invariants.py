@@ -1179,16 +1179,19 @@ def test_the_provenance_debts_are_exactly_these() -> None:
     the list reads as a statement of what Phase 8 still owes rather than as a
     floor somebody has stopped looking at.
 
-    All four are ceilings and citations rather than shapes, which is worth
-    saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Three are values a
+    All five are ceilings and citations rather than shapes, which is worth
+    saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Four are values a
     press read back without ever asking for the answer the tree would refuse,
-    and the fourth is a real measurement whose reading is not in this repo.
+    and the fifth is a real measurement whose reading is not in this repo.
     """
     assert set(catalog_provenance.OWED) == {
         "wow-wotlk:play.mail_item_cap",
         "wow-wotlk:accounts.level.max_level",
         "wow-tbc:accounts.level.max_level",
         "wow-tortoise:accounts.scheme",
+        # The Unbound live run set levels 2 and 3 only; "4 refused" is Yu'lon's own check
+        # (commands.py), whose highest level IS the catalog value, so it proves nothing.
+        "wow-unbound:accounts.level.max_level",
     }
     for key, reason in catalog_provenance.OWED.items():
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
@@ -1219,7 +1222,7 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
 
     assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
-    assert len(measured) == 45, len(measured)
+    assert len(measured) == 44, len(measured)
     assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
     assert not shape.fullmatch(
         "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"

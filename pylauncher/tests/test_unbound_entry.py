@@ -309,3 +309,12 @@ def test_the_unbound_tile_draws_the_wotlk_backdrop_under_its_own_name(qapp: QApp
     assert card._theme == "wow-wotlk"
     card._tick()
     assert DadcraftCampaignCard("wow-tbc")._theme == "wow-tbc"
+
+
+def test_no_unbound_check_tells_the_player_to_rebuild_for_what_rebuild_cannot_do() -> None:
+    """Live H5: Rebuild runs no module SQL again once the importer has ledgered the file."""
+    checks = unbound().install.native.azerothcore.sql_checks  # type: ignore[union-attr]
+    mentor = next(c for c in checks if c.table == "creature")
+    assert "Press Rebuild" not in mentor.reason and "apply it again" not in mentor.reason
+    assert "Rebuild does not" in mentor.reason
+    assert "Where to get help" in mentor.reason

@@ -2497,7 +2497,7 @@
                 "table": "creature",
                 "where": "id = 900001 AND guid >= 9000101 AND guid <= 9000109",
                 "at_least": 9,
-                "reason": "The Mentor is missing from one or more of the eight capitals and Dalaran, so new players have no one to teach them their classes. Its spawn file did not apply, or another spawn already holds one of its reserved ids. Press Rebuild to apply it again, and if it stays short use Where to get help on the Server tab."
+                "reason": "The Mentor is missing from one or more of the eight capitals and Dalaran, so new players have no one to teach them their classes. Its spawn file did not apply, or another spawn already holds one of its reserved ids. Rebuild does not run it again once it was recorded, so use Where to get help on the Server tab."
               },
               {
                 "db": "world",

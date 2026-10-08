@@ -480,18 +480,16 @@ PROVENANCE: dict[str, Provenance] = {
             "same press: the row's level is the `gmlevel` column the server's own query agreed with"
         ),
     ),
-    "wow-unbound:accounts.level.max_level": Provenance(
-        "measured-on",
-        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
-        note=(
-            'levels 0..3 accepted, 4 refused "4 is not a GM level this server has"; the app\'s '
-            "own account refused"
-        ),
-    ),
 }
 
 
 OWED: dict[str, str] = {
+    "wow-unbound:accounts.level.max_level": (
+        "The live run on m910q set account levels 2 and 3 and read them back; the refusal of 4 "
+        "came from Yu'lon's own check (`commands.py`), whose highest level is this very catalog "
+        "value, so it proves nothing about the server. Same as wow-wotlk's row. Settled by "
+        "8.3d's probe (accept 3, refuse 4) run on the Unbound server."
+    ),
     "wow-wotlk:play.mail_item_cap": (
         "8.4a sent twelve worn items in ONE mail and split nineteen into two, so twelve FITS -- "
         "but nothing on this tree has been asked whether thirteen is refused, and a cap is a "

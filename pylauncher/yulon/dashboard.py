@@ -135,6 +135,11 @@ until `SETTLED_AFTER`, as after any loop.
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
 
+HEALTH_RETRY_EVERY = timedelta(seconds=60)
+"""How long a module's health reading made without the world's ready line is replayed.
+
+Such a reading is not kept for the run (the log may yet catch up), and it is not remade every
+tick either: each remake reads the world's log and asks the database. T555."""
 WRONG_CLIENT_EVERY = timedelta(seconds=60)
 """How often the world log is read for a client that was turned away (T576)."""
 
@@ -389,6 +394,9 @@ class Dashboard:
         self._health_run: str | None = None
         self._health_got: module_health.HealthReading | None = None
         self._health_running: dict[str, bool | None] | None = None
+        self._health_waiting: tuple[str, datetime, str] | None = None
+        """`(run, when, sentence)` of the last reading that was not kept: replayed for
+        `HEALTH_RETRY_EVERY`, then asked again."""
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -537,6 +545,13 @@ class Dashboard:
         if block is None or health is None:
             return ""
         if self._health_run != run or self._health_got is None:
+            waiting = self._health_waiting
+            if (
+                waiting is not None
+                and waiting[0] == run
+                and timedelta(0) <= self._now() - waiting[1] < HEALTH_RETRY_EVERY
+            ):
+                return waiting[2]
             try:
                 log = self._log_of(self.spec.world, run)
             except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
@@ -561,7 +576,18 @@ class Dashboard:
             if got.good or self._banner is None or self._banner.search(log):
                 self._health_run, self._health_got, self._health_running = run, got, running
             else:
-                return module_health.sentence(got)  # a bad one never says a switch
+                if got.absent_marker:
+                    # No ready line and none of the module's own: the log no longer shows this
+                    # run's start (rotated by its size, or read long after). That is not the
+                    # module failing to load, and saying so would be a guess.
+                    got = module_health.HealthReading(
+                        got.name,
+                        unreadable="the world's log no longer shows how this run started",
+                    )
+                line = module_health.sentence(got)  # a bad one never says a switch
+                self._health_waiting = (run, self._now(), line)
+                return line
+            self._health_waiting = None
         got = self._health_got
         if self._health_running is not None:
             got = replace(

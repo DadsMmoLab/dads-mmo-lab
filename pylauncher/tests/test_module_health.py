@@ -151,7 +151,8 @@ def test_tables_missing_names_them_and_sends_the_player_to_support_not_to_a_pres
     text = _line(_Db(missing=("unbound_milestones", "unbound_class_catalog")))
     assert text == (
         "Unbound tables missing: unbound_class_catalog, unbound_milestones. "
-        "No button in Yu'lon brings them back, and Rebuild the server… does not. "
+        "Rebuild the server… does not bring them back, and nothing short of reinstalling the "
+        "server, which loses your characters, does. "
         "Press “Save logs for support…” on the Logs tab and ask for help."
     )
     assert not any(ch.isdigit() for ch in text), "a missing table must not read as a count"

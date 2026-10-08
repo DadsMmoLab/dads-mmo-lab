@@ -291,3 +291,46 @@ def test_the_mentor_check_tells_a_player_what_to_press() -> None:
     (check,) = [c for c in checks if c.table == "creature"]
     assert "Rebuild" in check.reason and "Where to get help" in check.reason
     assert "spawn ids" not in check.reason
+
+
+# -- the health line's log markers are lines the pinned module prints at every start -------------
+
+SOURCE_BLOBS = {
+    "src/UnboundReagentFree.cpp": "702af0f6a651bedbd7008c7a3b9a178efc9d2c9b",
+    "lua_scripts/unbound_mentor.lua": "70e9909aa8c056e12284ba423305b0d9c2272e55",
+}
+"""Git's blob id of the two source files that print the health markers, at the pinned revision
+(`git rev-parse <rev>:<path>`)."""
+
+
+def _marker_sources() -> str:
+    return "\n".join((FIXTURE / name).read_text(encoding="utf-8") for name in sorted(SOURCE_BLOBS))
+
+
+def test_the_marker_sources_are_the_pinned_modules_own_files() -> None:
+    manifest = {
+        name: digest
+        for digest, _, name in (
+            line.partition("  ")
+            for line in (FIXTURE / "MANIFEST.sha256").read_text(encoding="utf-8").splitlines()
+        )
+    }
+    for name, blob in SOURCE_BLOBS.items():
+        data = (FIXTURE / name).read_bytes()
+        assert _git_blob_id(data) == blob, f"{name} is not the pinned revision's file"
+        assert hashlib.sha256(data).hexdigest() == manifest[name], name
+
+
+def test_every_health_marker_is_printed_by_the_pinned_module_source() -> None:
+    """Cold review: a marker the module does not print on a start reads 'did not load' on a
+    healthy server (the 'Character cleanup covers' line did exactly that on a fresh install)."""
+    markers = load_catalog().get("wow-unbound").install.native.azerothcore.health.log_markers  # type: ignore[union-attr]
+    source = _marker_sources()
+    assert markers, "no markers: nothing below would be checked"
+    for marker in markers:
+        assert source.count(marker) >= 1, f"the vendored start-up sources never print {marker!r}"
+    # The switch lines are printed in both the on and the off branch, so one of them always runs.
+    assert source.count("[UNBOUND] free reagents: off") == 1
+    assert source.count("[UNBOUND] free reagents: on") == 1
+    assert source.count("[UNBOUND] instant summons: off") == 1
+    assert source.count("[UNBOUND] instant summons: on") == 1

@@ -1511,6 +1511,7 @@ def _unbound_watch(
     conf: str | None = CONF_OFF,
     age: timedelta = timedelta(minutes=3),
     log_box: list[str] | None = None,
+    clock: list[datetime] | None = None,
 ) -> dashboard.Dashboard:
     """An Unbound dashboard on a run `age` old; each tick reads the next of `runs`.
 
@@ -1533,7 +1534,7 @@ def _unbound_watch(
         log_of=lambda _c, _since: (
             (log_box.pop(0) if len(log_box) > 1 else log_box[0]) if log_box else log
         ),
-        now=lambda: NOW,
+        now=lambda: clock[0] if clock else NOW,
     )
 
 
@@ -1687,19 +1688,47 @@ def test_a_first_start_with_an_empty_characters_table_reads_loaded_on_the_server
 def test_a_bad_reading_is_not_kept_while_ready_came_from_uptime_alone(tmp_path: Path) -> None:
     """Cold review: past SETTLED_AFTER the header says ready with no 'ready...' line yet.
 
-    The module's own lines can still be on their way, so a 'did not load' read then must be
-    asked again, and the sentence heals when the log catches up.
+    The module's own lines can still be on their way, so such a read is not kept for the run:
+    asked again after `HEALTH_RETRY_EVERY`, and the sentence heals when the log catches up.
     """
     sql = _UnboundSql()
     box = [FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")]
-    watch = _unbound_watch(tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=box)
+    clock = [NOW]
+    watch = _unbound_watch(tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=box, clock=clock)
 
     early = watch.tick()
     box[0] = UNBOUND_LOG
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
     healed = watch.tick()
 
-    assert early.ready and early.module_line.startswith("Unbound did not load:")
+    assert early.ready and early.module_line.startswith("Unbound could not be checked:")
     assert healed.module_line == GOOD_LINE
+
+
+def test_a_log_that_no_longer_shows_the_start_is_could_not_be_checked_and_not_asked_every_tick(
+    tmp_path: Path,
+) -> None:
+    """Cold review: ten minutes up, neither the ready line nor a module line in the log (it was
+    rotated by size): not 'did not load' (a guess), and not a log read plus SQL on every tick."""
+    sql = _UnboundSql()
+    clock = [NOW]
+    watch = _unbound_watch(
+        tmp_path,
+        sql,
+        age=dashboard.SETTLED_AFTER * 2,
+        log="2026-10-08 INFO player Abc logged in\n",
+        clock=clock,
+    )
+
+    lines = [watch.tick().module_line for _ in range(4)]
+
+    assert lines[0].startswith("Unbound could not be checked: ")
+    assert "did not load" not in lines[0] and not any(ch.isdigit() for ch in lines[0])
+    assert lines == [lines[0]] * 4
+    assert sql.tables_asked == 1, "asked again on every tick"
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
+    watch.tick()
+    assert sql.tables_asked == 2, "never asked again"
 
 
 def test_a_bad_reading_is_kept_once_the_world_has_said_ready(tmp_path: Path) -> None:
@@ -1723,14 +1752,16 @@ def test_readiness_is_judged_from_the_log_that_the_reading_was_made_from(tmp_pat
     """
     sql = _UnboundSql()
     early = FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")
+    clock = [NOW]
     watch = _unbound_watch(
-        tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=[early, UNBOUND_LOG]
+        tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=[early, UNBOUND_LOG], clock=clock
     )
 
     first = watch.tick()
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
     second = watch.tick()
 
-    assert first.module_line.startswith("Unbound did not load:")
+    assert first.module_line.startswith("Unbound could not be checked:")
     assert second.module_line == GOOD_LINE
 
 
@@ -1906,3 +1937,30 @@ def test_the_first_read_of_a_young_run_starts_at_the_run(tmp_path: Path) -> None
     watch.tick()
 
     assert asked == [run]
+
+
+def test_unbound_says_both_the_wrong_client_and_whether_it_loaded(tmp_path: Path) -> None:
+    """T576 and T555 on one entry: the warning and the module line are both in the tab's line."""
+    server = _install(tmp_path)
+    conf = server / "env/dist/etc/modules/mod_unbound.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(CONF_OFF, encoding="utf-8")
+    watch = dashboard.Dashboard(
+        UNBOUND.container_spec(),
+        UNBOUND,
+        server,
+        sql=_UnboundSql(),
+        state_of=lambda _c: _running(_stamp(NOW - timedelta(minutes=3))),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: UNBOUND_LOG,
+        login_log_of=lambda _c, _s: WRONG_CLIENT_LINE,
+        now=lambda: NOW,
+    )
+
+    verdict = watch.tick()
+    text = dashboard.line(verdict)
+
+    assert verdict.module_line == GOOD_LINE
+    assert "not 3.3.5a (build 12340)" in verdict.warning
+    assert verdict.warning in text and GOOD_LINE in text
+    assert text.index(verdict.warning) < text.index(GOOD_LINE), "the warning comes first"
