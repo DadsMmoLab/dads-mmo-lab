@@ -25,7 +25,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import git as git_module
 from yulon import module_answers
-from yulon.apply import Applier, ApplyError, ApplyRefusal, DockerSql, _set_conf_key
+from yulon.apply import Applier, ApplyError, ApplyRefusal, ApplyReport, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import (
     Behind,
@@ -6516,6 +6516,45 @@ def test_the_tortoise_applier_carries_the_proved_release_through_its_guard(
     with pytest.raises(ApplyError, match="while Update was checking it"):
         applier.update(manifest)
     assert _git(clone, "rev-parse", "HEAD") == elsewhere
+
+
+@pytest.mark.parametrize("refuses", [False, True], ids=["permits-and-notes", "refuses"])
+def test_the_tortoise_applier_puts_a_put_back_through_its_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refuses: bool
+) -> None:
+    """T557: `put_back()` re-applies through `_install()`, which is NOT the guarded `install()`.
+
+    Mutation: drop the `put_back()` override and the base runs with no guard and no note.
+    """
+    from yulon.apply import LastUpdate
+    from yulon.controller_wow_tortoise import autoupdate
+
+    manifest = _unpinned_shipped("tortoise-bots-manager")
+    applier = autoupdate.GuardedApplier(
+        tmp_path / "server",
+        arming=lambda: autoupdate.Arming(enabled=False),
+        world_running=lambda: False,
+    )
+    ran: list[str] = []
+
+    def base(self: Applier, m: Manifest, values: object = None, *, last: LastUpdate) -> ApplyReport:
+        ran.append(m.id)
+        return ApplyReport("install", m.id, family=m.type, done=("restore",))
+
+    monkeypatch.setattr(Applier, "put_back", base)
+    if refuses:
+
+        def refuse(_manifest: Manifest, _action: object) -> str:
+            raise ApplyError("the updater is armed")
+
+        monkeypatch.setattr(applier, "_guard", refuse)
+        with pytest.raises(ApplyError, match="armed"):
+            applier.put_back(manifest, last=LastUpdate(manifest.id, "a" * 40, "b" * 40, "ledger"))
+        assert ran == []
+        return
+    report = applier.put_back(manifest, last=LastUpdate(manifest.id, "a" * 40, "b" * 40, "ledger"))
+    assert ran == [manifest.id]
+    assert report.done[0] == "restore" and len(report.done) == 2, "the guard's note is missing"
 
 
 # --------------------------------------------------------------------------

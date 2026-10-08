@@ -64,7 +64,15 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import docker
-from yulon.apply import Applier, ApplyError, ApplyReport, Completer, FolderSource, SqlRunner
+from yulon.apply import (
+    Applier,
+    ApplyError,
+    ApplyReport,
+    Completer,
+    FolderSource,
+    LastUpdate,
+    SqlRunner,
+)
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
 from yulon.git import Git
@@ -531,6 +539,22 @@ class GuardedApplier(Applier):
             ),
             note,
         )
+
+    def put_back(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        last: LastUpdate,
+    ) -> ApplyReport:
+        """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
+
+        `install()` is the override that runs the guard, and `put_back()` does not
+        go through it: without this the restart a C++ module asks for would be
+        let past the updater guard on this game only by way of the put-back press.
+        """
+        note = self._guard(manifest, "install")
+        return _with_note(super().put_back(manifest, values, last=last), note)
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")

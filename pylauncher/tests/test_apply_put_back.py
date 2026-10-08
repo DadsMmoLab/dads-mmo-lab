@@ -492,6 +492,8 @@ def test_an_unreadable_record_still_offers_the_reflog_answer(tmp_path: Path) -> 
         ),
         ([("B", f"checkout: moving from {'a' * 40} to {'b' * 40}"), ("A", "x")], "A"),
         ([("B", f"checkout: moving from main to {'b' * 40}"), ("A", "clone: from x")], None),
+        # The player's own `git checkout mybranch` from a detached HEAD is not an update.
+        ([("B", f"checkout: moving from {'a' * 40} to mybranch"), ("A", "x")], None),
         ([("B", "reset: moving to HEAD@{1}"), ("A", "reset: moving to FETCH_HEAD")], None),
         ([("B", "commit: mine"), ("A", "reset: moving to FETCH_HEAD")], None),
         ([("B", "reset: moving to FETCH_HEAD")], None),
@@ -503,6 +505,7 @@ def test_an_unreadable_record_still_offers_the_reflog_answer(tmp_path: Path) -> 
         "no-op-update-walked-past",
         "release-checkout",
         "first-install-pin",
+        "hand-checkout-of-a-branch",
         "hand-reset",
         "commit",
         "nothing-before",
@@ -650,3 +653,75 @@ def test_put_back_refuses_when_the_player_committed_on_top(tmp_path: Path) -> No
         )
 
     assert rig.head() == mine
+
+
+# -- review: what the failure sentences say --------------------------------------
+
+
+def test_a_put_back_that_moved_git_but_failed_after_says_it_is_back_on_the_old_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Git is already on A when a later step fails, so "tried to put it back and could not" lies.
+
+    Mutation: say "tried … could not" whatever git shows.
+    """
+    rig = _rig(tmp_path)
+    a, _b = _updated_a_to_b(rig)
+
+    def broken(*_args: object) -> None:
+        raise ApplyError("deploy failed")
+
+    monkeypatch.setattr(rig.applier, "_deploy", broken)
+    said = rig.applier.after_failed_build((ITEM,), lambda _id: rig.manifest)
+
+    assert rig.head() == a
+    assert f"{ITEM} is back on {a[:7]}, but the steps after that failed (deploy failed)" in said
+    assert "could not" not in said
+
+
+def test_a_put_back_that_never_moved_git_still_says_it_could_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+
+    def broken(*_args: object) -> None:
+        raise GitError("checkout failed")
+
+    monkeypatch.setattr(RunnerGit, "restore_rev", lambda self, dest, rev: broken())
+    said = rig.applier.after_failed_build((ITEM,), lambda _id: rig.manifest)
+
+    assert rig.head() == b
+    assert f"tried to put it back on {a[:7]} and could not" in said
+
+
+def test_an_error_naming_only_a_module_that_was_not_updated_lists_the_waiting_updates(
+    tmp_path: Path,
+) -> None:
+    """The broken module may be an update whose path the stream did not carry.
+
+    Mutation: list the waiting updates only when the error names no module at all.
+    """
+    rig = _rig(tmp_path)
+    _updated_a_to_b(rig)
+    other = rig.manifest.model_copy(update={"id": "mod-never-updated"})
+
+    said = rig.applier.after_failed_build(("mod-never-updated",), lambda _id: other)
+
+    assert "mod-never-updated was not updated since your last build that worked" in said
+    assert f"updated since your last build that worked: {ITEM}." in said
+    assert "choose Put back the last update" in said
+    assert "does not say which module" not in said
+
+
+def test_a_module_the_sentences_already_cover_is_not_listed_as_waiting_again(
+    tmp_path: Path,
+) -> None:
+    rig = _rig(tmp_path)
+    _updated_a_to_b(rig)
+    (rig.clone / "src" / "x.cpp").write_text("// edited\n", encoding="utf-8")
+
+    said = rig.applier.after_failed_build((ITEM,), lambda _id: rig.manifest)
+
+    assert "files in its folder were changed" in said
+    assert "updated since your last build that worked" not in said

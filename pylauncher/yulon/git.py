@@ -1617,8 +1617,12 @@ class RunnerGit:
         only there: `native._refuse_unless_updatable()` has already refused
         unless the only modified tracked files are ones this app wrote
         (`app_written_paths()`), and the caller writes those again immediately
-        afterwards. It is not a general-purpose checkout and there must not be
-        a second caller that has not made that check. (`_pin_args()`'s update
+        afterwards. It is not a general-purpose checkout, and a caller must make
+        its own check first. There are two. T64's route has the one above.
+        `Applier.put_back()` (T557) refuses unless the clone is clean apart from
+        this app's own files (`_reset_cost(history=False)`) and its HEAD is still
+        the update's `to`, re-read from the record or from a reflog that shows no
+        hand commit (`last_update()`). (`_pin_args()`'s update
         checkout is `--force` too, since T166, and is no second caller of this:
         it replaces a `reset --hard` that discarded the same things.)
 

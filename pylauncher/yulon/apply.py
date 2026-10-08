@@ -748,7 +748,7 @@ _UPDATE_SUBJECTS = (
     # A pinned or release-following module's Update: `checkout --detach --force <sha>`
     # from a HEAD that was already detached. A checkout from a BRANCH is the
     # first install's pin, which is no update at all.
-    re.compile(r"checkout: moving from [0-9a-f]{40} to \S+"),
+    re.compile(r"checkout: moving from [0-9a-f]{40} to [0-9a-f]{40}"),
 )
 
 
@@ -3945,6 +3945,7 @@ class Applier:
         put: list[str] = []
         other: list[str] = []
         moved: set[str] = set()
+        handled: set[str] = set()  # modules `other` already says something about
         for item_id in named:
             manifest = load(item_id)
             last = self.last_update(manifest) if manifest is not None else None
@@ -3956,6 +3957,7 @@ class Applier:
                 )
                 continue
             if last.source != "ledger":
+                handled.add(item_id)
                 other.append(
                     f"The build stopped on an error in {item_id}. Its last update was made before "
                     f"Yu'lon kept track of updates, so Yu'lon did not put it back by itself. To "
@@ -3966,6 +3968,7 @@ class Applier:
             try:
                 self.put_back(manifest, last=last)
             except PutBackRefused as exc:
+                handled.add(item_id)
                 other.append(
                     f"The build stopped on an error in {item_id}. Yu'lon did not put it back, "
                     f"because files in its folder were changed after the update and putting it "
@@ -3978,11 +3981,22 @@ class Applier:
                 continue
             except Exception as exc:  # noqa: BLE001 - every failure here is one sentence
                 logger.warning(f"could not put {item_id} back after a failed build: {exc}")
-                other.append(
-                    f"The build stopped on an error in {item_id}. Yu'lon tried to put it back on "
-                    f"{last.from_sha[:7]} and could not ({exc}). To build without it, press "
-                    f"Remove on its row, then press {_REBUILD}."
-                )
+                handled.add(item_id)
+                if self._reader("head_sha", HeadReader)(self.clone_dir(manifest)) == last.from_sha:
+                    # git did move: the checkout is on the old version and a later step
+                    # of putting it back (deploy, config, client files) failed.
+                    other.append(
+                        f"The build stopped on an error in {item_id}. {item_id} is back on "
+                        f"{last.from_sha[:7]}, but the steps after that failed ({exc}), so its "
+                        f"installed files may not match that version. To build without it, press "
+                        f"Remove on its row, then press {_REBUILD}."
+                    )
+                else:
+                    other.append(
+                        f"The build stopped on an error in {item_id}. Yu'lon tried to put it back "
+                        f"on {last.from_sha[:7]} and could not ({exc}). To build without it, press "
+                        f"Remove on its row, then press {_REBUILD}."
+                    )
                 continue
             moved.add(item_id)
             put.append(
@@ -3990,7 +4004,11 @@ class Applier:
                 f"build that worked. Yu'lon put {item_id} back on the version it had before that "
                 f"update ({last.from_sha[:7]})." + (f" {PUT_BACK_KEPT_SQL}" if last.sql else "")
             )
-        waiting = [item_id for item_id in self.unbuilt_updates() if item_id not in moved]
+        waiting = [
+            item_id
+            for item_id in self.unbuilt_updates()
+            if item_id not in moved and item_id not in handled
+        ]
         said = list(put)
         if put and waiting:
             said.append(
@@ -4003,12 +4021,20 @@ class Applier:
                 "be built."
             )
         said.extend(other)
-        if not named and waiting:
+        if not put and waiting:
+            # Nothing was put back, so the player is told which updates are still
+            # waiting and how to take one out: when the error names no module at all,
+            # and also when it names only modules that were not updated (the broken
+            # one may be an update whose path the stream did not carry).
+            lead = (
+                "The build stopped, and the error does not say which module caused it."
+                if not named
+                else "Other modules are waiting to be built."
+            )
             said.append(
-                "The build stopped, and the error does not say which module caused it. These "
-                f"modules were updated since your last build that worked: {', '.join(waiting)}. "
-                "To build without one of them, right-click it on the Modules tab, choose Put "
-                f"back the last update, then press {_REBUILD}."
+                f"{lead} These modules were updated since your last build that worked: "
+                f"{', '.join(waiting)}. To build without one of them, right-click it on the "
+                f"Modules tab, choose Put back the last update, then press {_REBUILD}."
             )
         return " ".join(said)
 

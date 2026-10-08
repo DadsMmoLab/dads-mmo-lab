@@ -7052,6 +7052,19 @@ TRY_UPDATE_AGAIN = (
 )
 """Update pressed on the version Yu'lon put back (T557, D2). No by default (`_confirm()`)."""
 
+MODULE_JOB_BLOCKS_REBUILD = (
+    "A Modules tab action ({what}) is still running. Wait for it to finish, then press "
+    + "“"
+    + server_build_presses.REBUILD
+    + "”"
+    + " again. Nothing was started."
+)
+"""The Rebuild press while a Modules tab job runs: both write the module-update record (T557)."""
+REBUILD_BLOCKS_MODULE_JOB = (
+    "A server build is running, so {what} was not started. Wait for it to finish, then try "
+    "again. Nothing was changed."
+)
+
 PUT_BACK_ACTION = "Put back the last update…"
 """The module row's menu entry that undoes its last Update (T557)."""
 PUT_BACK_TITLE = "Put back {id}?"
@@ -16400,6 +16413,8 @@ class ControllerView(QWidget):
         """
         manifest = self.selected_manifest()
         applier = self.services.applier
+        if manifest is not None and self._build_is_running(f"{action} {manifest.id}"):
+            return
         if manifest is None and self._selected_row_is_uncatalogued():
             # T41's own rows: installed here, no manifest in this game's
             # catalog, so there is nothing for the applier to run. Said rather
@@ -16988,6 +17003,18 @@ class ControllerView(QWidget):
             self._module_failed,
         )
 
+    def _build_is_running(self, what: str) -> bool:
+        """True (and said in the module report) when a server build is on: nothing is started.
+
+        The rows' buttons are greyed while the tab is busy, but the context menu and
+        a press already in flight are not, and a module job writes the record of
+        module updates that a failing Rebuild also writes (T557).
+        """
+        if not (self._busy or self.rebuild_log.running):
+            return False
+        self.module_report.setPlainText(REBUILD_BLOCKS_MODULE_JOB.format(what=what))
+        return True
+
     @Slot()
     def _put_back_last_update(self) -> None:
         """ "Put back the last update…" on the selected module row (T557).
@@ -17002,6 +17029,8 @@ class ControllerView(QWidget):
         manifest = self.selected_manifest()
         applier = self.services.applier
         if manifest is None or applier is None or manifest.type != "module":
+            return
+        if self._build_is_running(f"put back {manifest.id}"):
             return
         self._acting_on = manifest
         self._module_pending = f"put back {manifest.id}"
@@ -17281,6 +17310,17 @@ class ControllerView(QWidget):
                 "Server tab, then press "
                 f"{server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)} again. "
                 "Nothing was started.",
+            )
+            return False
+        if self._module_pending is not None:
+            # T557: a module Update, Put back or Remove is on a worker and the Modules
+            # tab's jobs do not set `_busy`. A failing Rebuild writes the same record of
+            # module updates, and it puts modules back: two such writers at once is how
+            # an entry loses its destination. Refused, not queued, like the case above.
+            show_information(
+                self,
+                "Something else is running",
+                MODULE_JOB_BLOCKS_REBUILD.format(what=self._module_pending),
             )
             return False
         # T217 live proof, item 3: a refusal the press would make anyway comes BEFORE
@@ -18089,6 +18129,10 @@ class ControllerView(QWidget):
         Update drops them, and every version is read again (a local `rev-parse` per
         clone, off the GUI thread). Not on a Stop: nothing is put back on one.
         """
+        if self._waits_for_the_distro(
+            "modules after a failed build", self._reload_after_a_failed_build
+        ):
+            return
         ledger = module_moves.read(self.services.controller.server_dir)
         if ledger is not None:
             for item in ledger.skipped:

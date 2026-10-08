@@ -28919,3 +28919,78 @@ def test_a_failed_rebuild_reloads_the_modules_and_drops_what_a_put_back_made_sta
     assert reloads and cleared
     assert ("module", "mod-transmog") not in view._behind
     assert view._behind[("module", "mod-other")] == 2
+
+
+# ----------------------------- T557 review: the Rebuild and the Modules jobs do not overlap
+
+
+def test_rebuild_is_refused_while_a_modules_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both write the record of module updates; two writers at once lose an entry's destination.
+
+    Mutation: drop the `_module_pending` check from `rebuild_server()`.
+    """
+    view, _applier, asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    started: list[int] = []
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: started.append(1))
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "show_information",
+        lambda _p, title, text: shown.append((title, text)),
+    )
+    view._module_pending = "update mod-transmog"
+
+    assert view.rebuild_server() is False
+
+    assert shown == [
+        (
+            "Something else is running",
+            "A Modules tab action (update mod-transmog) is still running. Wait for it to finish, "
+            "then press “Rebuild the server…” again. Nothing was started.",
+        )
+    ]
+    assert started == [] and asked == []
+
+
+@pytest.mark.parametrize("which", ["update", "remove", "put back"])
+def test_a_modules_job_is_refused_while_a_server_build_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    """The context menu is not greyed by `_set_busy()`, so the handlers say no themselves.
+
+    Mutation: drop `_build_is_running()` from the handler.
+    """
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._busy = True
+
+    if which == "put back":
+        view._put_back_last_update()
+    else:
+        view._module_action(which)
+
+    assert view.module_report.toPlainText() == (
+        f"A server build is running, so {which} mod-transmog was not started. Wait for it to "
+        "finish, then try again. Nothing was changed."
+    )
+    assert applier.put_back_calls == [] and applier.installed == [] and applier.removed == []
+    assert asked == [] and view._module_pending is None
+
+
+def test_the_reload_after_a_failed_build_waits_for_a_stopped_distro(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reads the record (a file read under `\\\\wsl.localhost`), which starts a stopped distro.
+
+    Mutation: drop the `_waits_for_the_distro()` line.
+    """
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    reads: list[int] = []
+    monkeypatch.setattr(controller_view_module.module_moves, "read", lambda _dir: reads.append(1))
+    view._distro = "stopped"
+
+    view._reload_after_a_failed_build()
+
+    assert reads == [], "the record was read while the distro was stopped"
+    assert "modules after a failed build" in view._waiting_on_distro

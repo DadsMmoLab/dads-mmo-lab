@@ -285,3 +285,39 @@ def test_a_write_that_changes_nothing_makes_no_file(tmp_path: Path) -> None:
     assert module_moves.record_end(tmp_path, KEY, head=A, release="") == ""
     assert module_moves.settle(tmp_path) == ""
     assert not _file(tmp_path).exists()
+
+
+def test_two_writers_in_one_process_do_not_lose_each_others_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module Update (worker) and a failing Rebuild (worker) both read-modify-rename the record.
+
+    Each read the file before the other renamed, so the second rename dropped the
+    first's entry. Here the read is made slow so the two would interleave every time.
+
+    Mutation: drop the lock around the read-modify-write.
+    """
+    import threading
+    import time
+
+    real = module_moves._load
+
+    def slow(path: Path) -> object:
+        found = real(path)
+        time.sleep(0.15)
+        return found
+
+    monkeypatch.setattr(module_moves, "_load", slow)
+    start = threading.Barrier(2)
+
+    def write(item: str) -> None:
+        start.wait()
+        module_moves.record_start(tmp_path, item, head=A, release="")
+
+    threads = [threading.Thread(target=write, args=(k,)) for k in ("module/mod-x", "module/mod-y")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert set(_read(tmp_path).moves) == {"module/mod-x", "module/mod-y"}

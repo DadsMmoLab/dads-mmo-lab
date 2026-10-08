@@ -37,6 +37,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -47,6 +48,16 @@ from typing import Any
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
+
+_WRITING = threading.RLock()
+"""One writer of the record at a time, in this process.
+
+A module Update and a failing Rebuild run on two workers at once (the Modules tab's
+jobs do not mark the tab busy), and each reads the file, changes it and renames it
+over the original: the second rename dropped the first's entry, which is how an
+entry loses its `to`. Another Yu'lon on the same folder is not covered, as with the
+clone claim.
+"""
 
 MOVES_FILE = ".yulon-module-moves.json"
 """The record's name in the server folder."""
@@ -197,6 +208,11 @@ def _write(server_dir: Path, change: Callable[[dict[str, Any]], None], what: str
     record, and the folder flushed, as `write_clone_claim()` writes the claim.
     A record that is there and cannot be used is left alone.
     """
+    with _WRITING:
+        return _write_locked(server_dir, change, what)
+
+
+def _write_locked(server_dir: Path, change: Callable[[dict[str, Any]], None], what: str) -> str:
     path = server_dir / MOVES_FILE
     raw, problem = _load(path)
     if raw is None:
