@@ -197,15 +197,17 @@ def install_custom(applier: Applier) -> CustomInstall:
             return finished[-1]
 
         first = not os.path.lexists(applier.clone_dir(manifest))
+        recorded = module_source.recorded(user_manifests_dir(), manifest)
         try:
             report = applier.install(
                 manifest, None, folder=source, complete=finish, replacing=replacing
             )
         except BaseException:
-            # The applier took a refused first install's folder back; its record
-            # goes too, or the list would offer an item with nothing behind it.
-            if first and not os.path.lexists(applier.clone_dir(manifest)):
-                forget(manifest)
+            # The applier took a refused first install's folder back; the record
+            # THIS press's completion wrote goes too, never an earlier one.
+            if finished and first and not recorded:
+                if not os.path.lexists(applier.clone_dir(manifest)):
+                    forget(manifest)
             raise
         left = custom.unused(finished[-1]) if finished else ()
         return replace(report, skipped=(*report.skipped, *left)) if left else report

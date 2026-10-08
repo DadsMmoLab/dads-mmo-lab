@@ -183,3 +183,26 @@ def test_a_wotlk_first_install_refused_after_completion_forgets_its_record(
     assert "was taken back" in str(refused.value)
     assert not (server / "modules" / "mod-linked-conf").exists()
     assert "mod-linked-conf" not in {m.id for m in wotlk_modules.store().load_all("module")}
+
+
+def test_a_failed_install_keeps_a_record_that_was_there_before_the_press(tmp_path: Path) -> None:
+    """Codex review: only the record THIS press's completion wrote is taken back."""
+    from yulon import module_source
+    from yulon.apply import ApplyError
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+    from yulon.git import GitError
+
+    class _Unreachable:
+        def clone(self, spec: CloneSpec) -> None:
+            raise GitError("could not reach github.com")
+
+    server = tmp_path / "server"
+    server.mkdir()
+    manifest = wotlk_modules.derive_link("https://github.com/you/mod-earlier")
+    module_source.persist(
+        wotlk_modules.user_manifests_dir(), manifest, shipped_ids=wotlk_modules.shipped_ids()
+    )
+    applier = Applier(server, git=_Unreachable())
+    with pytest.raises(ApplyError):
+        wotlk_modules.install_custom(applier)(manifest, None)
+    assert "mod-earlier" in {m.id for m in wotlk_modules.store().load_all("module")}

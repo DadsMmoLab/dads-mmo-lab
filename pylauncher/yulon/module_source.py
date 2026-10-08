@@ -514,6 +514,11 @@ def persist(user_root: Path, manifest: Manifest, *, shipped_ids: Container[str])
     _rewrite_index(user_root, manifest.game, manifest.type)
 
 
+def recorded(user_root: Path, manifest: Manifest) -> bool:
+    """Whether the user layer holds a record of `manifest`'s item (T596)."""
+    return (_items_dir(user_root, manifest.game, manifest.type) / f"{manifest.id}.json").is_file()
+
+
 def forget(user_root: Path, manifest: Manifest) -> bool:
     """Remove `manifest` from the user layer; `True` if a file was there to remove.
 

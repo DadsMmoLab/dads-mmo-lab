@@ -5450,7 +5450,10 @@ class Applier:
         # T596. With the database up and before anything is sent: which ledgered
         # files the server already has, then the backup of what is left to write.
         ledgered = self._already_in_the_ledger(manifest, migrations)
-        self._back_up_before_sql(manifest, when, ledgered, log)
+        if self._back_up_before_sql(manifest, when, ledgered, log):
+            # The backup can take minutes: the ledger is read again for what is
+            # sent (Codex review), so a row written meanwhile is not sent over.
+            ledgered = self._already_in_the_ledger(manifest, migrations)
         if (
             when in ("install", "remove")
             and reapplies_on_top(manifest)
@@ -5863,16 +5866,17 @@ class Applier:
 
     def _back_up_before_sql(
         self, manifest: Manifest, when: When, ledgered: Set[int], log: _Log
-    ) -> None:
+    ) -> bool:
         """E2 (T596): the backup of the databases this press will write, before the first write.
 
         Only those databases (owner, 2026-10-08), so a press that sends nothing
         -- every file already in the ledger -- takes none. A backup that fails
         refuses the press with nothing sent. It can take minutes, so the
         running-world guard is asked again after it, as after the database start.
+        Returns whether a backup was taken, so the caller reads the ledger again.
         """
         if self.sql_backup is None or self.sql is None:
-            return
+            return False
         dbs = tuple(
             sorted(
                 {
@@ -5883,7 +5887,7 @@ class Applier:
             )
         )
         if not dbs:
-            return
+            return False
         try:
             line = self.sql_backup.before(manifest, dbs)
         except Exception as exc:  # noqa: BLE001 - any failure to back up is one answer here
@@ -5893,10 +5897,12 @@ class Applier:
             )
             refused.detail = getattr(exc, "detail", "") or ""
             raise refused from exc
-        if line:
-            log.done.append(line)
-            if self._refuse_direct_sql_into_a_running_world(manifest, when):
-                log.world_stopped = True
+        if not line:
+            return False
+        log.done.append(line)
+        if self._refuse_direct_sql_into_a_running_world(manifest, when):
+            log.world_stopped = True
+        return True
 
     def _run_migration(self, step: SqlStep, migration: _Migration, log: _Log) -> None:
         """Send a ledgered file and its row as ONE script: in a transaction when it can be.

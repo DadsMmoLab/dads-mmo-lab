@@ -451,3 +451,23 @@ def test_a_first_install_refused_by_a_running_world_leaves_no_folder_and_no_reco
     assert sql.sent == []
     assert not (server / "sql_scripts" / "clones" / "bot-gear-pack").exists()
     assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("mod")}
+
+
+def test_a_failed_install_keeps_a_tortoise_record_from_an_earlier_press(tmp_path: Path) -> None:
+    from yulon.apply import ApplyError
+    from yulon.git import GitError
+
+    class _Unreachable:
+        def clone(self, spec: CloneSpec) -> None:
+            raise GitError("could not reach github.com")
+
+    server = tmp_path / "server"
+    server.mkdir()
+    manifest = tortoise_modules.derive_link("you/bot-gear-pack")
+    module_source.persist(
+        tortoise_modules.user_manifests_dir(), manifest, shipped_ids=tortoise_modules.shipped_ids()
+    )
+    applier = _tortoise_applier(server, _Unreachable(), _Db(), tmp_path / "client")  # type: ignore[arg-type]
+    with pytest.raises(ApplyError):
+        tortoise_modules.install_custom(applier)(manifest, None)
+    assert "bot-gear-pack" in {m.id for m in tortoise_modules.store().load_all("mod")}

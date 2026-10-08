@@ -319,6 +319,21 @@ def test_the_backup_is_taken_once_of_exactly_the_databases_that_will_be_written(
     assert f"backed up characters before {ITEM}" in report.done
 
 
+def test_the_ledger_is_read_again_after_the_backup(tmp_path: Path) -> None:
+    """Codex review: a row written while the backup ran is not sent over."""
+    server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY})
+    ledger = _Ledger()
+
+    class _RowArrives(_Backups):
+        def before(self, manifest: Manifest, dbs: tuple[Db, ...]) -> str | None:
+            ledger.applied["characters"] = {(ITEM, _sha1(ROWS_ONLY))}
+            return super().before(manifest, dbs)
+
+    report = _applier(server, ledger, _RowArrives()).install(_manifest(("characters", CHAR_FILE)))
+    assert ledger.sent == []
+    assert any("already applied" in line for line in report.skipped), report.skipped
+
+
 def test_a_failed_backup_sends_nothing(tmp_path: Path) -> None:
     server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY})
     ledger = _Ledger()
