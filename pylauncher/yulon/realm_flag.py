@@ -264,7 +264,9 @@ class Keeper:
       (`deliberately_offline`) is in force or began or ended since the tick started. That is
       a cancelled Stop whose own put-back failed. A mark of a running world is followed by
       the same check, so a mark that landed just after the core cleared the bit comes off.
-    - Anything else (stopped, gone, unread): nothing. Yu'lon's own Stop and Start mark it.
+    - The world stopped (exited, created, paused, dead): mark it once per run, database
+      already up, never retried; a world stopped outside Yu'lon's own Stop with realmd still
+      up is listed Offline. Gone or unread: nothing.
 
     Says once per spell what it did, never per tick, and never raises.
     """
@@ -316,22 +318,27 @@ class Keeper:
             logger.debug(f"{self.entry.id}: the realm row was not kept: {exc}")
 
     def _after_tick(self, status: str, run: str, ready: bool, begun: int) -> None:
-        if status == "restarting" or (status == "running" and not ready):
-            self._ready_run = None
-            self._make_offline(status, run, begun)
-        elif status == "running":
+        if status == "running" and ready:
+            # Up: the core cleared the bit. A crash of this same run is a new spell, and
+            # Docker's `restarting` still carries this run's StartedAt (Codex review).
             self._spell_said.clear()
+            self._marked_run, self._tried = None, None
             self._unstick(run, begun)
         elif status:
-            # Stopped or gone: Yu'lon's own Stop marked it, and the next start will.
-            self._spell_said.clear()
+            # Restarting, loading, or stopped (exited, created, paused, dead). A stopped world
+            # is marked once and never retried, for one stopped outside Yu'lon's own Stop with
+            # realmd still listing it (Codex adversarial review); its failure is not said,
+            # since after Yu'lon's own Stop the database is down too.
             self._ready_run = None
+            self._make_offline(status, run, begun)
 
     def _make_offline(self, status: str, run: str, begun: int) -> None:
         if self._marked_run == run:
             return
         now = self._now()
-        if self._tried is not None and self._tried[0] == run and now - self._tried[1] < MARK_RETRY:
+        stopped = status not in ("running", "restarting")
+        tried = self._tried
+        if tried is not None and tried[0] == run and (stopped or now - tried[1] < MARK_RETRY):
             return
         self._tried = (run, now)
         ok = self._mark(
@@ -342,7 +349,7 @@ class Keeper:
             start_database=False,
             quiet=True,
         )
-        what = "restarting" if status == "restarting" else "loading"
+        what = "stopped" if stopped else "restarting" if status == "restarting" else "loading"
         if ok and status == "running" and self.said_ready is not None and self.said_ready(run):
             # The world printed its ready marker and cleared the bit between this tick's read
             # and the mark (the marker comes first, `World.cpp:2399` before `Master.cpp:228`),
@@ -358,7 +365,7 @@ class Keeper:
                     f"{self.entry.id}: the world is {what}; its realm is listed Offline "
                     "until the world server says it is up"
                 )
-        elif "failed" not in self._spell_said:
+        elif not stopped and "failed" not in self._spell_said:
             self._spell_said.add("failed")
             logger.info(
                 f"{self.entry.id}: the world is {what}, and its realm could not be listed "

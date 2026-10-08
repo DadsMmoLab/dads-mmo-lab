@@ -186,13 +186,55 @@ def test_the_mark_is_retried_but_not_every_tick_when_it_failed(rig: Rig) -> None
     assert writes.names == ["mark", "mark"]
 
 
-def test_a_stopped_or_missing_world_is_left_to_yulons_own_stop(rig: Rig) -> None:
-    watch, world, _sql, writes, clock = rig
-    world.status = "exited"
+def test_a_world_stopped_outside_yulon_is_marked_once(rig: Rig) -> None:
+    """A `docker stop` of the world alone leaves realmd listing it; mark it (Codex adversarial)."""
+    watch, world, sql, writes, clock = rig
     watch.tick()
+    world.status = "exited"
+    for _ in range(20):
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["mark"]
+    assert writes.calls[0][1]["start_database"] is False
+    assert sql.flags & 2
+
+
+def test_a_stopped_world_whose_database_is_down_is_tried_once_and_quietly(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After Yu'lon's own Stop the database is down too: one try, no retries, nothing said."""
+    watch, world, _sql, writes, clock = rig
+    caplog.set_level("INFO", logger="yulon.realm_flag")
+    writes.mark_ok = False
+    world.status = "exited"
+    for _ in range(40):
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["mark"]
+    assert [r.getMessage() for r in caplog.records] == []
+
+
+def test_a_world_docker_cannot_find_is_left_alone(rig: Rig) -> None:
+    watch, world, _sql, writes, clock = rig
     world.status = ""
     watch.tick()
     assert writes.names == []
+
+
+def test_a_run_that_was_marked_loading_is_marked_again_when_it_crashes(rig: Rig) -> None:
+    """Docker's `restarting` carries the dead run's StartedAt: the same run, a new spell (Codex)."""
+    watch, world, sql, writes, clock = rig
+    world.run, world.log = RUN_B, "Loading maps..."
+    watch.tick()
+    world.log = READY_LINE
+    sql.flags &= ~2  # the core's own clear on listen
+    clock.advance(5)
+    watch.tick()
+    world.status = "restarting"
+    clock.advance(5)
+    watch.tick()
+    assert writes.names == ["mark", "mark"]
+    assert sql.flags & 2
 
 
 def test_a_world_that_is_up_and_ready_is_not_marked(rig: Rig) -> None:
