@@ -26186,8 +26186,21 @@ def test_a_client_that_pressed_play_before_the_addons_still_gets_the_out_of_date
 
 
 def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dropped(
-    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    installed: list[dict[str, Any]] = []
+    real_install = client_packs.install  # the `steps` spy, which calls the real one
+    monkeypatch.setattr(
+        client_packs,
+        "install",
+        lambda *a, **k: installed.append(real_install(*a, **k)) or installed[-1],
+    )
     original, play = _unbound_client(tmp_path)
     view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
     ps.names = WORLD_UP
@@ -26212,10 +26225,9 @@ def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dr
     assert old_res.read_bytes() == b"return 2\r\n", "the changed file was not replaced"
     assert old_art.read_bytes() == b"BLP2 the player's edit", "an edited file was removed"
     assert own.read_bytes() == b"## Title: Questie\n"
-    assert any(
-        "left alone because you changed them" in note and "UI-Frame.blp" in note
-        for note in view._play_notes
-    ), view._play_notes
+    assert installed[-1]["left_behind"] == [
+        "Interface/AddOns/multiclass-talents-ui/Art/UI-Frame.blp"
+    ]
 
 
 def test_a_folder_pack_is_no_download_in_the_make_dialog(

@@ -259,6 +259,20 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=(".azerothcore",),
     ),
+    Site(
+        "yulon.dashboard",
+        "Dashboard._module_line",
+        "the Server tab's module-health sentence is read from an AzerothCore block's `health` "
+        "(T555 T5)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("a CMaNGOS entry has no AzerothCore block, so no health"),
+            "trinitycore": not_applicable(
+                "a TrinityCore entry has no AzerothCore block, so no health"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
         "yulon.catalog.families.__init__",
