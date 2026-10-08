@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
+- A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
