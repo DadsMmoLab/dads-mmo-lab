@@ -9,7 +9,16 @@ from __future__ import annotations
 import re
 
 PIN = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
-"""mod-playerbots/azerothcore-wotlk, the revision `PIN_COLUMNS` was read at."""
+"""mod-playerbots/azerothcore-wotlk, the revision `PIN_COLUMNS` was read at (wow-wotlk's pin)."""
+
+UNBOUND_CORE_PIN = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+"""The core wow-unbound still builds, until T580 moves it to `PIN`."""
+
+VALID_AT = frozenset({PIN, UNBOUND_CORE_PIN})
+"""The core revisions `PIN_COLUMNS` is known to describe. It holds at `UNBOUND_CORE_PIN` too:
+no base `db_world` SQL file changed between the two revisions, and the 20 `db_world` updates
+between them alter no table (their one DDL is `CREATE TABLE IF NOT EXISTS` for two new `*_dbc`
+tables; T389). Each pin move must add its revision here after checking the same two things."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {
     "creature": frozenset(

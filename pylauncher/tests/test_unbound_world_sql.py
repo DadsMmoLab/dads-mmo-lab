@@ -21,7 +21,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.world_columns import PIN_COLUMNS, TABLE, columns_named, insert_rows, split_statements
+from tests.world_columns import (
+    PIN_COLUMNS,
+    TABLE,
+    VALID_AT,
+    columns_named,
+    insert_rows,
+    split_statements,
+)
 from yulon.catalog.catalog import load_catalog
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mod-unbound"
@@ -130,6 +137,17 @@ def _spawns_in(statements: list[str]) -> list[tuple[int, int]]:
 
 def _mentor_spawns() -> list[tuple[int, int]]:
     return _spawns_in(_creature_inserts())
+
+
+def test_the_column_snapshot_describes_the_core_unbound_builds() -> None:
+    """Unbound's SQL is checked against columns read at WotLK's pin; that is only honest while
+    the core Unbound builds is one of the revisions those columns are known to describe."""
+    entry = load_catalog().get("wow-unbound")
+    (core,) = [s for s in entry.emulator.sources if s.dest == "."]
+    assert core.rev in VALID_AT, (
+        f"wow-unbound builds the core at {core.rev}, which PIN_COLUMNS was not shown to describe: "
+        "read the columns again at that revision, then add it to VALID_AT"
+    )
 
 
 def test_the_snapshot_is_of_the_pinned_module_revision() -> None:
@@ -289,7 +307,10 @@ def test_the_mentor_check_tells_a_player_what_to_press() -> None:
     """The install shows this after \"is missing what it needs:\", so it says what to press."""
     checks = load_catalog().get("wow-unbound").install.native.azerothcore.sql_checks  # type: ignore[union-attr]
     (check,) = [c for c in checks if c.table == "creature"]
-    assert "Rebuild" in check.reason and "Where to get help" in check.reason
+    # Live H5: Rebuild runs no module SQL again once the importer has recorded the file, so the
+    # reason must not send the player to it as the remedy; it sends them to help.
+    assert "Press Rebuild" not in check.reason and "apply it again" not in check.reason
+    assert "Rebuild does not" in check.reason and "Where to get help" in check.reason
     assert "spawn ids" not in check.reason
 
 

@@ -126,8 +126,7 @@ def sentence(got: HealthReading) -> str:
         # finished install. Yu'lon writes nothing to that ledger, so there is no press to name.
         return (
             f"{name} tables missing: {', '.join(got.missing)}. "
-            f"{server_build_presses.REBUILD} does not bring them back, and nothing short of "
-            "reinstalling the server, which loses your characters, does. "
+            f"{server_build_presses.REBUILD} does not bring them back. "
             "Press “Save logs for support…” on the Logs tab and ask for help."
         )
     if got.short:

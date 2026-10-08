@@ -1722,7 +1722,10 @@ def test_a_log_that_no_longer_shows_the_start_is_could_not_be_checked_and_not_as
 
     lines = [watch.tick().module_line for _ in range(4)]
 
-    assert lines[0].startswith("Unbound could not be checked: ")
+    assert lines[0] == (
+        "Unbound could not be checked: this run's world log has neither its ready line nor "
+        "Unbound's start-up lines"
+    )
     assert "did not load" not in lines[0] and not any(ch.isdigit() for ch in lines[0])
     assert lines == [lines[0]] * 4
     assert sql.tables_asked == 1, "asked again on every tick"
@@ -1732,15 +1735,42 @@ def test_a_log_that_no_longer_shows_the_start_is_could_not_be_checked_and_not_as
 
 
 def test_a_bad_reading_is_kept_once_the_world_has_said_ready(tmp_path: Path) -> None:
-    """The world's own ready line is in the log: the module's state is fixed, ask once."""
+    """The world's own ready line is in the log: the module's state is fixed, ask once.
+
+    The clock moves past the replay window, so this proves the reading is KEPT for the run and
+    not merely replayed for a minute.
+    """
     sql = _UnboundSql()
     del sql.counts["unbound_milestones"]
-    watch = _unbound_watch(tmp_path, sql)
+    clock = [NOW]
+    watch = _unbound_watch(tmp_path, sql, clock=clock)
 
-    first, second = watch.tick(), watch.tick()
+    first = watch.tick()
+    clock[0] = NOW + 3 * dashboard.HEALTH_RETRY_EVERY
+    second = watch.tick()
 
     assert first.module_line == second.module_line
     assert first.module_line.startswith("Unbound tables missing:")
+    assert sql.tables_asked == 1
+
+
+def test_a_world_that_said_ready_without_the_prereq_line_did_not_load_and_stays_so(
+    tmp_path: Path,
+) -> None:
+    """A real 'did not load': the ready line is there and a module line is not. It is kept for
+    the run, so no later tick reads the log or asks the database again."""
+    sql = _UnboundSql()
+    clock = [NOW]
+    log = UNBOUND_LOG.replace("[UNBOUND] Prereq map built.\n", "")
+    watch = _unbound_watch(tmp_path, sql, log=log, clock=clock)
+
+    first = watch.tick()
+    clock[0] = NOW + 3 * dashboard.HEALTH_RETRY_EVERY
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound did not load:")
+    assert '"[UNBOUND] Prereq map built."' in first.module_line
+    assert second.module_line == first.module_line
     assert sql.tables_asked == 1
 
 
@@ -1860,10 +1890,10 @@ def test_a_clock_that_goes_backwards_reads_the_run_again_and_ages_the_sentence_f
     )
     assert watch.tick().warning
 
-    clock[0] = NOW - timedelta(hours=1)  # the machine's clock is set back
+    clock[0] = NOW - timedelta(seconds=5)  # the machine's clock is set back
     assert watch.tick().warning
     assert asked == [run, run], "carried on from a read that is now in the future"
-    clock[0] = NOW - timedelta(hours=1) + dashboard.WRONG_CLIENT_STAYS * 2
+    clock[0] = NOW - timedelta(seconds=5) + dashboard.WRONG_CLIENT_STAYS * 2
     watch._login_log_of = lambda _c, _s: ""
     assert watch.tick().warning == ""
 
@@ -1964,3 +1994,36 @@ def test_unbound_says_both_the_wrong_client_and_whether_it_loaded(tmp_path: Path
     assert "not 3.3.5a (build 12340)" in verdict.warning
     assert verdict.warning in text and GOOD_LINE in text
     assert text.index(verdict.warning) < text.index(GOOD_LINE), "the warning comes first"
+
+
+def test_a_replayed_reading_belongs_to_its_own_run(tmp_path: Path) -> None:
+    """A world that restarts inside the replay window is asked about afresh, not told the
+    sentence of the run before."""
+    sql = _UnboundSql()
+    old, new = _stamp(NOW - dashboard.SETTLED_AFTER * 2), _stamp(NOW - timedelta(minutes=3))
+    box = ["2026-10-08 INFO player Abc logged in\n", UNBOUND_LOG]
+    watch = _unbound_watch(tmp_path, sql, runs=[old, new], log_box=box)
+
+    first = watch.tick()
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound could not be checked:")
+    assert second.module_line == GOOD_LINE
+
+
+def test_a_clock_that_goes_backwards_does_not_hold_a_replayed_reading(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    clock = [NOW]
+    watch = _unbound_watch(
+        tmp_path,
+        sql,
+        age=dashboard.SETTLED_AFTER * 2,
+        log="2026-10-08 INFO player Abc logged in\n",
+        clock=clock,
+    )
+
+    watch.tick()
+    clock[0] = NOW - timedelta(seconds=5)
+    watch.tick()
+
+    assert sql.tables_asked == 2, "a reading stamped in the future was replayed"

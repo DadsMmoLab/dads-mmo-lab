@@ -577,12 +577,16 @@ class Dashboard:
                 self._health_run, self._health_got, self._health_running = run, got, running
             else:
                 if got.absent_marker:
-                    # No ready line and none of the module's own: the log no longer shows this
-                    # run's start (rotated by its size, or read long after). That is not the
-                    # module failing to load, and saying so would be a guess.
+                    # Neither the world's ready line nor any of the module's own is in this
+                    # run's log. That says what was seen, not why: the world may still be
+                    # loading or hung, or the log may have been cut. "Did not load" would be a
+                    # guess, so the line says only what was not there.
                     got = module_health.HealthReading(
                         got.name,
-                        unreadable="the world's log no longer shows how this run started",
+                        unreadable=(
+                            "this run's world log has neither its ready line nor "
+                            f"{got.name}'s start-up lines"
+                        ),
                     )
                 line = module_health.sentence(got)  # a bad one never says a switch
                 self._health_waiting = (run, self._now(), line)
