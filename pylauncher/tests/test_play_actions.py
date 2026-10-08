@@ -620,3 +620,97 @@ def test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_own_entry(tmp_p
     assert seam.entry.play.rename_command == "rename"
     assert seam.entry.play.set_level_command is None
     assert seam.mail_item_cap == 1
+
+
+# -- T584: a level on an online character is saved before it is read back ----
+
+
+class _LevelRows:
+    """A reader that knows the name lookup and walks `characters.level` through a script."""
+
+    def __init__(self, online: str, levels: list[str]) -> None:
+        self.online = online
+        self.levels = list(levels)
+        self.level_reads = 0
+
+    def query(self, db: str, statement: str) -> str:
+        if "SELECT name, online FROM" in statement:
+            return f"Guglu\t{self.online}\n"
+        if "SELECT level FROM" in statement:
+            self.level_reads += 1
+            return (self.levels.pop(0) if len(self.levels) > 1 else self.levels[0]) + "\n"
+        return ""
+
+    def run_statement(self, db: str, statement: str) -> None:  # pragma: no cover
+        raise AssertionError("a read must not write")
+
+
+def test_a_level_on_an_online_character_is_saved_and_read_back_until_the_row_agrees(
+    tmp_path,
+) -> None:
+    """Measured on Unbound, 500 bots online: `.character level` writes no row for a character in
+    the world, the row stayed at the old level for 125 s, and one `.saveall` made it read the new
+    one 2.5 to 4.7 s later. The tab sent no save, so it showed the old level."""
+    reader = _LevelRows("1", ["12", "12", "70"])
+    channel = _Channel(text="You changed level of Guglu to 70.")
+    naps: list[float] = []
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=naps.append)
+
+    assert channel.sent == ["character level Guglu 70", "saveall"]
+    assert outcome.done is True
+    assert outcome.text == "You changed level of Guglu to 70."
+    assert reader.level_reads == 3
+    assert len(naps) == 2, "it waits between reads and not after the one that agrees"
+
+
+def test_a_row_that_never_agrees_ends_in_a_plain_sentence_after_a_bounded_wait(tmp_path) -> None:
+    reader = _LevelRows("1", ["12"])
+    naps: list[float] = []
+    install = _install(tmp_path, sql=reader, channel=_Channel(text="Level changed."))
+
+    outcome = install.set_level_and_save("guglu", 70, tries=4, pause=0.5, sleep=naps.append)
+
+    assert outcome.done is True, "the server did take the level"
+    assert outcome.text.startswith("Level changed.")
+    assert "has not written" in outcome.text and "12" in outcome.text
+    assert reader.level_reads == 4
+    assert naps == [0.5, 0.5, 0.5]
+
+
+def test_an_offline_character_needs_no_save_and_is_not_polled(tmp_path) -> None:
+    """The offline arm of `.character level` writes the row itself."""
+    reader = _LevelRows("0", ["12"])
+    channel = _Channel()
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert outcome.done is True
+    assert channel.sent == ["character level Guglu 70"]
+    assert reader.level_reads == 0
+
+
+def test_a_refused_level_is_not_followed_by_a_save(tmp_path) -> None:
+    reader = _LevelRows("1", ["12"])
+    channel = _Channel("no")
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert outcome.done is False
+    assert channel.sent == ["character level Guglu 70"]
+    assert reader.level_reads == 0
+
+
+def test_a_save_the_server_refuses_is_said_and_the_row_is_not_polled(tmp_path) -> None:
+    reader = _LevelRows("1", ["12"])
+    channel = _Channel("yes", "no")
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert outcome.done is True, "the level itself was taken"
+    assert "the server said no" in outcome.text
+    assert reader.level_reads == 0
