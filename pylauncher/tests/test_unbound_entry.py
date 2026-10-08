@@ -124,15 +124,19 @@ def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> 
     assert probe is not None and reset is not None
 
 
+CORE_REV = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+PLAYERBOTS_REV = "7bae1b5c58c76a0aa20381155edc08096d1485b2"
+"""Unbound's own core and bots pins. WotLK moved to f19a1879 / 037c0141 (T389); Unbound stays here
+by the owner's decision until T580, so these are literals and not wow-wotlk's."""
+
+
 def test_it_builds_the_core_modules_ale_and_the_unbound_branch_at_pinned_commits() -> None:
     sources = {s.dest: s for s in unbound().emulator.sources}
     wotlk = {s.dest: s for s in load_catalog().get("wow-wotlk").emulator.sources}
-    for dest, source in wotlk.items():
-        assert (sources[dest].repo, sources[dest].branch, sources[dest].rev) == (
-            source.repo,
-            source.branch,
-            source.rev,
-        )
+    for dest, rev in ((".", CORE_REV), ("modules/mod-playerbots", PLAYERBOTS_REV)):
+        # The same repos and branches as wow-wotlk, at Unbound's own revisions.
+        assert (sources[dest].repo, sources[dest].branch) == (wotlk[dest].repo, wotlk[dest].branch)
+        assert sources[dest].rev == rev
     ale = sources["modules/mod-ale"]
     assert (ale.repo, ale.rev) == ("azerothcore/mod-ale", MOD_ALE_REV)
     mine = sources["modules/mod-unbound"]
@@ -279,9 +283,13 @@ def test_my_party_is_possible_on_unbound_and_still_not_on_the_cmangos_games() ->
     assert not InstallParty.for_entry_is_possible(load_catalog().get("wow-tbc"))
 
 
-def test_the_server_rates_card_reads_the_same_world_conf_and_keys_as_wotlk(tmp_path: Path) -> None:
+def test_the_server_rates_card_reads_the_same_world_conf_and_keys_as_wotlk_at_its_own_pin(
+    tmp_path: Path,
+) -> None:
     entry = unbound()
-    assert server_rates.read_at(entry) == server_rates.read_at(wotlk())
+    wotlk_repo, wotlk_rev = server_rates.read_at(wotlk())  # type: ignore[misc]
+    assert server_rates.read_at(entry) == (wotlk_repo, CORE_REV)
+    assert wotlk_rev != CORE_REV, "wow-wotlk moved on; Unbound keeps its own pin until T580"
     assert server_rates.card_file(entry) == "env/dist/etc/worldserver.conf"
     assert list(server_rates.conf_keys(entry)) == list(server_rates.conf_keys(wotlk()))
     assert len(server_rates.conf_keys(entry)) == 11

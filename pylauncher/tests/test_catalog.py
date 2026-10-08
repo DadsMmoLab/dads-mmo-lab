@@ -232,8 +232,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
-        "mod-playerbots/mod-playerbots": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
+        "mod-playerbots/azerothcore-wotlk": "f19a18799a35f7c24bdcdc9ea399c601f166259b",
+        "mod-playerbots/mod-playerbots": "037c01418b5d01506917a3db9b44fd56ac5f965c",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
@@ -249,15 +249,15 @@ GATE_PINS = {
 """The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26 and 2026-10-08:
 
-* `wow-wotlk`: T134's fresh install on `yulon-fedora-gate` (SELinux enforcing)
-  2026-09-26, whose press read core `7f12e89e` and module `7bae1b5c` out of the
-  install's own checkouts and whose world printed `AzerothCore rev. 7f12e89ee5f4+`.
-  The two are one pair: the core's f15ad9494 moved the playerbots database out of
-  the core and the module's af078829 took it in, so neither builds with the
-  other's older commit. Until then it was `413bea61`/`b949b50b`, gate 7.1's clean
-  2026-09-04 run on `yulon-ubuntu`.
+* `wow-wotlk`: T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
+  and module `037c0141`, the two `test-staging` merges of 2026-10-02 (core #258, module
+  #2873). The core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
+  (AzerothCore #27533), which mod-ale's master calls since its #408; and the module's
+  b0cd0ea7 takes the core's async module database (ff8d11773), so the two are one pair.
+  Before that, T134's `7f12e89e`/`7bae1b5c` (2026-09-26, the same box), and until then
+  `413bea61`/`b949b50b`, gate 7.1's clean 2026-09-04 run on `yulon-ubuntu`.
 * `wow-tbc`: `/home/user/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
   2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate

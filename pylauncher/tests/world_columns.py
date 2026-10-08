@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-PIN = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+PIN = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
 """mod-playerbots/azerothcore-wotlk, the revision `PIN_COLUMNS` was read at."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {

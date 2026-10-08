@@ -12,7 +12,9 @@ catalog's WotLK pin: the pin's `data/sql/base/db_world/<table>.sql`, with every
 2026-10-08 with the GitHub API at the pin. T560 added the tables NPC Teleporter's Remove
 touches and the mob-stat manifests update (base SQL only: the pin's db_world updates change
 none of their columns). The first test fails when the pin moves, so the snapshot is measured
-again rather than trusted.
+again rather than trusted. T389 moved the pin from 7f12e89e to f19a1879 (2026-10-08): no base
+SQL file changed between the two, and the 20 db_world updates between them alter no table
+(their one DDL is `CREATE TABLE IF NOT EXISTS` for two new `*_dbc` tables), so the snapshot holds.
 """
 
 from __future__ import annotations

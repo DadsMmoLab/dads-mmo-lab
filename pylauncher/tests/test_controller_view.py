@@ -16004,6 +16004,11 @@ def _at(window: Any, size: tuple[int, int]) -> None:
     # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
     # every height measured here -- a function of the window's width.
     apply_dadcraft_theme(window, width=window.width())
+    _settle(window, f"the window to settle at {size}")
+
+
+def _settle(window: Any, what: str) -> None:
+    """Pump until no widget in `window` has moved for `_SETTLED_ROUNDS` pumps in a row."""
     seen: list[object] = [None]
     same = [0]
 
@@ -16014,7 +16019,7 @@ def _at(window: Any, size: tuple[int, int]) -> None:
         seen[0] = now
         return same[0] >= _SETTLED_ROUNDS
 
-    pump_until(settled, f"the window to settle at {size}")
+    pump_until(settled, what)
 
 
 _SETTLE_PUMP_MS = 10
@@ -18320,7 +18325,12 @@ def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
     pump_until(lambda: not view.rebuild_log.running, "the failed job finished")
     process_events()
     view.rebuild_log.set_collapsed(True)
-    process_events()
+    # Folding asks for a layout, and the panel's height follows it a pass later.
+    # A fixed 50 ms pump measured it before that (T582): 68 px against the 102
+    # it needs, on py3.11 CI and in 11 of 150 local runs under CPU load. Wait
+    # for the layout to stop moving instead -- a panel that is really clipped
+    # still reads clipped once it has.
+    _settle(window, "the folded strip to settle")
 
     field = view.rebuild_log._status
     assert (
