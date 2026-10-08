@@ -176,7 +176,13 @@ def _removed_ids() -> dict[str, set[int]]:
 
 def test_remove_clears_exactly_the_ids_the_install_clears() -> None:
     """Every table, every id: the union of the two `.dist` DELETE blocks, no more and no less."""
-    assert _removed_ids() == _dist_ids()
+    # T564: the three gossip tables are cleared through the NPCs' gossip_menu_id (the model in
+    # test_npc_teleporter_menus.py), never by a fixed range that may hold another module's menus.
+    expected = _dist_ids()
+    for table in ("gossip_menu", "gossip_menu_option", "conditions"):
+        del expected[table]
+    assert _removed_ids() == expected
+    assert "@tp_cap" in _remove_text()
 
 
 def test_remove_keeps_the_install_s_other_conditions_on_the_row_it_matches() -> None:
@@ -244,11 +250,15 @@ def test_the_restored_rows_come_after_the_deletes_that_would_remove_them() -> No
     assert first_replace > last_delete
 
 
-def test_every_restored_row_lies_in_a_range_remove_clears() -> None:
-    """Otherwise the REPLACE would be putting back something the DELETE never took."""
-    removed = _removed_ids()
+def test_every_restored_row_is_one_a_legacy_install_took() -> None:
+    """The REPLACE only puts back what an Install made before T564 deleted (menus 50000..50008).
+
+    Remove no longer deletes that range itself (T564); it takes the menus the NPCs point at, and
+    an Install before T564 left the NPCs on 50000 and 50009, which is how those rows go (and
+    come back) in test_npc_teleporter_menus.py's legacy test.
+    """
     for table, rows in _BASE_ROWS.items():
         for row in rows:
             first = int(row.strip("(").split(",")[0])
             keyed = int(row.strip("(").split(",")[1]) if table == "conditions" else first
-            assert keyed in removed[table], (table, row)
+            assert 50000 <= keyed <= 50008, (table, row)

@@ -571,18 +571,33 @@ def test_remove_interrupted_between_any_two_statements_is_mended_by_removing_aga
         assert world.state(like=World()) == World().state(), f"interrupted after {stop} statements"
 
 
-@pytest.mark.parametrize("variant", ["06e5242", "70000"])
+@pytest.mark.parametrize("variant", VARIANTS)
 def test_remove_deletes_no_menu_that_is_not_the_modules(variant: str) -> None:
+    """Nothing but the menus the NPCs pointed at goes: not the old range, not the new one."""
     world = _installed(variant)
-    for menu in (59999, 60011, 70011, 61500):
+    foreign = (50009, 50010, 50017, 59999, 60011, 70011, 61500)
+    for menu in foreign:
         _foreign(world, menu)
+    world.con.execute(
+        "INSERT INTO gossip_menu_option (MenuID, OptionID, OptionText) VALUES (50012, 0, 'x'), (50003, 9, 'custom')"
+    )
     _remove(world)
-    assert {r[0] for r in world.rows("SELECT MenuID FROM gossip_menu WHERE TextID = 4242")} == {
-        59999,
-        60011,
-        70011,
-        61500,
-    }
+    assert {r[0] for r in world.rows("SELECT MenuID FROM gossip_menu WHERE TextID = 4242")} == set(
+        foreign
+    )
+    assert world.rows(
+        "SELECT MenuID, OptionID FROM gossip_menu_option WHERE OptionText IN ('x', 'custom') ORDER BY 1"
+    ) == [(50003, 9), (50012, 0)]
+
+
+def test_a_refused_install_is_mended_by_clearing_the_range_and_installing_again() -> None:
+    world = World()
+    _foreign(world, 60005)
+    with pytest.raises(Refused, match="stay missing"):
+        _install(world, "06e5242")
+    world.con.execute("DELETE FROM gossip_menu WHERE MenuID = 60005")
+    _install(world, "06e5242")
+    assert world.state() == _installed("06e5242").state()
 
 
 # --------------------------------------------------------------------------- the range is free
