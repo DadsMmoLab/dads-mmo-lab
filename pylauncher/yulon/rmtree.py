@@ -54,6 +54,10 @@ def remove_tree_stoppably(path: Path, stop: Callable[[], bool]) -> bool:
     """
     if not os.path.lexists(path):
         return False
+    if os.path.islink(path):
+        # `shutil.rmtree` refuses a top-level link, and `os.walk` would follow it into its
+        # target, outside the claimed folder (Codex adversarial review, T549 round 6).
+        raise OSError(f"Cannot remove {path}: it is a symbolic link, not a folder")
     for root, dirs, files in os.walk(path, topdown=False):
         for name in files:
             if stop():

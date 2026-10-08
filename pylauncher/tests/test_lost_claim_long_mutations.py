@@ -132,3 +132,25 @@ def test_a_stoppable_removal_asks_before_every_directory_it_removes(tmp_path: Pa
         rmtree.remove_tree_stoppably(tree, _stop_after(2))
     left = [path for path in tree.iterdir()]
     assert len(left) == 4, left  # two removed, then it stopped
+
+
+def test_a_stoppable_removal_refuses_a_root_that_is_a_link_and_leaves_its_target(
+    tmp_path: Path,
+) -> None:
+    """Codex adversarial review, round 6: `os.walk` follows a link given as the root.
+
+    `shutil.rmtree` refuses a top-level link; so must this. Mutation this catches: the
+    `islink(path)` refusal removed, which walks into the target and deletes its files.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.map").write_bytes(b"MAPS")
+    link = tmp_path / "maps"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:  # pragma: no cover - a Windows account without the link privilege
+        pytest.skip("cannot make a symlink here")
+    with pytest.raises(OSError, match="symbolic link") as raised:
+        rmtree.remove_tree_stoppably(link, lambda: False)
+    assert not isinstance(raised.value, rmtree.StoppedPartWay)
+    assert (outside / "keep.map").read_bytes() == b"MAPS", "the link's target was walked"
