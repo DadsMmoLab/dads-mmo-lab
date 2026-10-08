@@ -1,0 +1,30 @@
+diff --git a/src/server/game/Entities/Creature/TemporarySummon.cpp b/src/server/game/Entities/Creature/TemporarySummon.cpp
+index 5eceb9e..67275e0 100644
+--- a/src/server/game/Entities/Creature/TemporarySummon.cpp
++++ b/src/server/game/Entities/Creature/TemporarySummon.cpp
+@@ -394,6 +394,11 @@ Unit* Minion::GetOwner() const
+ 
+ bool Minion::IsGuardianPet() const
+ {
++    // Unbound multiclass: Feral Spirit wolves are pure guardians and must never
++    // claim the pet summon slot - a multiclass owner can have a real pet out.
++    if (GetEntry() == NPC_FERAL_SPIRIT)
++        return false;
++
+     return IsPet() || (m_Properties && m_Properties->Category == SUMMON_CATEGORY_PET);
+ }
+ 
+diff --git a/src/server/game/Spells/Spell.cpp b/src/server/game/Spells/Spell.cpp
+index f1a236f..ebedfa2 100644
+--- a/src/server/game/Spells/Spell.cpp
++++ b/src/server/game/Spells/Spell.cpp
+@@ -3929,7 +3929,8 @@ void Spell::_cast(bool skipCheck)
+     // Xinef: implement attribute SPELL_ATTR1_DISMISS_PET_FIRST, on spell cast current pet is dismissed and charms are removed
+     if (unitCaster && m_spellInfo->HasAttribute(SPELL_ATTR1_DISMISS_PET_FIRST))
+     {
+-        if (unitCaster->IsPlayer() && !m_spellInfo->HasEffect(SPELL_EFFECT_SUMMON_PET))
++        // Unbound multiclass: Feral Spirit (51533) coexists with the hunter pet
++        if (unitCaster->IsPlayer() && !m_spellInfo->HasEffect(SPELL_EFFECT_SUMMON_PET) && m_spellInfo->Id != 51533)
+             if (Pet* pet = unitCaster->ToPlayer()->GetPet())
+                 unitCaster->ToPlayer()->RemovePet(pet, PET_SAVE_AS_CURRENT);
+ 

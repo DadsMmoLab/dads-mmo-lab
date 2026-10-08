@@ -183,6 +183,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-vanilla": (vanilla_accounts, vanilla_maintenance),
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
+        "wow-unbound": (wotlk_accounts, wotlk_maintenance),  # T554: WotLK's package, its own entry
         "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
@@ -221,8 +222,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 14, (
-        str(checked) + " builders were exercised, not 14. An exact count, not a floor: the "
+    assert checked == 16, (  # T554: wow-unbound runs the WotLK package's two builders
+        str(checked) + " builders were exercised, not 16. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -641,7 +642,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | uncorrectable
             | unlocked
         )
-        if game == "wow-wotlk":
+        if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
             reference = (
                 unprobed
                 | unpathed

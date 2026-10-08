@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker
+from yulon import dbreads, docker, module_health, unbound_settings
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
@@ -135,6 +135,11 @@ until `SETTLED_AFTER`, as after any loop.
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
 
+HEALTH_RETRY_EVERY = timedelta(seconds=60)
+"""How long a module's health reading made without the world's ready line is replayed.
+
+Such a reading is not kept for the run (the log may yet catch up), and it is not remade every
+tick either: each remake reads the world's log and asks the database. T555."""
 WRONG_CLIENT_EVERY = timedelta(seconds=60)
 """How often the world log is read for a client that was turned away (T576)."""
 
@@ -205,6 +210,10 @@ class Verdict:
     says the run is up and not yet ready: the line says "starting" and the
     badge follows it. True when the install has no marker to look for, since
     nothing could ever say otherwise.
+    """
+    module_line: str = ""
+    """A module's own health sentence (`module_health`), once this run is ready; empty before
+    that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
     """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
@@ -287,6 +296,8 @@ def line(verdict: Verdict) -> str:
         parts.append(verdict.warning)
     if verdict.problem and verdict.players is not None:
         parts.append(verdict.problem)
+    if verdict.module_line:
+        parts.append(verdict.module_line)
     return " · ".join(parts)
 
 
@@ -379,6 +390,13 @@ class Dashboard:
         self._restarting_run: str | None = None
         self._ready_run: str | None = None
         self._ready_seen_at: datetime | None = None
+        # T555 T5: the module's health sentence for the run it was last read for.
+        self._health_run: str | None = None
+        self._health_got: module_health.HealthReading | None = None
+        self._health_running: dict[str, bool | None] | None = None
+        self._health_waiting: tuple[str, datetime, str] | None = None
+        """`(run, when, sentence)` of the last reading that was not kept: replayed for
+        `HEALTH_RETRY_EVERY`, then asked again."""
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -448,6 +466,10 @@ class Dashboard:
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
+        if verdict.ready:
+            line = self._module_line(state.started_at)
+            if line:
+                verdict = replace(verdict, module_line=line)
         return self._with_wrong_client(verdict, state.started_at)
 
     def _first_since(self, run: str) -> str:
@@ -506,6 +528,76 @@ class Dashboard:
             f"{version} client"
         )
         return replace(verdict, warning=" · ".join(w for w in (verdict.warning, sentence) if w))
+
+    def _module_line(self, run: str) -> str:
+        """The module's health sentence for run `run` (T555 T5).
+
+        Empty for an entry without a `health` block. Asked only after the world said ready, so
+        the module has printed its lines and made its tables. What the database and the log
+        said is kept by `run` and asked once; one that could not be read is not kept, so the next
+        tick asks again. The switches are laid beside it afresh at every tick: the settings file
+        can change under a running world (the Tuning card), and "(on at the next start)" is
+        about the file as it is now.
+        """
+        native_block = self.entry.install.native
+        block = native_block.azerothcore if native_block is not None else None
+        health = block.health if block is not None else None
+        if block is None or health is None:
+            return ""
+        if self._health_run != run or self._health_got is None:
+            waiting = self._health_waiting
+            if (
+                waiting is not None
+                and waiting[0] == run
+                and timedelta(0) <= self._now() - waiting[1] < HEALTH_RETRY_EVERY
+            ):
+                return waiting[2]
+            try:
+                log = self._log_of(self.spec.world, run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for its health: {exc}")
+                log = ""
+            got = module_health.reading(
+                health, block.sql_checks, self.entry.databases.schema_map(), self.sql, log, ()
+            )
+            if got.unreadable:
+                return module_health.sentence(got)
+            running = (
+                unbound_settings.running_state(log)
+                if unbound_settings.shown_for(self.entry)
+                else None
+            )
+            # A bad reading is kept only once the world's own ready line is in this run's log.
+            # "Ready" can come from uptime alone (SETTLED_AFTER), before the module's lines or
+            # tables are all there, and a verdict kept from then would never heal. A good one
+            # holds the module's own lines, so it cannot be early. No ready marker to look for
+            # at all (`_banner is None`) leaves nothing to wait for. Readiness is judged from the
+            # very log the reading was made from, never from a second read of it.
+            if got.good or self._banner is None or self._banner.search(log):
+                self._health_run, self._health_got, self._health_running = run, got, running
+            else:
+                if got.absent_marker:
+                    # Neither the world's ready line nor any of the module's own is in this
+                    # run's log. That says what was seen, not why: the world may still be
+                    # loading or hung, or the log may have been cut. "Did not load" would be a
+                    # guess, so the line says only what was not there.
+                    got = module_health.HealthReading(
+                        got.name,
+                        unreadable=(
+                            "this run's world log has neither its ready line nor "
+                            f"{got.name}'s start-up lines"
+                        ),
+                    )
+                line = module_health.sentence(got)  # a bad one never says a switch
+                self._health_waiting = (run, self._now(), line)
+                return line
+            self._health_waiting = None
+        got = self._health_got
+        if self._health_running is not None:
+            got = replace(
+                got, switches=unbound_settings.switches_for(self.server_dir, self._health_running)
+            )
+        return module_health.sentence(got)
 
     def _said_ready_and_stayed_up(self, run: str) -> bool:
         """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).
