@@ -3026,5 +3026,12 @@ def test_a_recorded_file_missing_from_the_client_is_reported(rig: _Rig) -> None:
     assert client_packs.recorded_files_missing(rig.play, entry) == (
         "Interface/AddOns/Nova/Nova.lua",
     ), "an edited file is there: only a missing one asks for a new install"
+    # Codex review round 3: a file still there under another case is not missing, or a
+    # case-sensitive disk would be "repaired" on every Play and nothing ever written.
+    (rig.play / "Interface" / "AddOns" / "Nova").rename(rig.play / "Interface" / "AddOns" / "nova")
+    (rig.play / "Interface" / "AddOns" / "nova" / "Nova.lua").write_bytes(
+        b"back, lower-case folder"
+    )
+    assert client_packs.recorded_files_missing(rig.play, entry) == ()
     junk = {**entry, "files": {"../outside": "0" * 64}}
     assert client_packs.recorded_files_missing(rig.play, junk) == (), "a bad name is not a file"

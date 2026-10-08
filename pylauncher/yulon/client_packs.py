@@ -1443,10 +1443,13 @@ def pack_files(play_dir: Path) -> frozenset[Path]:
 def recorded_files_missing(play_dir: Path, entry: Mapping[str, Any]) -> tuple[str, ...]:
     """The files a pack's record entry lists that are no longer in `play_dir`, sorted.
 
-    One `lstat` per file, no reading: Play installs the pack again when this is
-    not empty (T555 T1), so an addon folder the player deleted comes back. A file
-    the player edited is still there and is not listed. A name that could leave
-    the folder is not a file of the client and is skipped (`pack_files`' rule).
+    One `lstat` per file, no reading: Play puts the missing files back when this
+    is not empty (T555 T1), so an addon folder the player deleted comes back. A
+    file the player edited is still there and is not listed, and neither is one
+    still there under another case (`client_names.on_disk`, asked only for a name
+    the `lstat` did not find): `install()` writes onto that name, so a case-sensitive
+    disk would otherwise be "repaired" on every Play. A name that could leave the
+    folder is not a file of the client and is skipped (`pack_files`' rule).
     """
     files = entry.get("files")
     if not isinstance(files, dict):
@@ -1454,7 +1457,9 @@ def recorded_files_missing(play_dir: Path, entry: Mapping[str, Any]) -> tuple[st
     missing: list[str] = []
     for rel in files:
         clean = _clean_rel(rel)
-        if clean is not None and not os.path.lexists(play_dir / Path(*clean.parts)):
+        if clean is None or os.path.lexists(play_dir / Path(*clean.parts)):
+            continue
+        if not os.path.lexists(play_dir / Path(*client_names.on_disk(play_dir, clean).parts)):
             missing.append(clean.as_posix())
     return tuple(sorted(missing))
 
