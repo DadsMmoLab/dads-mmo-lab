@@ -193,6 +193,9 @@ MODULE_SURFACE_AFTER_7_2 = {
     # was back, so the update route leaves its sources with the new one. An
     # exception type, not machinery.
     "RollbackNotDone",
+    # Added deliberately with T563: an InstallerError whose sentence already says
+    # what to do, so a wrapper passes it through. An exception type, not machinery.
+    "SelfExplainedError",
     # Added deliberately with T228: the mark two of this module's failure types
     # carry so the log panel shows them after a Stop. A marker class, imported.
     "TrueAfterStop",
