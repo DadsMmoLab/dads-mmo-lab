@@ -2042,12 +2042,15 @@ def _install(
             _Item(item.info, client_names.on_disk(play_dir, item.rel))
             for item in _plan(pack, archive)
         ]
+        new = {item.rel.as_posix().casefold() for item in items}
+        if only_missing:
+            # Chosen before a leftover aside is put back (cold review): the pack's
+            # bytes are what the record names, so they are what goes in, and the
+            # swap then clears the aside like any file it replaces.
+            items = [i for i in items if not os.path.lexists(play_dir / Path(*i.rel.parts))]
         for item in items:
             _check_path(play_dir, item.rel)
         _recover_asides([play_dir / Path(*item.rel.parts) for item in items], sleep)
-        new = {item.rel.as_posix().casefold() for item in items}
-        if only_missing:
-            items = [i for i in items if not os.path.lexists(play_dir / Path(*i.rel.parts))]
         plain = sum(i.info.file_size for i in items if i.rel.suffix.lower() != ".mpq")
         if plain:
             _refuse_without_room(pack, play_dir, plain)

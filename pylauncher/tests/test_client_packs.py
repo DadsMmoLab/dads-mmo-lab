@@ -3040,6 +3040,24 @@ def test_putting_back_missing_files_writes_only_those_and_keeps_an_edited_siblin
     rig.untouched()
 
 
+def test_putting_back_a_file_whose_old_backup_was_left_writes_the_packs_bytes(
+    rig: _Rig,
+) -> None:
+    """Cold review note 2: a `.yulon-pack-old` a crashed swap left beside a missing file must
+    not come back in its place while the record says the pack's hash."""
+    fetched = rig.fetched(ADDON_FILES)
+    entry = rig.install(ADDONS, fetched)
+    nova = rig.play / "Interface" / "AddOns" / "Nova"
+    (nova / "Nova.lua").unlink()
+    (nova / "Nova.lua.yulon-pack-old").write_bytes(b"print('an older Nova')\n")
+
+    again = rig.install(ADDONS, fetched, previous=entry, only_missing=True)
+
+    assert (nova / "Nova.lua").read_bytes() == ADDON_FILES["Nova/Nova.lua"]
+    assert again["files"]["Interface/AddOns/Nova/Nova.lua"] == _sha(ADDON_FILES["Nova/Nova.lua"])
+    assert sorted(p.name for p in nova.iterdir()) == ["Nova.lua", "Nova.toc"], "an aside was left"
+
+
 def test_putting_back_with_nothing_missing_writes_nothing(rig: _Rig) -> None:
     fetched = rig.fetched(ADDON_FILES)
     entry = rig.install(ADDONS, fetched)
