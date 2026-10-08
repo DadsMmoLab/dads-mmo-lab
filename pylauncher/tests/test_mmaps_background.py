@@ -1506,3 +1506,31 @@ def test_the_generators_quote_never_claims_more_or_less_than_the_log_said(
         assert said == quoted
     else:
         assert said == "16% [Map 001] Building tile [40,53] / 16% [Map 001] Building…."
+
+
+def test_a_discard_stopped_part_way_forgets_the_set_and_keeps_pathfinding_off(
+    server: Path,
+) -> None:
+    """T549: a press that loses its folder claim while the tiles are deleted stops between two
+    files; the set it was deleting reads as not made, with pathfinding off, never as done.
+
+    Mutation this catches: `discard()` deleting without asking `stop`, or raising before
+    the record is forgotten.
+    """
+    from yulon import rmtree
+
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(8)
+    fake.finish(139)
+    status(server, fake)
+    asked = [0]
+
+    def stop() -> bool:
+        asked[0] += 1
+        return asked[0] > 3
+
+    with pytest.raises(rmtree.StoppedPartWay):
+        mmaps.discard(server, ENTRY, install_id=INSTALL_ID, stop=stop)
+    assert 0 < len(output(server)) < 8, "stopped between files, not before or after them all"
+    assert not (server / mmaps.RECORD_FILE).exists(), "a part-deleted set still on record"

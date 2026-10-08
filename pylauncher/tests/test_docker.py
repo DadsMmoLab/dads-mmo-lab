@@ -4521,6 +4521,7 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
             "_claim_facts",
             "_release_claim",
             "_remove_claim",
+            "_claim_still_ours",
         )
     },
     "tool_containers_left_running": (

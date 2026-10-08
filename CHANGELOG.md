@@ -40,6 +40,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Adding a module from a folder again keeps the working copy if the new copy fails part way, as the message says.
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
+- **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.

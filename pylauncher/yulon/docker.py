@@ -7486,8 +7486,39 @@ class _Claim:
     nonce: str
 
 
+@dataclass(frozen=True)
+class ClaimHeld:
+    """What `folder_claim()` yields: the claim's container name, and whether it was lost (T549).
+
+    `lost` is set when the claim's CLI ends before its press lets it go: Docker Desktop
+    restarted, or the container was removed. From then on a second Yu'lon can claim
+    the folder, so a press that holds this must stop.
+    """
+
+    name: str
+    lost: threading.Event
+    confirm: Callable[[], bool] = field(default=lambda: True, compare=False)
+    """Asks Docker NOW whether the claim still runs as this press's own (by its nonce)."""
+
+    def held(self) -> bool:
+        """Is the claim still this press's, asked now (Codex reviews of T549)? False sets `lost`.
+
+        The watcher's `lost` comes a moment after the CLI ends, from another thread, so
+        a press about to change the folder asks this instead: Docker itself, before each
+        change. An unanswered question is not a claim held.
+        """
+        if self.lost.is_set():
+            return False
+        if self.confirm():
+            return True
+        self.lost.set()
+        return False
+
+
 @contextmanager
-def folder_claim(folder: Path, image: str, cancel: threading.Event | None = None) -> Iterator[bool]:
+def folder_claim(
+    folder: Path, image: str, cancel: threading.Event | None = None
+) -> Iterator[ClaimHeld]:
     """Hold `folder`'s claim while inside (T543); a press goes ahead only inside one.
 
     Two Yu'lons on one daemon -- a second user, or a Windows and a WSL one -- can press
@@ -7502,10 +7533,10 @@ def folder_claim(folder: Path, image: str, cancel: threading.Event | None = None
     0.7-1.7 s). A claim found in place is never removed here, whoever's it is (Codex
     adversarial review): the caller says what it is and, for this Yu'lon's own, how.
 
-    Yields True; the type is the seam's, so a test's stand-in can say what it held.
-    Without a claim nothing is yielded: the press stops there (Codex adversarial
-    review, twice), since the tools need the same docker and image and nothing is
-    lost by stopping before the old map data moves.
+    Yields a `ClaimHeld`, whose `lost` a watcher sets if the claim's CLI ends before
+    the press lets it go (T549). Without a claim nothing is yielded: the press stops
+    there (Codex adversarial review, twice), since the tools need the same docker and
+    image and nothing is lost by stopping before the old map data moves.
 
     `cancel` set while the claim comes up ends the wait at once (cold review): the
     claim's CLI goes, and so does a claim it had made.
@@ -7525,10 +7556,60 @@ def folder_claim(folder: Path, image: str, cancel: threading.Event | None = None
             "file is there, delete it; if the folder is read-only, make it writable."
         )
     held = _take_claim(CLAIM_PREFIX + ident, image, cancel, again=True)
+    lost = threading.Event()
+    letting_go = threading.Event()
+    threading.Thread(
+        target=_watch_claim, args=(held, lost, letting_go), name="yulon-claim-watch", daemon=True
+    ).start()
     try:
-        yield True
+        yield ClaimHeld(held.name, lost, lambda: _claim_still_ours(held))
     finally:
+        letting_go.set()  # before the release ends the CLI: that end is not a loss
         _release_claim(held)
+
+
+_CLAIM_STILL_OURS_ASKS = 2
+"""How many answers it takes to call a claim lost (cold review of T549): one slow or failed
+`docker inspect` is not a lost claim, and a loss, once said, stays said."""
+
+_CLAIM_ASK_GAP = 1.5
+"""Seconds between two such answers (cold review 2 of T549). Back to back, a transient
+fault -- the daemon answering "no such container" for a moment, as it can while it
+restarts its network -- fails both in milliseconds. The most a loss costs is two bounded
+asks plus this one wait."""
+
+
+def _claim_still_ours(held: _Claim) -> bool:
+    """Does Docker say the claim `held` still runs, carrying this press's nonce? (T549)
+
+    Asked with `_CLAIM_ASK_TIMEOUT`, and once more, `_CLAIM_ASK_GAP` later, before the
+    answer is no.
+    """
+    for attempt in range(_CLAIM_STILL_OURS_ASKS):
+        if attempt:
+            time.sleep(_CLAIM_ASK_GAP)
+        facts = _claim_facts(held.name, timeout=_CLAIM_ASK_TIMEOUT)
+        if facts is not None and facts.nonce == held.nonce and facts.status == "running":
+            return True
+    return False
+
+
+def _watch_claim(held: _Claim, lost: threading.Event, letting_go: threading.Event) -> None:
+    """Set `lost` if the claim's CLI ends before its press lets it go (T549). Never raises.
+
+    The CLI is `docker run -i` attached to the claim: it ends when the container does
+    (removed, or Docker restarted) as well as when the press closes its stdin.
+    """
+    try:
+        held.proc.wait()
+    except Exception as exc:  # noqa: BLE001 - a watcher must not take the press down
+        logger.warning(f"the claim {held.name} could not be watched: {exc!r}")
+        return
+    if not letting_go.is_set():
+        logger.warning(
+            f"the claim {held.name} ended before its press did (exit {held.proc.returncode})"
+        )
+        lost.set()
 
 
 def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:

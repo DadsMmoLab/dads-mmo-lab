@@ -53,11 +53,11 @@ import posixpath
 import re
 import threading
 import time
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import ClassVar, Literal, cast
+from typing import ClassVar, Literal, NoReturn, cast
 
 from yulon import (
     client_names,
@@ -66,6 +66,7 @@ from yulon import (
     docker,
     platform,
     play_client,
+    rmtree,
     server_build_presses,
 )
 from yulon.catalog import bot_count
@@ -155,6 +156,81 @@ REEXTRACT_KEPT_ASIDE = (
     "new map data if it is whole."
 )
 """What a stopped `reextract()` ends with when a tool's container could not be removed (T303)."""
+
+REEXTRACT_KEPT_ASIDE_CLAIM_LOST = (
+    "The map data from before this press is kept aside in the server's data folder and was "
+    "not put back, since another press may be working there now. Press "
+    f"\u201c{REEXTRACT_BUTTON}\u201d again: it puts the old map data back first, or keeps the "
+    "new map data if it is whole."
+)
+"""What a `reextract()` whose folder claim ended mid-press ends with (T549)."""
+
+REEXTRACT_FINISH_AGAIN = (
+    "The new map data is in place, but this press did not finish clearing out the old data: "
+    f"press \u201c{REEXTRACT_BUTTON}\u201d again. It removes what is left of it, then "
+    "extracts the map data once more from the start."
+)
+"""What a `reextract()` whose claim ended after the old map data was deleted ends with (T549)."""
+
+REEXTRACT_PATHFINDING_NOT_MADE = (
+    "The new map data is in place, but its pathfinding data was not started: press "
+    "\u201cMake the pathfinding data\u201d on the Server tab."
+)
+"""What a `reextract()` whose claim ended after its flag was cleared ends with (cold review of
+T549): its button is gone by then, so the sentence names the press that is left."""
+
+REEXTRACT_SETTLE_UNFINISHED = (
+    "What an earlier press left in the server's data folder was only partly settled; the next "
+    f"\u201c{REEXTRACT_BUTTON}\u201d finishes it first."
+)
+"""What a `reextract()` whose claim ended while it settled an earlier press ends with (T549)."""
+
+
+def reextract_claim_lost(data_dir: Path, name: str) -> str:
+    """Why a Re-extract stopped when its folder claim ended before it did (T549)."""
+    return (
+        f"Yu'lon's reservation of {data_dir} ({name}) ended before this extraction did: Docker "
+        "was restarted, or that container was removed. The extraction was stopped, since "
+        "another Yu'lon could now start one in the same folder."
+    )
+
+
+class _PressCancel(threading.Event):
+    """A Re-extract's cancel: the player's Stop, or its folder claim lost (T549).
+
+    Read live, not copied by a thread: a tool's watcher or a stage's check sees the
+    claim's loss the moment it is set, as it sees a Stop.
+    """
+
+    def __init__(self, stop: threading.Event | None, lost: threading.Event) -> None:
+        super().__init__()
+        self._stop = stop
+        self._lost = lost
+        anyway = getattr(stop, "anyway", None)
+        if anyway is not None:
+            self.anyway = anyway
+
+    def is_set(self) -> bool:
+        return super().is_set() or self._lost.is_set() or self.player_stopped()
+
+    def player_stopped(self) -> bool:
+        """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
+        return self._stop is not None and self._stop.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            step = _PRESS_CANCEL_POLL
+            if deadline is not None:
+                step = min(step, deadline - time.monotonic())
+                if step <= 0:
+                    return False
+            self._lost.wait(step)  # wakes at once on the loss; polls the Stop
+        return True
+
+
+_PRESS_CANCEL_POLL = 0.05
+"""How often `_PressCancel.wait()` looks at the player's Stop. Not a deadline."""
 
 
 def another_yulon_extracting(data_dir: Path, names: Sequence[str] = ()) -> str:
@@ -2065,7 +2141,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             # T543: before anything is asked or moved, so of two presses on one folder
             # -- two Yu'lons on one daemon -- only one gets past here.
             try:
-                claim.enter_context(self._seams.folder_claim(data_dir, image, probe.cancel))
+                held = claim.enter_context(self._seams.folder_claim(data_dir, image, probe.cancel))
             except docker.FolderClaimed as claimed:
                 raise InstallerError(self._claimed_note(data_dir, claimed)) from claimed
             except docker.ClaimStopped as exc:
@@ -2078,7 +2154,12 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"{self.entry.name}'s map data was not extracted again. {exc} Then press "
                     f"\u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
                 ) from exc
-            yield from self._reextract_claimed(server_dir, probe, data_dir, client)
+            # T549: the claim watched for the whole press. Lost, it stops the press as a
+            # Stop does -- through the cancel every tool and stage already reads.
+            watched = held if isinstance(held, docker.ClaimHeld) else None
+            if watched is not None:
+                probe = replace(probe, cancel=_PressCancel(probe.cancel, watched.lost))
+            yield from self._reextract_claimed(server_dir, probe, data_dir, client, watched)
 
     def _claimed_note(self, data_dir: Path, claimed: docker.FolderClaimed) -> str:
         """What a press refused by another press's claim on `data_dir` says (T543)."""
@@ -2110,14 +2191,27 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def _reextract_claimed(
-        self, server_dir: Path, probe: StageContext, data_dir: Path, client: Path
+        self,
+        server_dir: Path,
+        probe: StageContext,
+        data_dir: Path,
+        client: Path,
+        claim: docker.ClaimHeld | None = None,
     ) -> Iterator[str]:
-        """`reextract()` from its first question on, with the folder claimed (T543)."""
+        """`reextract()` from its first question on, with the folder claimed (T543).
+
+        `claim`, when watched (T549): lost before the old map data moves, nothing is
+        changed; lost after, the old map data stays aside, because another press may be
+        working in the folder by then.
+        """
         self._refuse_a_tool_still_writing(data_dir)
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
         background = mmaps.background_block(self.entry) is not None
         ident = self._install_id(server_dir) if background else ""
         if background:
+            # Asked before the job is stopped (Codex review of cff3f4da): with the claim
+            # gone, a job running now may be another press's.
+            self._still_claimed(claim, data_dir, f"{data_dir} was not touched.")
             stopped = mmaps.stop_for_route(
                 server_dir,
                 self.entry,
@@ -2136,9 +2230,23 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             if stopped is not None:
                 yield stopped
-        yield from self._settle_an_earlier_press(server_dir, data_dir)
+        # The watcher's flag, asked per file inside each long change (the lead's stop-time
+        # item): a claim lost while old data is deleted or moved stops between two files.
+        stop = (lambda: claim.lost.is_set()) if claim is not None else None
+        player_stopped = getattr(probe.cancel, "player_stopped", lambda: False)
+        self._still_claimed(claim, data_dir, f"{data_dir} was not touched.")
+        try:
+            yield from self._settle_an_earlier_press(server_dir, data_dir, stop=stop)
+        except rmtree.StoppedPartWay:
+            self._lost_part_way(claim, data_dir, REEXTRACT_SETTLE_UNFINISHED)
+        self._still_claimed(claim, data_dir, "Nothing was moved aside.")
         plan = self._tc().extract
-        extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
+        try:
+            extract.set_aside(
+                data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)), stop=stop
+            )
+        except rmtree.StoppedPartWay:
+            self._lost_part_way(claim, data_dir, REEXTRACT_KEPT_ASIDE_CLAIM_LOST)
         ctx = replace(probe, client_dir=client)
         stage = replace(
             self.stage_named("client-data"), recorded=False, cancel_note=REEXTRACT_CANCEL_NOTE
@@ -2150,7 +2258,29 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "folders; it is put back if this extraction does not finish."
             )
             yield from self._staged((stage,), ctx)
+            # Asked of Docker before the old map data is deleted (Codex adversarial
+            # review): lost as the last tool finished, nothing more is done here.
+            self._still_claimed(claim, data_dir, "")
         except BaseException as failure:
+            # Asked of Docker, not only of the watcher (Codex adversarial review): a tool
+            # failing on the same Docker trouble can get here before the watcher has.
+            if claim is not None and not claim.held():
+                # Not put back (T549): another Yu'lon may be pressing in the folder now.
+                if not isinstance(failure, Exception):
+                    raise  # a stream closed or an interrupt goes on as it came
+                if player_stopped():
+                    # The player's own Stop stays the Stop (cold review of T549); the old
+                    # map data is still not put back under a claim that has gone.
+                    if isinstance(failure, InstallerError):
+                        failure.args = (f"{failure} {REEXTRACT_KEPT_ASIDE_CLAIM_LOST}",)
+                    raise
+                # Not `from failure`: what ended the tools was the claim's loss turned into
+                # the cancel, and a panel reading that cause would call it the player's Stop.
+                logger.warning(f"reextract stopped on its lost claim; it ended on {failure!r}")
+                raise InstallerError(
+                    f"{reextract_claim_lost(data_dir, claim.name)} "
+                    f"{REEXTRACT_KEPT_ASIDE_CLAIM_LOST}"
+                ) from None
             if docker.tool_containers_writing_into(data_dir):
                 # T303: a tool Docker would not remove after a Stop
                 # (`extract.ContainerLeftRunning`), or one still being ended after the
@@ -2158,7 +2288,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 # stays aside; the next press settles it.
                 told = REEXTRACT_KEPT_ASIDE
             else:
-                told = self._put_the_old_map_data_back(data_dir)
+                told = self._put_the_old_map_data_back(data_dir, claim, stop)
                 if background:  # asked of `data/` as it is now: old data not back says 0
                     tiles = self._kept_for_the_next_run(server_dir, ident)
                     if tiles:
@@ -2167,7 +2297,10 @@ class TrinityCoreInstaller(CmangosInstaller):
                 failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
         try:
-            extract.supersede(data_dir)
+            extract.supersede(data_dir, stop=stop)
+        except rmtree.StoppedPartWay:
+            # Marked replaced first, so the next press finishes the deletion (T549).
+            self._lost_part_way(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         except OSError as exc:
             yield (
                 f"warning: the map data from before this press, in "
@@ -2176,11 +2309,15 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"later “{REEXTRACT_BUTTON}” may put it back if the map data in place no longer "
                 "matches the server's files by then."
             )
+        self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         if background:
             # After the new map data is in, so a failure here must not fail the press
             # (scoped re-review of e457b29e): the map data is done; this is said.
             try:
-                mmaps.discard(server_dir, self.entry, install_id=ident)
+                mmaps.discard(server_dir, self.entry, install_id=ident, stop=stop)
+            except rmtree.StoppedPartWay:
+                # The set forgotten and pathfinding off already (T549); the flag stays.
+                self._lost_part_way(claim, data_dir, REEXTRACT_FINISH_AGAIN)
             except mmaps.MmapsError as exc:
                 logger.warning(f"the old pathfinding data could not be removed: {exc}")
                 yield (
@@ -2195,6 +2332,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     "The pathfinding data made from the old map data was removed, and "
                     "pathfinding is off until it has been made again."
                 )
+        self._still_claimed(claim, data_dir, REEXTRACT_FINISH_AGAIN)
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -2202,13 +2340,57 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"warning: {server_dir / REEXTRACT_FILE} could not be removed ({exc}); the "
                 "Server tab will go on asking for an extraction that has been done."
             )
+        # The flag is gone from here, and with it the Re-extract button (cold review of
+        # T549): what is left to do is the pathfinding data, so that is what is said.
+        self._still_claimed(claim, data_dir, REEXTRACT_PATHFINDING_NOT_MADE)
         yield from self.after_ready(server_dir)
+        if claim is not None and not claim.held():
+            # Lost while the pathfinding job started (Codex reviews of a62f138f): that
+            # job writes under `data/`, so it is stopped again, and nothing says done.
+            not_stopped = ""
+            if background:
+                try:
+                    mmaps.stop_for_route(
+                        server_dir,
+                        self.entry,
+                        "the extraction",
+                        clear=False,
+                        press=REEXTRACT_BUTTON,
+                        runner=self._mmaps_runner,
+                        install_id=ident,
+                    )
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - said, with what to do (adversarial review)
+                    logger.warning(f"the pathfinding job could not be stopped again: {exc}")
+                    not_stopped = f" The pathfinding job it had started could not be stopped: {exc}"
+            self._still_claimed(claim, data_dir, f"{REEXTRACT_PATHFINDING_NOT_MADE}{not_stopped}")
         yield (
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."
         )
 
-    def _settle_an_earlier_press(self, server_dir: Path, data_dir: Path) -> Iterator[str]:
+    def _still_claimed(
+        self, claim: docker.ClaimHeld | None, data_dir: Path, nothing_done: str
+    ) -> None:
+        """Before each change to the folder: is its claim still this press's? (T549)
+
+        Asked of Docker (`ClaimHeld.held()`), not only of the watcher. Gone, the press
+        stops here with why, and `nothing_done` says what that left.
+        """
+        if claim is None or claim.held():
+            return
+        said = reextract_claim_lost(data_dir, claim.name)
+        raise InstallerError(f"{said} {nothing_done}".rstrip())
+
+    def _lost_part_way(self, claim: docker.ClaimHeld | None, data_dir: Path, left: str) -> NoReturn:
+        """A long change `stop` ended between two files because the claim was lost (T549)."""
+        name = claim.name if claim is not None else ""
+        raise InstallerError(f"{reextract_claim_lost(data_dir, name)} {left}") from None
+
+    def _settle_an_earlier_press(
+        self, server_dir: Path, data_dir: Path, *, stop: Callable[[], bool] | None = None
+    ) -> Iterator[str]:
         """What an earlier press left under `data/`: replaced data deleted, kept data put back.
 
         `extract.PREVIOUS_DIR` is deleted when it is marked replaced
@@ -2225,18 +2407,18 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         aside = data_dir / extract.PREVIOUS_DIR
         try:
-            if extract.drop_superseded(data_dir) or not os.path.lexists(aside):
+            if extract.drop_superseded(data_dir, stop=stop) or not os.path.lexists(aside):
                 return
             if os.path.lexists(aside / extract.EVIDENCE_FILE) and self._map_data_whole(
                 server_dir, data_dir
             ):
-                extract.supersede(data_dir)
+                extract.supersede(data_dir, stop=stop)
                 yield (
                     f"An earlier “{REEXTRACT_BUTTON}” finished but left the map data from before "
                     "it; that was deleted first."
                 )
                 return
-            extract.put_back(data_dir)
+            extract.put_back(data_dir, stop=stop)
         except OSError as exc:
             raise InstallerError(
                 f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
@@ -2281,10 +2463,22 @@ class TrinityCoreInstaller(CmangosInstaller):
             logger.warning(f"could not tell whether the pathfinding tiles are kept: {exc}")
             return 0
 
-    def _put_the_old_map_data_back(self, data_dir: Path) -> str:
-        """After a failed, stopped or closed extraction: the old map data back; what to say."""
+    def _put_the_old_map_data_back(
+        self,
+        data_dir: Path,
+        claim: docker.ClaimHeld | None = None,
+        stop: Callable[[], bool] | None = None,
+    ) -> str:
+        """After a failed, stopped or closed extraction: the old map data back; what to say.
+
+        `stop`: the claim's loss, asked per file (T549); the put-back stops there, and
+        the next press finishes it.
+        """
         try:
-            extract.put_back(data_dir)
+            extract.put_back(data_dir, stop=stop)
+        except rmtree.StoppedPartWay:
+            name = claim.name if claim is not None else ""
+            return f"{reextract_claim_lost(data_dir, name)} {REEXTRACT_KEPT_ASIDE_CLAIM_LOST}"
         except OSError as exc:
             logger.warning(f"the map data set aside in {data_dir} could not be put back: {exc}")
             return (

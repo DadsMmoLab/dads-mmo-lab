@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import client_names, container_end, docker, platform
+from yulon import client_names, container_end, docker, platform, rmtree
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
@@ -408,7 +408,7 @@ def counts(produces: Mapping[str, int], data_dir: Path) -> dict[str, int]:
     return {folder: file_count(data_dir / folder) for folder in produces}
 
 
-def _remove_tree(path: Path) -> bool:
+def _remove_tree(path: Path, stop: Callable[[], bool] | None = None) -> bool:
     """Remove `path` and everything under it; False when there was nothing to remove.
 
     One fallible call answers both questions. `is_dir()` and then `rmtree()` is
@@ -427,6 +427,9 @@ def _remove_tree(path: Path) -> bool:
     `supersede()`, `drop_superseded()`, T241), and the case view
     (`remove_case_view()`, T260).
     """
+    if stop is not None:
+        # File by file, asked before each (T549): `rmtree.StoppedPartWay` between two.
+        return rmtree.remove_tree_stoppably(path, stop)
     try:
         shutil.rmtree(path)
     except FileNotFoundError:
@@ -2210,7 +2213,9 @@ new one (Codex review, T241).
 """
 
 
-def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
+def set_aside(
+    data_dir: Path, names: Sequence[str], *, stop: Callable[[], bool] | None = None
+) -> tuple[str, ...]:
     """Move each of `names` that is under `data_dir` into `PREVIOUS_DIR`; the names moved.
 
     Renames only, so nothing is deleted and the old map data is whole wherever
@@ -2232,6 +2237,10 @@ def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
     try:
         aside.mkdir(parents=True)
         for name in names:
+            if stop is not None and stop():
+                # T549: before the next rename. Not put back here -- the press that
+                # stopped may no longer hold the folder; the next press puts it back.
+                raise rmtree.StoppedPartWay(f"moving the map data in {data_dir} aside")
             if os.path.lexists(data_dir / name):
                 os.rename(data_dir / name, aside / name)
                 moved.append(name)
@@ -2253,7 +2262,7 @@ def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
     return tuple(moved)
 
 
-def put_back(data_dir: Path) -> tuple[str, ...]:
+def put_back(data_dir: Path, *, stop: Callable[[], bool] | None = None) -> tuple[str, ...]:
     """Return everything under `PREVIOUS_DIR` to `data_dir`, replacing what is there; the names.
 
     What is there is the new extraction's partial output, and it is removed
@@ -2280,8 +2289,10 @@ def put_back(data_dir: Path) -> tuple[str, ...]:
     for name in names:
         absent = name.endswith(ABSENT_SUFFIX)
         target = data_dir / (name[: -len(ABSENT_SUFFIX)] if absent else name)
+        if stop is not None and stop():
+            raise rmtree.StoppedPartWay(f"putting the map data in {data_dir} back")
         if target.is_dir() and not target.is_symlink():
-            _remove_tree(target)
+            _remove_tree(target, stop)
         elif os.path.lexists(target):
             target.unlink()
         if absent:
@@ -2306,7 +2317,7 @@ is put back.
 """
 
 
-def supersede(data_dir: Path) -> None:
+def supersede(data_dir: Path, *, stop: Callable[[], bool] | None = None) -> None:
     """The new map data is in: mark `PREVIOUS_DIR` replaced, then delete it and the mark.
 
     Raises:
@@ -2318,10 +2329,10 @@ def supersede(data_dir: Path) -> None:
     if not os.path.lexists(data_dir / PREVIOUS_DIR):
         return
     (data_dir / SUPERSEDED_MARK).mkdir(exist_ok=True)
-    drop_superseded(data_dir)
+    drop_superseded(data_dir, stop=stop)
 
 
-def drop_superseded(data_dir: Path) -> bool:
+def drop_superseded(data_dir: Path, *, stop: Callable[[], bool] | None = None) -> bool:
     """Delete a `PREVIOUS_DIR` that `SUPERSEDED_MARK` says is replaced; False when unmarked.
 
     The mark goes last, so a deletion cut short is still marked.
@@ -2332,7 +2343,7 @@ def drop_superseded(data_dir: Path) -> bool:
     mark = data_dir / SUPERSEDED_MARK
     if not os.path.lexists(mark):
         return False
-    _remove_tree(data_dir / PREVIOUS_DIR)
+    _remove_tree(data_dir / PREVIOUS_DIR, stop)  # `stop`: per file, the mark kept (T549)
     mark.rmdir()
     return True
 

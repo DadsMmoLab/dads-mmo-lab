@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -646,3 +647,106 @@ def test_a_released_claim_whose_removal_failed_is_swept(
     while name in fake_containers(fake_docker):
         assert time.monotonic() < deadline, "the claim stayed"
         time.sleep(0.02)
+
+
+# -- T549: a claim that ends before its press does --------------------------------
+
+
+def test_a_claim_that_ends_while_its_press_holds_it_says_it_was_lost(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """T549: Docker Desktop restarted, or the container removed: the claim's CLI exits.
+
+    The press must hear it: a second Yu'lon can claim the folder from then on.
+    Ended here as `docker rm -f` ends it, by ending the CLI attached to it.
+
+    Mutation this catches: nothing watching the claim's CLI (`lost` never set).
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    name = _claim_name(folder)
+    with docker.folder_claim(folder, IMAGE) as held:
+        assert not held.lost.is_set()
+        cli = int((fake_docker / "containers" / name).read_text(encoding="utf-8"))
+        os.kill(cli, signal.SIGKILL)
+        assert held.lost.wait(HANG_BOUND), "a claim that ended mid-press was not noticed"
+        assert held.name == name
+
+
+def test_a_claim_its_press_lets_go_is_not_lost(fake_docker: Path, tmp_path: Path) -> None:
+    """The press's own release ends the CLI too, and that is not a loss.
+
+    Mutation this catches: the watcher reading every end of the CLI as a loss.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        pass
+    time.sleep(0.3)  # the watcher has seen the CLI end by now
+    assert not held.lost.is_set()
+
+
+def test_one_slow_answer_about_a_held_claim_does_not_lose_it(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review of T549: one `docker inspect` slower than its bound counted as lost, and a
+    loss is sticky, so a finished extraction could fail on one slow answer. The claim is
+    asked again, with the claim's own bound, before it is called lost.
+
+    Mutations this catches: one ask only; the 1 s look bound instead of `_CLAIM_ASK_TIMEOUT`.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        real = docker._claim_facts
+        timeouts: list[float] = []
+
+        def first_slow(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+            timeouts.append(timeout)
+            return None if len(timeouts) == 1 else real(name, timeout=timeout)
+
+        monkeypatch.setattr(docker, "_claim_facts", first_slow)
+        assert held.held(), "one slow answer lost the claim"
+        assert not held.lost.is_set()
+        assert timeouts and all(t == docker._CLAIM_ASK_TIMEOUT for t in timeouts), timeouts
+
+
+def test_the_two_asks_about_a_held_claim_are_a_moment_apart(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review 2 of T549: back to back, a transient "no such container" fails both asks in
+    milliseconds. The second ask waits `_CLAIM_ASK_GAP`, and only when the first said no.
+
+    Mutations this catches: no wait between the asks; a wait before the first ask too.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        real = docker._claim_facts
+        events: list[str] = []
+        asked = [0]
+
+        def transient(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+            events.append("ask")
+            asked[0] += 1
+            return None if asked[0] == 1 else real(name, timeout=timeout)
+
+        monkeypatch.setattr(docker, "_claim_facts", transient)
+        asker = threading.current_thread()
+        real_sleep = time.sleep
+
+        def only_ours(seconds: float) -> None:
+            # `docker.time` is the one `time` module: a sleep on any other thread (the
+            # claim's watcher, the fake daemon) must not count as the asks' wait.
+            if threading.current_thread() is asker and seconds == docker._CLAIM_ASK_GAP:
+                events.append(f"sleep {seconds}")  # the asks' wait, not a poll's back-off
+            else:
+                real_sleep(seconds)
+
+        monkeypatch.setattr(docker.time, "sleep", only_ours)
+        assert held.held(), "a transient no lost the claim"
+        assert events == ["ask", f"sleep {docker._CLAIM_ASK_GAP}", "ask"], events
+        events.clear()
+        assert held.held()
+        assert events == ["ask"], "a claim that answers at once is not made to wait"
+    assert 1.0 <= docker._CLAIM_ASK_GAP <= 2.0

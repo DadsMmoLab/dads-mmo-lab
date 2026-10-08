@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -1222,9 +1222,9 @@ def _stop_a_reextract(
     seen_at_put_back: list[list[str]] = []
     real_put_back = extract.put_back
 
-    def put_back(data_dir: Path) -> tuple[str, ...]:
+    def put_back(data_dir: Path, **kwargs: Any) -> tuple[str, ...]:
         seen_at_put_back.append(fake_containers(state))
-        return real_put_back(data_dir)
+        return real_put_back(data_dir, **kwargs)
 
     monkeypatch.setattr(extract, "put_back", put_back)
     outcome: list[BaseException] = []
@@ -1361,7 +1361,7 @@ def test_a_second_reextract_is_refused_while_the_first_ones_tool_may_still_write
         runs = [call for call in fake_calls(state) if call.startswith("create ")]
         left = data_files(box)
         put_back: list[Path] = []
-        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+        monkeypatch.setattr(extract, "put_back", lambda data_dir, **_: put_back.append(data_dir))
 
         with pytest.raises(InstallerError) as refused:
             list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
@@ -1414,7 +1414,7 @@ def test_a_reextract_closed_while_a_tool_container_will_not_go_leaves_the_old_da
         box.world.running = False
         box.seams["run_container"] = docker.run_container
         put_back: list[Path] = []
-        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+        monkeypatch.setattr(extract, "put_back", lambda data_dir, **_: put_back.append(data_dir))
         press = box.engine().reextract(
             InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
         )
@@ -1504,13 +1504,13 @@ def test_old_map_data_deleted_part_way_after_the_new_is_in_is_never_put_back(
     real = extract._remove_tree
     cut: list[Path] = []
 
-    def stops_half_way(path: Path) -> bool:
+    def stops_half_way(path: Path, stop: Any = None) -> bool:
         if path == data / extract.PREVIOUS_DIR and not cut:
             first = sorted(path.iterdir())[0]
             real(first) if first.is_dir() else first.unlink()
             cut.append(first)
             raise PermissionError(13, "Permission denied")
-        return real(path)
+        return real(path, stop)
 
     monkeypatch.setattr(extract, "_remove_tree", stops_half_way)
     (data / "maps" / "0003232.map").write_bytes(b"OLD")  # so old and new data differ
@@ -1669,7 +1669,7 @@ def test_a_put_back_that_fails_says_what_the_next_press_will_do(
     """Scoped re-review note 2: not "puts it back first" -- the next press keeps whichever map
     data is whole, which may be the new."""
 
-    def fails(data_dir: Path) -> tuple[str, ...]:
+    def fails(data_dir: Path, **_: Any) -> tuple[str, ...]:
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(extract, "put_back", fails)
@@ -1973,7 +1973,7 @@ def test_a_failed_reextract_whose_old_data_did_not_come_back_says_nothing_of_kep
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
 
-    def stuck(data_dir: Path) -> tuple[str, ...]:
+    def stuck(data_dir: Path, **_: Any) -> tuple[str, ...]:
         raise PermissionError("a file is held open")
 
     monkeypatch.setattr(extract, "put_back", stuck)
@@ -3422,3 +3422,556 @@ def test_a_reextract_lets_go_of_its_claim_however_it_ends(
             assert made and "yulon-claim-" in made[0], made
     finally:
         end_fake_containers(state)
+
+
+# -- T549: the folder's claim ends mid-press -----------------------------------------
+
+
+def test_a_press_whose_folder_claim_ends_stops_and_leaves_the_old_map_data_aside(
+    box: Box,
+) -> None:
+    """T549: the claim gone, a second Yu'lon may claim the folder and set its own work
+    going, so this press stops as a Stop would -- its tools end, nothing more runs -- and
+    does not put the old map data back underneath another press. It says why.
+
+    Mutation this catches: the press not watching its claim (the other two tools run and
+    the old data is put back), or a claim-lost press reading as a plain Stop.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    tools = box.m.tools
+    real_call = type(tools).__call__
+
+    def tool_then_lose_the_claim(self, spec, *, sink, cancel=None):  # type: ignore[no-untyped-def]
+        run = real_call(self, spec, sink=sink, cancel=cancel)
+        lost.set()  # Docker Desktop restarted while the first tool ran
+        return run
+
+    type(tools).__call__ = tool_then_lose_the_claim  # type: ignore[method-assign]
+    try:
+        box.m.tools.seen.clear()
+        box.world.running = False
+        with pytest.raises(InstallerError) as raised:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    finally:
+        type(tools).__call__ = real_call  # type: ignore[method-assign]
+    said = str(raised.value)
+    assert list(box.m.tools.seen) == ["mapextractor"], "the press went on after the claim ended"
+    assert "yulon-claim-0123456789abcdef" in said and "reservation" in said, said
+    assert not stop_took_effect(raised.value), "a lost claim is not the player's Stop"
+    data = box.server_dir / "data"
+    assert (data / extract.PREVIOUS_DIR).is_dir(), "the old map data was put back under it"
+
+
+def test_a_press_whose_folder_claim_ended_before_anything_moved_changes_nothing(
+    box: Box,
+) -> None:
+    """T549: lost before the old map data is moved aside, the press stops with nothing changed.
+
+    Mutation this catches: no look at the claim before the old map data is set aside.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    lost = threading.Event()
+    lost.set()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "was not touched" in str(raised.value), raised.value
+    assert box.m.tools.seen == {}, "a tool ran after the claim was lost"
+    assert data_files(box) == before
+
+
+def _claim_asked_of_docker(answers: Callable[[], bool]) -> object:
+    """A folder-claim stand-in whose `held()` is asked of `answers`, as of Docker (T549)."""
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", threading.Event(), answers)
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    return lambda folder, image, cancel=None: _Claim()
+
+
+def test_a_failing_press_asks_docker_before_it_puts_the_old_map_data_back(box: Box) -> None:
+    """Codex adversarial review of fe565941: the watcher's `lost` comes from another thread a
+    moment late, so a tool that fails on the same Docker trouble reached the put-back first.
+    The put-back asks Docker itself whether the claim is still this press's.
+
+    Mutation this catches: the failure path reading only `lost`.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(
+        lambda: "vmap4extractor" not in box.m.tools.seen
+    )
+    box.m.tools.fail_tool = "vmap4extractor"
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "put back under a lost claim"
+
+
+def test_a_press_asks_docker_before_it_deletes_the_old_map_data(box: Box) -> None:
+    """Codex adversarial review of fe565941: lost after the last tool, the press deleted the
+    old map data and finished in a folder another press may hold by then.
+
+    Mutation this catches: no look at the claim before `extract.supersede()`.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(
+        lambda: "vmap4assembler" not in box.m.tools.seen
+    )
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "the old data was deleted"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+
+
+def test_a_press_asks_docker_before_it_settles_an_earlier_press(box: Box) -> None:
+    """Codex review of fe565941: what an earlier press left is put back or deleted -- a change
+    to the folder -- so it is not done once the claim is gone.
+
+    Mutation this catches: `_settle_an_earlier_press()` not asking first.
+    """
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    extract.set_aside(data, ("maps",))  # an earlier press that died part way
+    before = data_files(box)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: False)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert data_files(box) == before, "the earlier press's data was settled under a lost claim"
+
+
+def test_a_press_whose_claim_ends_as_pathfinding_starts_stops_it_and_does_not_say_done(
+    box: Box,
+) -> None:
+    """Codex reviews of a62f138f: lost while `after_ready()` started the pathfinding job, the
+    press reported success with a writer started in a folder another press may hold.
+
+    Mutation this catches: no look at the claim after `after_ready()`.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    finished_with_pathfinding(box)
+    flagged(box)
+    started = len(fake.started)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: len(fake.started) == started)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert len(fake.started) == started + 1, "the pathfinding job was started"
+    assert "reservation" in str(raised.value), raised.value
+    # Cold review of T549: the flag, and with it the Re-extract button, is gone by now, so
+    # the sentence names the press that is left instead of "press Re-extract again".
+    assert needs_reextract(box.server_dir, ENTRY) is None, "the flag was cleared"
+    assert trinitycore.REEXTRACT_PATHFINDING_NOT_MADE in str(raised.value), raised.value
+    assert trinitycore.REEXTRACT_FINISH_AGAIN not in str(raised.value), raised.value
+    last_run = max(i for i, call in enumerate(fake.calls) if call.startswith("run:"))
+    after = fake.calls[last_run + 1 :]
+    assert any(
+        call.startswith(("stop:", "remove:")) for call in after
+    ), f"the job started under a lost claim was not stopped: {fake.calls}"
+
+
+def test_a_late_pathfinding_job_that_would_not_stop_is_named_in_the_sentence(box: Box) -> None:
+    """Codex adversarial review of cff3f4da: a stop that failed was only logged, so a writer
+    could run on unnamed. What the job's own stop said is part of the sentence.
+
+    Mutation this catches: the stop's failure swallowed into the log.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    finished_with_pathfinding(box)
+    flagged(box)
+    started = len(fake.started)
+
+    def held() -> bool:
+        if len(fake.started) == started:
+            return True
+        fake.refuse_remove = "Docker would not remove centurion-mmaps"  # the stop fails
+        return False
+
+    box.seams["folder_claim"] = _claim_asked_of_docker(held)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "could not be stopped" in str(raised.value), raised.value
+    assert "Docker would not remove centurion-mmaps" in str(raised.value), raised.value
+
+
+def test_a_job_running_at_the_start_is_not_stopped_once_the_claim_is_gone(box: Box) -> None:
+    """Codex review of cff3f4da: stopping a running pathfinding job is a change too; with the
+    claim gone, that job may be the next press's.
+
+    Mutation this catches: `mmaps.stop_for_route()` before the claim is asked.
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    # A pathfinding job on record as running: the press's first change is to stop it.
+    (box.server_dir / mmaps.RECORD_FILE).write_text(
+        json.dumps({"state": "running", "container": "centurion-mmaps-0123abcd"}), "utf-8"
+    )
+    calls = len(fake.calls)
+    box.seams["folder_claim"] = _claim_asked_of_docker(lambda: False)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert fake.calls[calls:] == [], f"the pathfinding job was asked about: {fake.calls[calls:]}"
+
+
+def test_a_claim_lost_right_after_the_flag_goes_says_the_pathfinding_data_was_not_made(
+    box: Box,
+) -> None:
+    """Cold review of T549: once the flag is gone the Re-extract button is too, so the sentence
+    names "Make the pathfinding data", and no pathfinding job is started.
+
+    Mutation this catches: the look after the flag is cleared saying "press Re-extract again".
+    """
+    fake: FakeMmapsDocker = box.m.mmaps
+    finished_with_pathfinding(box)
+    flagged(box)
+    flag = box.server_dir / trinitycore.REEXTRACT_FILE
+    started = len(fake.started)
+    seen_flag: list[bool] = []
+
+    def held() -> bool:
+        if flag.exists():
+            seen_flag.append(True)
+            return True
+        return not seen_flag  # lost at the first look after the flag has gone
+
+    box.seams["folder_claim"] = _claim_asked_of_docker(held)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert not flag.exists()
+    assert len(fake.started) == started, "a pathfinding job was started under a lost claim"
+    assert trinitycore.REEXTRACT_PATHFINDING_NOT_MADE in str(raised.value), raised.value
+    assert trinitycore.REEXTRACT_FINISH_AGAIN not in str(raised.value), raised.value
+
+
+def test_a_claim_lost_just_before_the_flag_goes_keeps_the_flag_and_says_press_again(
+    box: Box,
+) -> None:
+    """Cold review of T549: "press Re-extract again" is said only while that button is there.
+
+    Mutation this catches: the flag removed before the last look at the claim.
+    """
+    flagged(box)
+    flag = box.server_dir / trinitycore.REEXTRACT_FILE
+    aside = box.server_dir / "data" / extract.PREVIOUS_DIR
+    seen_aside: list[bool] = []
+    after: list[bool] = []
+
+    def held() -> bool:
+        # Held until the old map data has been set aside and deleted, and for one look
+        # after that (before the pathfinding tiles go); lost at the next, before the flag.
+        if aside.exists():
+            seen_aside.append(True)
+            return True
+        if not seen_aside:
+            return True
+        after.append(True)
+        return len(after) < 2
+
+    box.seams["folder_claim"] = _claim_asked_of_docker(held)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "reservation" in str(raised.value), raised.value
+    assert flag.exists() and needs_reextract(box.server_dir, ENTRY) is not None
+    assert trinitycore.REEXTRACT_FINISH_AGAIN in str(raised.value), raised.value
+    # The sentence is true (cold review 2): the next press extracts the map data again.
+    _watcher_claim(box)
+    box.m.tools.seen.clear()
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "mapextractor" in box.m.tools.seen, "the next press did not extract again"
+    assert needs_reextract(box.server_dir, ENTRY) is None
+
+
+def _lose_claim_when(
+    box: Box, monkeypatch: pytest.MonkeyPatch, when: Callable[[], bool]
+) -> tuple[threading.Event, list[str]]:
+    """A claim whose watcher flag goes up the first time `when()` is true, asked per file."""
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost, lambda: not lost.is_set())
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    real = trinitycore.rmtree.remove_tree_stoppably
+    removed: list[str] = []
+
+    def counting(path: Path, stop: Callable[[], bool]) -> bool:
+        def asked() -> bool:
+            if when():
+                lost.set()
+            if not stop():
+                removed.append(str(path))
+                return False
+            return True
+
+        return real(path, asked)
+
+    monkeypatch.setattr(trinitycore.rmtree, "remove_tree_stoppably", counting)
+    return lost, removed
+
+
+def test_a_claim_lost_while_the_old_map_data_is_deleted_stops_between_files(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lead's stop-time item: the deletion asks the watcher's flag per file, stops at the
+    next file, and leaves the data marked for the next press to finish.
+
+    Mutation this catches: `supersede()` called without the claim's `stop`.
+    """
+    flagged(box)
+    data = box.server_dir / "data"
+    lost, removed = _lose_claim_when(box, monkeypatch, lambda: len(removed) >= 2)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert lost.is_set()
+    assert "reservation" in str(raised.value), raised.value
+    assert (data / extract.SUPERSEDED_MARK).is_dir(), "the mark goes last"
+    assert (data / extract.PREVIOUS_DIR).is_dir(), "stopped before the deletion finished"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the next press finishes it"
+    assert trinitycore.REEXTRACT_FINISH_AGAIN in str(raised.value), raised.value
+
+
+def test_a_claim_lost_while_the_pathfinding_tiles_are_deleted_stops_between_tiles(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation this catches: `mmaps.discard()` called without the claim's `stop`."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    tiles = box.server_dir / "data" / mmaps.MMAPS_DIR
+    lost, removed = _lose_claim_when(
+        box, monkeypatch, lambda: sum(path.endswith(mmaps.MMAPS_DIR) for path in removed) >= 2
+    )
+    box.world.running = False
+    before = len(list(tiles.iterdir()))
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert lost.is_set() and "reservation" in str(raised.value), raised.value
+    assert 0 < len(list(tiles.iterdir())) < before, "stopped between tiles"
+    assert "mmap.enablePathFinding = 1" not in world_conf(box), "pathfinding is off"
+    assert box.engine().mmaps_status(box.server_dir).state != "done"
+    assert needs_reextract(box.server_dir, ENTRY) is not None
+
+
+def test_the_players_stop_stays_a_stop_when_the_claim_is_also_gone(box: Box) -> None:
+    """Cold review of T549: a Stop the player pressed, with the claim also lost by the time
+    the failure path asks, read as "the reservation ended". It stays the Stop; the old map
+    data is still left aside, since the folder may be another press's now.
+
+    Mutation this catches: the claim-lost sentence replacing the player's Stop.
+    """
+    from yulon.after_stop import stop_took_effect
+
+    finished_with_pathfinding(box)
+    flagged(box)
+    stop = threading.Event()
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost, lambda: not lost.is_set())
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+
+    tools = box.m.tools
+    real_call = type(tools).__call__
+
+    def tool_then_stop(self, spec, *, sink, cancel=None):  # type: ignore[no-untyped-def]
+        run = real_call(self, spec, sink=sink, cancel=cancel)
+        stop.set()  # the player's Stop ...
+        lost.set()  # ... and, by the time the failure path asks, the claim gone too
+        return run
+
+    type(tools).__call__ = tool_then_stop  # type: ignore[method-assign]
+    try:
+        box.world.running = False
+        with pytest.raises(InstallerError) as raised:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=stop))
+    finally:
+        type(tools).__call__ = real_call  # type: ignore[method-assign]
+    assert stop_took_effect(raised.value), f"the Stop read as something else: {raised.value!r}"
+    assert "reservation" not in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "not put back"
+
+
+def test_a_claim_lost_while_a_client_pack_is_laid_stops_the_laying_part_way(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lead's stop-time item: laying a pack into the copy took ~37 s; the claim's flag is
+    asked between its chunks (through the press's cancel), not only before and after.
+
+    Mutation this catches: the press's cancel not carrying the claim's `lost`.
+    """
+    from yulon.after_stop import stop_took_effect
+
+    finished_with_pathfinding(box)
+    flagged(box)
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost, lambda: not lost.is_set())
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    real_install = client_packs.install
+    laid: list[str] = []
+
+    def install(*args: object, **kwargs: object) -> dict[str, object]:
+        lost.set()  # Docker Desktop restarted while this pack was being laid
+        try:
+            return real_install(*args, **kwargs)  # type: ignore[arg-type]
+        except client_packs.Cancelled:
+            laid.append("stopped part-way")
+            raise
+
+    monkeypatch.setattr(client_packs, "install", install)
+    box.m.tools.seen.clear()
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert laid == ["stopped part-way"], laid
+    assert box.m.tools.seen == {}, "a tool ran after the claim was lost"
+    assert "reservation" in str(raised.value), raised.value
+    assert not stop_took_effect(raised.value), "a lost claim is not the player's Stop"
+
+
+def _watcher_claim(box: Box) -> threading.Event:
+    """A claim whose watcher flag is the returned event; `held()` follows it."""
+    lost = threading.Event()
+    held = docker.ClaimHeld("yulon-claim-0123456789abcdef", lost, lambda: not lost.is_set())
+
+    class _Claim:
+        def __enter__(self) -> docker.ClaimHeld:
+            return held
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    box.seams["folder_claim"] = lambda folder, image, cancel=None: _Claim()
+    return lost
+
+
+def _lose_claim_as_called(
+    monkeypatch: pytest.MonkeyPatch, owner: object, name: str, lost: threading.Event
+) -> None:
+    """`owner.name` loses the claim the instant it is called, then runs for real."""
+    real = getattr(owner, name)
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        lost.set()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, wrapper)
+
+
+def test_a_claim_lost_as_the_old_map_data_is_set_aside_moves_nothing_and_runs_no_tool(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutations this catches: `set_aside()` called without the claim's `stop`; its stop
+    swallowed instead of ending the press."""
+    flagged(box)
+    before = data_files(box)
+    box.m.tools.seen.clear()
+    lost = _watcher_claim(box)
+    _lose_claim_as_called(monkeypatch, extract, "set_aside", lost)
+    box.world.running = False
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None):
+            said.append(str(line))
+    assert "reservation" in str(raised.value), raised.value
+    assert trinitycore.REEXTRACT_KEPT_ASIDE_CLAIM_LOST in str(raised.value), raised.value
+    # The press must not carry on as if the folders had been moved.
+    assert not any("moved aside" in line for line in said), said
+    assert data_files(box) == before, "map data moved under a lost claim"
+    assert not box.m.tools.seen, f"a tool ran under a lost claim: {box.m.tools.seen}"
+
+
+def test_a_claim_lost_as_an_earlier_press_is_settled_changes_nothing(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation this catches: `_settle_an_earlier_press()` run without the claim's `stop`."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    extract.set_aside(data, ("maps",))  # an earlier press that died part way
+    before = data_files(box)
+    lost = _watcher_claim(box)
+    _lose_claim_as_called(monkeypatch, extract, "put_back", lost)
+    box.world.running = False
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert trinitycore.REEXTRACT_SETTLE_UNFINISHED in str(raised.value), raised.value
+    assert data_files(box) == before, "the earlier press's data was settled under a lost claim"
+
+
+def test_a_failed_press_whose_claim_goes_as_it_puts_the_old_data_back_leaves_it_aside(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation this catches: the failure path's `put_back()` called without the claim's `stop`."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    lost = _watcher_claim(box)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    _lose_claim_as_called(monkeypatch, extract, "put_back", lost)
+    with pytest.raises(InstallerError) as raised:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert trinitycore.REEXTRACT_KEPT_ASIDE_CLAIM_LOST in str(raised.value), raised.value
+    assert (box.server_dir / "data" / extract.PREVIOUS_DIR).is_dir(), "put back under a lost claim"
