@@ -13807,8 +13807,9 @@ class ControllerView(QWidget):
             told = getattr(admin, "after_create", None)
             # Only for a level the person asked for: an existing account held at a higher
             # level by the floor rule is not something this press changed.
-            asked = told is not None and gm_level > 0 and made.gm_level
-            note = told(made.username, made.gm_level) if asked else ""
+            note = ""
+            if told is not None and gm_level > 0 and made.gm_level:
+                note = told(made.username, made.gm_level)
             return _CreatedAccount(made, note)
 
         self._run(create, self._account_done, self._account_failed)
