@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
 - **Save file** on the Tuning tab keeps the file's byte-order mark and the line endings of every line you did not edit.
 - A server setting file that is a link to a file outside the server folder is no longer opened, saved or backed up by the Tuning tab.
+- **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
