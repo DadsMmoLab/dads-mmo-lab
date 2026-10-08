@@ -1000,6 +1000,7 @@ class CmangosInstaller(StagedInstaller):
         *,
         claim: bool = False,
         reclaim_at: int | None = None,
+        not_before: int = 0,
     ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
         db = self._native().db
@@ -1012,6 +1013,7 @@ class CmangosInstaller(StagedInstaller):
             exec_stdin=self._seams.exec_stdin,
             claim=claim,
             reclaim_at=reclaim_at,
+            not_before=not_before,
         )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
@@ -2694,7 +2696,12 @@ class CmangosInstaller(StagedInstaller):
                 stage="world-updates",
             )
             state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
-            self._record_world_files(ctx, (sqlplan.FileRow(one.phase, one.file, sha, state),))
+            # Past the time the dialog showed, so no press still holding it can match the row.
+            self._record_world_files(
+                ctx,
+                (sqlplan.FileRow(one.phase, one.file, sha, state),),
+                not_before=one.at_unix + 1,
+            )
             if refused:
                 yield (
                     f"The database refused {one.file} again, so it and the updates after it are "

@@ -255,6 +255,79 @@ def test_only_one_of_two_presses_can_take_a_stuck_row(tmp_path: Path) -> None:
     assert _ledger(db)[U2] == "started"
 
 
+def test_two_presses_in_one_second_still_cannot_both_take_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim moves the row's time on, so a press holding the old time never matches again."""
+    db, _ = _stuck_server(tmp_path)
+    monkeypatch.setattr(sqlplan.time, "time", lambda: 5000.0)
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "mangos"],
+        io.BytesIO(b"UPDATE yulon_install_file SET at_unix = 5000 WHERE state = 'failed';"),
+        env={},
+    )
+    row = sqlplan.FileRow("content updates", U2, "a" * 64, "started")
+
+    def take() -> None:
+        sqlplan.record_world_files(
+            (row,),
+            marker_db="mangos",
+            container="tbc-db",
+            client="mariadb",
+            password="x",
+            exec_stdin=db.exec_stdin,
+            reclaim_at=5000,
+        )
+
+    take()
+    assert _times(db)[("content updates", U2)] > 5000
+    with pytest.raises(InstallerError):
+        take()
+
+
+def test_a_claim_that_cannot_be_written_leaves_the_stuck_row_where_it_was(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    seen = _times(db)[("content updates", U2)]
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "mangos"],
+        io.BytesIO(
+            b"CREATE TRIGGER refuse_claim BEFORE INSERT ON yulon_install_file "
+            b"BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+        ),
+        env={},
+    )
+    with pytest.raises(InstallerError):
+        sqlplan.record_world_files(
+            (sqlplan.FileRow("content updates", U2, "a" * 64, "started"),),
+            marker_db="mangos",
+            container="tbc-db",
+            client="mariadb",
+            password="x",
+            exec_stdin=db.exec_stdin,
+            reclaim_at=seen,
+        )
+    assert _ledger(db)[U2] == "failed"
+
+
+def test_a_retrys_own_record_is_never_older_than_the_time_it_took_the_row_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, _ = _stuck_server(tmp_path)
+    monkeypatch.setattr(sqlplan.time, "time", lambda: 5000.0)
+    sqlplan.record_world_files(
+        (sqlplan.FileRow("content updates", U2, "a" * 64, "applied"),),
+        marker_db="mangos",
+        container="tbc-db",
+        client="mariadb",
+        password="x",
+        exec_stdin=db.exec_stdin,
+        not_before=5001,
+    )
+    assert _times(db)[("content updates", U2)] == 5001
+
+
 def _times(db: _Db) -> dict[tuple[str, str], int]:
     answer = "\n".join(
         f"{p}\t{f}\t{t}"

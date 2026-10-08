@@ -1563,11 +1563,12 @@ def file_rows_sql(
     row a claim two presses cannot both win (Codex, T531) -- the client refuses the
     second, and that press stops before it runs the file.
 
-    `reclaim_at` (one row, T545) takes a stuck row over: it deletes the row only if it
-    was written at that second -- the one the dialog showed -- and then does the plain
-    `INSERT`. Two presses that both read the stuck row both delete at most that one
-    row, and only one `INSERT` wins; a press that arrives later finds the winner's new
-    row (written now, not then) and deletes nothing, so its `INSERT` is refused.
+    `reclaim_at` (one row, T545) takes a stuck row over, in one transaction: it deletes the
+    row only if it was written at that second -- the one the dialog showed -- and then does
+    the plain `INSERT`, which is written at a time past that second even when the clock has
+    not moved. So a second press holding the same time finds a row that no longer carries it,
+    deletes nothing, and its `INSERT` is refused; and a refused `INSERT` rolls the `DELETE`
+    back, so the stuck row is never lost to a failed claim.
 
     InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
     capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
@@ -1589,21 +1590,27 @@ def file_rows_sql(
             )
         if row.state not in _FILE_STATES or not _HEX64.fullmatch(row.sha256):
             raise InstallerError(f"internal: a malformed {FILE_TABLE} row {row!r}")
-    values = ", ".join(
-        f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
-    )
-    take = ""
     if reclaim_at is not None:
         if len(rows) != 1:
             raise InstallerError("internal: a reclaim takes exactly one ledger row")
-        claim = True
-        take = (
-            f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{rows[0].phase}' "
-            f"AND file = '{rows[0].file}' AND at_unix = {int(reclaim_at)};\n"
+        row = rows[0]
+        # Past the second the press read, whatever the clock says: that is what makes the row
+        # a claim only one press can hold.
+        taken_at = max(now, int(reclaim_at) + 1)
+        return (
+            text
+            + "BEGIN;\n"
+            + f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
+            + f"AND file = '{row.file}' AND at_unix = {int(reclaim_at)};\n"
+            + f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+            + f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
+            + "COMMIT;\n"
         )
+    values = ", ".join(
+        f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
+    )
     return (
         text
-        + take
         + f"{'INSERT' if claim else 'REPLACE'} INTO `{marker_db}`.`{FILE_TABLE}` "
         + "(phase, file, sha256, state, at_unix) "
         + f"VALUES {values};\n"
@@ -1624,14 +1631,20 @@ def record_world_files(
     wsl_distro: str | None = None,
     claim: bool = False,
     reclaim_at: int | None = None,
+    not_before: int = 0,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
+
+    `not_before` keeps the time written from going back past a second a stale press may still
+    hold (T545): a retry's own records are never older than the time it took the row at.
 
     Raises:
         InstallerError: the client refused the script, or could not be reached.
     """
     _run_sql(
-        file_rows_sql(marker_db, rows, int(time.time()), claim=claim, reclaim_at=reclaim_at),
+        file_rows_sql(
+            marker_db, rows, max(int(time.time()), not_before), claim=claim, reclaim_at=reclaim_at
+        ),
         what=(
             "claiming a world update (another update of this server may be applying it)"
             if claim or reclaim_at is not None
