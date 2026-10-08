@@ -534,8 +534,18 @@ class Controller:
             raise StartRefused(reason)
 
     def stop_conflicting_and_start(self) -> list[str]:
-        """Stop the server holding our ports, then start this one."""
-        self.refuse_before_a_stop()
+        """Stop the server holding our ports, then start this one.
+
+        `before_servers` starts our database, and the server in the way may hold
+        that port too, so with something in the way it waits for `start()`, after
+        the stop (T552, Codex review). With nothing in the way it is asked first,
+        like every press that stops something: a refusal leaves everything as it was.
+        """
+        if self.port_conflicts():
+            self.refuse_start()
+            self.refuse_a_missing_database()
+        else:
+            self.refuse_before_a_stop()
         stopped = self.stop_conflicting()
         self.start()
         return stopped

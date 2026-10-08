@@ -176,6 +176,34 @@ def test_two_entries_that_can_run_together_may_not_share_a_soap_port() -> None:
         parse_catalog({"games": [wotlk_json(), clash]})
 
 
+def test_an_entry_without_operations_still_publishes_its_soap_port() -> None:
+    """The base file publishes `install.native.soap_port` whether or not a channel dials it."""
+    clash = second_ac_json(operations=None)
+    clash["install"]["native"]["soap_port"] = 7878
+    with pytest.raises(ValidationError, match="7878"):
+        parse_catalog({"games": [wotlk_json(), clash]})
+
+
+@pytest.mark.parametrize(
+    ("ports", "soap", "taken"),
+    [
+        ({"db": 8085}, SECOND_SOAP, "8085"),  # my database on WotLK's world port
+        ({"db": 3307}, 3724, "3724"),  # my SOAP on WotLK's auth port
+        ({"db": 3307}, 3306, "3306"),  # my SOAP on WotLK's database port
+        ({"db": 7878}, SECOND_SOAP, "7878"),  # my database on WotLK's SOAP port
+    ],
+)
+def test_a_port_may_not_be_another_entrys_port_of_any_other_kind(
+    ports: dict[str, int], soap: int, taken: str
+) -> None:
+    """Docker binds the number, whatever the entry calls it, so a cross-kind overlap fails late."""
+    clash = second_ac_json(ports={**SECOND_PORTS, **ports})
+    clash["install"]["native"]["soap_port"] = soap
+    clash["operations"]["port"] = soap
+    with pytest.raises(ValidationError, match=taken):
+        parse_catalog({"games": [wotlk_json(), clash]})
+
+
 def test_two_entries_that_share_an_auth_port_may_share_the_rest() -> None:
     """They conflict on purpose (Start offers to stop the other), so one DB/SOAP port is fine."""
     sibling = second_ac_json(ports={**SECOND_PORTS, "auth": 3724, "db": 3306})
@@ -566,6 +594,46 @@ def test_the_step_runs_after_every_refusal_and_before_the_servers(
     with pytest.raises(controller.StartRefused, match="no port"):
         refused.start()
     assert "servers" not in order
+
+
+def test_stopping_the_other_server_comes_before_the_step_that_starts_our_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The step starts our database, which the server in the way may hold the port of (Codex, r6).
+
+    Asked before the stop, a catalog pair that shares an auth port and a database
+    port could never be started with "stop the other server".
+    """
+    from yulon import controller, docker
+
+    order: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: order.append("before_servers") or None,
+    )
+    held = ["ac-worldserver"]
+    monkeypatch.setattr(ctl, "refuse_start", lambda: order.append("refuse_start"))
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: list(held))
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: order.append("database"))
+    monkeypatch.setattr(ctl, "stop_conflicting", lambda: order.append("stop") or held.clear() or [])
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: order.append("servers"))
+    ctl.stop_conflicting_and_start()
+    assert order.index("stop") < order.index("before_servers") < order.index("servers")
+
+    # With nothing in the way, a refusal still comes before the stop of anything.
+    order.clear()
+    refusing = controller.Controller(
+        second_ac_entry().container_spec(), tmp_path, before_servers=lambda: "no port"
+    )
+    monkeypatch.setattr(refusing, "refuse_start", lambda: None)
+    monkeypatch.setattr(refusing, "port_conflicts", lambda: [])
+    monkeypatch.setattr(refusing, "refuse_a_missing_database", lambda: None)
+    monkeypatch.setattr(refusing, "stop_conflicting", lambda: order.append("stop") or [])
+    with pytest.raises(controller.StartRefused, match="no port"):
+        refusing.stop_conflicting_and_start()
+    assert order == []
 
 
 def test_a_wotlk_start_has_no_port_step() -> None:

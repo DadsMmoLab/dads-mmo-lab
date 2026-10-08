@@ -3081,6 +3081,22 @@ class CatalogEntry(_Strict):
             )
         return self
 
+    def _published_host_ports(self) -> dict[int, str]:
+        """Every host port this entry binds, each with what it is for (T552)."""
+        found: dict[int, str] = {}
+        native = self.install.native
+        candidates = (
+            (self.ports.auth, "auth port"),
+            (self.ports.world, "world port"),
+            (self.ports.db, "database port"),
+            (native.soap_port if native and native.family == "azerothcore" else None, "SOAP port"),
+            (self.operations.port if self.operations else None, "command-channel port"),
+        )
+        for number, what in candidates:
+            if number is not None and number not in found:
+                found[number] = what
+        return found
+
     def manifest_game(self) -> str:
         """The `manifests/<game>/` tree this entry's modules come from (T552)."""
         return self.manifests_from or self.id
@@ -3164,32 +3180,32 @@ class Catalog(_Strict):
 
     @model_validator(mode="after")
     def _entries_that_run_together_share_no_host_port(self) -> Catalog:
-        """Two entries with no auth or world port in common get no other port in common (T552).
+        """Two entries with no auth or world port in common share no host port at all (T552).
 
         `Controller.port_conflicts()` looks at auth and world only, so two entries
         that share one of those are the "stop the other one first" pair (WotLK and
         TBC share all of theirs, on purpose). Two that share neither are meant to
-        run at once, and a shared database or SOAP port would then fail late, at
-        a Docker bind error, after the first server's containers were up (Codex
-        adversarial review).
+        run at once, and any other overlap would then fail late, at a Docker bind
+        error after the first server's containers were up (Codex adversarial
+        reviews). Docker binds the number whatever the entry calls it, so every
+        port an entry publishes is compared with every port of the other: its
+        database against the other's world port counts as much as database
+        against database. The SOAP port is the one the base file publishes
+        (`install.native.soap_port`) for an AzerothCore entry, whether or not an
+        `operations` block dials it, plus the one a channel dials.
         """
         for i, first in enumerate(self.games):
             for second in self.games[i + 1 :]:
                 if {first.ports.auth, first.ports.world} & {second.ports.auth, second.ports.world}:
                     continue
-                pairs = {
-                    "database": (first.ports.db, second.ports.db),
-                    "SOAP": (
-                        first.operations.port if first.operations else None,
-                        second.operations.port if second.operations else None,
-                    ),
-                }
-                for what, (a, b) in pairs.items():
-                    if a is not None and a == b:
+                taken = first._published_host_ports()
+                for number, what in second._published_host_ports().items():
+                    if number in taken:
                         raise ValueError(
                             f"{first.id} and {second.id} can run at the same time (their auth "
-                            f"and world ports differ) but both publish {what} port {a}; each "
-                            "needs its own"
+                            f"and world ports differ) but both publish port {number}: "
+                            f"{first.id}'s {taken[number]} and {second.id}'s {what}; "
+                            "each needs its own"
                         )
         return self
 
