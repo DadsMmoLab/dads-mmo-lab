@@ -222,6 +222,19 @@ def test_two_entries_that_share_an_auth_port_may_share_the_rest() -> None:
     parse_catalog({"games": [wotlk_json(), sibling]})
 
 
+def test_two_entries_that_share_only_a_world_port_may_share_the_rest() -> None:
+    """The port rule skips a pair sharing EITHER auth or world, not just auth (T565).
+
+    Their world port collides, so they cannot run at once and Start offers to
+    stop the other; the rest of their ports are then free to match.
+    """
+    sibling = second_ac_json(ports={**SECOND_PORTS, "world": 8085, "db": 3306})
+    assert sibling["ports"]["auth"] != 3724
+    sibling["install"]["native"]["soap_port"] = 7878
+    sibling["operations"]["port"] = 7878
+    parse_catalog({"games": [wotlk_json(), sibling]})
+
+
 def test_the_shipped_catalog_names_every_container_once() -> None:
     seen: dict[str, str] = {}
     for entry in load_catalog().games:
