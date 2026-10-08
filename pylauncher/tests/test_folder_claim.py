@@ -326,6 +326,39 @@ def test_a_claim_that_never_runs_is_never_held(fake_docker: Path, tmp_path: Path
             pytest.fail("the press went ahead on a claim that never ran")
 
 
+@pytest.mark.parametrize("dies", [True, False])
+def test_the_stand_in_claim_container_is_never_seen_empty(
+    fake_docker: Path, tmp_path: Path, dies: bool
+) -> None:
+    """T567: the stand-in made the container file empty and wrote "created" a moment later,
+    and an `inspect` in between read an empty file as "running": a claim that never ran was
+    held, once in a while, on CI. The container has a state from the instant it exists.
+    """
+    if dies:
+        (fake_docker / "claim-dies").write_text("", encoding="utf-8")
+    for turn in range(25):
+        name = f"yulon-claim-{turn:012}"
+        box = fake_docker / "containers" / name
+        run = subprocess.Popen(
+            [platform.docker_program(), "run", "--rm", "-i", "--name", name, "--label", "k=v"]
+            + ["--label", "j=w", IMAGE, "cat"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        seen = None
+        deadline = time.monotonic() + HANG_BOUND
+        while seen is None and time.monotonic() < deadline:
+            try:
+                seen = box.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+        run.kill()
+        run.wait()
+        assert seen, f"turn {turn}: the container was visible with no state in it ({seen!r})"
+        assert seen == "created" if dies else seen.isdigit(), seen
+
+
 def test_a_stop_while_the_claim_comes_up_ends_the_wait_at_once(
     fake_docker: Path, tmp_path: Path
 ) -> None:
