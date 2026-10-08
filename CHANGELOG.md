@@ -14,11 +14,16 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
+- WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
+- The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.
+- WoW Unbound's Mentor stands in every capital and in Dalaran, and the install checks that all nine are there.
 - **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
+- **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.

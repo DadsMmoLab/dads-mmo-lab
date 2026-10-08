@@ -2363,6 +2363,311 @@
           "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
         }
       ]
+    },
+    {
+      "id": "wow-unbound",
+      "name": "WoW Unbound",
+      "status": "beta",
+      "description": "Wrath of the Lich King with Wrath Unbound: unlock more classes at the Mentor and mix their spells and talents. Its own server, beside your WotLK one. Death Knight can be your first class, not an added one.",
+      "notes": [
+        "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK."
+      ],
+      "emulator": {
+        "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
+        "sources": [
+          {
+            "repo": "mod-playerbots/azerothcore-wotlk",
+            "branch": "Playerbot",
+            "depth": null,
+            "dest": ".",
+            "rev": "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+          },
+          {
+            "repo": "mod-playerbots/mod-playerbots",
+            "branch": "master",
+            "dest": "modules/mod-playerbots",
+            "rev": "7bae1b5c58c76a0aa20381155edc08096d1485b2"
+          },
+          {
+            "repo": "azerothcore/mod-ale",
+            "branch": "master",
+            "dest": "modules/mod-ale",
+            "rev": "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+          },
+          {
+            "repo": "DadsMmoLab/dads-mmo-lab",
+            "branch": "mod-unbound",
+            "dest": "modules/mod-unbound",
+            "rev": "49b334be72d4f1837c712d4f9ec7bcca05742155"
+          }
+        ]
+      },
+      "install": {
+        "platforms": [
+          "linux",
+          "macos",
+          "windows"
+        ],
+        "default_server_dir": "yulon-unbound",
+        "password": {
+          "mode": "fixed",
+          "value": "password"
+        },
+        "native": {
+          "family": "azerothcore",
+          "update_to_latest": true,
+          "templates": "wow-wotlk/native",
+          "images": [
+            "worldserver",
+            "authserver",
+            "db-import",
+            "client-data"
+          ],
+          "image_prefix": "yulon.local/ac-unbound-",
+          "db": {
+            "image": "mysql:8.4",
+            "client": "mysql",
+            "user": "root"
+          },
+          "ready": {
+            "world": "ready...",
+            "auth": "{{REALM_HOST}}:{{WORLD_PORT}}"
+          },
+          "azerothcore": {
+            "world_env": {
+              "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+              "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500",
+              "AC_VALIDATE_SKILL_LEARNED_BY_SPELLS": "0",
+              "AC_ALE_ENABLED": "1",
+              "AC_ALE_SCRIPT_PATH": "/azerothcore/env/dist/etc/modules/lua_scripts",
+              "AC_ALE_AUTO_RELOAD": "0"
+            },
+            "confs_from_dist": [
+              "env/dist/etc/modules/playerbots.conf",
+              "env/dist/etc/modules/mod_ale.conf",
+              "env/dist/etc/modules/mod_unbound.conf"
+            ],
+            "patches": [
+              {
+                "file": "wow-unbound/patches/01-unbound-core-access.patch",
+                "source": ".",
+                "reason": "Lets the Unbound module read and change a character's class, spells and talents inside the game server."
+              },
+              {
+                "file": "wow-unbound/patches/02-player-learntalent.patch",
+                "source": ".",
+                "reason": "Lets a character learn talents from the classes they have unlocked."
+              },
+              {
+                "file": "wow-unbound/patches/03-feral-spirit-coexist.patch",
+                "source": ".",
+                "reason": "Lets Feral Spirit wolves and a hunter's pet be out at the same time."
+              },
+              {
+                "file": "wow-unbound/patches/04-pet-commands.patch",
+                "source": ".",
+                "reason": "Makes the pet bar's commands reach every pet and summon a character has out."
+              },
+              {
+                "file": "wow-unbound/patches/05-unbound-mana-regen.patch",
+                "source": ".",
+                "reason": "Lets a character whose first class has no mana refill the mana of the classes they unlock."
+              }
+            ],
+            "lua_scripts": [
+              {
+                "src": "modules/mod-unbound/lua_scripts",
+                "dest": "env/dist/etc/modules/lua_scripts/unbound"
+              }
+            ],
+            "sql_checks": [
+              {
+                "db": "world",
+                "table": "unbound_class_catalog",
+                "at_least": 1000,
+                "reason": "The Unbound class spell lists are missing, so the Mentor would have nothing to teach."
+              },
+              {
+                "db": "world",
+                "table": "unbound_milestones",
+                "at_least": 5,
+                "reason": "The Unbound unlock levels and prices are missing."
+              },
+              {
+                "db": "world",
+                "table": "creature",
+                "where": "id = 900001 AND guid >= 9000101 AND guid <= 9000109",
+                "at_least": 9,
+                "reason": "The Mentor is missing from one or more of the eight capitals and Dalaran, so new players have no one to teach them their classes. Its spawn file did not apply, or another spawn already holds one of its reserved ids. Rebuild does not run it again once it was recorded, so use Where to get help on the Server tab."
+              },
+              {
+                "db": "world",
+                "table": "creature_template",
+                "where": "entry = 900001",
+                "reason": "The Mentor is not in the world database."
+              },
+              {
+                "db": "world",
+                "table": "item_template",
+                "where": "entry = 900100",
+                "reason": "The Mentor Stone is not in the world database."
+              },
+              {
+                "db": "world",
+                "table": "skillraceclassinfo_dbc",
+                "where": "ID >= 10000",
+                "reason": "The rows that let every class use every skill are missing."
+              }
+            ],
+            "health": {
+              "name": "Unbound",
+              "log_markers": [
+                "[UNBOUND] Prereq map built.",
+                "[UNBOUND] free reagents:",
+                "[UNBOUND] instant summons:"
+              ],
+              "count_label": "Mentor",
+              "count_table": "creature"
+            }
+          },
+          "soap_port": 7879
+        }
+      },
+      "containers": {
+        "db": "ub-database",
+        "auth": "ub-authserver",
+        "world": "ub-worldserver",
+        "db_import": "ub-db-import",
+        "client_data": "ub-client-data-init"
+      },
+      "ports": {
+        "auth": 3725,
+        "world": 8086,
+        "db": 3307
+      },
+      "databases": {
+        "auth": "acore_auth",
+        "characters": "acore_characters",
+        "world": "acore_world",
+        "extra": [
+          "acore_playerbots"
+        ],
+        "playerbots": "acore_playerbots",
+        "ale": "acore_ale"
+      },
+      "client": {
+        "version": "3.3.5a",
+        "build": 12340,
+        "required_build": 12340,
+        "notes": [
+          "set realmlist 127.0.0.1:3725 (or the host's LAN/public IP and :3725 for other players); this server's login port is not WoW WotLK's"
+        ],
+        "packs": [
+          {
+            "id": "unbound-addons",
+            "label": "Unbound addons",
+            "description": "The Unbound talent window, the multi-resource bar and the Unbound spellbook.",
+            "source": {
+              "kind": "checkout_folder",
+              "path": "modules/mod-unbound/client/Interface/AddOns"
+            },
+            "sha256_file": "modules/mod-unbound/MANIFEST.sha256",
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ]
+          }
+        ],
+        "config_wtf": {
+          "always": {
+            "checkAddonVersion": "0"
+          }
+        }
+      },
+      "play": {
+        "equipped": {
+          "template_column": "itemEntry",
+          "instance_table": "item_instance",
+          "inventory_column": "item"
+        },
+        "teleport_command": "teleport name",
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
+      },
+      "accounts": {
+        "level": {
+          "table": "account_access",
+          "account_column": "id",
+          "level_column": "gmlevel",
+          "max_level": 3
+        }
+      },
+      "operations": {
+        "channel": "soap",
+        "namespace": "urn:AC",
+        "port": 7879,
+        "gm_level": 3,
+        "enable_env": {
+          "AC_SOAP_ENABLED": "1",
+          "AC_SOAP_IP": "0.0.0.0",
+          "AC_AI_PLAYERBOT_COMMAND_SERVER_PORT": "0",
+          "AC_RA_ENABLE": "0"
+        },
+        "must_not_listen": [
+          8888,
+          3443
+        ]
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "env/dist/etc/modules/playerbots.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": {
+            "database": "playerbots",
+            "table": "playerbots_account_type",
+            "account_column": "account_id",
+            "type_column": "account_type",
+            "types": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      },
+      "has_manifests": true,
+      "help_places": [
+        {
+          "label": "Dad's MMO Lab Discord, #wow-unbound",
+          "url": "https://discord.com/channels/1505690043044335749/1507088008837595226",
+          "purpose": "Bugs in the multi-class mod."
+        },
+        {
+          "label": "AzerothCore",
+          "url": "https://github.com/azerothcore/azerothcore-wotlk/issues",
+          "purpose": "Bugs in the WotLK server that also happen without the bots."
+        },
+        {
+          "label": "mod-playerbots",
+          "url": "https://github.com/mod-playerbots/mod-playerbots/issues",
+          "purpose": "Bugs in the bots."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ],
+      "manifests_from": "wow-wotlk"
     }
   ]
 }
