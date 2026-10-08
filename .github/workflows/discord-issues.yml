@@ -1,9 +1,10 @@
 name: discord-issues
 
-# One Discord post per issue. Opened: post with a short Claude Haiku summary and
-# store the message id in the issue body (<!-- discord_msg_id: N -->). Closed or
-# reopened: edit that same message (title, colour, status line); the summary
-# stays and Claude is not called again.
+# One Discord post per issue. Every run reads the issue as it is NOW and renders
+# that, so whichever run executes last shows the true state. No trusted message
+# id yet: post it (one short Claude Haiku summary) and store the id in a comment
+# by github-actions[bot] (never the issue body, which anyone can edit). Id found:
+# edit that message only; Claude is not called again.
 
 on:
   issues:
@@ -13,6 +14,8 @@ permissions:
   contents: read
   issues: write
 
+# One run at a time per issue. A queue keeps one pending run and replaces it,
+# which is fine because each run renders the current state.
 concurrency:
   group: discord-issue-${{ github.event.issue.number }}
   cancel-in-progress: false

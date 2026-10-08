@@ -38,6 +38,7 @@ TIMEOUT = 20
 
 EMBED_TITLE_MAX = 256
 EMBED_DESC_MAX = 4096
+RATE_LIMIT_RETRIES = 3
 SUMMARY_MAX = {"pr": 1000, "issue": 1000, "release": 3000}
 
 COLOR_MERGED = 0x5865F2
@@ -47,6 +48,8 @@ COLOR_DONE = 0x2ECC71
 COLOR_NOT_PLANNED = 0x95A5A6
 
 MARKER_RE = re.compile(r"<!--\s*discord_msg_id:\s*(\d+)\s*-->")
+COMPACT_ABOVE = 10
+BOT_LOGIN = "github-actions[bot]"
 SKIP_CI = ("[skip ci]", "[ci skip]")
 
 _PROMPT_TAGS = {
@@ -90,14 +93,33 @@ def clip(text: str, limit: int) -> str:
 # --- Claude -----------------------------------------------------------------
 
 
+def _http_client():
+    """The HTTP client the SDK uses; None means its default. A test swaps this."""
+    return None
+
+
 def _make_client():
     import anthropic
 
-    return anthropic.Anthropic(timeout=60.0, max_retries=2)
+    return anthropic.Anthropic(timeout=60.0, max_retries=2, http_client=_http_client())
+
+
+_CLOSING_TAG_RE = re.compile(r"<\s*/\s*(\w+)\s*>")
 
 
 def _escape_closing_tags(text: str) -> str:
-    return re.sub(r"</(\w+)>", r"<\\/\1>", text)
+    """Stop text from closing the tag it is wrapped in (any spacing or case).
+
+    Not a hard boundary: a model can still be talked round. It only removes the
+    cheapest trick.
+    """
+    return _CLOSING_TAG_RE.sub(lambda m: f"<\\/{m.group(1)}>", text)
+
+
+_LINK_RE = re.compile(
+    r"https?://\S+|\bdiscord(?:app)?\.(?:gg|com/invite)/\S*|\bwww\.\S+",
+    re.IGNORECASE,
+)
 
 
 def summarize(kind: str, title: str, text: str) -> str | None:
@@ -148,7 +170,7 @@ def summarize(kind: str, title: str, text: str) -> str | None:
             log(f"Claude stopped with {stop}: using the fallback.")
             return None
         parts = [block.text for block in response.content if getattr(block, "type", None) == "text"]
-        out = re.sub(r"https?://\S+", "", "".join(parts)).strip()
+        out = _LINK_RE.sub("", "".join(parts)).strip()
     except Exception as exc:  # Claude must never fail the job
         log(f"Claude call failed ({type(exc).__name__}): using the fallback.")
         return None
@@ -230,16 +252,42 @@ class Discord:
             payload["username"] = self.username
         return payload
 
+    def _call(self, method: str, url: str, payload: dict | None = None) -> str:
+        """One webhook call. On a 429, wait what Discord asks and try again."""
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                return _request(method, url, payload)
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt == RATE_LIMIT_RETRIES:
+                    raise
+                wait = _retry_after(exc)
+                log(f"Discord rate limit: waiting {wait:.1f}s (retry {attempt + 1}).")
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
     def post(self, embed: dict) -> str:
         """Post a new message; returns its id."""
-        body = _request("POST", self._url(wait=True), self._payload(embed))
+        body = self._call("POST", self._url(wait=True), self._payload(embed))
         return str(json.loads(body)["id"])
 
     def edit(self, message_id: str, embed: dict) -> None:
-        _request("PATCH", self._url(message_id), self._payload(embed, edit=True))
+        self._call("PATCH", self._url(message_id), self._payload(embed, edit=True))
 
     def get(self, message_id: str) -> dict:
-        return json.loads(_request("GET", self._url(message_id)))
+        return json.loads(self._call("GET", self._url(message_id)))
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float:
+    """Seconds Discord asked us to wait (body, then header), kept within 0-30."""
+    wait = 1.0
+    try:
+        wait = float(json.loads(exc.read().decode("utf-8")).get("retry_after", wait))
+    except Exception:
+        try:
+            wait = float(exc.headers.get("Retry-After", wait))
+        except Exception:
+            pass
+    return min(max(wait, 0.0), 30.0)
 
 
 def make_discord(thread_env: str, username: str) -> Discord | None:
@@ -259,26 +307,61 @@ def load_event() -> dict:
 
 
 def _find_pr(sha: str) -> dict | None:
+    """The MERGED pull request behind a commit, if any. An open PR is not one."""
     try:
         prs = gh_json("GET", f"/repos/{repo()}/commits/{sha}/pulls") or []
     except Exception as exc:
         log(f"Could not look up the PR of {sha[:8]} ({type(exc).__name__}).")
         return None
     merged = [p for p in prs if p.get("merged_at")]
-    return (merged or prs or [None])[0]
+    return merged[0] if merged else None
+
+
+def _first_line(commit: dict) -> str:
+    lines = (commit.get("message") or "").splitlines()
+    return lines[0] if lines else commit["id"][:8]
+
+
+def _compact_embed(event: dict, commits: list) -> dict:
+    """One message for a force push or a big push: no PR lookups, no Claude."""
+    forced = bool(event.get("forced"))
+    lines = [f"- {clip(_first_line(c), 100)}" for c in commits[:15]]
+    if len(commits) > 15:
+        lines.append(f"...and {len(commits) - 15} more")
+    count = f"{len(commits)} commit{'s' if len(commits) != 1 else ''}"
+    pusher = (event.get("pusher") or {}).get("name") or "someone"
+    return {
+        "title": f"{count} pushed to Yulon" + (" (force push)" if forced else ""),
+        "url": event.get("compare") or f"{server_url()}/{repo()}/commits/Yulon",
+        "description": "\n".join(lines),
+        "color": COLOR_MERGED,
+        "footer": {"text": f"Pushed by {pusher}"},
+    }
 
 
 def cmd_merged() -> int:
     discord = make_discord("DISCORD_PR_THREAD_ID", "Yu'lon merged")
     if discord is None:
         return 0
-    seen: set[int] = set()
-    failed = 0
-    for commit in load_event().get("commits") or []:
-        message = commit.get("message", "")
-        if any(tag in message.lower() for tag in SKIP_CI):
+    event = load_event()
+    commits = []
+    for commit in event.get("commits") or []:
+        if any(tag in commit.get("message", "").lower() for tag in SKIP_CI):
             log(f"Skipping {commit.get('id', '')[:8]}: skip-ci commit.")
             continue
+        commits.append(commit)
+    if event.get("forced") or len(commits) > COMPACT_ABOVE:
+        try:
+            msg_id = discord.post(_compact_embed(event, commits))
+            log(f"Posted a compact push message ({len(commits)} commits, msg_id={msg_id}).")
+            return 0
+        except Exception as exc:
+            log(f"Discord post failed for the push ({type(exc).__name__}: {exc}).")
+            return 1
+    seen: set[int] = set()
+    failed = 0
+    for commit in commits:
+        message = commit.get("message", "")
         sha = commit["id"]
         pr = _find_pr(sha)
         if pr is not None:
@@ -318,26 +401,37 @@ def cmd_merged() -> int:
 # --- issue ------------------------------------------------------------------
 
 
-def _status(action: str, state_reason: str, sender: str, author: str) -> tuple:
-    """(title prefix, colour, status line) for an issue event."""
-    if action == "closed":
-        if state_reason == "not_planned":
-            return (
-                "[Not Planned] ",
-                COLOR_NOT_PLANNED,
-                f"Closed as not planned by {sender}",
-            )
-        return "[Completed] ", COLOR_DONE, f"Completed by {sender}"
-    if action == "reopened":
-        return "[Reopened] ", COLOR_OPEN, f"Reopened by {sender}"
-    return "", COLOR_OPEN, f"Opened by {author}"
+def _render_state(issue: dict) -> tuple[str, int, str]:
+    """(title prefix, colour, status line) from the issue as it is NOW."""
+    if issue.get("state") == "closed":
+        closer = (issue.get("closed_by") or {}).get("login")
+        by = f" by {closer}" if closer else ""
+        reason = issue.get("state_reason") or ""
+        if reason == "not_planned":
+            return "[Not Planned] ", COLOR_NOT_PLANNED, f"Closed as not planned{by}"
+        if reason == "duplicate":
+            return "[Duplicate] ", COLOR_NOT_PLANNED, f"Closed as a duplicate{by}"
+        return "[Completed] ", COLOR_DONE, f"Completed{by}"
+    if issue.get("state_reason") == "reopened":
+        return "[Reopened] ", COLOR_OPEN, "Reopened"
+    return "", COLOR_OPEN, f"Opened by {(issue.get('user') or {}).get('login', 'someone')}"
 
 
-def _with_marker(body: str, msg_id: str) -> str:
-    marker = f"<!-- discord_msg_id: {msg_id} -->"
-    if MARKER_RE.search(body):
-        return MARKER_RE.sub(marker, body)
-    return body.rstrip() + f"\n\n{marker}\n"
+def _trusted_ids(comments: list) -> list[str]:
+    """Message ids stored by this workflow: marker comments by the Actions bot only.
+
+    The issue body and anyone else's comments are user-editable, so a marker
+    there could point the edit at some other Discord message.
+    """
+    ids = []
+    for comment in comments:
+        user = comment.get("user") or {}
+        if user.get("login") != BOT_LOGIN or user.get("type") != "Bot":
+            continue
+        found = MARKER_RE.search(comment.get("body") or "")
+        if found:
+            ids.append(found.group(1))
+    return ids
 
 
 def _issue_summary_of(message: dict) -> str:
@@ -354,51 +448,56 @@ def cmd_issue() -> int:
     if discord is None:
         return 0
     event = load_event()
-    issue = event["issue"]
-    action = event.get("action", "opened")
-    number = issue["number"]
-    body = issue.get("body") or ""
-    if action != "opened":
-        # The event can predate the id being stored (open and close in a hurry).
-        try:
-            body = gh_json("GET", f"/repos/{repo()}/issues/{number}").get("body") or body
-        except Exception as exc:
-            log(f"Could not re-read issue #{number} ({type(exc).__name__}).")
-    sender = (event.get("sender") or {}).get("login") or issue["user"]["login"]
-    prefix, color, status = _status(
-        action, issue.get("state_reason") or "", sender, issue["user"]["login"]
-    )
+    number = event["issue"]["number"]
+    # Render from the issue as it is now, not from the event: runs can start out
+    # of order or be replaced in the queue, and the last one to run must show the
+    # true state.
+    try:
+        issue = gh_json("GET", f"/repos/{repo()}/issues/{number}")
+    except Exception as exc:
+        log(f"Could not re-read issue #{number} ({type(exc).__name__}): using the event.")
+        issue = event["issue"]
+    try:
+        comments = gh_json("GET", f"/repos/{repo()}/issues/{number}/comments?per_page=100")
+    except Exception as exc:
+        log(f"Could not read the comments of issue #{number} ({type(exc).__name__}).")
+        return 1
+    prefix, color, status = _render_state(issue)
     labels = ", ".join(lbl["name"] for lbl in issue.get("labels") or [])
     if labels:
-        status += f" • {labels}"
-
-    found = MARKER_RE.search(body)
-    msg_id = found.group(1) if found else ""
-    summary = ""
-    if action == "opened" or not msg_id:
-        clean = MARKER_RE.sub("", body)
-        summary = summarize("issue", issue["title"], clean) or ""
-    if msg_id and action != "opened":
-        # Closing or reopening: keep the posted summary, never call Claude.
-        try:
-            summary = _issue_summary_of(discord.get(msg_id))
-        except Exception as exc:
-            log(f"Could not read message {msg_id} ({type(exc).__name__}).")
-            msg_id = ""
-
+        status += f" \u2022 {labels}"
     embed = {
         "title": f"{prefix}Issue #{number}: {issue['title']}",
         "url": issue["html_url"],
-        "description": status + (f"\n\n{summary}" if summary else ""),
         "color": color,
     }
-    if msg_id:
+
+    for msg_id in _trusted_ids(comments or []):
+        try:
+            posted = discord.get(msg_id)
+        except Exception as exc:
+            log(f"Could not read message {msg_id} ({type(exc).__name__}).")
+            continue
+        try:
+            posted_url = posted["embeds"][0].get("url")
+        except (KeyError, IndexError, TypeError):
+            posted_url = None
+        if posted_url != issue["html_url"]:
+            log(f"Message {msg_id} is not the post of issue #{number}: ignoring it.")
+            continue
+        summary = _issue_summary_of(posted)
+        embed["description"] = status + (f"\n\n{summary}" if summary else "")
         try:
             discord.edit(msg_id, embed)
-            log(f"Edited Discord message {msg_id} for issue #{number} ({action}).")
+            log(f"Edited Discord message {msg_id} for issue #{number}.")
             return 0
         except Exception as exc:
             log(f"Edit of {msg_id} failed ({type(exc).__name__}): posting a new one.")
+            break
+
+    # No usable stored post: this run makes it, with the one Claude summary.
+    summary = summarize("issue", issue["title"], MARKER_RE.sub("", issue.get("body") or "")) or ""
+    embed["description"] = status + (f"\n\n{summary}" if summary else "")
     try:
         new_id = discord.post(embed)
     except Exception as exc:
@@ -407,13 +506,14 @@ def cmd_issue() -> int:
     log(f"Posted issue #{number} to Discord (msg_id={new_id}).")
     try:
         gh_json(
-            "PATCH",
-            f"/repos/{repo()}/issues/{number}",
-            {"body": _with_marker(body, new_id)},
+            "POST",
+            f"/repos/{repo()}/issues/{number}/comments",
+            {"body": f"<!-- discord_msg_id: {new_id} -->\nPosted in the Yu'lon Discord."},
         )
-        log(f"Stored discord_msg_id in the body of issue #{number}.")
+        log(f"Stored discord_msg_id in a comment on issue #{number}.")
     except Exception as exc:
         log(f"Could not store the message id ({type(exc).__name__}): {exc}")
+        return 1
     return 0
 
 

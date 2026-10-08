@@ -3,6 +3,7 @@ name: discord-merged
 # One Discord post per commit pushed to Yulon (a squash merge is one commit, so
 # one PR is one post): title, link, author and a short Claude Haiku summary.
 # A commit with no PR (a direct push) is posted as its first line and a link.
+# More than 10 commits, or a force push, is one compact message instead.
 # Not on pull_request: closed as well, or every merge would post twice.
 
 on:
@@ -13,9 +14,8 @@ permissions:
   contents: read
   pull-requests: read
 
-concurrency:
-  group: discord-merged
-  cancel-in-progress: false
+# No concurrency group on purpose: a group keeps one pending run and replaces
+# it, so a third push in a row would silently drop a merge's post.
 
 jobs:
   notify:

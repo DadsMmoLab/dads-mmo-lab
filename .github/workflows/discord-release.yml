@@ -3,6 +3,7 @@ name: discord-release
 # One Discord post per release, after the release workflow finishes on a v* tag
 # (the tag is the run's head_branch). Not on release: published: the release is
 # created with GITHUB_TOKEN, and GitHub starts no workflow from that token.
+# A re-run of the release workflow (run_attempt 2+) does not post again.
 # Run it by hand with a tag to re-post. Tick "Skip the Claude summary" to post
 # the raw CHANGELOG section instead.
 
@@ -30,6 +31,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.run_attempt == 1 &&
       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
