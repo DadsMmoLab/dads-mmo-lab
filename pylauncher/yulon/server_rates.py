@@ -213,7 +213,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+        rev="f19a18799a35f7c24bdcdc9ea399c601f166259b",
         keys=_ALL_KEYS,
         notes={},
     ),
