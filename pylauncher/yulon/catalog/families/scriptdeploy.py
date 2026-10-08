@@ -16,6 +16,12 @@ wrote it, is left as it is and the press says so. A record that cannot be read
 counts as empty, which keeps every differing file: when in doubt, nothing is lost.
 A file the checkout no longer ships is removed only under the same rule.
 
+The record also names, under `pending`, the one file a press is about to write and
+the digest it will have, saved BEFORE the write: a crash between the write and the
+final record leaves bytes that are claimed afterwards exactly when they are those
+bytes (`_is_ours_by_pending`), so the next press updates them instead of calling
+them the player's.
+
 The model is the ALE manifests' `deploy` step (`apply.Applier._deploy()`), which
 copies a module's `lua_scripts` into the same folder; what is added here is the
 record, because these files come back on every rebuild and update rather than
@@ -90,11 +96,35 @@ def _read_record(server_dir: Path) -> tuple[dict[str, str], str]:
     files = parsed.get("files") if isinstance(parsed, dict) else None
     if not isinstance(files, dict):
         return {}, "it holds no list of files"
-    return {
+    kept = {
         k: v
         for k, v in files.items()
         if isinstance(k, str) and isinstance(v, str) and _inside_the_script_dir(k)
-    }, ""
+    }
+    pending = parsed.get("pending")
+    if isinstance(pending, dict):
+        for rel, digest in pending.items():
+            if isinstance(rel, str) and isinstance(digest, str) and _inside_the_script_dir(rel):
+                if _is_ours_by_pending(server_dir, rel, digest):
+                    kept[rel] = digest
+    return kept, ""
+
+
+def _is_ours_by_pending(server_dir: Path, rel: str, digest: str) -> bool:
+    """Is the file at `rel` the one a press that never finished was writing (T563)?
+
+    A press records the digest it is about to write BEFORE it writes the file, so
+    a crash between the two leaves bytes on disk that the record only knows as
+    "pending". They are Yu'lon's exactly when they are those bytes; anything else
+    at that name is not claimed, and a link never is.
+    """
+    path = server_dir.joinpath(*PurePosixPath(rel).parts)
+    if path.is_symlink() or _through_a_link(server_dir, path) is not None:
+        return False
+    try:
+        return _sha(path.read_bytes()) == digest
+    except OSError:
+        return False
 
 
 def _inside_the_script_dir(rel: str) -> bool:
@@ -115,14 +145,24 @@ def _inside_the_script_dir(rel: str) -> bool:
     )
 
 
-def _write_record(server_dir: Path, files: dict[str, str]) -> None:
-    """Save the record; with nothing left in it, remove the file (T563)."""
+def _write_record(
+    server_dir: Path, files: dict[str, str], pending: dict[str, str] | None = None
+) -> None:
+    """Save the record; with nothing left in it, remove the file (T563).
+
+    `pending` is the one file about to be written and the digest it will have:
+    written first, so a crash between the file and the final record leaves it
+    claimable (see `_is_ours_by_pending`).
+    """
     path = record_path(server_dir)
-    if not files:
+    if not files and not pending:
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps({"version": 1, "files": dict(sorted(files.items()))}, indent=2) + "\n"
+    body: dict[str, object] = {"version": 1, "files": dict(sorted(files.items()))}
+    if pending:
+        body["pending"] = dict(sorted(pending.items()))
+    text = json.dumps(body, indent=2) + "\n"
     _publish(path, text.encode("utf-8"))
 
 
@@ -322,6 +362,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     renamed = _renamed_in_place(server_dir, record, planned)
     wrote = current = 0
     finished = False
+    pending_written = False
     try:
         for item in planned:
             link = _through_a_link(server_dir, item.target)
@@ -352,6 +393,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 )
                 continue
             item.target.parent.mkdir(parents=True, exist_ok=True)
+            pending_written = True
+            _write_record(server_dir, kept_record, {item.rel: new})
             _publish(item.target, data)
             kept_record[item.rel] = new
             wrote += 1
@@ -388,7 +431,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             "so it was not started."
         ) from exc
     finally:
-        if kept_record != record:
+        if kept_record != record or pending_written:
             try:
                 _write_record(server_dir, kept_record)
             except OSError as exc:
