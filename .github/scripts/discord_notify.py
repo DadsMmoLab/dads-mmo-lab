@@ -570,10 +570,34 @@ def _pr_titles_since(prev: str, tag: str) -> list[str]:
     return titles[-60:]
 
 
+def _earlier_attempt_succeeded() -> bool:
+    """True if this is a re-run and an earlier attempt of the run already succeeded.
+
+    A re-run of a run that FAILED is the first time the release is out, so it must
+    post; a re-run of one that succeeded would post the same release twice.
+    """
+    run_id = os.environ.get("RELEASE_RUN_ID", "").strip()
+    attempt = os.environ.get("RELEASE_RUN_ATTEMPT", "").strip()
+    if not run_id or not attempt.isdigit():
+        return False
+    for number in range(1, int(attempt)):
+        try:
+            earlier = gh_json("GET", f"/repos/{repo()}/actions/runs/{run_id}/attempts/{number}")
+        except Exception as exc:
+            log(f"Could not read attempt {number} of run {run_id} ({type(exc).__name__}).")
+            continue
+        if (earlier or {}).get("conclusion") == "success":
+            log(f"Attempt {number} of run {run_id} already succeeded and posted: skipping.")
+            return True
+    return False
+
+
 def cmd_release(tag: str) -> int:
     if not tag:
         print("No release tag given.", file=sys.stderr)
         return 1
+    if _earlier_attempt_succeeded():
+        return 0
     discord = make_discord("DISCORD_RELEASE_THREAD_ID", "Yu'lon releases")
     if discord is None:
         return 0

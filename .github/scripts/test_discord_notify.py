@@ -44,6 +44,8 @@ class FakeWorld:
         self.compare_commits: list[str] = []
         self.changelog = ""
         self.patch_fails = False
+        self.attempts: dict[str, str] = {}
+        self.attempt_calls: list[str] = []
 
     def discord(self, method=None):
         return [c for c in self.calls if "discord.com" in c[1] and (method in (None, c[0]))]
@@ -62,6 +64,9 @@ class FakeWorld:
             return json.dumps(self.comments)
         if path.startswith("/repos/owner/repo/issues/") and method == "GET":
             return json.dumps(self.issue)
+        if path.startswith("/repos/owner/repo/actions/runs/"):
+            self.attempt_calls.append(path)
+            return json.dumps({"conclusion": self.attempts[path.rsplit("/", 1)[1]]})
         if path.startswith("/repos/owner/repo/releases/tags/"):
             tag = path.rsplit("/", 1)[1]
             return json.dumps(
@@ -712,11 +717,54 @@ def test_issue_workflow_queues_per_issue_without_cancelling():
     assert conc["cancel-in-progress"] is False
 
 
-def test_release_workflow_skips_reruns_but_not_manual_reposts():
-    cond = load_workflow("discord-release.yml")["jobs"]["notify"]["if"]
-    assert "workflow_run.run_attempt == 1" in cond
+def test_release_workflow_passes_the_run_to_the_script_and_gates_on_success_and_tag():
+    job = load_workflow("discord-release.yml")["jobs"]["notify"]
+    cond = job["if"]
+    assert "run_attempt" not in cond  # the script decides, from the earlier attempts
     assert "workflow_dispatch" in cond
     assert "workflow_run.conclusion == 'success'" in cond
+    assert "startsWith(github.event.workflow_run.head_branch, 'v')" in cond
+    env = job["steps"][-1]["env"]
+    assert env["RELEASE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
+    assert env["RELEASE_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
+
+
+def rerun(world, monkeypatch, attempt, outcomes):
+    monkeypatch.setenv("RELEASE_RUN_ID", "42")
+    monkeypatch.setenv("RELEASE_RUN_ATTEMPT", str(attempt))
+    world.attempts = {str(i + 1): c for i, c in enumerate(outcomes)}
+    world.releases = [{"tag_name": "v1.0"}]
+    world.changelog = "## v1.0 - d\n- A change\n"
+    return dn.cmd_release("v1.0")
+
+
+def test_a_rerun_after_a_successful_attempt_does_not_post_again(world, monkeypatch):
+    assert rerun(world, monkeypatch, 2, ["success"]) == 0
+    assert world.discord("POST") == []
+    assert world.claude.requests == []
+
+
+def test_a_rerun_after_a_failed_attempt_posts(world, monkeypatch):
+    assert rerun(world, monkeypatch, 2, ["failure"]) == 0
+    assert len(world.discord("POST")) == 1
+
+
+def test_a_third_attempt_skips_if_any_earlier_one_succeeded(world, monkeypatch):
+    assert rerun(world, monkeypatch, 3, ["failure", "success"]) == 0
+    assert world.discord("POST") == []
+    assert len(world.attempt_calls) == 2
+    assert rerun(world, monkeypatch, 3, ["failure", "cancelled"]) == 0
+    assert len(world.discord("POST")) == 1
+
+
+def test_a_first_attempt_and_a_manual_repost_post_without_asking(world, monkeypatch):
+    assert rerun(world, monkeypatch, 1, []) == 0
+    assert len(world.discord("POST")) == 1
+    monkeypatch.setenv("RELEASE_RUN_ID", "")
+    monkeypatch.setenv("RELEASE_RUN_ATTEMPT", "")
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST")) == 2
+    assert len(world.attempt_calls) == 0
 
 
 def test_workflows_never_put_event_fields_inside_run_scripts():
