@@ -7043,6 +7043,14 @@ before anything was derived, which is exactly what the sentence has to convey.
 
 MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
 
+TRY_UPDATE_AGAIN_TITLE = "Try {id}'s update again?"
+TRY_UPDATE_AGAIN = (
+    "The newest version of {id} ({new}) did not build on this server last time and was put "
+    "back. It will probably fail again unless the server itself has been updated since. "
+    "Update anyway?"
+)
+"""Update pressed on the version Yu'lon put back (T557, D2). No by default (`_confirm()`)."""
+
 MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
 """The title over `Applier.replacement_question()`'s sentence (T47).
 
@@ -7491,6 +7499,8 @@ class ControllerView(QWidget):
         self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
         self._behind: dict[tuple[str, str], int | Behind] = {}
+        # T557: the newest version of a row that failed to build and was put back, by key.
+        self._put_back_tip: dict[tuple[str, str], str] = {}
         # T126: the newest release's tag for a counted row that follows its
         # releases. Read only for a key `_behind` still has.
         self._behind_release: dict[tuple[str, str], str] = {}
@@ -16242,6 +16252,7 @@ class ControllerView(QWidget):
         self._rebuild_owed &= here
         self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
         self._behind = {key: value for key, value in self._behind.items() if key in here}
+        self._put_back_tip = {k: v for k, v in self._put_back_tip.items() if k in here}
 
     def _refresh_rebuild_banner(self) -> None:
         """Show the amber banner iff something owes a rebuild, and name what.
@@ -16403,6 +16414,18 @@ class ControllerView(QWidget):
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
             return
+        again_tip = (
+            self._put_back_tip.get((manifest.type, manifest.id)) if action == "update" else None
+        )
+        if again_tip is not None and not self._confirm(
+            TRY_UPDATE_AGAIN_TITLE.format(id=manifest.id),
+            TRY_UPDATE_AGAIN.format(id=manifest.id, new=again_tip[:7]),
+        ):
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"update {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
         if action == "remove" and apply_module.settings_only(manifest):
             # T380 cold review: one press of Remove put every rate this mod
             # touched back to stock, a rate set since included. Asked first, No
@@ -16481,7 +16504,19 @@ class ControllerView(QWidget):
         self._module_pending = f"{action} {manifest.id}"
         self._update_asked = (manifest, values) if action == "update" else None
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
+        if again_tip is None:
+            self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
+            return
+
+        def update_anyway() -> ApplyReport:
+            # On the worker, not here: a file write. A tip that cannot be offered
+            # again is no reason to refuse the update the player just asked for.
+            problem = applier.allow_put_back_tip(manifest)
+            if problem:
+                logger.warning(f"{manifest.id}'s put-back version stays hidden: {problem}")
+            return run(manifest, values)
+
+        self._run(update_anyway, self._module_done, self._module_failed)
 
     def _module_values(
         self, manifest: Manifest, action: When, *, again: bool = False
@@ -16842,6 +16877,7 @@ class ControllerView(QWidget):
             self._rebuild_owed.discard(key)
             self._sql_owed.pop(key, None)
             self._behind.pop(key, None)
+            self._put_back_tip.pop(key, None)
             return
         # The clone has just been fetched and reset to its upstream tip -- that
         # is what `install()` does over a folder that is already there -- so
@@ -16850,6 +16886,7 @@ class ControllerView(QWidget):
         # recount costs a network round trip, and a stale number is a wrong one
         # (T44 item 2).
         self._behind.pop(key, None)
+        self._put_back_tip.pop(key, None)
         if result.rebuild_required:
             self._rebuild_owed.add(key)
         owed = _pending_sql_names(result)
@@ -16976,6 +17013,9 @@ class ControllerView(QWidget):
         # by a number it cannot prove still has an update to offer.
         self._behind = {
             (row.family, row.key): row.behind for row in result if is_behind(row.behind)
+        }
+        self._put_back_tip = {
+            (row.family, row.key): row.put_back_tip for row in result if row.put_back_tip
         }
         self._behind_release = {(row.family, row.key): row.release for row in result if row.release}
         self._behind_updated = {

@@ -28609,3 +28609,107 @@ def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
     assert said not in view.server_reasons.text()
     assert view.start_button.isEnabled()
     assert view.stop_button.toolTip() == "The server is not running."
+
+
+# -------------------------------------------------- T557: the put-back tip (D2)
+
+
+class _PutBackTipApplier(_FakeApplier):
+    """Records the updates that reach the applier; the skip record is the real one."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.updates: list[str] = []
+
+    def update(  # type: ignore[override]
+        self,
+        manifest: object,
+        values: object = None,
+        *,
+        approved: apply_module.UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        self.updates.append(str(manifest.id))  # type: ignore[attr-defined]
+        return self.install(manifest, values)
+
+
+@pytest.mark.parametrize("yes", [False, True], ids=["no-runs-nothing", "yes-clears-and-updates"])
+def test_update_on_the_put_back_tip_asks_first_and_only_a_yes_runs_it(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: bool,
+) -> None:
+    """T557 D2: the newest version failed to build and was put back; updating to it asks.
+
+    The question is the design's sentence, under `Try <id>'s update again?`, and
+    the dialog defaults to No (`_confirm()`). A No changes nothing, record
+    included. A Yes clears the skipped tip and runs the Update.
+
+    Mutation: drop the question and a No still updates; drop `clear_skip` and the
+    tip is hidden again after a Yes.
+    """
+    from yulon import module_moves
+
+    tip = "b" * 40
+    key = module_moves.key("module", "mod-transmog")
+    assert module_moves.skip(tmp_path, key, tip=tip) == ""
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    row = apply_module.ModuleUpdate(
+        "mod-transmog", tmp_path, True, 0, fetched=tip, put_back_tip=tip
+    )
+    view._module_updates_done((row,))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+
+    assert asked == [
+        (
+            "Try mod-transmog's update again?",
+            "The newest version of mod-transmog (bbbbbbb) did not build on this server last "
+            "time and was put back. It will probably fail again unless the server itself has "
+            "been updated since. Update anyway?",
+        )
+    ]
+    ledger = module_moves.read(tmp_path)
+    assert ledger is not None
+    if yes:
+        assert applier.updates == ["mod-transmog"]
+        assert key not in ledger.skipped
+    else:
+        assert applier.updates == []
+        assert ledger.skipped[key].tip == tip
+        assert view.module_report.toPlainText() == (
+            "update mod-transmog: cancelled — nothing on this machine was changed."
+        )
+
+
+def test_update_on_a_tip_that_was_not_put_back_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[str] = []
+    monkeypatch.setattr(view, "_confirm", lambda title, question: asked.append(title) or False)
+    view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+    assert asked == []
+    assert applier.updates == ["mod-transmog"]

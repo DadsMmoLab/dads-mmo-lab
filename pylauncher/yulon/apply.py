@@ -3882,6 +3882,16 @@ class Applier:
                 if problem:
                     logger.warning(f"{manifest.id} was put back, but not recorded: {problem}")
 
+    def allow_put_back_tip(self, manifest: Manifest) -> str:
+        """Offer `manifest`'s put-back version again: the player said update to it anyway (D2).
+
+        "" when done, else why not. A record that cannot be written leaves the
+        tip hidden; the Update that follows still runs.
+        """
+        return module_moves.clear_skip(
+            self.server_dir, module_moves.key(manifest.type, manifest.id)
+        )
+
     def unbuilt_updates(self) -> tuple[str, ...]:
         """The modules whose recorded update nobody has built yet, in the record's order (T557).
 
@@ -6931,6 +6941,21 @@ class ModuleUpdate:
     checked_unix: int = 0
     """When this row was counted, for `cached_module_updates()`."""
 
+    fetched: str = ""
+    """The commit the count was taken against: what a fresh fetch named (T557).
+
+    What a put-back tip is compared with. Never `head`: HEAD is where the clone
+    is, the fetched commit is where the author is.
+    """
+
+    put_back_tip: str = ""
+    """The newest version, when it is the one that was put back after it failed to build (T557, D2).
+
+    Set by `_without_put_back_tips()` and never cached: the record decides it
+    on every read. The row is then not behind (no chip, no update to offer), and
+    its line says why.
+    """
+
     release: str = ""
     """For a module that follows its releases (T126): the newest release's tag.
 
@@ -6963,6 +6988,8 @@ class ModuleUpdate:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
             return f"{self.key}: could not ask (no answer from git)"
+        if self.put_back_tip:
+            return PUT_BACK_TIP_LINE.format(id=self.key, new=self.put_back_tip[:7])
         placed = _NOT_UNDER_RELEASE.get(self.behind) if isinstance(self.behind, Behind) else None
         if placed is not None:
             return f"{self.key}: {placed.format(release=self.release or 'the release it follows')}"
@@ -6977,6 +7004,13 @@ class ModuleUpdate:
             )
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
+
+
+PUT_BACK_TIP_LINE = (
+    "{id}: the newest version ({new}) did not build on this server and was put back, so it "
+    "is not offered. Yu'lon will offer the next one when its author publishes it."
+)
+"""Check for updates, on a row whose newest version was put back (T557, D2)."""
 
 
 _NOT_UNDER_RELEASE: dict[Behind, str] = {
@@ -7069,7 +7103,28 @@ def module_updates(
         )
         for path in entries
     ]
-    return tuple(github.settle(rows))
+    return tuple(_without_put_back_tips(server_dir, github.settle(rows)))
+
+
+def _without_put_back_tips(server_dir: Path, rows: Sequence[ModuleUpdate]) -> list[ModuleUpdate]:
+    """`rows`, with a newest version that was put back no longer offered (T557, D2).
+
+    A row is changed only when the commit its count was taken against
+    (`fetched`) IS the tip the record says was put back. The author pushing past
+    it makes `fetched` differ, and the row is offered as normal. A record that
+    cannot be read hides nothing: an update offered twice is better than one
+    that is never offered.
+    """
+    ledger = module_moves.read(server_dir)
+    if ledger is None or not ledger.skipped:
+        return list(rows)
+    kept: list[ModuleUpdate] = []
+    for row in rows:
+        skip = ledger.skipped.get(module_moves.key(row.family, row.key))
+        if skip is not None and row.fetched and row.fetched == skip.tip and is_behind(row.behind):
+            row = replace(row, behind=0, put_back_tip=skip.tip)
+        kept.append(row)
+    return kept
 
 
 def _module_update(
@@ -7095,7 +7150,12 @@ def _module_update(
         if question is not None:
             github.pose(question)
         return ModuleUpdate(
-            key=path.name, path=path, is_checkout=True, behind=counted.behind, family=kind
+            key=path.name,
+            path=path,
+            is_checkout=True,
+            behind=counted.behind,
+            family=kind,
+            fetched=counted.fetched or "",
         )
     release = resolve(slug)
     counted = (
@@ -7110,6 +7170,7 @@ def _module_update(
         is_checkout=True,
         behind=counted.behind,
         family=kind,
+        fetched=counted.fetched or "",
         release=release.tag if release is not None else "",
         installed_release=clone_release(path, item_id=path.name),
     )
@@ -7183,7 +7244,7 @@ def cached_module_updates(
     rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
-    return tuple(rows)
+    return tuple(_without_put_back_tips(server_dir, rows))
 
 
 def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:
@@ -7216,6 +7277,7 @@ def _write_module_updates(
                 "release": row.release,
                 "installed_release": row.installed_release,
                 "checked_unix": row.checked_unix,
+                "fetched": row.fetched,
             }
             for row in [*others, *rows]
         ],
@@ -7599,6 +7661,7 @@ def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], Modu
                 installed_release=str(row.get("installed_release", "")),
                 head=str(row["head"]),
                 checked_unix=int(row["checked_unix"]),
+                fetched=str(row.get("fetched", "")),
             )
             for row in payload["rows"]
         }
