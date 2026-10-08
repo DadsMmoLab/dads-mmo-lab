@@ -390,7 +390,7 @@ def test_remove_keeps_the_database_changes_and_names_the_backup(tmp_path: Path) 
 
     assert ledger.sent == sent, "Remove sends nothing: the changes are kept"
     assert backups.named_for == [ITEM]
-    assert f"the backup taken before {ITEM}'s first database change" in report.left_behind
+    assert report.left_behind[-1] == f"the backup taken before {ITEM}'s first database change"
     assert any(CHAR_FILE in line for line in report.left_behind), report.left_behind
 
 

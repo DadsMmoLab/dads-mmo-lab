@@ -7078,8 +7078,11 @@ class Applier:
             ),
             pending_sql=tuple(log.pending_sql),
             left_behind=(
-                _left_behind(
-                    manifest, (*log.client_left_behind, *log.kept_folders, *log.kept_database)
+                # The backup's name last, after the database changes it was taken
+                # before (T596 live check: first, it read as the thing left behind).
+                (
+                    *_left_behind(manifest, (*log.client_left_behind, *log.kept_folders)),
+                    *log.kept_database,
                 )
                 if action == "remove"
                 else ()
