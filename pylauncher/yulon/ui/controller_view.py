@@ -3006,6 +3006,7 @@ def _realm_port_keeper(
     spec: docker.ContainerSpec,
     server_dir: Path,
     sql: DockerSql,
+    *,
     wsl_distro: str | None,
 ) -> Callable[[], str | None] | None:
     """Before the servers start, the realm row gets this server's world port; None for 8085 (T552).
@@ -3281,7 +3282,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
-            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro),
+            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
