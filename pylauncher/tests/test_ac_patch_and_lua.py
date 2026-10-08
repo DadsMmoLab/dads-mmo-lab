@@ -346,13 +346,26 @@ def test_the_sql_check_is_asked_of_the_world_schema_read_only(
 ) -> None:
     rec, _server_dir, _made, said = installed(tmp_path, installers)
     asked = [s for s in rec.sql_calls if "creature_template" in s]
-    assert asked == ["SELECT COUNT(*) FROM `acore_world`.`creature_template` WHERE entry = 1;"]
+    assert asked == [
+        "SELECT table_schema, table_name FROM information_schema.tables WHERE "
+        "(table_schema = 'acore_world' AND table_name IN ('creature_template'));",
+        "SELECT COUNT(*) FROM `acore_world`.`creature_template` WHERE entry = 1;",
+    ]
     assert any("has what this server needs" in line for line in said), said
 
 
-@pytest.mark.parametrize("answer", ["0\n", ""], ids=("zero", "no-rows"))
+@pytest.mark.parametrize(
+    ("answer", "refusal"),
+    [
+        ("0\n", "scratch NPC is not in the world database"),
+        # T555 T3 (N4): a count with no answer is not a count of 0.
+        ("", "could not be checked"),
+        ("Table missing", "could not be checked"),
+    ],
+    ids=("zero", "no-answer", "junk"),
+)
 def test_a_short_count_refuses_before_the_world_starts(
-    tmp_path: Path, installers: Path, answer: str
+    tmp_path: Path, installers: Path, answer: str, refusal: str
 ) -> None:
     rec = Recorder(images=False)
     server_dir = tmp_path / "server"
@@ -360,24 +373,37 @@ def test_a_short_count_refuses_before_the_world_starts(
     rec.query_answer = answer
     made = make(scratch_entry(**FULL), rec, installers)
 
-    with pytest.raises(InstallerError, match="scratch NPC is not in the world database"):
+    with pytest.raises(InstallerError, match=refusal):
         list(made.run(InstallOptions(server_dir=server_dir)))
     assert "start" not in rec.calls
     assert not (server_dir / LAID).exists(), "the scripts were laid over a refused database"
 
 
-def test_a_missing_table_is_a_short_count_and_an_unanswered_one_refuses(
+def test_a_table_the_import_did_not_make_refuses_naming_it_before_the_world_starts(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "server"
+    rec.on_clone = lay_tree(server_dir)
+    rec.missing_tables = frozenset({"creature_template"})
+    made = make(scratch_entry(**FULL), rec, installers)
+
+    with pytest.raises(InstallerError) as raised:
+        list(made.run(InstallOptions(server_dir=server_dir)))
+
+    assert f"{ENTRY.name} tables missing: creature_template" in str(raised.value)
+    assert "matching rows" not in str(raised.value)
+    assert "start" not in rec.calls
+    assert not any(s.startswith("SELECT COUNT") for s in rec.sql_calls if "creature_template" in s)
+
+
+def test_an_unanswered_or_unreadable_count_refuses_as_could_not_be_checked(
     tmp_path: Path,
 ) -> None:
     from yulon.catalog.catalog import SqlCheck
 
     check = SqlCheck(db="world", table="unbound_catalog", reason="no catalog.")
-
-    def no_table(schema: str, statement: str) -> str:
-        raise docker.DockerCommandError("ERROR 1146 (42S02): Table doesn't exist")
-
-    with pytest.raises(InstallerError, match="no catalog"):
-        list(scriptdeploy.check_sql([check], {"world": "w"}, no_table, "Scratch"))
+    there = _Db({"w": {"unbound_catalog": "1\n"}})
 
     def down(schema: str, statement: str) -> str:
         raise docker.DockerCommandError("container is not running")
@@ -386,8 +412,195 @@ def test_a_missing_table_is_a_short_count_and_an_unanswered_one_refuses(
     with pytest.raises(InstallerError, match="could not be checked"):
         list(scriptdeploy.check_sql([check], {"world": "w"}, down, "Scratch"))
 
+    there.counts["unbound_catalog"] = "Warning\n"
     with pytest.raises(InstallerError, match="not a count"):
-        list(scriptdeploy.check_sql([check], {"world": "w"}, lambda s, q: "Warning\n", "S"))
+        list(scriptdeploy.check_sql([check], {"world": "w"}, there, "S"))
+
+
+# -- T555 T3 (N4): tables first, then counts, and never a false 0 --------------------------------
+
+UNBOUND_TABLES = (
+    "unbound_class_catalog",
+    "unbound_milestones",
+    "unbound_spell_catalog",
+    "unbound_talent_bridge",
+    "creature_template",
+)
+
+
+class _Db:
+    """A fake `ask` over a database that holds `tables` (schema -> table -> count answer).
+
+    It answers `information_schema.tables` the way the mysql client does under
+    `--batch --skip-column-names` (one `schema<TAB>table` line per row, nothing for
+    no rows), a count with the answer it was given, and a count of a table it does
+    not hold with MySQL's own ERROR 1146. `dropped` tables are listed but refuse
+    their count: dropped between the two questions. Every statement is kept.
+    """
+
+    def __init__(self, tables: dict[str, dict[str, str]], *, dropped: frozenset[str] = frozenset()):
+        self.tables = tables
+        self.counts = {name: answer for held in tables.values() for name, answer in held.items()}
+        self.dropped = dropped
+        self.asked: list[str] = []
+
+    def __call__(self, schema: str, statement: str) -> str:
+        self.asked.append(statement)
+        if "information_schema.tables" in statement:
+            return "".join(
+                f"{where}\t{name}\n"
+                for where, held in self.tables.items()
+                for name in held
+                if f"'{where}'" in statement and f"'{name}'" in statement
+            )
+        table = statement.split("`.`")[1].split("`")[0]
+        if table in self.dropped or table not in self.tables.get(schema, {}):
+            raise docker.DockerCommandError(
+                f"ERROR 1146 (42S02) at line 1: Table '{schema}.{table}' doesn't exist"
+            )
+        return self.counts[table]
+
+
+def _unbound_checks() -> list[Any]:
+    from yulon.catalog.catalog import SqlCheck
+
+    return [
+        SqlCheck(db="world", table=name, reason=f"{name} is not filled.") for name in UNBOUND_TABLES
+    ]
+
+
+def _counts(names: tuple[str, ...], answer: str = "1200\n") -> dict[str, str]:
+    return {name: answer for name in names}
+
+
+def test_tables_the_import_did_not_make_are_named_missing_never_counted_as_0() -> None:
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES[2:])})
+
+    with pytest.raises(InstallerError) as raised:
+        list(scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, db, "WoW Unbound"))
+
+    text = str(raised.value)
+    assert "WoW Unbound tables missing: unbound_class_catalog, unbound_milestones" in text
+    assert "0 matching rows" not in text and " 0 " not in text, text
+    assert "The server was not started" in text
+    counted = [s for s in db.asked if s.startswith("SELECT COUNT")]
+    assert not any("unbound_class_catalog" in s or "unbound_milestones" in s for s in counted)
+    assert "information_schema.tables" in db.asked[0], "the tables are asked about first"
+
+
+def test_an_empty_answer_to_a_count_could_not_be_checked_and_is_never_a_0() -> None:
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES)})
+    db.counts["unbound_milestones"] = ""
+
+    with pytest.raises(InstallerError) as raised:
+        list(scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, db, "WoW Unbound"))
+
+    text = str(raised.value)
+    assert "could not be checked" in text and "acore_world.unbound_milestones" in text
+    assert "0 matching rows" not in text and "has 0" not in text, text
+
+
+def test_a_table_dropped_between_the_two_questions_is_missing_not_0() -> None:
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES)}, dropped=frozenset({"unbound_talent_bridge"}))
+
+    with pytest.raises(InstallerError) as raised:
+        list(scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, db, "WoW Unbound"))
+
+    text = str(raised.value)
+    assert "WoW Unbound tables missing: unbound_talent_bridge" in text
+    assert "0 matching rows" not in text, text
+
+
+def test_no_table_at_all_is_every_table_missing() -> None:
+    db = _Db({"acore_world": {}})
+
+    with pytest.raises(
+        InstallerError, match="tables missing: " + ", ".join(sorted(UNBOUND_TABLES))
+    ):
+        list(scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, db, "WoW Unbound"))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["acore_world unbound_milestones\n", "Warning: Using a password\n"],
+    ids=("no-tab", "a-warning"),
+)
+def test_a_tables_answer_that_is_not_rows_could_not_be_checked(answer: str) -> None:
+    def ask(schema: str, statement: str) -> str:
+        return answer
+
+    with pytest.raises(InstallerError, match="could not be checked"):
+        list(
+            scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, ask, "WoW Unbound")
+        )
+
+
+def test_a_database_that_does_not_answer_the_tables_question_could_not_be_checked() -> None:
+    def down(schema: str, statement: str) -> str:
+        raise docker.DockerCommandError("ERROR 2002 (HY000): Can't connect to local MySQL server")
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, down, "WoW Unbound")
+        )
+
+    assert "could not be checked" in str(raised.value)
+    assert "missing" not in str(raised.value)
+
+
+def test_every_table_there_and_filled_says_what_it_said_before() -> None:
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES)})
+    db.counts["creature_template"] = "34000\n"
+
+    said = list(
+        scriptdeploy.check_sql(_unbound_checks(), {"world": "acore_world"}, db, "WoW Unbound")
+    )
+
+    assert said == [
+        *(
+            f"acore_world.{name} has what this server needs (1200 rows)."
+            for name in UNBOUND_TABLES[:4]
+        ),
+        "acore_world.creature_template has what this server needs (34000 rows).",
+    ]
+
+
+def test_a_short_table_says_its_real_count() -> None:
+    checks = _unbound_checks()
+    checks[2] = checks[2].model_copy(update={"at_least": 1000})
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES)})
+    db.counts["unbound_spell_catalog"] = "12\n"
+
+    with pytest.raises(InstallerError) as raised:
+        list(scriptdeploy.check_sql(checks, {"world": "acore_world"}, db, "WoW Unbound"))
+
+    assert str(raised.value) == (
+        "WoW Unbound's world database is missing what it needs: unbound_spell_catalog is not "
+        "filled. (acore_world.unbound_spell_catalog has 12 matching rows, at least 1000 are "
+        "needed). The server was not started."
+    )
+
+
+def test_read_checks_gives_the_reading_without_wording_it() -> None:
+    """The pure half T5's Server-tab line builds on: what is missing, short and counted."""
+    checks = _unbound_checks()
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES[1:])})
+    db.counts["unbound_talent_bridge"] = "0\n"
+
+    reading = scriptdeploy.read_checks(checks, {"world": "acore_world"}, db)
+
+    assert reading.missing == ("unbound_class_catalog",)
+    assert reading.short == ((checks[3], 0),)
+    assert [found for _check, found in reading.counts] == [1200, 1200, 0, 1200]
+
+
+def test_a_schema_name_that_is_not_one_plain_name_is_never_spliced_into_the_question() -> None:
+    db = _Db({"acore_world": _counts(UNBOUND_TABLES)})
+
+    with pytest.raises(scriptdeploy.ChecksUnreadable, match="not one plain schema name"):
+        scriptdeploy.read_checks(_unbound_checks(), {"world": "w' OR '1'='1"}, db)
+
+    assert db.asked == []
 
 
 def test_an_edited_lua_is_kept_and_said_on_the_next_press(tmp_path: Path, installers: Path) -> None:

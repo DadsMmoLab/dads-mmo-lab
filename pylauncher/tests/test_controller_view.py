@@ -25929,6 +25929,185 @@ def test_a_url_pack_with_a_new_version_is_installed_again(
     assert b"Version: 2" in (play / "Interface" / "AddOns" / "Foo" / "Foo.toc").read_bytes()
 
 
+# -- A pack that is a folder of the checkout (T555 T1) ------------------------------------
+
+FOLDER_MODULE = "src/mod-unbound"
+FOLDER_PATH = f"{FOLDER_MODULE}/client/Interface/AddOns"
+FOLDER_ADDONS = {
+    "multiclass-talents-ui/multiclass-talents-ui.toc": b"## Interface: 30300\r\n",
+    "multiclass-talents-ui/Art/UI-Frame.blp": b"BLP2" + bytes(range(64)),
+    "multiclass-resources/multiclass-resources.toc": b"## Interface: 30300\n",
+    "multiclass-resources/multiclass-resources.lua": b"return 1\r\n",
+}
+
+
+def _lay_folder_module(server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS) -> None:
+    """The module's addon folder in the server's checkout, and its sha256sum list."""
+    lines = []
+    for name, data in sorted(files.items()):
+        path = server_dir / FOLDER_PATH / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        lines.append(f"{hashlib.sha256(data).hexdigest()}  client/Interface/AddOns/{name}\n")
+    (server_dir / FOLDER_MODULE / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
+
+
+FOLDER_PACK = ClientPack.model_validate(
+    {
+        "id": "unbound-addons",
+        "label": "Unbound addons",
+        "source": {"kind": "checkout_folder", "path": FOLDER_PATH},
+        "sha256_file": f"{FOLDER_MODULE}/MANIFEST.sha256",
+        "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+    }
+)
+
+
+def _folder_client(tmp_path: Path) -> tuple[CatalogEntry, Path, Path]:
+    """An entry whose one required pack is the folder pack, its checkout, and its two clients."""
+    _lay_folder_module(tmp_path)
+    client = WOTLK.client.model_copy(update={"packs": (FOLDER_PACK,)})
+    entry = WOTLK.model_copy(update={"client": client})
+    original = _game_client(tmp_path / "clients" / "WoW")
+    return entry, original, _built(original, tmp_path)
+
+
+def test_play_installs_a_folder_pack_from_the_checkout_and_never_downloads_it(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    own = play / "Interface" / "AddOns" / "Questie" / "Questie.toc"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"## Title: Questie\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == [], "a checkout folder went to the downloader"
+    assert steps == ["install unbound-addons", "launch"]
+    addons = play / "Interface" / "AddOns"
+    for name, data in FOLDER_ADDONS.items():
+        assert (addons / name).read_bytes() == data, name
+    assert own.read_bytes() == b"## Title: Questie\n", "the player's own addon was touched"
+    recorded = client_packs.read_record(play).packs["unbound-addons"]
+    assert sorted(recorded["files"]) == sorted(f"Interface/AddOns/{n}" for n in FOLDER_ADDONS)
+
+
+def test_a_folder_pack_that_is_already_installed_is_not_installed_again(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["launch"]
+
+
+def test_a_pack_whose_recorded_file_was_deleted_is_installed_again_at_the_next_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Lead decision 2026-10-08: "addons look missing" is answered by the next Play."""
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    gone = play / "Interface" / "AddOns" / "multiclass-resources"
+    shutil.rmtree(gone)
+    edited = play / "Interface" / "AddOns" / "multiclass-talents-ui" / "multiclass-talents-ui.toc"
+    edited.write_bytes(b"## Interface: 30300\n## Notes: my own edit\n")
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["install unbound-addons", "launch"]
+    for name in ("multiclass-resources.toc", "multiclass-resources.lua"):
+        assert (gone / name).read_bytes() == FOLDER_ADDONS[f"multiclass-resources/{name}"]
+    # Codex adversarial: putting a deleted file back never reverts an edit beside it.
+    assert edited.read_bytes() == b"## Interface: 30300\n## Notes: my own edit\n"
+    steps.clear()
+    view.play()
+    assert steps == ["launch"], "nothing is missing now: the edit is no reason to install"
+
+
+def test_a_linked_addons_folder_never_stops_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Cold review note 1: the player made `Interface/AddOns` a link to their own addons after
+    the pack went in. Play goes on as it did before missing files were put back."""
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    addons = play / "Interface" / "AddOns"
+    mine = tmp_path / "my-addons"
+    shutil.move(addons, mine)
+    shutil.rmtree(mine / "multiclass-resources")
+    addons.symlink_to(mine, target_is_directory=True)
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["launch"]
+    assert asks.calls == []
+    assert not (mine / "multiclass-resources").exists(), "wrote through the player's link"
+
+
+def test_a_folder_pack_the_checkout_does_not_match_stops_play_naming_the_file(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    extra = tmp_path / FOLDER_PATH / "multiclass-resources" / "Stray.lua"
+    extra.write_bytes(b"-- nobody listed me\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps == [], "nothing installed and nothing started"
+    assert site.calls == []
+    _title, text, retry, skip = asks.calls[0]
+    assert "multiclass-resources/Stray.lua" in text and "Unbound addons" in text
+    assert retry == "Retry" and skip is None, "a required pack is never played without"
+    assert not (play / "Interface" / "AddOns" / "multiclass-resources").exists()
+
+
+def test_a_missing_folder_or_list_is_named_before_a_ready_to_play_client_is_made(
+    tmp_path: Path,
+) -> None:
+    """`_checkout_refusal` (decision 3) checks a folder pack's folder and its list exist."""
+    refusal = controller_view_module._checkout_refusal
+    _lay_folder_module(tmp_path)
+    assert refusal(FOLDER_PACK, tmp_path) is None
+    (tmp_path / FOLDER_MODULE / "MANIFEST.sha256").unlink()
+    missing_list = refusal(FOLDER_PACK, tmp_path)
+    assert missing_list is not None and f"{FOLDER_MODULE}/MANIFEST.sha256" in missing_list
+    _lay_folder_module(tmp_path)
+    shutil.rmtree(tmp_path / FOLDER_PATH)
+    missing_folder = refusal(FOLDER_PACK, tmp_path)
+    assert missing_folder is not None and FOLDER_PATH in missing_folder
+    assert controller_view_module.server_build_presses.UPDATE_TO_LATEST in missing_folder
+
+
+def test_a_folder_pack_is_no_download_in_the_make_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site
+) -> None:
+    entry, original, _ = _folder_client(tmp_path)
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker, entry=entry)
+    shutil.rmtree(play_client.default_target(original, WOTLK.name, tmp_path))
+
+    view.make_play_client()
+
+    dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
+    assert dialog.client_options is not None
+    assert dialog.client_options.required_label.text() == "Nothing to download."
+
+
 def test_switching_an_optional_pack_off_removes_its_files_at_the_next_play(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
 ) -> None:

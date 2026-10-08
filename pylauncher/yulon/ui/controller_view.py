@@ -33,7 +33,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, cast
+from typing import Any, NamedTuple, Protocol, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -1609,13 +1609,23 @@ def _checkout_refusal(
     Names the file and the commit the server is on, and points at the Server
     build menu: a newer commit (or the tested pin) is what has the file. `again`
     is the press to make afterwards: Play, or Make… when nothing was built.
+
+    A checkout-folder pack (T555 T1) needs its folder and its `sha256_file`;
+    whether the folder matches the list is the fetch's question, not this one's.
     """
     rel = pack.source.path
-    if pack.source.kind != "checkout" or rel is None:
+    if not pack.source.from_checkout or rel is None:
         return None
-    path = server_dir / rel
-    if path.is_file() or any(path.parent.glob(f"{path.name}.part*")):
-        return None
+    if pack.source.kind == "checkout_folder":
+        assert pack.sha256_file is not None  # catalog validation
+        if (server_dir / rel).is_dir():
+            if (server_dir / pack.sha256_file).is_file():
+                return None
+            rel = pack.sha256_file
+    else:
+        path = server_dir / rel
+        if path.is_file() or any(path.parent.glob(f"{path.name}.part*")):
+            return None
     commit = _checkout_commit(server_dir, rel, wsl_distro=wsl_distro)
     on = f"commit {commit[:10]}" if commit else "the commit it is on"
     return (
@@ -11745,9 +11755,16 @@ class ControllerView(QWidget):
             check_cancel()
             say(f"Getting {pack.label}…")
             try:
-                if pack.source.kind == "checkout":
+                # Each kind by name, and nothing falls through to the downloader: a
+                # checkout folder handed to `fetch_url` would be asked of the internet.
+                kind = pack.source.kind
+                if kind == "checkout":
                     fetched = client_packs.fetch_checkout(pack, server_dir)
-                else:
+                elif kind == "checkout_folder":
+                    fetched = client_packs.fetch_checkout_folder(
+                        pack, server_dir, entry_id=game, cancelled=cancelled
+                    )
+                elif kind == "url":
                     fetched = client_packs.fetch_url(
                         pack,
                         entry_id=game,
@@ -11755,6 +11772,8 @@ class ControllerView(QWidget):
                         progress=self._download_progress(pack),
                         cancelled=cancelled,
                     )
+                else:
+                    assert_never(kind)
             except client_packs.Cancelled:
                 raise
             except client_packs.PackUnavailable as exc:
@@ -11775,16 +11794,30 @@ class ControllerView(QWidget):
                     or str(exc),
                 ) from exc
             have = packs.get(pack.id)
-            if (
+            # Installed already, unless a file it recorded is gone from the client (T555
+            # T1, lead 2026-10-08): a deleted addon folder comes back at the next Play.
+            # Only the missing files are written then; an edit beside them stays.
+            same = (
                 have is not None
                 and have.get("sha256") == fetched.sha256
                 and have.get("version") == fetched.version
-            ):
-                continue
-            say(f"Installing {pack.label}…")
+            )
+            if same:
+                assert have is not None
+                if not client_packs.recorded_files_missing(play, have):
+                    continue
+                say(f"Putting back the missing files of {pack.label}…")
+            else:
+                say(f"Installing {pack.label}…")
             try:
                 done = client_packs.install(
-                    play, pack, fetched, game=game, server_dir=server_dir, previous=have
+                    play,
+                    pack,
+                    fetched,
+                    game=game,
+                    server_dir=server_dir,
+                    previous=have,
+                    only_missing=same,
                 )
             except client_packs.PartialInstall as exc:
                 packs[pack.id] = exc.entry

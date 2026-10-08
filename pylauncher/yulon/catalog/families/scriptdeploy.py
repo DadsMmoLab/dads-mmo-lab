@@ -30,7 +30,10 @@ once per module install.
 The SQL checks (`AzerothCoreData.sql_checks`) are read-only counts asked after the
 import has applied the modules' SQL (`AC_UPDATES_ALLOWED_MODULES=all` with
 `./modules` mounted, `base.yml.tmpl`): a count that falls short, or that cannot be
-read, refuses the press before the world starts.
+read, refuses the press before the world starts. Since T555 T3 (Unbound issue #71)
+`information_schema` is asked first which of the tables are there, and only those
+are counted: a table the import never made is said to be missing, by name, and is
+never reported as holding 0 rows.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -57,7 +61,7 @@ SCRIPT_MODE = 0o644
 """Readable by everyone: the world runs as the image's `acore` user, not as the host's."""
 
 NO_SUCH_TABLE = "ERROR 1146"
-"""MySQL's "Table ... doesn't exist": the module's SQL never made it, which is a count of 0."""
+"""MySQL's "Table ... doesn't exist": the module's SQL never made it -- a missing table, not 0."""
 
 
 @dataclass(frozen=True)
@@ -458,47 +462,162 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
 SqlAsk = Callable[[str, str], str]
 """`(schema, statement) -> the client's stdout`: the install's `sql_query` seam, bound."""
 
+TABLES_QUESTION = "SELECT table_schema, table_name FROM information_schema.tables WHERE "
+"""How the one question about which tables exist starts (`read_checks`)."""
+
+_PLAIN_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+"""A schema name that may be spliced into the tables question as a quoted literal."""
+
+
+class ChecksUnreadable(Exception):  # noqa: N818 - a state, worded for the player
+    """The database could not be asked, or gave an answer that is not what was asked.
+
+    `str()` is the reason, in the player's words, without "the server was not
+    started": the caller says what it did about it.
+    """
+
+
+@dataclass(frozen=True)
+class ChecksReading:
+    """What the database holds for a set of checks, before anything is worded.
+
+    `missing` are the checked tables `information_schema` does not list (or that
+    vanished before their count), sorted, each once; `counts` is every check whose
+    table is there, with the rows it counted, in the checks' order; `short` the
+    ones of those under their `at_least`.
+    """
+
+    missing: tuple[str, ...]
+    short: tuple[tuple[SqlCheck, int], ...]
+    counts: tuple[tuple[SqlCheck, int], ...]
+
+
+def _tables_question(wanted: dict[str, set[str]]) -> str:
+    groups = []
+    for schema, tables in sorted(wanted.items()):
+        names = ", ".join(f"'{name}'" for name in sorted(tables))
+        groups.append(f"(table_schema = '{schema}' AND table_name IN ({names}))")
+    return f"{TABLES_QUESTION}{' OR '.join(groups)};"
+
+
+def _tables_there(wanted: dict[str, set[str]], ask: SqlAsk) -> set[tuple[str, str]]:
+    """`(schema, table)` for each wanted table `information_schema` lists. Raises ChecksUnreadable.
+
+    Under `--batch --skip-column-names` each row is `schema<TAB>table`, and no rows
+    is an empty answer: every wanted table is missing then. A line of any other
+    shape is an answer to some other question (a warning, an error printed to
+    stdout), and nothing is read from it.
+    """
+    schema = sorted(wanted)[0]
+    try:
+        answer = ask(schema, _tables_question(wanted))
+    except docker.DockerCommandError as exc:
+        raise ChecksUnreadable(f"the database did not say which tables it has ({exc})") from exc
+    found: set[tuple[str, str]] = set()
+    for line in answer.splitlines():
+        if not line.strip():
+            continue
+        where, tab, table = line.strip().partition("\t")
+        if not tab or not _PLAIN_NAME.match(where) or not _PLAIN_NAME.match(table):
+            raise ChecksUnreadable(
+                f"the database answered {line.strip()[:80]!r} when asked which tables it has"
+            )
+        found.add((where.casefold(), table.casefold()))
+    return found
+
+
+def read_checks(checks: Sequence[SqlCheck], schemas: dict[Db, str], ask: SqlAsk) -> ChecksReading:
+    """Which checked tables are there, and what each one that is there counts.
+
+    Two steps (T555 T3, Unbound #71): one `information_schema.tables` question for
+    every table the checks name, then one count per check whose table is listed.
+    A count refused with ERROR 1146 (the table went between the two questions) is
+    a missing table too. Nothing is ever read as 0 that was not answered as 0.
+
+    Raises:
+        ChecksUnreadable: a schema name that is not one plain name (never spliced
+            into a question), a question the database did not answer, or an answer
+            that is not the rows or the count asked for -- an empty count included.
+    """
+    wanted: dict[str, set[str]] = {}
+    for check in checks:
+        schema = schemas[check.db]
+        if not _PLAIN_NAME.match(schema):
+            raise ChecksUnreadable(f"{schema!r} is not one plain schema name")
+        wanted.setdefault(schema, set()).add(check.table)
+    if not wanted:
+        return ChecksReading((), (), ())
+    there = _tables_there(wanted, ask)
+    missing: set[str] = set()
+    counts: list[tuple[SqlCheck, int]] = []
+    for check in checks:
+        schema = schemas[check.db]
+        where = f"{schema}.{check.table}"
+        if (schema.casefold(), check.table.casefold()) not in there:
+            missing.add(check.table)
+            continue
+        try:
+            answer = ask(schema, check.statement(schema))
+        except docker.DockerCommandError as exc:
+            if NO_SUCH_TABLE in str(exc):
+                missing.add(check.table)
+                continue
+            raise ChecksUnreadable(f"{where}: {exc}") from exc
+        first = answer.strip().splitlines()[0].strip() if answer.strip() else ""
+        if not first:
+            raise ChecksUnreadable(f"{where}: the database gave no answer when asked its rows")
+        try:
+            found = int(first)
+        except ValueError:
+            raise ChecksUnreadable(
+                f"{where}: the database answered {first[:80]!r} when asked how many rows it "
+                "has, which is not a count"
+            ) from None
+        counts.append((check, found))
+    return ChecksReading(
+        missing=tuple(sorted(missing)),
+        short=tuple((check, found) for check, found in counts if found < check.at_least),
+        counts=tuple(counts),
+    )
+
 
 def check_sql(
     checks: Sequence[SqlCheck], schemas: dict[Db, str], ask: SqlAsk, server_name: str
 ) -> Iterator[str]:
-    """Ask every count; refuse the first that falls short or cannot be read.
+    """Read the checks (`read_checks`); refuse missing tables, a short count, or no answer.
 
     Fail closed (Codex, adversarial review): a count that could not be asked, or
     an answer that is not a number, refuses as a short count does. The check is
     there because the world must not start without that data, and "could not
     tell" is not "it is there". The press can be run again once the database
-    answers; nothing was started.
+    answers; nothing was started. A table that is not there is named as missing
+    (T555 T3), never counted as 0.
 
     Raises:
-        InstallerError: a count fell short, its table is not there, or it could
-            not be read.
+        InstallerError: a table is not there, a count fell short, or the database
+            could not be read.
     """
-    for check in checks:
+    try:
+        reading = read_checks(checks, schemas, ask)
+    except ChecksUnreadable as exc:
+        raise InstallerError(
+            f"{server_name}'s database could not be checked for what it needs ({exc}). The "
+            "server was not started; press the same button again once the database answers."
+        ) from exc
+    if reading.missing:
+        why = " ".join(
+            dict.fromkeys(check.reason for check in checks if check.table in reading.missing)
+        )
+        raise InstallerError(
+            f"{server_name} tables missing: {', '.join(reading.missing)}. {why} The server "
+            "was not started."
+        )
+    for check, found in reading.short:
         schema = schemas[check.db]
-        try:
-            answer = ask(schema, check.statement(schema))
-        except docker.DockerCommandError as exc:
-            if NO_SUCH_TABLE not in str(exc):
-                raise InstallerError(
-                    f"{server_name}'s {check.db} database could not be checked for what it "
-                    f"needs ({schema}.{check.table}: {exc}). The server was not started; "
-                    "press the same button again once the database answers."
-                ) from exc
-            answer = "0"
-        first = answer.strip().splitlines()[0].strip() if answer.strip() else "0"
-        try:
-            found = int(first)
-        except ValueError:
-            raise InstallerError(
-                f"{server_name}'s {check.db} database answered {first!r} when asked how many "
-                f"rows {schema}.{check.table} has, which is not a count. The server was not "
-                "started."
-            ) from None
-        if found < check.at_least:
-            raise InstallerError(
-                f"{server_name}'s {check.db} database is missing what it needs: {check.reason} "
-                f"({schema}.{check.table} has {found} matching rows, at least {check.at_least} "
-                "are needed). The server was not started."
-            )
-        yield f"{schema}.{check.table} has what this server needs ({found} rows)."
+        raise InstallerError(
+            f"{server_name}'s {check.db} database is missing what it needs: {check.reason} "
+            f"({schema}.{check.table} has {found} matching rows, at least {check.at_least} "
+            "are needed). The server was not started."
+        )
+    for check, found in reading.counts:
+        yield f"{schemas[check.db]}.{check.table} has what this server needs ({found} rows)."
