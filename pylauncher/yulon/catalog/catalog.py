@@ -2017,6 +2017,16 @@ class Realmlist(_Strict):
         default="localAddress", description="None for cores whose realmlist has no LAN column."
     )
     realm_id: int = 1
+    offline_flag_column: str | None = Field(
+        default=None,
+        description=(
+            "The flags column whose bit 2 (REALM_FLAG_OFFLINE) makes the authserver list the "
+            "realm as offline. Set only for a core whose world server never sets that bit "
+            "itself while it loads: this app then sets it before the world starts and before "
+            "it stops, and the core clears it when the world listens (T577). None leaves the "
+            "realm row alone."
+        ),
+    )
 
 
 class AccountLevel(_Strict):
@@ -2048,6 +2058,15 @@ class AccountLevel(_Strict):
     )
     level_column: str = Field(
         default="gmlevel", min_length=1, description="The column holding the level itself."
+    )
+    world_caches_rank: bool = Field(
+        default=False,
+        description=(
+            "True when the running world server reads an account's rank once and keeps it, so "
+            "a level written to the account row is not live until the world is told through "
+            "its own command (or restarted). This app then sends that command after it "
+            "creates an account with a level (T579). Measured on the tortoise fork only."
+        ),
     )
     max_level: int = Field(
         default=3,

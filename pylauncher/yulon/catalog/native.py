@@ -85,6 +85,7 @@ from yulon import (
     module_answers,
     networking,
     platform,
+    realm_flag,
     resources,
     runner,
     server_build_presses,
@@ -5755,6 +5756,14 @@ class Seams:
     wait's `docker.StopControl`, carrying the rebuild's Cancel) and
     `before_signal=` (the moment past which something may have been touched).
     """
+    mark_realm_offline: Callable[..., object] = realm_flag.mark_offline
+    """Set the realm row's offline bit before the world starts or is replaced (T577).
+
+    Called with `(entry, spec, server_dir)`; a no-op for an entry whose realm row names no
+    flag column. Best effort: it logs what it could not do and never raises.
+    """
+    clear_realm_offline: Callable[..., object] = realm_flag.clear_offline_if_world_up
+    """Take the bit off again when a replace gave up with the old world still running (T577)."""
     stop_servers: Callable[..., None] = docker.stop_servers_staged
     """The rollback's stop of the FAILED build's servers, before any tag moves back (T158).
 
@@ -6095,6 +6104,8 @@ class Seams:
             start_db=on(docker.start_database, wsl_distro=distro),
             start=on(docker.start_staged, wsl_distro=distro),
             recreate=on(docker.recreate_staged, wsl_distro=distro),
+            mark_realm_offline=on(realm_flag.mark_offline, wsl_distro=distro),
+            clear_realm_offline=on(realm_flag.clear_offline_if_world_up, wsl_distro=distro),
             stop_servers=on(docker.stop_servers_staged, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
@@ -7756,6 +7767,12 @@ class StagedInstaller:
                 ) from exc
             yield from servers_down.forward(ctx)
 
+        # T577: marked offline before the replace starts the new world, so the realm list says
+        # Offline for the whole load. On the update route the old world is already down here,
+        # and the bit is set within seconds of that. Best effort, never raising; a replace
+        # given up or refused with the old world still running takes the bit off again below.
+        self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
+
         def replace_them(say: docker.OutputSink) -> bool:
             return self._seams.recreate(
                 spec,
@@ -7765,10 +7782,16 @@ class StagedInstaller:
             )
 
         try:
-            yield from _with_hint(
-                _speaking(replace_them, control.abandon),
-                ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
-            )
+            try:
+                yield from _with_hint(
+                    _speaking(replace_them, control.abandon),
+                    ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
+                )
+            except Exception:
+                # T577: a replace given up or refused may leave the old world running behind
+                # the bit set above, and only a start clears it.
+                self._seams.clear_realm_offline(self.entry, spec, ctx.server_dir)
+                raise
         except docker.SaveAbandoned as exc:
             raise InstallStopped(
                 "The rebuild was stopped while the world server was saving its characters on "
@@ -12718,6 +12741,11 @@ class StagedInstaller:
         warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
+        # T577: a core whose world never marks its realm offline while it loads is marked
+        # here, before the world exists to be logged in to. Best effort, never raising.
+        self._seams.mark_realm_offline(
+            self.entry, self.entry.container_spec(), ctx.server_dir, unless_world_up=True
+        )
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
