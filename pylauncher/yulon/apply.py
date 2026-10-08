@@ -22,6 +22,7 @@ that is the controller's call (call down / signal up, §5).
 from __future__ import annotations
 
 import decimal
+import errno
 import hashlib
 import json
 import os
@@ -5175,16 +5176,15 @@ class Applier:
             if path.is_symlink() or not path.is_dir():
                 continue
             try:
-                held = sum(1 for _ in path.iterdir())
-                if held == 0:
-                    path.rmdir()
-                    log.done.append(f"rmdir {rel}")
-                else:
-                    log.kept_folders.append(
-                        f"{rel} (kept: it holds {held} of your file(s) or folder(s))"
-                    )
+                # `rmdir` itself is the emptiness test: one call that refuses a folder
+                # holding anything, so no listing and no gap between look and delete.
+                path.rmdir()
+                log.done.append(f"rmdir {rel}")
             except OSError as exc:
-                log.skipped.append(f"{rel}: could not be taken back ({exc})")
+                if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                    log.kept_folders.append(f"{rel} (kept: it holds your files)")
+                else:
+                    log.skipped.append(f"{rel}: could not be taken back ({exc})")
 
     def _undeploy(self, step: Deploy, clone: Path, log: _Log) -> None:
         """Delete exactly what `_deploy()` put under `dest` — never the dest dir itself.
