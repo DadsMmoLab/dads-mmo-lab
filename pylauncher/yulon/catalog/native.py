@@ -1509,6 +1509,13 @@ def _against_the_catalog(
             rows.append(row)
             continue
         now = replace(row, pin=pin.rev, ahead=None)
+        built = _built_sha(row)
+        if pin.head is not None and not (built and pin.head.startswith(built)):
+            # The record is from before the pin moved and the folder is not where it
+            # says: the folder is the fact. A record left stale (a hand checkout, a
+            # state write that failed) must not offer a compile onto the commit the
+            # folder is already on (Codex adversarial). Unread, the record decides.
+            now = replace(now, built=pin.head[:_SHORT_SHA])
         rows.append(now)
         if not on_its_pin(now):
             moved.append(pin)
@@ -1520,6 +1527,12 @@ def _against_the_catalog(
         if not on_its_pin(now):
             moved.append(pin)
     return tuple(rows), tuple(moved)
+
+
+def _built_sha(row: SourceRev) -> str:
+    """The sha half of a record's `built` (`a1b2c3d · 2026-09-16`), or `""` when it has none."""
+    head = row.built.split(git.VERSION_SEPARATOR)[0].strip()
+    return head if len(head) >= _SHORT_SHA else ""
 
 
 def moved_pins(state: InstallState | None, pins: Sequence[CatalogPin]) -> tuple[CatalogPin, ...]:

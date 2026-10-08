@@ -333,3 +333,23 @@ def test_every_new_sentence_reads_as_meant_for_the_player(tmp_path: Path) -> Non
     ]
     assert [text_faults(text) for text in said] == [[], [], [], []]
     assert f"{BOTS} is tested with {NEW_BOTS[:7]}" in said[1], "an unread HEAD is not invented"
+
+
+def test_a_stale_record_whose_folder_is_already_on_the_new_pin_is_offered_nothing(
+    tmp_path: Path,
+) -> None:
+    """Codex adversarial (high): the record says 7f12e89e, the folder is on f19a1879 already.
+
+    Read off the record alone this offers an hour's compile that moves nothing,
+    and its question would say "is on f19a187, tested with f19a187". The
+    folder's HEAD is the fact; the record is the fallback when HEAD is unread.
+    """
+    row = native.SourceRev(CORE, f"{OLD_CORE[:7]} · 2026-09-20", pin=OLD_CORE, ahead=0)
+    on_it = (_pin(CORE, NEW_CORE, NEW_CORE),)
+    said = native.source_version(_state(row), (), on_it)
+    assert said.past_the_pin is False
+    assert said.line == f"On the tested pin {NEW_CORE[:7]}"
+    assert native.moved_pins(_state(row), on_it) == ()
+    # HEAD unread: the record still decides, as before.
+    unread = native.source_version(_state(row), (), (_pin(CORE, NEW_CORE, None),))
+    assert unread.past_the_pin is True
