@@ -11776,6 +11776,7 @@ class ControllerView(QWidget):
             catalog_always=catalog_always,
             # Config.wtf the only channel: "Use this computer" writes this computer there.
             default_address=None if written_elsewhere else PLAY_CLIENT_ADDRESS,
+            auth_port=self.entry.ports.auth,
         )
         removed = client_packs.launcher_config_removals(
             record.launcher,

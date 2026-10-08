@@ -2435,6 +2435,31 @@ def test_a_typed_realm_address_sets_realmlist_and_patchlist_over_the_catalogs() 
     assert "realmList" not in client_packs.launcher_config_keys({}, catalog_always={})
 
 
+@pytest.mark.parametrize(
+    ("typed", "auth_port", "written"),
+    [
+        ("10.0.0.7", 3724, "10.0.0.7"),
+        ("10.0.0.7", 3725, "10.0.0.7:3725"),
+        ("logon.example.com:3725", 3725, "logon.example.com:3725"),
+    ],
+)
+def test_a_typed_address_carries_the_servers_auth_port_into_config_wtf(
+    typed: str, auth_port: int, written: str
+) -> None:
+    """T565: realmlist.wtf said `host:3725` for a second server, Config.wtf said `host`."""
+    got = client_packs.launcher_config_keys(
+        {"realm_address": typed}, catalog_always={}, auth_port=auth_port
+    )
+    assert got == {"realmList": written, "patchList": written}
+
+
+def test_this_computer_said_carries_the_auth_port_into_config_wtf_too() -> None:
+    got = client_packs.launcher_config_keys(
+        {"realm_address": None}, catalog_always={}, default_address="127.0.0.1", auth_port=3725
+    )
+    assert got == {"realmList": "127.0.0.1:3725", "patchList": "127.0.0.1:3725"}
+
+
 def test_ask_in_the_game_removes_accountname_and_only_when_said_so() -> None:
     assert client_packs.launcher_config_removals({"account": None}, catalog_always={}) == (
         "accountName",

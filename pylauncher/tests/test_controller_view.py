@@ -27118,6 +27118,33 @@ def test_a_typed_realm_address_replaces_the_catalogs_realmlist_and_patchlist(
     assert not (original / "WTF").exists()
 
 
+@pytest.mark.parametrize("config", [True, False])
+@pytest.mark.parametrize(("auth_port", "written"), [(3724, "10.0.0.7"), (3725, "10.0.0.7:3725")])
+def test_a_typed_address_reaches_config_wtf_and_realmlist_wtf_with_the_same_auth_port(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    config: bool,
+    auth_port: int,
+    written: str,
+) -> None:
+    """T565: a second server's client must not fall back to the first server's login."""
+    entry, original, play = _made_client(tmp_path, remove_locale=False, config=config, exe=False)
+    entry = entry.model_copy(update={"ports": entry.ports.model_copy(update={"auth": auth_port})})
+    _save_launcher(play, {"realm_address": "10.0.0.7"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith(f"set realmlist {written}\n")
+    text = _config(play)
+    assert f'SET realmList "{written}"' in text and f'SET patchList "{written}"' in text
+
+
 def test_without_a_typed_address_the_catalogs_realmlist_stays(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
 ) -> None:

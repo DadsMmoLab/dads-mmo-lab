@@ -72,8 +72,14 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
     labels = state / "labels"
     labels.mkdir(exist_ok=True)
     given = [args[i + 1] for i, arg in enumerate(args) if arg == "--label"]
+    # The name is taken with its state already in it (T567): an empty file read as
+    # "running" in the instant before the "created" went in, and a claim that never
+    # ran was held. A real daemon's container is `created` from the moment it exists.
+    first = "created" if (state / "claim-dies").exists() else str(os.getpid())
+    pending = state / f".{{name}}.{{os.getpid()}}"
+    pending.write_text(first, encoding="ascii")
     try:
-        made = os.open(box, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        os.link(pending, box)
     except FileExistsError:
         sys.stderr.write(
             f'docker: Error response from daemon: Conflict. The container name "/{{name}}" is '
@@ -81,17 +87,15 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
             "container to be able to reuse that name.\\n"
         )
         sys.exit(125)
+    finally:
+        pending.unlink(missing_ok=True)
     (labels / name).write_text("\\n".join(given), encoding="utf-8")
     if (state / "claim-dies").exists():
         # Created, never running: its command failed to start, and `--rm` takes it.
-        os.write(made, b"created")
-        os.close(made)
         time.sleep(0.5)
         box.unlink(missing_ok=True)
         sys.stderr.write("docker: Error response from daemon: failed to create task\\n")
         sys.exit(127)
-    os.write(made, str(os.getpid()).encode("ascii"))
-    os.close(made)
     sys.stdin.read()
     box.unlink(missing_ok=True)
     sys.exit(0)
