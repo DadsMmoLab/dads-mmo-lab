@@ -536,6 +536,14 @@ class DadcraftHeader(QFrame):
         painter.drawLine(8, 1, w - 8, 1)
 
 
+THEME_OF = {"wow-unbound": "wow-wotlk"}
+"""A tile that borrows another campaign's backdrop, particles and frame colours (T554).
+
+WoW Unbound is WotLK with more classes, so its card is the Frostmourne glacier too. The
+object name and the particle seed stay the tile's own id.
+"""
+
+
 class DadcraftCampaignCard(QFrame):
     """Themed animated campaign card frame with expansion-specific backdrops,
     glowing particle physics, and reactive hover lighting.
@@ -544,6 +552,7 @@ class DadcraftCampaignCard(QFrame):
     def __init__(self, game_id: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.game_id = game_id
+        self._theme = THEME_OF.get(game_id, game_id)
         self.setObjectName(f"catalog-tile-{game_id}")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedHeight(370)
@@ -609,7 +618,7 @@ class DadcraftCampaignCard(QFrame):
         self._hover_progress += (target_hover - self._hover_progress) * 0.15
 
         for p in self._particles:
-            if self.game_id == "wow-wotlk":
+            if self._theme == "wow-wotlk":
                 # Snow drifts down & across
                 p["y"] = float(p["y"]) + float(p["speed"]) * 0.8
                 p["x"] = float(p["x"]) + float(p["speed"]) * 0.3
@@ -618,7 +627,7 @@ class DadcraftCampaignCard(QFrame):
                     p["x"] = random.uniform(0.0, 0.98)
                 if float(p["x"]) > 1.0:
                     p["x"] = 0.0
-            elif self.game_id == "wow-vanilla":
+            elif self._theme == "wow-vanilla":
                 # Cinders & ashes fall slowly downward, drifting with the heat
                 p["y"] = float(p["y"]) + float(p["speed"]) * 0.45
                 p["x"] = float(p["x"]) + float(p["speed"]) * 0.12
@@ -647,7 +656,7 @@ class DadcraftCampaignCard(QFrame):
         painter.setClipPath(path)
 
         # 1. Theme-specific background foundations & radial pulses
-        if self.game_id == "wow-wotlk":
+        if self._theme == "wow-wotlk":
             # Icy Frostmourne Glacier
             bg = QLinearGradient(0, 0, w, h)
             bg.setColorAt(0.0, QColor("#101824"))
@@ -668,7 +677,7 @@ class DadcraftCampaignCard(QFrame):
             mist.setColorAt(1.0, QColor(60, 140, 220, int(30 + 20 * hp)))
             painter.fillRect(0, int(h * 0.75), w, int(h * 0.25), mist)
 
-        elif self.game_id == "wow-tbc":
+        elif self._theme == "wow-tbc":
             # Fel Fire & Dark Portal Brimstone
             bg = QLinearGradient(0, 0, w, h)
             bg.setColorAt(0.0, QColor("#162214"))
@@ -684,7 +693,7 @@ class DadcraftCampaignCard(QFrame):
             g1.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.fillRect(0, 0, w, h, g1)
 
-        elif self.game_id == "wow-vanilla":
+        elif self._theme == "wow-vanilla":
             # Dark Iron Forge & Polished Steel
             bg = QLinearGradient(0, 0, w, h)
             bg.setColorAt(0.0, QColor("#1C1E24"))
@@ -727,11 +736,11 @@ class DadcraftCampaignCard(QFrame):
             px = (float(p["x"]) + sway) * w
             py = float(p["y"]) * h
 
-            if self.game_id == "wow-wotlk":
+            if self._theme == "wow-wotlk":
                 alpha = int(
                     255 * min(1.0, (1.0 - float(p["y"])) * 2.0) * min(1.0, float(p["y"]) * 3.0)
                 )
-            elif self.game_id == "wow-vanilla":
+            elif self._theme == "wow-vanilla":
                 # Ashes fade in as they fall from above, then settle out at the bottom
                 alpha = int(
                     255 * min(1.0, float(p["y"]) * 4.0) * min(1.0, (1.0 - float(p["y"])) * 1.6)
@@ -744,19 +753,19 @@ class DadcraftCampaignCard(QFrame):
 
             alpha = min(255, int(alpha * (1.0 + 0.4 * hp)))
 
-            if self.game_id == "wow-wotlk":
+            if self._theme == "wow-wotlk":
                 col = (
                     QColor(210, 245, 255, alpha)
                     if p["tier"] == "bright"
                     else QColor(120, 200, 255, int(alpha * 0.8))
                 )
-            elif self.game_id == "wow-tbc":
+            elif self._theme == "wow-tbc":
                 col = (
                     QColor(190, 255, 150, alpha)
                     if p["tier"] == "bright"
                     else QColor(70, 240, 30, int(alpha * 0.85))
                 )
-            elif self.game_id == "wow-vanilla":
+            elif self._theme == "wow-vanilla":
                 # Falling ashes: pale smoke-white motes, a few faint ember cinders
                 col = (
                     QColor(205, 210, 218, alpha)
@@ -782,21 +791,21 @@ class DadcraftCampaignCard(QFrame):
         # 3. Outer Dadcraft Bevel & Filigree Frame
         painter.setClipping(False)
 
-        if self.game_id == "wow-wotlk":
+        if self._theme == "wow-wotlk":
             if hp > 0:
                 border_base = QColor(int(43 + 37 * hp), int(82 + 86 * hp), int(120 + 135 * hp))
                 border_hi = QColor(int(128 + 96 * hp), int(208 + 36 * hp), 255)
             else:
                 border_base = QColor(43, 82, 120)
                 border_hi = QColor(128, 208, 255)
-        elif self.game_id == "wow-tbc":
+        elif self._theme == "wow-tbc":
             if hp > 0:
                 border_base = QColor(int(40 + 24 * hp), int(90 + 165 * hp), int(32 + 32 * hp))
                 border_hi = QColor(int(96 + 120 * hp), 255, int(48 + 136 * hp))
             else:
                 border_base = QColor(40, 90, 32)
                 border_hi = QColor(96, 255, 48)
-        elif self.game_id == "wow-vanilla":
+        elif self._theme == "wow-vanilla":
             if hp > 0:
                 border_base = QColor(int(74 + 54 * hp), int(86 + 74 * hp), int(102 + 90 * hp))
                 border_hi = QColor(255, 255, 255)
