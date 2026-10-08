@@ -433,6 +433,14 @@ def test_macos_downloads_its_dmg_and_stops_there(tmp_path: Path) -> None:
     assert io.calls == ["fetch_text", "download", "verify"]
 
 
+def test_an_appimage_that_cannot_find_its_own_file_says_so(tmp_path: Path) -> None:
+    """T578: running from a vanished-on-exit mount with no `$APPIMAGE` to name the file."""
+    io = _IO()
+    with pytest.raises(UpdateError, match="cannot find its own file"):
+        _apply(io, Install(InstallKind.APPIMAGE_LOST, None, "", False), tmp_path)
+    assert io.calls == []
+
+
 def test_a_checkout_is_refused_because_it_has_no_artifact_at_all(tmp_path: Path) -> None:
     io = _IO()
     with pytest.raises(UpdateError):

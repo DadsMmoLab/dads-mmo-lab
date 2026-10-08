@@ -55,6 +55,7 @@ class _Play:
         self.characters = characters
         self.pieces = pieces
         self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.saving: list[tuple[str, int]] = []
         self.mail_item_cap = cap
         self.answer = _Outcome(True, text="done")
 
@@ -83,6 +84,10 @@ class _Play:
     def set_level(self, character: str, level: int) -> object:
         self.calls.append(("set_level", (character, level)))
         return self.answer
+
+    def set_level_and_save(self, character: str, level: int) -> object:
+        self.saving.append((character, level))
+        return self.set_level(character, level)
 
     def rename(self, character: str) -> object:
         self.calls.append(("rename", (character,)))
@@ -1406,3 +1411,18 @@ def test_an_empty_character_list_says_to_make_one_in_the_game(tmp_path: Path) ->
     view.refresh_characters()
 
     assert view.character_report.text() == ""
+
+
+def test_the_set_level_press_goes_through_the_saving_variant(tmp_path: Path) -> None:
+    """T584: a level on an online character is not in `characters.level` until the server saves,
+    so the press must ask `set_level_and_save` and not the bare command."""
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+    view.new_level.setValue(80)
+
+    view.set_level_button.click()
+    pump_until(lambda: bool(play.saving), "the press reaches the play")
+
+    assert play.saving == [("Guglu", 80)]
