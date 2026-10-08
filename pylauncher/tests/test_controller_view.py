@@ -29446,6 +29446,69 @@ def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_en
     assert not view._module_job_running()
 
 
+class _AdminWithCreateNote(_StubAccounts):
+    """A stub whose `after_create` records what the view asked and answers a sentence."""
+
+    def __init__(self) -> None:
+        super().__init__(useraccounts.Listing(accounts=[]))
+        self.after: list[tuple[str, int]] = []
+
+    def after_create(self, account: str, level: int) -> str:
+        self.after.append((account, level))
+        return "GM level 3 is live now."
+
+
+def test_creating_an_account_with_a_level_asks_the_world_and_says_what_it_answered(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T579: the report carries the live-level sentence after the creation line."""
+    admin = _AdminWithCreateNote()
+    made = _FakeMaintenance()
+    services = replace(_services(ps, tmp_path, [], made), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.account_gm.setValue(3)
+    view.create_account()
+
+    assert admin.after == [("dad", 3)]
+    assert "GM level 3 is live now." in view.account_report.text()
+    assert "created" in view.account_report.text()
+
+
+def test_creating_an_account_with_no_level_does_not_ask_the_world(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    admin = _AdminWithCreateNote()
+    services = replace(_services(ps, tmp_path, [], _FakeMaintenance()), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.create_account()
+
+    assert admin.after == []
+
+
+def test_creating_with_no_level_over_an_account_held_at_gm_3_does_not_claim_a_level_change(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The result carries the floor-held level; this press asked for none (T579 review)."""
+    admin = _AdminWithCreateNote()
+    made = _FakeMaintenance()
+    made.create = lambda name, password, gm: AccountResult(  # type: ignore[method-assign]
+        username=name, account_id=9, created=False, gm_level=3
+    )
+    services = replace(_services(ps, tmp_path, [], made), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.account_gm.setValue(0)
+    view.create_account()
+
+    assert admin.after == []
+    assert "live now" not in view.account_report.text()
+
+
 # -- T576: a client that is not 3.3.5a --------------------------------------------------
 
 

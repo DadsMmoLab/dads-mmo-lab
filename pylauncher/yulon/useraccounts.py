@@ -703,6 +703,37 @@ class InstallAccounts:
             digits_are_ids=digits_are_ids(self.entry),
         )
 
+    def after_create(self, account: str, level: int) -> str:
+        """Tell the running world the level an account was just created with (T579).
+
+        Create writes the account row itself, and a world that keeps each rank it read at
+        start (`AccountLevel.world_caches_rank`) goes on treating the new account as rank 0
+        until it restarts. The command the Set GM level press sends updates that cache live,
+        so it is sent here too. The returned sentence is for the report line, empty when
+        there is nothing to say: no level, or a core that reads the level at each login.
+
+        When the world cannot be told (no command channel, the server is stopped or does not
+        answer) the level is still saved on the account and the sentence says it takes effect
+        when the server next starts.
+        """
+        level_block = self.entry.accounts.level
+        if level <= 0 or level_block is None or not level_block.world_caches_rank:
+            return ""
+        waits = (
+            f"GM level {level} is saved on the account and takes effect when the server "
+            "next starts."
+        )
+        if self._channel() is None:
+            return (
+                f"{waits} Yu'lon's command channel is not set up, so the running server "
+                "was not told."
+            )
+        outcome = self.set_gm_level(account, level)
+        if outcome.done:
+            return f"GM level {level} is live now."
+        why = outcome.problem or "it did not answer"
+        return f"{waits} The running server could not be told: {why}"
+
     def delete_plan(self, account: str) -> DeletePlan:
         """What deleting `account` would remove, read now, or why it will not be deleted."""
         refusal = _not_ours_to_delete(

@@ -1389,7 +1389,8 @@
       "realmlist": {
         "table": "realmlist",
         "address_column": "address",
-        "local_address_column": null
+        "local_address_column": null,
+        "offline_flag_column": "realmflags"
       },
       "play": {
         "equipped": { "template_column": "item_template" },
@@ -1402,7 +1403,7 @@
         "set_level_absent_reason": "This server can't move a character to a level you pick. From the Console it can reset a logged-in character to the starting level, or make a new bot at the level you name."
       },
       "accounts": {
-        "level": { "level_column": "rank", "max_level": 4 },
+        "level": { "level_column": "rank", "max_level": 4, "world_caches_rank": true },
         "scheme": "mangos_sha"
       },
       "console": {
