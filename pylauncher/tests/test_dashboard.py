@@ -1460,3 +1460,99 @@ def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_fiv
         for _ in range(2):
             dash.tick()
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+# --- T576: a client that is not 3.3.5a, seen in the world server's log ----------------------
+
+WRONG_CLIENT_LINE = (
+    "2026-10-08 04:29:18 WorldSocket::HandleAuthSession: Client 172.19.0.1 requested "
+    "connecting with realm id 2197369053 but this realm has id 1 set in config.\n"
+)
+
+
+def _client_watch(
+    tmp_path: Path,
+    run: str,
+    log: Callable[[str, str], str],
+    clock: list[datetime],
+    entry: catalog_module.CatalogEntry = WOTLK,
+) -> dashboard.Dashboard:
+    return dashboard.Dashboard(
+        entry.container_spec(),
+        entry,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _c: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: BANNER,
+        login_log_of=log,
+        now=lambda: clock[0],
+    )
+
+
+def test_a_world_log_that_refuses_a_foreign_realm_id_tells_the_player_the_client_is_not_3_3_5a(
+    tmp_path: Path,
+) -> None:
+    """The world server drops a non-3.3.5a client after the password; the tab says why."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: WRONG_CLIENT_LINE, [NOW])
+
+    verdict = watch.tick()
+
+    assert "3.3.5a" in verdict.warning and "12340" in verdict.warning
+    assert "not" in verdict.warning
+    assert verdict.warning in dashboard.line(verdict)
+
+
+def test_a_log_without_that_line_adds_no_warning(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: "ready...\nsome other line\n", [NOW])
+
+    assert watch.tick().warning == ""
+
+
+def test_a_server_that_names_no_client_build_never_reads_the_log_for_it(tmp_path: Path) -> None:
+    """Data-driven: the catalog's `required_build`, not a game id, decides."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"required_build": None})}
+    )
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, [NOW], entry
+    )
+
+    assert watch.tick().warning == ""
+    assert asked == []
+
+
+def test_the_log_is_read_for_it_once_a_minute_and_only_what_is_new(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", clock)
+
+    for seconds in (0, 10, 20, 59):
+        clock[0] = NOW + timedelta(seconds=seconds)
+        watch.tick()
+    assert asked == [run]
+    clock[0] = NOW + timedelta(seconds=61)
+    watch.tick()
+
+    assert len(asked) == 2
+    assert asked[1] != run
+    assert asked[1] > _stamp(NOW - timedelta(minutes=1)), "re-read the whole run"
+    assert asked[1].endswith("Z")
+
+
+def test_the_warning_stays_a_while_after_the_line_and_then_goes(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    lines = [WRONG_CLIENT_LINE]
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, _s: lines.pop(0) if lines else "", clock)
+
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS - timedelta(seconds=1)
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS + timedelta(seconds=1)
+    assert watch.tick().warning == ""
