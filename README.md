@@ -9,7 +9,8 @@ can be unlocked. Playerbots stay single-class.
 - **Author:** DaddyCool, Dad's MMO Lab.
 - **Version:** v1.4.0, "Shadow Release", released 2026-07-25.
 - **This branch:** an orphan branch of `DadsMmoLab/dads-mmo-lab` that holds only Unbound's
-  files, so that a server installer can pin one commit of it.
+  files, laid out as an AzerothCore module so that a server installer can clone one commit of
+  it straight into `modules/mod-unbound`.
 
 ## Where these files came from
 
@@ -25,21 +26,29 @@ on the `main` branch of this repository is the older v1.2.2.
 
 The installer carries its whole server payload as quoted shell heredocs. Every server file
 on this branch is one of those heredocs, byte for byte, laid out by what it is rather than
-where the installer wrote it. The installer itself is not on this branch. The client
+where the installer wrote it (the one exception is `src/UnboundSystem_loader.cpp`, see Layout). The installer itself is not on this branch. The client
 addons are the zip's contents, unzipped unchanged. The only files written for this branch
 are this README, `.gitattributes`, `MANIFEST.sha256` and the two files in `conf/`, which
 spell out the settings the installer writes into existing config files.
 
 ## Layout
 
+This branch is laid out the way AzerothCore reads a module: **the branch root is the `mod-unbound`
+module**. Clone it to `modules/mod-unbound` in an AzerothCore tree. AzerothCore only builds a
+module folder that has a `src/` directory, and only applies module SQL from
+`data/sql/<db-world|db-characters>/`. The v1.4.0 release record (commit `d29fac97`) kept the
+installer's own layout instead, which cannot be built from a plain clone. Its files are still
+byte-identical to the release: the SQL, the C++ sources and the Lua are `git mv` renames only.
+
 | Path | What it is | Where the installer put it |
 |---|---|---|
-| `core-patch/unbound-core-access.patch` | The AzerothCore core patch: 6 files (`Player.h`, `Player.cpp`, `PlayerQuest.cpp`, `PlayerStorage.cpp`, `Trainer.cpp`, `ConditionMgr.cpp`). It adds `Player::m_unboundClassMask` with `Get`/`SetUnboundClassMask()` and ORs it into the class checks for trainers, spells, quests, items and `CONDITION_CLASS`. The worldserver does not compile with `mod-unbound` unless this patch is applied. | `modules/mod-unbound/unbound-core-access.patch`, then `git apply` at the server root |
-| `modules/mod-unbound/src/` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped) and its loader `UnboundSystem_loader.cpp` (`Addmod_unboundScripts()`). AzerothCore picks a module up from its `src/` folder; the release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
-| `modules/mod-multiclass-summons/` | bdodroid's `mod-multiclass-summons` C++ module, used with permission (see Credits). It fixes Warlock, Mage and Death Knight pet and mount conflicts for multi-class characters and lets them field several guardians at once; playerbots are excluded at runtime. Its `data/sql/db-world/base/multiclass_summons.sql` registers the `spell_summon_pet_override` spell script on spells 688, 697, 712, 691, 30146, 70907, 70908, 46584 and 52150. The five files are the release's copy, byte-identical to `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915` (that commit's `README.md` was not part of the release and is not here). | `modules/mod-multiclass-summons/` |
+| `src/UnboundSystem.cpp`, `src/UnboundSystem_loader.cpp` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped) and its loader (`Addmod_unboundScripts()`). The loader is the one change to the release's files: it also calls `Addmod_multiclass_summonsScripts()`, because AzerothCore only calls the loader of a folder that has the module's own name. The release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
+| `src/mod-multiclass-summons/` | bdodroid's `mod-multiclass-summons` C++ sources, used with permission (see Credits). It fixes Warlock, Mage and Death Knight pet and mount conflicts for multi-class characters and lets them field several guardians at once; playerbots are excluded at runtime. The three files are the release's copy, byte-identical to `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915` (that commit's `README.md` was not part of the release and is not here). Its `CMakeLists.txt` (two `AC_ADD_SCRIPT` lines for files AzerothCore already collects from `src/`) is not carried over. | `modules/mod-multiclass-summons/src/` |
+| `data/sql/db-world/base/multiclass_summons.sql` | bdodroid's SQL: registers the `spell_summon_pet_override` spell script on spells 688, 697, 712, 691, 30146, 70907, 70908, 46584 and 52150. | `modules/mod-multiclass-summons/data/sql/db-world/base/` |
 | `lua_scripts/` | The ALE (Eluna) Lua scripts: `unbound_mentor.lua` (the Mentor and the Mentor Stone), `unbound_addon_sync.lua` (the bridge to the client talent addon; it creates `unbound_character_talents` itself) and `unbound_talent_data.lua` (talent data). On a successful start the world log prints `[UNBOUND] Prereq map built.` | `env/dist/etc/modules/lua_scripts/` |
-| `sql/world/` | SQL for the world database (`acore_world`). | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
-| `sql/characters/` | SQL for the characters database (`acore_characters`). | `modules/mod-unbound/data/sql/db-characters/` |
+| `data/sql/db-world/` | SQL for the world database (`acore_world`). `npc_setup.sql` is renamed `00_npc_setup.sql` so that AzerothCore's updater, which orders by file name, applies it first. | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
+| `data/sql/db-characters/` | SQL for the characters database (`acore_characters`). | `modules/mod-unbound/data/sql/db-characters/` |
+| `core-patch/unbound-core-access.patch` | The AzerothCore core patch: 6 files (`Player.h`, `Player.cpp`, `PlayerQuest.cpp`, `PlayerStorage.cpp`, `Trainer.cpp`, `ConditionMgr.cpp`). It adds `Player::m_unboundClassMask` with `Get`/`SetUnboundClassMask()` and ORs it into the class checks for trainers, spells, quests, items and `CONDITION_CLASS`. The worldserver does not compile with `mod-unbound` unless this patch is applied. | `modules/mod-unbound/unbound-core-access.patch`, then `git apply` at the server root |
 | `conf/mod_ale.conf` | The `mod_ale.conf` the installer writes when the server has none (`ALE.Enabled = 1`, `ALE.ScriptPath = "/azerothcore/env/dist/etc/modules/lua_scripts"`). | `env/dist/etc/modules/mod_ale.conf` |
 | `conf/worldserver.conf.unbound` | `ValidateSkillLearnedBySpells = 0`, which the installer sets in `worldserver.conf`. Without it AzerothCore removes cross-class spells from every character at login. | `env/dist/etc/worldserver.conf` |
 | `client/Interface/AddOns/` | The three client addons: `multiclass-talents-ui` (2.9.27-unbound-gm; `/mc`), `multiclass-resources` (1.3; `/mcr`) and `UnboundSpellbook` (0.3; `/usbk`, `/usbkrescan`). They need "Load out of date AddOns". The client is otherwise a stock 3.3.5a client: no MPQ, DBC or map changes. | the player's `Interface/AddOns/` |
@@ -50,21 +59,22 @@ There is no auth-database SQL in this release.
 
 ## SQL apply order
 
-The installer pipes each file into `mysql` in this order (it does not rely on AzerothCore's
-own updater for module SQL). Within each folder, file-name order is the installer's order.
+AzerothCore's updater applies module SQL from `data/sql/db-world/` and
+`data/sql/db-characters/` at server start, in file-name order across the whole folder
+(sub-folders included), so the order is by name:
 
-0. World: `modules/mod-multiclass-summons/data/sql/db-world/base/multiclass_summons.sql`,
-   applied when the installer stages that module. It sits where AzerothCore's updater also
-   applies module SQL at start-up, and it is safe to re-run (`DELETE` then `INSERT` of its
-   own rows).
-1. World: `01_unbound_world.sql`, `02_fix_catalog_req_level.sql`, `03_creation_gift_spells.sql`,
+1. World: `00_npc_setup.sql` (the Mentor's `creature_template` 900001). It must be in the
+   world database before the worldserver starts, or the Mentor Lua fails at load.
+2. World: `01_unbound_world.sql`, `02_fix_catalog_req_level.sql`, `03_creation_gift_spells.sql`,
    `04_catalog_druid_forms.sql`, `05_individual_purchase_prereqs.sql`,
    `06_universal_skill_access.sql`, `07_mentor_stone.sql`, `08_catalog_additions.sql`,
    `10_catalog_audit_fixes.sql`, `11_catalog_gap_additions.sql`, `12_mount_spell_fix.sql`,
    `13_flight_form_fix.sql`, `14_judgement_fix.sql`. There is no `09` in the release.
-2. Characters: `01_unbound_characters.sql`.
-3. World: `npc_setup.sql` (the Mentor's `creature_template` 900001). It must be in the world
-   database before the worldserver starts, or the Mentor Lua fails at load.
+3. World: `base/multiclass_summons.sql` (safe to re-run: `DELETE` then `INSERT` of its own rows).
+4. Characters: `01_unbound_characters.sql`.
+
+The v1.4.0 installer instead piped each file into `mysql` itself, in this order: the summons
+SQL, `01` to `14`, the characters file, and `npc_setup.sql` last.
 
 The files are written to be re-run safely (`INSERT IGNORE`, `ON DUPLICATE KEY UPDATE`,
 `CREATE TABLE IF NOT EXISTS`, an `information_schema` guard in `05`). Some of them rewrite
@@ -87,7 +97,7 @@ After the first start, a GM spawns the Mentor once in game with `.npc add 900001
 
 Wrath Unbound is by DaddyCool, Dad's MMO Lab.
 
-`modules/mod-multiclass-summons/` is by bdodroid, used with permission:
+`src/mod-multiclass-summons/` and `data/sql/db-world/base/multiclass_summons.sql` are by bdodroid, used with permission:
 <https://github.com/bdodroid/mod-multiclass-summons>, commit
 [`6001603bfe038204b73d0d5878ac3e1f24dda915`](https://github.com/bdodroid/mod-multiclass-summons/commit/6001603bfe038204b73d0d5878ac3e1f24dda915).
 
