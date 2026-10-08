@@ -288,6 +288,9 @@ class FlowScroll(QScrollArea):
         self._max_lines = max(1, max_lines)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        # Not a stop of its own for the pad or Tab: the buttons in it are, and the
+        # pad scrolls to whichever it lands on (`ui.gamepad._scroll_into_view`).
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setWidget(bar)
