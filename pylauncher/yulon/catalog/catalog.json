@@ -390,6 +390,7 @@
                 },
                 {
                   "name": "content updates",
+                  "on_update": "apply_new",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/Updates/*.sql"
@@ -399,6 +400,7 @@
                 },
                 {
                   "name": "instance updates",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/Updates/Instances/[0-9]*.sql"
@@ -413,6 +415,7 @@
                 },
                 {
                   "name": "ACID",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/tbc-db/ACID/*.sql"
@@ -430,6 +433,7 @@
                 },
                 {
                   "name": "core updates",
+                  "on_update": "refuse_new",
                   "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-tbc/sql/updates/mangos/*.sql",
@@ -459,6 +463,7 @@
                 },
                 {
                   "name": "playerbots world",
+                  "on_update": "replace_changed",
                   "into": "mangos",
                   "files": [
                     "src/mangos-tbc/src/modules/Bots/sql/world/*.sql",
@@ -847,6 +852,7 @@
                 },
                 {
                   "name": "content updates",
+                  "on_update": "apply_new",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/Updates/*.sql"
@@ -856,6 +862,7 @@
                 },
                 {
                   "name": "instance updates",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/Updates/Instances/[0-9]*.sql"
@@ -870,6 +877,7 @@
                 },
                 {
                   "name": "ACID",
+                  "on_update": "report",
                   "into": "mangos",
                   "files": [
                     "src/classic-db/ACID/acid_classic.sql"
@@ -878,6 +886,7 @@
                 },
                 {
                   "name": "core updates",
+                  "on_update": "refuse_new",
                   "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-classic/sql/updates/mangos/*.sql",
@@ -907,6 +916,7 @@
                 },
                 {
                   "name": "playerbots world",
+                  "on_update": "replace_changed",
                   "into": "mangos",
                   "files": [
                     "src/mangos-classic/src/modules/Bots/sql/world/*.sql",

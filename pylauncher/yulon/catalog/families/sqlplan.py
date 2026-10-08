@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import fnmatch
 import gzip
+import hashlib
 import io
 import re
 import stat as stat_module
@@ -1431,6 +1432,535 @@ def record_phases(
         schema=marker_db,
         exec_stdin=exec_stdin,
         wsl_distro=wsl_distro,
+    )
+
+
+FILE_TABLE = "yulon_install_file"
+"""Beside the marker: each world-update file an existing server has, and in what state (T531).
+
+One row per `(phase, file)`, written only by the update route's world catch-up
+(`CmangosInstaller.servers_down_work()`), never by the import. `seeded` is a file
+that was in the checkout before the route first moved it, so the import applied
+it; `started` is written BEFORE a file runs and `applied`/`failed` after, so a
+press that stops mid-file leaves `started`, which is never run again. It lives in
+the world schema, so it travels with the world: a restored world brings its own
+rows, and a Reset that drops the world drops them with it.
+"""
+
+FILE_SEEDED = "seeded"
+FILE_STARTED = "started"
+FILE_APPLIED = "applied"
+FILE_FAILED = "failed"
+
+_FILE_STATES = frozenset({FILE_SEEDED, FILE_STARTED, FILE_APPLIED, FILE_FAILED})
+_FILE_MAX = 255
+"""`FILE_TABLE.file`'s `VARCHAR(255)`: a longer path cannot be recorded, so it is not applied."""
+
+
+@dataclass(frozen=True)
+class FileRow:
+    """One row of `FILE_TABLE`: a phase's file, the sha256 of its bytes, and its state."""
+
+    phase: str
+    file: str
+    sha256: str
+    state: str
+
+
+FileLedger = Mapping[tuple[str, str], FileRow]
+
+
+def file_digest(path: Path) -> str:
+    """The sha256 of a file's bytes as they lie on disk: what the ledger compares."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def file_ledger_query(marker_db: str) -> str:
+    """The one question the ledger is read with; `parse_file_ledger()` reads its answer."""
+    return f"SELECT phase, file, sha256, state FROM `{marker_db}`.`{FILE_TABLE}`"
+
+
+def parse_file_ledger(answer: str) -> dict[tuple[str, str], FileRow]:
+    """`file_ledger_query()`'s answer as rows. A row that is not four known columns raises.
+
+    Raises `ValueError` rather than skipping the row: a ledger that cannot be read
+    is a ledger that cannot say a file already ran, and guessing there is how a
+    file runs twice.
+    """
+    rows: dict[tuple[str, str], FileRow] = {}
+    for line in answer.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[3] not in _FILE_STATES:
+            raise ValueError(f"unreadable {FILE_TABLE} row: {line!r}")
+        row = FileRow(*parts)
+        rows[(row.phase, row.file)] = row
+    return rows
+
+
+def recordable(rel: str) -> bool:
+    """Can `FILE_TABLE` hold this path? Not past 255, and nothing `'...'` cannot carry."""
+    return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
+
+
+def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: bool = False) -> str:
+    """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
+
+    `claim` writes a plain `INSERT` instead: the key is `(phase, file)`, so it fails
+    when ANY row for that file is already there, which is what makes the `started`
+    row a claim two presses cannot both win (Codex, T531) -- the client refuses the
+    second, and that press stops before it runs the file.
+
+    InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
+    capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
+    """
+    text = (
+        f"CREATE TABLE IF NOT EXISTS `{marker_db}`.`{FILE_TABLE}` "
+        "(phase VARCHAR(191) NOT NULL, file VARCHAR(255) NOT NULL, sha256 CHAR(64) NOT NULL, "
+        "state VARCHAR(8) NOT NULL, at_unix BIGINT NOT NULL, PRIMARY KEY (phase, file)) "
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+    )
+    if not rows:
+        return text
+    for row in rows:
+        _refuse_unquotable(row.phase, f"the SQL phase name {row.phase!r}")
+        if not recordable(row.file):
+            raise InstallerError(
+                f"The world update {row.file!r} cannot be recorded as applied, so it was not "
+                "applied: its path is too long or holds a character SQL cannot carry here."
+            )
+        if row.state not in _FILE_STATES or not _HEX64.fullmatch(row.sha256):
+            raise InstallerError(f"internal: a malformed {FILE_TABLE} row {row!r}")
+    values = ", ".join(
+        f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
+    )
+    return (
+        text
+        + f"{'INSERT' if claim else 'REPLACE'} INTO `{marker_db}`.`{FILE_TABLE}` "
+        + "(phase, file, sha256, state, at_unix) "
+        + f"VALUES {values};\n"
+    )
+
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def record_world_files(
+    rows: Sequence[FileRow],
+    *,
+    marker_db: str,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+    claim: bool = False,
+) -> None:
+    """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
+
+    Raises:
+        InstallerError: the client refused the script, or could not be reached.
+    """
+    _run_sql(
+        file_rows_sql(marker_db, rows, int(time.time()), claim=claim),
+        what=(
+            "claiming a world update (another update of this server may be applying it)"
+            if claim
+            else "recording which world updates this server has"
+        ),
+        container=container,
+        client=client,
+        password=password,
+        schema=marker_db,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+_SYSTEM_SCHEMAS = ("mysql", "information_schema", "performance_schema", "sys")
+"""Schemas no world update has business naming, beside the server's own non-world ones."""
+
+
+def _sql_tokens(backslash_escapes: bool) -> re.Pattern[str]:
+    """The tokenizer for one reading of `\\` inside a string (see `_SQL_TOKENS`)."""
+    if backslash_escapes:
+        strings = r"'(?:[^'\\]|\\.|'')*'?" + r'|"(?:[^"\\]|\\.|"")*"?'
+    else:
+        strings = r"'(?:[^']|'')*'?" + r'|"(?:[^"]|"")*"?'
+    return re.compile(
+        strings
+        + r"|`[^`]*`?"
+        + r"|--(?=[\s\x00-\x1f]|$)[^\n]*|#[^\n]*"
+        + r"|/\*M?![0-9]*|\*/"
+        + r"|/\*.*?(?:\*/|$)"
+        + r"|[^'\"`#/*-]+"
+        + r"|.",
+        re.S,
+    )
+
+
+_SQL_TOKENS = _sql_tokens(backslash_escapes=True)
+_SQL_TOKENS_NO_BACKSLASH = _sql_tokens(backslash_escapes=False)
+"""SQL read left to right: a string, an identifier, a comment, an executable comment's
+markers, or plain text. Whichever starts first wins, so an apostrophe in a comment is
+the comment's and a `--` in a string is the string's (Codex, T531)."""
+
+
+def _code_only(text: str, *, backslash_escapes: bool = True) -> tuple[str, bool]:
+    """The SQL MySQL would execute, and whether it holds an executable comment: string
+    bodies emptied, comments made spaces, an executable comment's body kept (only its
+    `/*!NNNNN` or MariaDB's `/*M!NNNNN`, and `*/`, go). A marker inside a string or a
+    plain comment is text."""
+    parts: list[str] = []
+    executable = False
+    tokens = _SQL_TOKENS if backslash_escapes else _SQL_TOKENS_NO_BACKSLASH
+    for match in tokens.finditer(text):
+        token = match.group(0)
+        if token[0] == '"' and re.fullmatch(r'"\w+"', token):
+            # Under ANSI_QUOTES -- set in the file, globally, or by a client -- this is
+            # an identifier, `"characters"."foo"`; read as one either way (Codex, T531).
+            parts.append(f" {token[1:-1]}")
+        elif token[0] in "'\"":
+            parts.append(" '' ")
+        elif token[0] == "`":
+            # A quoted name is a token of its own even glued to a keyword
+            # (UPDATE`characters`.`x`), so it starts after a space here (Codex, T531).
+            parts.append(f" {token}")
+        elif token.startswith(("/*!", "/*M!")):
+            executable = True
+            parts.append(" ")
+        elif token == "*/":
+            parts.append(" ")
+        elif token.startswith(("--", "#", "/*")):
+            parts.append(" ")
+        else:
+            parts.append(token)
+    return "".join(parts), executable
+
+
+def foreign_schemas(
+    path: Path, others: Collection[str], *, executable_comments_ok: bool = False
+) -> tuple[str, ...]:
+    """What in a world update's text could reach past the world schema; empty when nothing.
+
+    The update runs with `into` as the client's DEFAULT schema only -- the account
+    can reach every schema -- so a file that says `USE characters` or
+    `characters.x` would write there (Codex, T531). Read as the SQL MySQL runs
+    (`_code_only()`): comments become spaces -- a separator, as they are to MySQL --
+    an executable comment's body is kept and the file is flagged for having one,
+    and string literals are emptied -- quest text says "ten logs. Then …" (cold
+    review of T531), and a refused file holds back every later update -- so a
+    schema name counts at a SQL boundary followed by a dot, whitespace around the
+    dot allowed as MySQL allows it (`logs . x`). `--` is a comment only with
+    whitespace after it, as in MySQL (`a--1` is arithmetic). Measured
+    2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
+    Updates/*.sql files trips it.
+
+    `executable_comments_ok` is the bot reload's reading (T534 cold review): the
+    bots' mysqldump files carry `/*!40101 … */` lines, so an executable comment is not
+    by itself a reason there -- its body is still read for schema names, and both
+    quote readings are still taken. Of sql_mode changes, only mysqldump's own pair
+    (`_DUMP_SQL_MODE`) is accepted; any other one is refused as in a world update.
+    """
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    found: list[str] = []
+    # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
+    # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
+    paired = True
+    if executable_comments_ok:
+        # mysqldump's own pair, and nothing else, may set sql_mode in a bot file: a switch
+        # part-way (NO_BACKSLASH_ESCAPES) changes what is a string from there on and can
+        # hide a statement from both readings (re-review of T534). The pair is one header
+        # then one footer, and the saved mode is named nowhere else -- a footer alone
+        # would restore whatever a file put in @OLD_SQL_MODE itself (Codex).
+        kinds = [m.group(1) is not None for m in _DUMP_SQL_MODE.finditer(raw)]
+        paired = kinds in ([], [True], [True, False])
+        raw = _DUMP_SQL_MODE.sub(" ", raw)
+        paired = paired and not re.search(r"(?i)OLD_SQL_MODE", raw)
+    for escapes in (True, False):
+        text, executable = _code_only(raw, backslash_escapes=escapes)
+        for reason in _foreign_in(text, executable and not executable_comments_ok, others):
+            if reason not in found:
+                found.append(reason)
+    if not paired and "a change of sql_mode" not in found:
+        found.append("a change of sql_mode")
+    return tuple(found)
+
+
+_DUMP_SQL_MODE = re.compile(
+    r"/\*!40101\s+SET\s+(?:(@OLD_SQL_MODE\s*=\s*@@SQL_MODE\s*,\s*SQL_MODE\s*=\s*"
+    r"'NO_AUTO_VALUE_ON_ZERO')|SQL_MODE\s*=\s*IFNULL\(\s*@OLD_SQL_MODE\s*,\s*''\s*\))\s*\*/",
+    re.I,
+)
+"""mysqldump's header and footer SQL_MODE lines, exactly: the only sql_mode a bot file may set."""
+
+_CLIENT_COMMAND = re.compile(r"(?im)^[ \t]*(?:\\[a-z.!#?]|(?:connect|source|system)\b)")
+"""A mysql/mariadb CLIENT command at the start of a line (T548): `\\u db` and `connect`
+switch schema, `\\.`/`source` read another file, `\\!`/`system` run a shell. The client
+acts on them itself, so no SQL reading sees them; on a line of their own they are refused."""
+
+
+def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[str]:
+    """`foreign_schemas()` over one reading of the file's SQL."""
+    found = [
+        name
+        for name in sorted({*others, *_SYSTEM_SCHEMAS})
+        if re.search(rf"(?:^|[\s(,=;])`?{re.escape(name)}`?\s*\.\s*`?[A-Za-z_]", text, re.I | re.M)
+    ]
+    if re.search(r"(?im)(^|;)\s*USE\s", text):
+        found.append("USE")
+    if executable:
+        found.append("an executable comment")
+    if _CLIENT_COMMAND.search(text):
+        found.append("a mysql client command")
+    if re.search(r"(?i)\bsql_mode\b", text):
+        # ANSI_QUOTES or NO_BACKSLASH_ESCAPES would change what is a string from that
+        # point on, which this reading cannot follow (Codex, T531): refused, not guessed.
+        found.append("a change of sql_mode")
+    if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
+        found.append("a whole-database statement")
+    return found
+
+
+_TOKENS = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'"
+    r'|"(?:[^"\\]|\\.)*"'
+    r"|`[^`]*`"
+    r"|--[^\n]*|#[^\n]*"
+    r"|/\*![0-9]*|\*/"
+    r"|/\*.*?\*/"
+    r"|;"
+    r"|[^'\"`;#/*-]+"
+    r"|.",
+    re.S,
+)
+_TABLE = r"`?(?:\w+`?\.`?)?(\w+)`?"
+
+
+def _statements(text: str) -> Iterator[str]:
+    """Each statement's text with comments and string bodies gone; quote-aware. An
+    executable comment (`/*!40101 … */`) is read as the SQL MySQL runs from it."""
+    parts: list[str] = []
+    for match in _TOKENS.finditer(text):
+        token = match.group(0)
+        if token == ";":
+            yield "".join(parts).strip()
+            parts = []
+        elif token.startswith("/*!") or token == "*/":
+            # An executable comment's body IS SQL the server runs: kept, markers dropped.
+            parts.append(" ")
+        elif token.startswith(("--", "#", "/*")):
+            parts.append(" ")
+        elif token[0] in "'\"":
+            parts.append("''")
+        else:
+            parts.append(token)
+    tail = "".join(parts).strip()
+    if tail:
+        yield tail
+
+
+def whole_table_problem(path: Path) -> str | None:
+    """Why re-running this file whole could leave something a single run would not; None if
+    it cannot (T534).
+
+    Whole-table means: every table the file INSERTs into or UPDATEs is dropped
+    (`DROP TABLE IF EXISTS`) or emptied (`DELETE FROM t` / `TRUNCATE t`, no WHERE)
+    earlier in the same file -- `REPLACE` and `INSERT IGNORE` included. `CREATE
+    TABLE`/`INDEX`, `DELETE … WHERE`, `SET`, `SELECT`, `LOCK`/`UNLOCK TABLES` and mysqldump's
+    `ALTER TABLE … DISABLE/ENABLE KEYS` are idempotent as statements; an executable
+    comment's body is read as the statement it is. Anything else (`ALTER`, `RENAME`,
+    `USE`, a procedure) is a reason.
+    Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
+    world/classic file passes.
+    """
+    if only_creates_indexes(path):
+        return None  # run one index at a time by the reload, each made fresh
+    emptied: set[str] = set()
+    dropped: set[str] = set()
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        if not raw:
+            continue
+        sql = " ".join(raw.split())
+        head = sql.upper()
+        if head.startswith(("SET ", "SELECT ", "LOCK TABLES", "UNLOCK TABLES")):
+            continue
+        if re.fullmatch(rf"(?i)ALTER TABLE {_TABLE} (DISABLE|ENABLE) KEYS", sql):
+            continue
+        match = re.match(rf"(?i)CREATE TABLE (?:IF NOT EXISTS )?{_TABLE}", sql)
+        if match:
+            # Dropped first, or the second run fails (plain) or keeps the OLD table's
+            # definition (IF NOT EXISTS) -- not what a fresh install has (Codex, T534 r4-5).
+            if match.group(1).lower() not in dropped:
+                return f"it creates {match.group(1)} without dropping it first"
+            continue
+        match = re.match(rf"(?i)CREATE (?:UNIQUE )?INDEX \S+ ON {_TABLE}", sql)
+        if match:
+            # In a mixed file an index that is already there stops the script part-way;
+            # only on a table this file dropped is it new for certain (index-only files
+            # are run one index at a time instead, and never reach here).
+            if match.group(1).lower() not in dropped:
+                return f"it adds an index to {match.group(1)}, which it did not drop first"
+            continue
+        match = re.match(rf"(?i)DROP TABLE IF EXISTS {_TABLE}", sql)
+        if match:
+            emptied.add(match.group(1).lower())
+            dropped.add(match.group(1).lower())
+            continue
+        match = re.match(rf"(?i)(?:DELETE FROM|TRUNCATE(?: TABLE)?) {_TABLE}(.*)$", sql)
+        if match:
+            rest = match.group(2).strip().upper()
+            if not rest:
+                # Only the plain whole-table form empties it (Codex, T534).
+                emptied.add(match.group(1).lower())
+                continue
+            if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
+                continue  # deletes the same rows however often it runs
+            return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+        # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
+        # the table emptied first like a plain INSERT does (Codex, T534 round 2).
+        if re.match(r"(?i)UPDATE ", sql) and not re.match(rf"(?i)UPDATE {_TABLE} SET ", sql):
+            # A join, a list or an alias can write a table other than the first one
+            # named (Codex, T534): only the single-table form is read.
+            return f"it runs an UPDATE of more than one table ({sql[:40]}…)"
+        match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
+        if match:
+            if match.group(1).lower() not in emptied:
+                return f"it writes {match.group(1)} without emptying it first"
+            continue
+        return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+    return None
+
+
+def only_creates_indexes(path: Path) -> bool:
+    """Is this file nothing but `CREATE [UNIQUE] INDEX` statements (and `SET`s)?
+
+    The bots' `ai_playerbot_indexes.sql`: on a server that has the indexes the
+    client refuses the first one, which says they are there, not that a table
+    was harmed (T534).
+    """
+    seen = False
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        head = " ".join(raw.split()).upper()
+        if not head or head.startswith("SET "):
+            continue
+        if not head.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
+            return False
+        seen = True
+    return seen
+
+
+def index_statements(path: Path) -> list[str]:
+    """Each `CREATE [UNIQUE] INDEX` statement of an index-only file, as written (T534)."""
+    return [
+        " ".join(raw.split())
+        for raw in _statements(path.read_text(encoding="utf-8", errors="replace"))
+        if " ".join(raw.split()).upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))
+    ]
+
+
+def recreate_index_statement(statement: str) -> str | None:
+    """`DROP INDEX` + the same `CREATE INDEX`, for an index that is already there (T534)."""
+    match = re.match(
+        r"(?is)\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(`?\w+`?)\s+ON\s+(`?\w+`?)", statement
+    )
+    if match is None:
+        return None
+    return f"DROP INDEX {match.group(1)} ON {match.group(2)};\n{statement}"
+
+
+def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:
+    """`seeded` rows for every file of a phase the ledger holds NO row of, in run order. Pure
+    but for reading each file's bytes.
+
+    Asked with the runs expanded BEFORE the checkout moves: a phase with no rows is
+    one whose files were applied by the import from the checkout as it stood then.
+    A file the ledger could not hold is left out, and is then offered as new and
+    refused by name when it is recorded, never applied unrecorded.
+    """
+    known = {phase for phase, _file in ledger}
+    return tuple(
+        FileRow(run.phase.name, run.rel, file_digest(run.path), FILE_SEEDED)
+        for run in runs
+        if run.path is not None and run.phase.name not in known and recordable(run.rel)
+    )
+
+
+@dataclass(frozen=True)
+class PendingFiles:
+    """What the ledger says about a phase's files as they lie on disk now (T531)."""
+
+    new: tuple[PhaseRun, ...]
+    """Not in the ledger, in a phase nothing is stuck in: applied once, in this order."""
+    changed: tuple[str, ...]
+    """In the ledger with other bytes: edited upstream since; never run again."""
+    unsure: tuple[str, ...]
+    """Left `started` by a press that stopped mid-file: never run again."""
+    failed: tuple[str, ...]
+    """Recorded `failed`: the client refused it. Never run again."""
+    withheld: tuple[str, ...]
+    """Not in the ledger, but its phase has an `unsure` or `failed` file: the updates are a
+    chain in file order, so nothing after a file that did not land runs past it."""
+    moved: tuple[PhaseRun, ...] = ()
+    """Not in the ledger under this name, but its exact bytes are, under another: a file
+    upstream renamed or moved (Codex, T531). Recorded `seeded` under the new name and
+    never run again."""
+
+
+def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
+    """Sort the runs against the ledger. Pure but for reading each held file's bytes.
+
+    A `started` or `failed` row is the player's to settle, never this function's: it
+    is not run again, and no new file of its phase runs either until that row is
+    gone (`CmangosInstaller._catch_up_world()` says how).
+    """
+    stuck = {
+        phase for (phase, _file), row in ledger.items() if row.state in (FILE_STARTED, FILE_FAILED)
+    }
+    here = {(run.phase.name, run.rel) for run in runs}
+    # A move: the same phase, bytes the ledger holds under a path that is GONE now
+    # (Codex, T531 round 5) -- a copy beside its original is new, and runs.
+    gone_bytes = {
+        (phase, row.sha256) for (phase, file), row in ledger.items() if (phase, file) not in here
+    }
+    new: list[PhaseRun] = []
+    moved: list[PhaseRun] = []
+    withheld: list[str] = []
+    changed: list[str] = []
+    unsure: list[str] = []
+    failed: list[str] = []
+    for run in runs:
+        row = ledger.get((run.phase.name, run.rel))
+        if row is None:
+            if run.path is not None and (run.phase.name, file_digest(run.path)) in gone_bytes:
+                moved.append(run)
+            elif run.phase.name in stuck:
+                withheld.append(run.rel)
+            else:
+                new.append(run)
+        elif row.state == FILE_STARTED:
+            unsure.append(run.rel)
+        elif row.state == FILE_FAILED:
+            failed.append(run.rel)
+        elif run.path is not None and file_digest(run.path) != row.sha256:
+            changed.append(run.rel)
+    # A stuck row whose file is gone from the checkout still holds its phase back, so
+    # it is named too, or the player would be told "they wait behind it" about nothing.
+    phases = {run.phase.name for run in runs}
+    for (phase, file), row in sorted(ledger.items()):
+        if phase in phases and (phase, file) not in here:
+            if row.state == FILE_STARTED:
+                unsure.append(file)
+            elif row.state == FILE_FAILED:
+                failed.append(file)
+    return PendingFiles(
+        new=tuple(new),
+        changed=tuple(changed),
+        unsure=tuple(unsure),
+        failed=tuple(failed),
+        withheld=tuple(withheld),
+        moved=tuple(moved),
     )
 
 

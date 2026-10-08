@@ -1111,7 +1111,9 @@ def test_the_tbc_question_keeps_its_words() -> None:
     assert text.endswith(
         "If the build fails, the build you have now is put back. Anything the new server writes "
         "into your database on first start is not put back — that is what the backup is for."
+        + native.world_updates_note(TBC)
     )
+    assert native.world_updates_note(TBC), "T531: TBC's question names the world content fixes"
 
 
 def test_the_wiring_asks_the_family_which_databases_the_question_names(tmp_path: Path) -> None:

@@ -318,6 +318,13 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.catalog.native",
+        "world_updates_note",
+        "the update's question names the world content fixes it applies (T531)",
+        _cmangos_only(_NO_SQL_PLAN, not_applicable(_TC_SQL_MOVES_WITH_ITS_CODE)),
+        hits=(".cmangos",),
+    ),
+    Site(
+        "yulon.catalog.native",
         "correction_phases",
         "the SQL phases Apply database corrections offers (T129)",
         _cmangos_only(_NO_SQL_PLAN, not_applicable(_TC_SQL_MOVES_WITH_ITS_CODE)),
