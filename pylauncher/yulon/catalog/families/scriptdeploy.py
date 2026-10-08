@@ -116,7 +116,11 @@ def _inside_the_script_dir(rel: str) -> bool:
 
 
 def _write_record(server_dir: Path, files: dict[str, str]) -> None:
+    """Save the record; with nothing left in it, remove the file (T563)."""
     path = record_path(server_dir)
+    if not files:
+        path.unlink(missing_ok=True)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps({"version": 1, "files": dict(sorted(files.items()))}, indent=2) + "\n"
     _publish(path, text.encode("utf-8"))
@@ -240,12 +244,16 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     `quiet` leaves out the summary when nothing changed (the update route and a
     Rebuild call this on every press, and "all current" every time is noise).
 
+    **No specs is not always nothing to do** (T563): an entry that dropped its
+    `lua_scripts` still has the record of the ones an earlier press laid, and
+    those are removed under the stale rule below, and the record with them.
+
     Raises:
         InstallerError: a source is not there or has a link in it (nothing is written),
             a file could not be written (files written before it stay, and are in the
             record), or the record itself could not be saved after the files were.
     """
-    if not specs:
+    if not specs and not record_path(server_dir).exists():
         return
     remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
     # The script folder, each entry's own folder in it, and the record: none may be
@@ -261,6 +269,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     planned = _plan(server_dir, specs, remedy)
     folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
     record, unreadable = _read_record(server_dir)
+    if not specs and not record:
+        return
     if unreadable:
         yield (
             f"{LUA_SCRIPTS_DIR}/{RECORD_FILE}, Yu'lon's list of the scripts it laid, could not "
@@ -345,7 +355,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                         f"started nothing new. Once that is fixed, delete {folders} and that "
                         f"file, then press {remedy}."
                     ) from exc
-    if wrote or not quiet:
+    if specs and (wrote or not quiet):
         yield f"Lua scripts are in place ({wrote} written, {current} already current)."
 
 

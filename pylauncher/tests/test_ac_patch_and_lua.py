@@ -1030,3 +1030,50 @@ def test_a_link_planted_at_the_temp_name_is_not_written_through(
         None if dangling else "keep me\n"
     )
     assert not (dest / ".a.lua.yulon-new").is_symlink() and not (dest / ".a.lua.yulon-new").exists()
+
+
+def test_an_entry_that_drops_all_its_scripts_removes_the_ones_it_laid(tmp_path: Path) -> None:
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("a\n", encoding="utf-8")
+    (src / "b.lua").write_text("b\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (laid / "b.lua").write_text("edited by hand\n", encoding="utf-8")
+    assert scriptdeploy.record_path(server_dir).exists()
+
+    said = list(scriptdeploy.lay(server_dir, [], quiet=True))
+
+    assert not (laid / "a.lua").exists()
+    assert (laid / "b.lua").read_text(encoding="utf-8") == "edited by hand\n"
+    assert "Removed" in " ".join(said) and "changed on this machine" in " ".join(said), said
+    assert not any("in place" in line for line in said), said
+    assert not scriptdeploy.record_path(server_dir).exists()
+
+
+def test_a_rebuild_of_an_entry_that_dropped_its_scripts_removes_them(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, _made, _said = installed(tmp_path, installers)
+    assert (server_dir / LAID).exists()
+    dropped = make(scratch_entry(**{**FULL, "lua_scripts": []}), rec, installers)
+
+    said = list(dropped.before_rebuild(server_dir, "rebuild"))
+
+    assert not (server_dir / LAID).exists()
+    assert not scriptdeploy.record_path(server_dir).exists()
+    assert f"Removed {LAID}: this server no longer ships it." in said, said
+
+
+def test_no_scripts_and_no_record_writes_and_refuses_nothing(tmp_path: Path) -> None:
+    """WotLK declares none and never had any: nothing is laid, written or refused for it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / "env").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    assert list(scriptdeploy.lay(server_dir, [])) == []
+    assert not (tmp_path / "elsewhere").exists()
