@@ -816,6 +816,56 @@ def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_el
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
 
 
+def test_port_holders_split_our_containers_from_everyone_elses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T574: a resume has our own database on 3306 and must not be told it is taken."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(
+            0,
+            "tbc-db\t127.0.0.1:3306->3306/tcp\n"
+            "tbc-auth\t0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp\n"
+            "old-mysql\t0.0.0.0:3307->3306/tcp\n"
+            "stranger\t127.0.0.1:7878->7878/tcp\n"
+            "idle\t\n",
+            "",
+        ),
+    )
+    owners = {"tbc-db": "mine", "tbc-auth": "mine", "stranger": "another", "old-mysql": "another"}
+    monkeypatch.setattr(docker, "container_project", lambda name, **_kw: owners.get(name))
+    got = docker.port_holders((3306, 3724, 7878, 3307, 8085), "mine")
+    assert got.ours == frozenset({3306, 3724})
+    assert got.foreign == {7878: ("stranger",), 3307: ("old-mysql",)}
+
+
+def test_port_holders_do_not_ask_who_owns_a_container_that_publishes_nothing_we_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(0, "other\t0.0.0.0:9999->9999/tcp\n", ""),
+    )
+    monkeypatch.setattr(
+        docker, "container_project", lambda _n, **_kw: pytest.fail("asked about an unrelated one")
+    )
+    assert docker.port_holders((3306,), "mine") == docker.PortHolders()
+
+
+def test_a_holder_docker_will_not_name_an_owner_for_is_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(0, "x\t127.0.0.1:3306->3306/tcp\n", ""),
+    )
+    monkeypatch.setattr(docker, "container_project", lambda _n, **_kw: docker.UNREADABLE)
+    assert docker.port_holders((3306,), "mine").foreign == {3306: ("x",)}
+
+
 def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8047,3 +8097,158 @@ def test_build_cache_bytes_says_unknown_rather_than_zero(
     _, run = _answers(_completed(returncode=1, stderr="no buildx"), proc)
     monkeypatch.setattr(docker.runner, "run", run)
     assert docker.build_cache_bytes() is None
+
+
+# --- T574: a taken or reserved port in `up` is said in plain words, and leads ------
+
+_PULL_NOISE = (
+    " Image mariadb:11 Pulling\n 88a022341f1e Pulling fs layer 0B\n"
+    " 88a022341f1e Pull complete\n Container tbc-db Starting\n"
+)
+_RESERVED = (
+    "Error response from daemon: ports are not available: exposing port TCP "
+    "127.0.0.1:3306 -> 127.0.0.1:0: listen tcp4 127.0.0.1:3306: bind: An attempt was "
+    "made to access a socket in a way forbidden by its access permissions.\n"
+)
+_TAKEN_WINDOWS = _RESERVED.replace(
+    "An attempt was made to access a socket in a way forbidden by its access permissions.",
+    "Only one usage of each socket address (protocol/network address/port) is normally permitted.",
+)
+_TAKEN_LINUX = _RESERVED.replace(
+    "An attempt was made to access a socket in a way forbidden by its access permissions.",
+    "address already in use",
+)
+
+
+def _daemon_says(monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
+    monkeypatch.setattr(
+        docker, "_docker", lambda argv, cwd=None, timeout=None, **_kw: _completed(1, "", stderr)
+    )
+
+
+def test_a_port_windows_reserved_in_up_is_said_in_plain_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Discord report, word for word: compose's line reaches the player untranslated."""
+    _daemon_says(monkeypatch, _PULL_NOISE + _RESERVED)
+    with pytest.raises(docker.DockerRefusal) as caught:
+        docker._run(["compose", "up", "-d", "--no-deps", "tbc-db"], cwd=Path("."))
+    said = str(caught.value)
+    assert said == docker.blocked_port_sentence(3306, "reserved", windows=True)
+    assert "net stop winnat" in said and "ports are not available" not in said
+
+
+def test_a_port_another_program_holds_in_up_is_said_in_plain_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for stderr in (_TAKEN_WINDOWS, _TAKEN_LINUX):
+        _daemon_says(monkeypatch, stderr)
+        with pytest.raises(docker.DockerRefusal) as caught:
+            docker._run(["compose", "up", "-d"], cwd=Path("."))
+        assert str(caught.value) == docker.blocked_port_sentence(3306, "in_use", windows=False)
+
+
+def test_a_permission_denied_port_on_linux_is_reserved_without_the_winnat_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _daemon_says(
+        monkeypatch,
+        _RESERVED.replace(
+            "An attempt was made to access a socket in a way forbidden by its access permissions.",
+            "permission denied",
+        ),
+    )
+    with pytest.raises(docker.DockerRefusal) as caught:
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert str(caught.value) == docker.blocked_port_sentence(3306, "reserved", windows=False)
+    assert "winnat" not in str(caught.value)
+
+
+def test_a_ports_are_not_available_line_it_cannot_read_is_not_translated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No port number to name: say what Docker said rather than invent a sentence."""
+    _daemon_says(monkeypatch, "Error response from daemon: ports are not available: odd\n")
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert not isinstance(caught.value, docker.DockerRefusal)
+    assert "ports are not available: odd" in str(caught.value)
+
+
+def test_a_failed_compose_command_leads_with_the_daemons_line_not_the_pull_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The player's row read 'Image mariadb:11 Pulling / 88a0... Pulling fs layer'."""
+    _daemon_says(
+        monkeypatch,
+        _PULL_NOISE + "Error response from daemon: pull access denied for mariadb\n",
+    )
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["compose", "up", "-d", "--no-deps", "tbc-db"], cwd=Path("."))
+    said = str(caught.value)
+    assert said.startswith("docker compose up -d --no-deps tbc-db exited 1: Error response")
+    assert "Pulling" not in said
+
+
+def test_a_failure_with_no_daemon_line_keeps_all_of_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _daemon_says(monkeypatch, "no configuration file provided: not found\n")
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert str(caught.value) == (
+        "docker compose up -d exited 1: no configuration file provided: not found"
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: docker.start(Path(".")), id="start"),
+        pytest.param(
+            lambda: docker.start_database(SPEC, Path("."), because="nothing was imported"),
+            id="start_database",
+        ),
+        pytest.param(lambda: docker.start_staged(SPEC, Path(".")), id="start_staged"),
+        pytest.param(lambda: docker.compose_up_service(Path("."), "bots"), id="compose_up_service"),
+    ],
+)
+def test_every_compose_up_site_leads_with_the_daemons_line(
+    monkeypatch: pytest.MonkeyPatch, call: Callable[[], object]
+) -> None:
+    _daemon_says(monkeypatch, _PULL_NOISE + "Error response from daemon: no space left\n")
+    monkeypatch.setattr(docker, "status", lambda **_kw: [])
+    with pytest.raises(docker.DockerCommandError) as caught:
+        call()
+    assert " exited 1: Error response from daemon: no space left" in str(caught.value)
+    assert "Pulling" not in str(caught.value)
+
+
+def test_the_same_daemon_line_twice_is_said_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    line = "Error response from daemon: no space left\n"
+    _daemon_says(monkeypatch, line + " Container x Error\n" + line)
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert str(caught.value) == (
+        "docker compose up -d exited 1: Error response from daemon: no space left"
+    )
+
+
+def test_only_a_compose_failure_is_cut_down_to_the_daemons_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another command's stderr is its whole diagnosis; nothing there is progress to drop."""
+    stderr = " Container x Error\nError response from daemon: conflict\nsecond line\n"
+    _daemon_says(monkeypatch, stderr)
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["rm", "x"])
+    assert str(caught.value) == f"docker rm x exited 1: {stderr.strip()}"
+
+
+def test_what_the_headline_drops_stays_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _daemon_says(monkeypatch, _PULL_NOISE + "Error response from daemon: no space left\n")
+    with caplog.at_level("INFO", logger="yulon.docker"), pytest.raises(docker.DockerCommandError):
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert "88a022341f1e Pull complete" in caplog.text

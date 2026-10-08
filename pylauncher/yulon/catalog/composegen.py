@@ -1827,27 +1827,31 @@ def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_DOTENV_EXPORT = re.compile(r"^export\s+")
+_DOTENV_SEPARATOR = re.compile(r"[=:]")
+
+
 def dotenv_value(server_dir: Path, key: str) -> str | None:
     """What `<server_dir>/.env` sets `key` to, or `None` when it does not set it.
 
-    The LAST assignment, because that is the one compose takes; read with the
-    same rules `merge_dotenv()` writes by (`export ` prefix, spaces around the
-    key). A missing or unreadable file sets nothing.
+    The LAST assignment, because that is the one compose takes. Read the way
+    compose-go reads the file (T574): a leading byte order mark is dropped
+    (PowerShell 5.1's `-Encoding UTF8` and old Notepad write one), `export` and
+    any whitespace after it is a prefix, and the key ends at the first `=` or
+    `:` (the YAML-style `KEY: value`). A missing or unreadable file sets nothing.
     """
     try:
-        text = (server_dir / DOTENV_FILE).read_text(encoding="utf-8", errors="replace")
+        text = (server_dir / DOTENV_FILE).read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
     found: str | None = None
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("export "):
-            stripped = stripped[len("export ") :].lstrip()
-        if "=" not in stripped:
+        stripped = _DOTENV_EXPORT.sub("", line.strip())
+        split = _DOTENV_SEPARATOR.search(stripped)
+        if split is None:
             continue
-        name, value = stripped.split("=", 1)
-        if name.strip() == key:
-            found = value.strip()
+        if stripped[: split.start()].strip() == key:
+            found = stripped[split.end() :].strip()
     return found
 
 

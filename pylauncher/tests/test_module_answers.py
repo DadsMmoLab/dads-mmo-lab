@@ -339,7 +339,8 @@ def test_the_onyxia_level_answer_reaches_the_row_upstream_sets_from_it(tmp_path:
 
     Read off Zoidwaffle/sql-npc-teleporter @06e5242, line 189:
     `(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL, 3, 0, "Portal Master - Level req")`
-    with `@GOSSIP_MENU := 50000`, in an INSERT whose columns are
+    with `@GOSSIP_MENU := 50000` (60000 once T564 has moved the menus), in an INSERT whose
+    columns are
     `(SourceTypeOrReferenceId, SourceGroup, SourceEntry, ConditionTypeOrReference,
     ConditionValue1, ...)`. The file is sent as upstream wrote it (60) and the
     answer is written into that row after it, so the clone stays unmodified and
@@ -356,13 +357,22 @@ def test_the_onyxia_level_answer_reaches_the_row_upstream_sets_from_it(tmp_path:
         ("world", "teleporter_capital.dist"),
         ("world", "teleporter_starting_zone.dist"),
     ]
-    assert sql.statements == [
-        (
-            "world",
-            "UPDATE conditions SET ConditionValue1=80 WHERE SourceTypeOrReferenceId=15 "
-            "AND SourceGroup=50004 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
-        )
+    # T564: around the two files, the corrections that keep the teleporter's menus off the base
+    # game's ids (tests/test_npc_teleporter_menus.py runs them). The Onyxia answer is written into
+    # the row at the capital NPC's menu + 4, wherever the menus are.
+    assert [text.split(" ", 2)[0:2] for _db, text in sql.statements] == [
+        ["START", "TRANSACTION;"],
+        ["START", "TRANSACTION;"],
+        ["REPLACE", "INTO"],
+        ["SET", "@tp_menu:=(SELECT"],
+        ["START", "TRANSACTION;"],
     ]
+    assert sql.statements[3] == (
+        "world",
+        "SET @tp_menu:=(SELECT gossip_menu_id FROM creature_template WHERE entry=190000); "
+        "UPDATE conditions SET ConditionValue1=80 WHERE SourceTypeOrReferenceId=15 "
+        "AND SourceGroup=@tp_menu+4 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
+    )
     assert [p.key for p in manifest.prompts] == ["ony_level"]
 
 
