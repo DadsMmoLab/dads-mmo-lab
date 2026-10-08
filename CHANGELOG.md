@@ -22,6 +22,15 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
+- The bot counts see an indented setting in a hand-edited conf.
+- A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
+- On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
+- **Save file** on the Tuning tab keeps the file's line endings and byte-order mark.
+- The Tuning tab no longer opens, saves, backs up or reverts a setting file that is a link out of the server folder.
+- **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
+- **Add to Steam** and self-update no longer mistake another AppImage for Yu'lon when it is started from inside one.
+- **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
 - Stopping a Tortoise server just after it starts now waits for its save, instead of warning that characters may be missing.
@@ -32,6 +41,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
+- A world update whose file is gone can be skipped from **Apply database corrections…**; a renamed one is retried.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.

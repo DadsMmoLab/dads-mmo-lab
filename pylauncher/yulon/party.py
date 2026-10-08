@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import dbreads, platform, play, resources, runner
+from yulon import dbreads, platform, play, resources, runner, tuning
 from yulon.actions import Outcome
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
@@ -464,19 +464,23 @@ class ConfRead:
 
 
 def read_conf(path: Path, env: Mapping[str, str] | None = None) -> ConfRead:
-    """Read both of ALE's keys as the server will hold them, column 0 only.
+    """Read both of ALE's keys as the server will hold them.
 
-    Column 0 is `conf.patch()`'s rule and it is here for the reason that rule
-    exists: the shipped `mod_ale.conf.dist` carries commented `ALE.*` lines, so a
-    pattern that matches indented or commented lines reads the file's own
-    prose as its settings.
+    The file is read the way the server reads it (`_conf_value`, T572): trimmed,
+    so an indented assignment counts, and the first copy of a key wins. A
+    commented line is never a setting: the shipped `mod_ale.conf.dist` carries a
+    commented `ALE.Enabled = true` beside a compiled default of `false`
+    (`ALEConfig.cpp:20`), and reading that comment as the setting would report an
+    engine that is off as on.
 
     `env` is the worldserver's environment as the entry declares it. An
     `AC_ALE_*` variable in it wins over the file, because AzerothCore's config
     reads the variable before the file's value (`Config.cpp` GetValueDefault,
-    read at 7f12e89e on 2026-10-08). Unbound needs this: its `mod_ale.conf` is
-    mod-ale's `.dist` copied unchanged and its real settings are in `world_env`
-    (T554 rework). `present` stays the file's own presence.
+    read at 7f12e89e on 2026-10-08), and it is used as it stands, with no trim
+    and no quote removal: only the file parser does those. Unbound needs this:
+    its `mod_ale.conf` is mod-ale's `.dist` copied unchanged and its real
+    settings are in `world_env` (T554 rework). `present` stays the file's own
+    presence.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -492,26 +496,30 @@ def read_conf(path: Path, env: Mapping[str, str] | None = None) -> ConfRead:
 
 
 def _effective_value(text: str, key: str, env: Mapping[str, str] | None) -> str | None:
-    """`key`'s `AC_*` variable from `env` when it is set, else the file's value."""
+    """`key`'s `AC_*` variable from `env` when it is set, RAW, else the file's value.
+
+    Raw because the core uses an environment value as it stands
+    (`Config.cpp` EnvVarForIniKey / GetValueDefault at 7f12e89e): the trim and
+    the quote removal belong to the file parser alone (T572).
+    """
     from_env = (env or {}).get(composegen.env_name_for(key))
     if from_env is not None:
-        return from_env.strip().strip('"')
+        return from_env
     return _conf_value(text, key)
 
 
 def _conf_value(text: str, key: str) -> str | None:
-    """The LAST active setting of `key`, unquoted, or `None`.
+    """The setting of `key` the SERVER reads, unquoted, or `None` (T572).
 
-    The last rather than the first: a conf file read top to bottom by the
-    server takes the last assignment, and an applier that appends a corrected
-    key leaves the old one above it.
+    `tuning.conf_value()`, which is AzerothCore's own rule (`Config.cpp` at
+    7f12e89e): each line is trimmed, so an INDENTED assignment is live, and the
+    FIRST copy of a key wins because `IsDuplicateOption` skips the later ones.
+    This reader used to take column 0 only and the last copy, so a hand-edited
+    conf with an indented or repeated key read one way here and another by the
+    server. A commented key (`# ALE.Enabled = true`) is still no setting: its
+    trimmed name starts with `#` and never equals the key.
     """
-    found: str | None = None
-    for line in text.splitlines():
-        head, sep, tail = line.partition("=")
-        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t"):
-            found = tail.strip().strip('"')
-    return found
+    return tuning.conf_value(text, key)
 
 
 def read_facts(
@@ -934,9 +942,9 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
       contiguous run from 0 is returned — offering the rest would be offering
       names this server cannot be made to take.
 
-    Column 0 only, which is `read_conf`'s rule for `read_conf`'s reason: the
-    shipped file carries commented keys and a pattern that matched them would
-    read the file's prose as its settings.
+    Read as the server reads it (`_conf_value`, T572): each line trimmed, and
+    the first copy of a name wins. A commented key is no setting, and the
+    shipped file carries many.
 
     **A value is taken verbatim to the end of the line, `#` included**, and
     whether the core's own reader would drop a trailing comment is NOT measured
@@ -950,11 +958,17 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
     read the value the module actually holds.
     """
     seen: dict[int, dict[int, str]] = {}
+    taken: set[str] = set()
     for line in text.splitlines():
-        head, sep, tail = line.partition("=")
-        if not sep or head[:1] in ("#", " ", "\t"):
+        body = line.strip()
+        if not body or body[0] in "#[":
             continue
+        head, sep, tail = body.partition("=")
         key = head.strip()
+        # The first copy of a name wins whatever it holds, a blank one included.
+        if not sep or key in taken:
+            continue
+        taken.add(key)
         if not key.startswith(SPEC_NAME_KEY):
             continue
         parts = key[len(SPEC_NAME_KEY) :].split(".")

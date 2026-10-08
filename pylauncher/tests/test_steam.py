@@ -955,7 +955,17 @@ def test_the_details_have_no_doubled_spaces(tmp_path: Path) -> None:
 # the server entry's launcher (T575)
 # --------------------------------------------------------------------------
 
-_MOUNTED = "/tmp/.mount_YulonAbC123/usr/bin/yulon"
+_MOUNT_DIR = "/tmp/.mount_YulonAbC123"
+_MOUNTED = f"{_MOUNT_DIR}/usr/bin/yulon"
+
+
+def _payload(base: Path) -> tuple[str, str]:
+    """A real AppImage payload folder as `release.yml` lays it out: `(APPDIR, binary)`."""
+    root = base / ".mount_YulonAbC123"
+    (root / "usr" / "bin").mkdir(parents=True)
+    (root / "usr" / "bin" / "yulon").write_bytes(b"\x7fELF")
+    (root / "yulon.desktop").write_text("[Desktop Entry]\n", encoding="utf-8")
+    return str(root), str(root / "usr" / "bin" / "yulon")
 
 
 def test_inside_an_appimage_the_server_entry_starts_the_appimage_file(tmp_path: Path) -> None:
@@ -967,9 +977,10 @@ def test_inside_an_appimage_the_server_entry_starts_the_appimage_file(tmp_path: 
     image = tmp_path / "Apps" / "Yulon-v0.9.13-x86_64.AppImage"
     image.parent.mkdir()
     image.write_bytes(b"\x7fELF")
+    appdir, binary = _payload(tmp_path)
 
     exe, opts = steam.launcher_command(
-        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     assert exe == str(image)
@@ -985,6 +996,48 @@ def test_an_appimage_variable_naming_a_missing_file_is_not_believed(tmp_path: Pa
     )
 
     assert exe == "/opt/yulon/yulon"
+
+
+def test_an_appimage_inherited_from_another_app_is_not_taken_for_ours(tmp_path: Path) -> None:
+    """T578: a tarball started from inside another AppImage inherits its APPIMAGE and APPDIR.
+
+    Add to Steam would have written that other program into the Server entry.
+    """
+    other = tmp_path / "OtherApp.AppImage"
+    other.write_bytes(b"\x7fELF")
+
+    exe, opts = steam.launcher_command(
+        frozen=True,
+        executable="/opt/yulon/yulon",
+        environ={"APPIMAGE": str(other), "APPDIR": "/tmp/.mount_OtherXyZ789"},
+    )
+
+    assert (exe, opts) == ("/opt/yulon/yulon", "")
+
+
+def test_a_mounted_binary_with_no_verified_appimage_refuses_in_a_sentence(tmp_path: Path) -> None:
+    """Env stripped inside the mount: the only path known is one that vanishes on exit (T575)."""
+    for environ in ({}, {"APPIMAGE": str(tmp_path / "gone.AppImage"), "APPDIR": _MOUNT_DIR}):
+        with pytest.raises(steam.SteamRefusal) as caught:
+            steam.launcher_command(frozen=True, executable=_MOUNTED, environ=environ)
+        assert "AppImage" in str(caught.value)
+        assert "Nothing was written" in str(caught.value)
+
+
+def test_the_refusal_comes_before_any_file_is_touched(tmp_path: Path) -> None:
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    shortcuts = _shortcuts(tmp_path, client_dir=client)
+    shortcuts.launcher = lambda: steam.launcher_command(
+        frozen=True, executable=_MOUNTED, environ={}
+    )
+
+    with pytest.raises(steam.SteamRefusal):
+        shortcuts.add()
+
+    assert not (config / "shortcuts.vdf").exists()
+    assert not (config / "grid").exists()
 
 
 def test_a_tarball_install_still_starts_the_binary_in_its_folder() -> None:
@@ -1013,8 +1066,9 @@ def test_the_server_entry_is_written_with_the_appimage_and_its_folder(tmp_path: 
     image.parent.mkdir()
     image.write_bytes(b"\x7fELF")
     shortcuts = _shortcuts(tmp_path, client_dir=client)
+    appdir, binary = _payload(tmp_path)
     shortcuts.launcher = lambda: steam.launcher_command(
-        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     shortcuts.add()
@@ -1042,8 +1096,9 @@ def test_a_second_press_repairs_an_entry_that_points_into_the_mount(tmp_path: Pa
     ) | {"LastPlayTime": 1789071688, "SomeFieldValveAddsNextYear": "keep me"}
     (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {"0": broken}}))
     shortcuts = _shortcuts(tmp_path, client_dir=client)
+    appdir, binary = _payload(tmp_path)
     shortcuts.launcher = lambda: steam.launcher_command(
-        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     shortcuts.add()

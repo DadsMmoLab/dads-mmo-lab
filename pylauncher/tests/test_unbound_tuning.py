@@ -173,3 +173,54 @@ def test_a_conf_that_spells_true_shows_on_and_is_switched_off_as_zero(
     card.editors["Unbound.AutoBuff"].control.setChecked(False)
     card.save_button.click()
     assert "Unbound.AutoBuff = 0\n" in path.read_text(encoding="utf-8")
+
+
+def test_a_save_on_an_unbound_conf_in_a_linked_folder_is_refused_and_nothing_written_outside(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    """T573: the Unbound card has its own writer; a folder that is a link out is refused.
+
+    Mutation: drop both the `check_inside` pass in `save_tuning` and `root=` in
+    `unbound_settings.write`, and the outside folder is rewritten.
+    """
+    server = tmp_path / "server"
+    lay(server)
+    folder = (server / unbound_settings.FILE).parent
+    outside = tmp_path / "somebody-elses-folder"
+    folder.rename(outside)
+    try:
+        folder.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    before = {p.name: p.read_bytes() for p in outside.iterdir()}
+    view = view_for(unbound(), server)
+    card = card_of(view)
+    card.editors["Unbound.ReagentFree"].control.setChecked(True)
+
+    card.save_button.click()
+
+    assert {p.name: p.read_bytes() for p in outside.iterdir()} == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_the_unbound_writer_itself_refuses_a_linked_conf_folder(tmp_path: Path) -> None:
+    """T573: `unbound_settings.write` passes `root=server_dir`, so a linked PARENT is seen too.
+
+    Mutation: drop `root=` there and the backup and the write go through the link.
+    """
+    server = tmp_path / "server"
+    lay(server)
+    modules = server / unbound_settings.FILE
+    folder = modules.parent
+    outside = tmp_path / "somebody-elses-folder"
+    folder.rename(outside)
+    try:
+        folder.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    before = {p.name: p.read_bytes() for p in outside.iterdir()}
+
+    with pytest.raises(unbound_settings.tuning.TuningError, match="outside the server folder"):
+        unbound_settings.write(server, {"Unbound.ReagentFree": "1"})
+
+    assert {p.name: p.read_bytes() for p in outside.iterdir()} == before
