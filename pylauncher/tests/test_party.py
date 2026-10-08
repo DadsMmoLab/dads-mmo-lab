@@ -455,6 +455,7 @@ def test_the_script_path_the_manifest_writes_is_the_absolute_container_path() ->
 # excluded it. A sibling's list would have refused a class this server supports.
 
 WOTLK = load_catalog().get("wow-wotlk")
+UNBOUND = load_catalog().get("wow-unbound")
 RNDBOT = dbreads.Marker(prefix="rndbot", source="default")
 
 
@@ -926,6 +927,117 @@ def test_the_facts_are_gathered_from_the_disk_the_binary_and_the_wire(tmp_path: 
     assert party.ready(facts) is True
     assert facts.deployed == tuple(sorted(party.BRIDGE_SCRIPTS))
     assert facts.engine_cloned is True
+
+
+# mod-ale's own `.dist`, copied unchanged: what `confs_from_dist` lays for
+# Unbound (`catalog.json` wow-unbound), whose real settings are in the env.
+ALE_DIST_AS_SHIPPED = 'ALE.Enabled = true\nALE.ScriptPath = "lua_scripts"\n'
+
+
+def _unbound_like_install(tmp_path: Path, conf: str | None) -> Path:
+    server = _ready_install(tmp_path)
+    if conf is None:
+        (server / party.ALE_CONF).unlink()
+    else:
+        (server / party.ALE_CONF).write_text(conf)
+    return server
+
+
+def test_unbound_reads_its_lua_engine_settings_from_the_environment_it_starts_with(
+    tmp_path: Path,
+) -> None:
+    """T554 rework item 1. Unbound's `mod_ale.conf` is mod-ale's `.dist` copied
+    unchanged (`ALE.Enabled = true`, `ALE.ScriptPath = "lua_scripts"`); the
+    settings the server runs with are `AC_ALE_ENABLED` / `AC_ALE_SCRIPT_PATH` in
+    the entry's `world_env`, and AzerothCore's config lets an `AC_*` variable
+    win over the file (`Config.cpp` GetValueDefault, 7f12e89e). Reading the file
+    alone blocked My Party on Unbound forever, pointing at a mod-ale install the
+    Modules tab refuses there."""
+    server = _unbound_like_install(tmp_path, ALE_DIST_AS_SHIPPED)
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    seam = party.InstallParty(
+        UNBOUND,
+        server,
+        sql=_Sql(),
+        channel_for_saved=lambda: chan,
+        container="ub-worldserver",
+        world_running=lambda: True,
+        engine=lambda: party.BinaryRead(True, "in"),
+    )
+    facts = seam.facts()
+    assert facts.engine_enabled is True
+    assert facts.script_path == party.ALE_SCRIPT_PATH
+    assert party.blocker(facts) is None
+
+
+def test_wotlk_still_reads_its_lua_engine_settings_from_its_conf(tmp_path: Path) -> None:
+    """WotLK's entry sets no `AC_ALE_*` variable, so its conf is still the
+    source: the shipped relative path is still the blocker it was."""
+    server = _unbound_like_install(tmp_path, ALE_DIST_AS_SHIPPED)
+    facts = _install(server, _Sql(), _Chan()).facts()
+    assert facts.script_path == "lua_scripts"
+    assert "relative path" in (party.blocker(facts) or "")
+
+
+@pytest.mark.parametrize(
+    ("value", "on"),
+    [
+        ("1", True),
+        ("true", True),
+        ("True", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        ("2", False),
+        ("banana", False),
+    ],
+)
+def test_ale_enabled_counts_as_on_exactly_where_the_cores_bool_reader_would(
+    tmp_path: Path, value: str, on: bool
+) -> None:
+    """`GetOption<bool>` parses through `StringTo<bool>` non-strict
+    (`StringConvert.h:94-122`, 7f12e89e): 1/y/on/yes/true are on, 0/n/off/no/
+    false off, any case. Anything else is a bad value and the engine falls back
+    to its compiled default, which `preconditions()` treats as off."""
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(f"ALE.Enabled = {value}\n")
+    assert party.read_conf(conf).enabled is on
+
+
+def test_an_ac_ale_variable_wins_over_the_conf_either_way(tmp_path: Path) -> None:
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(f'ALE.Enabled = 1\nALE.ScriptPath = "{party.ALE_SCRIPT_PATH}"\n')
+    read = party.read_conf(conf, env={"AC_ALE_ENABLED": "0", "AC_ALE_SCRIPT_PATH": "/x"})
+    assert read.enabled is False
+    assert read.script_path == "/x"
+    untouched = party.read_conf(conf, env={"AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"})
+    assert untouched.enabled is True
+    assert untouched.script_path == party.ALE_SCRIPT_PATH
+
+
+def test_settings_the_environment_supplies_are_not_called_compiled_defaults(
+    tmp_path: Path,
+) -> None:
+    """The `conf_present` sentence says the engine runs on its compiled
+    defaults. With `AC_ALE_ENABLED` set that is false, file or no file."""
+    server = _unbound_like_install(tmp_path, None)
+    facts = party.read_facts(
+        server,
+        world_running=True,
+        engine=party.BinaryRead(True, "in"),
+        probe=party.Probe(True, "answered", "DML-BRIDGE-READY"),
+        env={"AC_ALE_ENABLED": "1", "AC_ALE_SCRIPT_PATH": party.ALE_SCRIPT_PATH},
+    )
+    assert party.blocker(facts) is None
+    bare = party.read_facts(
+        server,
+        world_running=True,
+        engine=party.BinaryRead(True, "in"),
+        probe=party.Probe(True, "answered", "DML-BRIDGE-READY"),
+    )
+    assert "no mod_ale.conf" in (party.blocker(bare) or "")
 
 
 def test_the_facts_carry_a_server_that_was_never_installed(tmp_path: Path) -> None:

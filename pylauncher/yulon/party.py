@@ -60,13 +60,14 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from yulon import dbreads, platform, play, resources, runner
 from yulon.actions import Outcome
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
@@ -374,18 +375,19 @@ def _binary_sentence(engine: bool | None) -> str:
 def _enabled_sentence(enabled: bool | None) -> str:
     if enabled is None:
         return (
-            "the value of ALE.Enabled could not be read from mod_ale.conf, so whether the Lua "
-            "engine will run any script is unknown."
+            "the value of ALE.Enabled could not be read from mod_ale.conf or the server's "
+            "environment, so whether the Lua engine will run any script is unknown."
         )
     return (
-        "the Lua engine is switched off: ALE.Enabled is not set to 1 in mod_ale.conf. Its "
-        "compiled default is off, whatever the comment beside it in the shipped file says."
+        "the Lua engine is switched off: ALE.Enabled is not set to 1 (or true) in mod_ale.conf "
+        "or the server's environment. Its compiled default is off, whatever the comment beside "
+        "it in the shipped file says."
     )
 
 
 def _script_path_sentence(path: str | None) -> str:
     if path is None:
-        return "ALE.ScriptPath could not be read from mod_ale.conf."
+        return "ALE.ScriptPath could not be read from mod_ale.conf or the server's environment."
     if not path.startswith("/"):
         return (
             f"the Lua engine is looking for scripts in {path!r}, a relative path it resolves "
@@ -456,22 +458,55 @@ class ConfRead:
     script_path: str | None
 
 
-def read_conf(path: Path) -> ConfRead:
-    """Read both of ALE's keys out of one conf file, column 0 only.
+def read_conf(path: Path, env: Mapping[str, str] | None = None) -> ConfRead:
+    """Read both of ALE's keys as the server will hold them, column 0 only.
 
     Column 0 is `conf.patch()`'s rule and it is here for the reason that rule
     exists: the shipped `mod_ale.conf.dist` carries a commented `ALE.Enabled =
     true` beside a compiled default of `false` (`ALEConfig.cpp:20`), so a
     pattern that matches indented or commented lines reads the file's own
     prose as its settings and reports an engine that is off as on.
+
+    `env` is the worldserver's environment as the entry declares it. An
+    `AC_ALE_*` variable in it wins over the file, because AzerothCore's config
+    reads the variable before the file's value (`Config.cpp` GetValueDefault,
+    read at 7f12e89e on 2026-10-08). Unbound needs this: its `mod_ale.conf` is
+    mod-ale's `.dist` copied unchanged and its real settings are in `world_env`
+    (T554 rework). `present` stays the file's own presence.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
+        present = True
     except OSError:
-        return ConfRead(False, None, None)
-    enabled = _conf_value(text, "ALE.Enabled")
-    script = _conf_value(text, "ALE.ScriptPath")
-    return ConfRead(True, None if enabled is None else enabled.strip() == "1", script)
+        text = ""
+        present = False
+    enabled = _effective_value(text, "ALE.Enabled", env)
+    script = _effective_value(text, "ALE.ScriptPath", env)
+    return ConfRead(present, None if enabled is None else core_bool(enabled) is True, script)
+
+
+def _effective_value(text: str, key: str, env: Mapping[str, str] | None) -> str | None:
+    """`key`'s `AC_*` variable from `env` when it is set, else the file's value."""
+    from_env = (env or {}).get(composegen.env_name_for(key))
+    if from_env is not None:
+        return from_env.strip().strip('"')
+    return _conf_value(text, key)
+
+
+def core_bool(value: str) -> bool | None:
+    """What AzerothCore's `GetOption<bool>` makes of `value`, or `None`.
+
+    `StringTo<bool>` non-strict (`StringConvert.h:94-122` at 7f12e89e): `1`,
+    `y`, `on`, `yes`, `true` are on and `0`, `n`, `off`, `no`, `false` are off,
+    letters in any case. `None` is a bad value, for which the core logs and
+    uses the option's compiled default.
+    """
+    word = value.strip()
+    if word == "1" or word.lower() in ("y", "on", "yes", "true"):
+        return True
+    if word == "0" or word.lower() in ("n", "off", "no", "false"):
+        return False
+    return None
 
 
 def _conf_value(text: str, key: str) -> str | None:
@@ -495,6 +530,7 @@ def read_facts(
     world_running: bool,
     engine: BinaryRead,
     probe: Probe,
+    env: Mapping[str, str] | None = None,
 ) -> Facts:
     """Every fact the sentences are decided from, read once off one install.
 
@@ -506,7 +542,7 @@ def read_facts(
     scripts were on disk that day too.
     """
     installed = server_dir.is_dir()
-    conf = read_conf(server_dir / ALE_CONF)
+    conf = read_conf(server_dir / ALE_CONF, env)
     try:
         deployed = tuple(sorted(p.name for p in dest_dir(server_dir).glob("*.lua")))
     except OSError:
@@ -516,7 +552,9 @@ def read_facts(
         world_running=world_running,
         engine_cloned=(server_dir / "modules" / "mod-ale").is_dir(),
         engine_in_binary=engine.engine,
-        conf_present=conf.present,
+        # The sentence for a missing conf says the engine runs on compiled
+        # defaults, which an `AC_ALE_ENABLED` in the environment makes untrue.
+        conf_present=conf.present or composegen.env_name_for("ALE.Enabled") in (env or {}),
         engine_enabled=conf.enabled,
         script_path=conf.script_path,
         deployed=deployed,
@@ -3073,12 +3111,14 @@ class InstallParty:
                 world_running=self._world_running(),
                 engine=BinaryRead(None, _unreadable("the world server is not running")),
                 probe=Probe(None, "the server was not asked: it is not running", ""),
+                env=composegen.world_env(self.entry),
             )
         return read_facts(
             self.server_dir,
             world_running=True,
             engine=self._engine(),
             probe=self._probe(),
+            env=composegen.world_env(self.entry),
         )
 
     def _probe(self) -> Probe:

@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.
