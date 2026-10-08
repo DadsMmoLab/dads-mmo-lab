@@ -61,6 +61,7 @@ from yulon import (
     __version__,
     client_config,
     client_names,
+    networking,
     platform,
     play_client,
     server_build_presses,
@@ -984,6 +985,7 @@ def launcher_config_keys(
     *,
     catalog_always: Mapping[str, str],
     default_address: str | None = None,
+    auth_port: int = networking.STANDARD_AUTH_PORT,
 ) -> dict[str, str]:
     """The Config.wtf keys the launcher picks set; a key the catalog's `always` sets is dropped.
 
@@ -999,6 +1001,10 @@ def launcher_config_keys(
     computer" (`realm_address` saved as None) then writes it there, because
     taking the typed lines out would leave the game with no address, and
     leaving them would send it to the old one (T187 final review).
+
+    `auth_port` is the server's own (`entry.ports.auth`): an address goes into
+    Config.wtf as `realmlist_value()` says it, the same as into realmlist.wtf,
+    so a second server on 3725 is not sent to the first server's login (T565).
     """
     picks = clean_launcher(launcher)
     keys: dict[str, str] = {}
@@ -1018,9 +1024,11 @@ def launcher_config_keys(
     keys = {k: v for k, v in keys.items() if k.casefold() not in fixed}
     address = picks.get("realm_address")
     if address:
-        keys.update(realmList=address, patchList=address)
+        value = networking.realmlist_value(address, auth_port)
+        keys.update(realmList=value, patchList=value)
     elif "realm_address" in picks and default_address:
-        keys.update(realmList=default_address, patchList=default_address)
+        value = networking.realmlist_value(default_address, auth_port)
+        keys.update(realmList=value, patchList=value)
     return keys
 
 
