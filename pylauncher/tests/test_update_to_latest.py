@@ -39,6 +39,7 @@ from tests.support_stop import compile_until_stopped, stop_when
 # CMaNGOS install needs on disk.
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
+from tests.test_families_cmangos import entry_with_sql
 from tests.test_families_cmangos import install as tbc_install
 from yulon import docker, git, resources, rmtree, runner, server_build_presses
 from yulon.apply import CLONE_DIRS
@@ -60,6 +61,7 @@ PINNED = ENTRY.emulator.sources[0].rev or ""
 
 OLD = "a" * 40
 NEW = "b" * 40
+TBC_DB_PIN = next(s.rev for s in TBC.emulator.sources if s.repo == "cmangos/tbc-db") or ""
 
 
 def _installed(rec: Recorder, tmp_path: Path) -> Path:
@@ -123,8 +125,10 @@ def _tbc(tmp_path: Path) -> tuple[Recorder, Path, CmangosInstaller]:
     """A finished TBC install, every source on `OLD` with `NEW` waiting upstream.
 
     The CMaNGOS half of this file, and the family that carries both of the
-    facts the AzerothCore half cannot show: a `*-db` source that must not move,
-    and a patch this app wrote into the checkout.
+    facts the AzerothCore half cannot show: a `*-db` source that must not follow
+    upstream, and a patch this app wrote into the checkout. Its world reads
+    stopped in the rebuild's servers-down window, where T531's world catch-up
+    asks before it writes.
     """
     rec = Recorder()
     server_dir = tmp_path / "tbc"
@@ -134,7 +138,7 @@ def _tbc(tmp_path: Path) -> tuple[Recorder, Path, CmangosInstaller]:
         rec.upstream[server_dir / source.dest] = NEW
     rec.clones.clear()
     rec.calls.clear()
-    made = tbc_engine(rec)
+    made = tbc_engine(rec, world_running=lambda container: False)
     # The hook that lays a patch's pre-image belongs to the INSTALL: it stands
     # in for what a real clone leaves behind. An update fetches into a tree that
     # is already there, so leaving it armed would quietly re-lay the pre-image
@@ -272,9 +276,12 @@ def test_a_db_source_is_never_fetched_even_though_the_others_are(tmp_path: Path)
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
 
-    fetched = [spec.url for spec in rec.clones]
-    assert not any("tbc-db" in url for url in fetched), fetched
-    assert rec.heads[server_dir / "src/tbc-db"] == OLD, "the world database was dragged forward"
+    db = next(source for source in TBC.emulator.sources if source.repo == "cmangos/tbc-db")
+    fetched = [(spec.url, spec.rev) for spec in rec.clones if "tbc-db" in spec.url]
+    # T531: it goes to the commit this app was tested with, so the world updates
+    # that pin adds reach a server that already exists -- never to upstream's tip.
+    assert fetched == [(db.url, db.rev)], fetched
+    assert rec.heads[server_dir / "src/tbc-db"] == db.rev, "the world database followed the tip"
     assert rec.heads[server_dir / "src/mangos-tbc"] == NEW
 
 
@@ -778,7 +785,7 @@ def _cmangos(tmp_path: Path, entry: CatalogEntry) -> tuple[Recorder, Path, Cmang
     rec.clones.clear()
     rec.calls.clear()
     rec.on_clone = None
-    return rec, server_dir, tbc_engine(rec, entry=entry)
+    return rec, server_dir, tbc_engine(rec, entry=entry, world_running=lambda container: False)
 
 
 def _compose_on_disk(server_dir: Path) -> dict[str, tuple[bytes, int, int]]:
@@ -1532,7 +1539,18 @@ def _real_git_tbc(
     says to the guard.
     """
     moving = {"cmangos/mangos-tbc", "cmangos/playerbots"}
-    entry = TBC.model_copy(
+    # T531's world catch-up is left out (`on_update: leave` everywhere): it would move
+    # tbc-db through this same real-git clone, onto an origin that is mangos-tbc's.
+    assert TBC.install.native is not None and TBC.install.native.cmangos is not None
+    sql = TBC.install.native.cmangos.sql
+    plain = entry_with_sql(
+        sql.model_copy(
+            update={
+                "phases": tuple(p.model_copy(update={"on_update": "leave"}) for p in sql.phases)
+            }
+        )
+    )
+    entry = plain.model_copy(
         update={
             "emulator": TBC.emulator.model_copy(
                 update={
@@ -1881,7 +1899,14 @@ def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
     assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
-    assert not [call for call in rec.calls if call.startswith("changed-")]
+    # T531/T533: TBC asks git only about the core's update chain in the moved core
+    # checkout (T533 refuses a move that adds to it) and about Instances/ACID in
+    # tbc-db's move; the bots' world SQL is told apart by its bytes, not by git (T534).
+    asked = [call for call in rec.calls if call.startswith("changed-")]
+    assert asked == [
+        f"changed-files:mangos-tbc:{OLD[:7]}..{NEW[:7]}",
+        f"changed-files:tbc-db:{OLD[:7]}..{TBC_DB_PIN[:7]}",
+    ], asked
     assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
 
 
@@ -1956,7 +1981,13 @@ def _spine(
         rec, server_dir = _ready(tmp_path)
         return rec, server_dir, lambda **overrides: engine(rec, **overrides)
     rec, server_dir, _made = _cmangos(tmp_path, entry)
-    return rec, server_dir, lambda **overrides: tbc_engine(rec, entry=entry, **overrides)
+    return (
+        rec,
+        server_dir,
+        lambda **overrides: tbc_engine(
+            rec, entry=entry, **{"world_running": lambda container: False, **overrides}
+        ),
+    )
 
 
 def _tags(rec: Recorder, refuse: Callable[[str, str, int], bool]) -> Callable[[str, str], str]:
