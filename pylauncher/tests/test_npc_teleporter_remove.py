@@ -6,7 +6,8 @@ INSERTs its own rows. Remove must delete the same ranges, or its menus, texts, s
 models stay in the world (T560).
 
 But the capital file's `@GOSSIP_MENU := 50000` range also holds nine rows of the BASE GAME at the
-WotLK pin 7f12e89e (`data/sql/base/db_world/*.sql`; no db_world update there touches them):
+WotLK pin f19a1879 (`data/sql/base/db_world/*.sql`, unchanged since 7f12e89e; no db_world update
+there touches them):
 the Searing Gorge gate menus of Mountaineer Pebblebitty (creature 3836, gossip_menu_id 50000)
 and Maggran Earthbinder (creature 11860, gossip_menu_id 50008). The install deletes them
 (upstream defect, T564), so Remove puts those 19 rows back, copied from the pin's base SQL.
@@ -73,7 +74,7 @@ _KEYS = {
 }
 
 # Rows of the base game inside those ranges, copied byte for byte from the pin's base SQL
-# (mod-playerbots/azerothcore-wotlk @7f12e89e, data/sql/base/db_world: gossip_menu.sql lines
+# (mod-playerbots/azerothcore-wotlk @7f12e89e, unchanged at f19a1879, data/sql/base/db_world: gossip_menu.sql lines
 # 6048-6056, gossip_menu_option.sql 4686-4693, conditions.sql 10967-10968). Moving the pin fails
 # test_the_snapshot_is_of_the_catalogs_wotlk_pin in test_wotlk_world_columns.py first.
 _BASE_ROWS = {

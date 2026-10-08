@@ -173,7 +173,7 @@ class KnownRecipe:
 
 
 KNOWN_RECIPES: dict[str, KnownRecipe] = {
-    # mod-playerbots/azerothcore-wotlk `apps/docker/Dockerfile` at the catalog pin 7f12e89e,
+    # mod-playerbots/azerothcore-wotlk `apps/docker/Dockerfile` at 7f12e89e and at f19a1879,
     # stages skeleton, build, runtime, authserver, worldserver, db-import and client-data (the
     # four targets `wow-wotlk/native/build.yml.tmpl` builds; `tools` is not built). T230 plan §1.
     "e87bc1bd18f94bbf1705b81438b0caf7a1c8c8c8a0330cdaf08511f0f3ae7964": KnownRecipe(
