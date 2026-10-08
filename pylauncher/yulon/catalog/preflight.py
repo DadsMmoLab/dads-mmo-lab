@@ -36,6 +36,7 @@ number, and the installs that warned at 51 GB free went on to succeed.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -554,18 +555,49 @@ _PORT_OVERRIDES = {
 }
 
 
-def _port_setting(server_dir: Path, var: str) -> tuple[str | None, str]:
-    """`(value, where it came from)` for a port variable, the way compose resolves it (T574).
+def _dotenv_literal(raw: str) -> str | None:
+    """What compose reads from the right-hand side of a `.env` line; None when it cannot be known.
 
-    Compose gives the process environment precedence over `.env`, and Yu'lon's
-    own environment is what its `docker compose` runs inherit, so a
-    `DOCKER_*_EXTERNAL_PORT` set there wins. An empty value sets nothing.
+    A quoted value is what is inside the quotes (anything after them is a
+    comment); an unquoted one ends at the first whitespace-then-`#`. A `$`
+    anywhere means compose will interpolate it (`${DB_PORT:-13306}`), which
+    only compose can resolve, so the answer is "unknown" and the caller probes
+    and refuses nothing for that port (T574).
     """
-    given = (os.environ.get(var) or "").strip()
-    if given:
-        return given, f"the environment variable {var}"
-    from_file = (composegen.dotenv_value(server_dir, var) or "").strip().strip("\"'")
-    return (from_file or None), f"{var} in {server_dir / composegen.DOTENV_FILE}"
+    text = raw.strip()
+    if text[:1] in ("'", '"'):
+        end = text.find(text[0], 1)
+        text = text[1:] if end == -1 else text[1:end]
+    else:
+        match = re.search(r"(?:^|\s)#", text)
+        if match is not None:
+            text = text[: match.start()]
+    return None if "$" in text else text.strip()
+
+
+def _port_setting(
+    server_dir: Path, var: str, *, own_environment: bool
+) -> tuple[str | None, str, bool]:
+    """`(value, where it came from, known)` for a port variable, the way compose resolves it (T574).
+
+    Compose gives the process environment precedence over `.env`, and an
+    environment variable that is present but EMPTY still counts as set: it
+    stops `.env` from filling the key, and `${VAR:-default}` then takes the
+    default. So an empty value returns no override at all. Yu'lon's own
+    environment is what its `docker compose` runs inherit, except for a server
+    inside a WSL distro (`own_environment` False): `wsl.exe` does not forward
+    it, so only that distro's `.env` counts. `known` is False for a `.env`
+    value only compose can resolve.
+    """
+    if own_environment and var in os.environ:
+        given = os.environ[var].strip()
+        return (given or None), f"the environment variable {var}", True
+    where = f"{var} in {server_dir / composegen.DOTENV_FILE}"
+    raw = composegen.dotenv_value(server_dir, var)
+    if raw is None:
+        return None, where, True
+    literal = _dotenv_literal(raw)
+    return (literal or None), where, literal is not None
 
 
 def _not_a_port(where: str, given: str) -> str:
@@ -588,7 +620,8 @@ def bind_targets(
     port-conflict remedy writes `DOCKER_DB_EXTERNAL_PORT` to `.env`; the
     process environment beats it, as in compose), and a released channel
     (`127.0.0.1:0`) publishes nothing. A setting that is not a port number is
-    a problem to refuse with, not a number to bind.
+    a problem to refuse with, not a number to bind; one that compose has to
+    interpolate is left alone (`_dotenv_literal()`).
     """
     found: list[tuple[str, int, str]] = []
     problems: list[str] = []
@@ -597,7 +630,14 @@ def bind_targets(
         var = _PORT_OVERRIDES.get(what)
         channel = what in ("SOAP port", "command-channel port")
         if var is not None or channel:
-            given, where = _port_setting(server_dir, var or composegen.CHANNEL_PORT_VAR)
+            given, where, known = _port_setting(
+                server_dir,
+                var or composegen.CHANNEL_PORT_VAR,
+                own_environment=platform.wsl_location(server_dir) is None,
+            )
+            if not known:
+                logger.info(f"preflight: {where} is for compose to resolve; not probing {what}")
+                continue
             if given is not None:
                 port_text = given
                 if channel:
@@ -1793,18 +1833,9 @@ def _port_check(facts: Facts) -> Check:
     the old note for this half. Any other bind error stays `unknown` and refuses
     nothing.
     """
-    if facts.port_conflicts:
-        return Check(
-            "the server's ports",
-            "refuse",
-            f"{', '.join(facts.port_conflicts)} already publish the ports this server needs",
-            "Stop that server first (or remove its containers), then try again.",
-        )
-    if facts.port_blocks:
+    if facts.port_conflicts or facts.port_blocks:
         windows = facts.platform_id == "windows"
-        return Check(
-            "the server's ports",
-            "refuse",
+        said = [
             " ".join(
                 (
                     block.text
@@ -1814,6 +1845,21 @@ def _port_check(facts: Facts) -> Check:
                     )
                 )
                 for block in facts.port_blocks
+            )
+        ]
+        if facts.port_conflicts:
+            said.insert(
+                0,
+                f"{', '.join(facts.port_conflicts)} already publish the ports this server needs",
+            )
+        return Check(
+            "the server's ports",
+            "refuse",
+            ". ".join(part for part in said if part) if facts.port_conflicts else said[0],
+            (
+                "Stop that server first (or remove its containers), then try again."
+                if facts.port_conflicts
+                else ""
             ),
         )
     if facts.ports_in_use:

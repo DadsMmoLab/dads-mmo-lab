@@ -950,6 +950,71 @@ def test_the_default_bind_is_told_the_platform_gather_was_given(
     assert told and set(told) == {platform_name == "windows"}
 
 
+def _db_ports_bound(tmp_path: Path, dotenv_line: str) -> tuple[set[int], preflight.Facts]:
+    (tmp_path / ".env").write_text(dotenv_line + "\n", encoding="utf-8")
+    asked: set[int] = set()
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.add(port)
+        return _free(host, port)
+
+    return asked, _gather_with(tmp_path, bind_port=bind)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "DOCKER_DB_EXTERNAL_PORT=13306 # moved off 3306",
+        'DOCKER_DB_EXTERNAL_PORT="13306" # moved',
+        "DOCKER_DB_EXTERNAL_PORT='13306'",
+        "export DOCKER_DB_EXTERNAL_PORT=13306\t#moved",
+    ],
+)
+def test_a_dotenv_port_with_a_comment_or_quotes_is_the_port_compose_reads(
+    tmp_path: Path, line: str
+) -> None:
+    asked, facts_ = _db_ports_bound(tmp_path, line)
+    assert 13306 in asked and 3306 not in asked
+    assert facts_.port_blocks == ()
+
+
+def test_a_dotenv_port_only_compose_can_resolve_is_neither_probed_nor_refused(
+    tmp_path: Path,
+) -> None:
+    asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=${DB_PORT:-13306}")
+    assert not {3306, 13306} & asked
+    assert facts_.port_blocks == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_an_empty_environment_port_is_set_and_gives_compose_its_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compose only fills keys from `.env` that the environment lacks; empty is not lacking."""
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "")
+    asked, _ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306")
+    assert 3306 in asked and 13306 not in asked
+
+
+def test_a_server_inside_a_wsl_distro_ignores_the_windows_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`wsl.exe` does not forward it, so the distro's compose never sees it."""
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "23306")
+    inside, _ = preflight.bind_targets(ENTRY, Path(r"\\wsl.localhost\Ubuntu\home\me\srv"))
+    here, _ = preflight.bind_targets(ENTRY, Path("/home/me/srv"))
+    assert 3306 in {port for _h, port, _w in inside}
+    assert 23306 in {port for _h, port, _w in here}
+
+
+def test_a_foreign_container_and_a_bad_port_setting_are_both_said(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("DOCKER_DB_EXTERNAL_PORT=99999\n", encoding="utf-8")
+    held = docker.PortHolders(foreign={ENTRY.ports.world: ("old-mangosd",)})
+    facts_ = _gather_with(tmp_path, port_holders=lambda _ports: held)
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "old-mangosd" in said and "99999" in said
+
+
 def test_the_windows_volume_branch_is_reachable_without_running_on_windows() -> None:
     """The injected platform has to reach `_same_volume()`, not just `gather()`.
 
