@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
+- On Centurion, **Revive** works again after a server update, and pathfinding data no longer crashes while made.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
