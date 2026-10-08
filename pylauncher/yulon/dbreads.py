@@ -205,11 +205,13 @@ def _checked(marker: Marker, bots: BotMarker) -> MarkerAnswer:
 def _conf_values(text: str, key: str) -> list[str]:
     """Every ACTIVE setting of `key`, in file order, unquoted.
 
-    Column 0 only, matching `conf.patch()`'s rule and for its reason: the
-    shipped files are full of commented prose that a looser pattern would read
-    as settings.
+    Each line is trimmed first, as every core's own reader does (AzerothCore's
+    `Config.cpp` and CMaNGOS's `Config::Reload` alike), so an INDENTED setting
+    is live (T572). A commented line never matches: it starts with `#`. Every
+    copy is returned and `resolve_marker` refuses a conflict, because the two
+    families this serves disagree on which copy wins.
     """
-    pattern = re.compile(rf"^{re.escape(key)}\s*=(.*)$")
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=(.*)$")
     found: list[str] = []
     for line in text.splitlines():
         hit = pattern.match(line)
