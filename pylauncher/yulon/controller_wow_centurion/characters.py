@@ -24,15 +24,28 @@ sent through the console or SOAP crashes the server, offline characters
 included. Offline was not a safe way round it. So `CONFIRMED_LIVE` was set to
 those five, and Revive was withheld with its own sentence, `REVIVE_CRASHED`,
 rather than the one for a verb nobody had tried.
+
+T218 was fixed in the fork (thomasjteachey/TrinityCore112 #1767, in CENTURION 4948d1a9): the
+handler treats a command without a session as full permission. So Revive is offered again, but
+only on a server whose build carries that fix (`revive_is_fixed()`): the catalog's pin must be
+one that does (`REVIVE_FIXED_PINS`), and the install's checkout must be on that pin, or have
+been moved by Update to latest or Return to the tested pin while the catalog had it. A server
+made before the pin moved is still the crashing build, and pressing Revive there would take its
+world down, so it keeps the sentence that says to update the server first.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Final
 
-from yulon import play
+from yulon import git, play, server_build_presses
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.native import read_state
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
 
 CONFIRMED_LIVE: Final[frozenset[str]] = frozenset(
     {"set_level", "teleport", "mail_gold", "send_gear", "rename"}
@@ -42,17 +55,111 @@ CONFIRMED_LIVE: Final[frozenset[str]] = frozenset(
 NOT_CONFIRMED = "each is offered once it has been checked against a live {game} server"
 """Why a verb nobody has tried is not drawn: the view says it after the verbs it names."""
 
+REVIVE_FIXED_PINS: Final[frozenset[str]] = frozenset({"4948d1a9290cb1046eede1dbf289789200ea050e"})
+"""Catalog pins whose build answers a console or SOAP `revive` (T218).
+
+CENTURION 4948d1a9 holds #1767 (`cs_misc.cpp`: `!session || session->HasPermission(...)`).
+A later pin is added here by whoever moves it, after reading that the fix is still in it:
+`test_the_shipped_pin_carries_the_revive_fix` fails until they do, and until then Revive is
+withheld again rather than offered on a build nobody has looked at."""
+
 REVIVE_CRASHED = (
     "it crashed the world server when it was tried, so it stays off until that is fixed"
 )
-"""Why Revive is not drawn: T208 pressed it and the world server crashed (T218)."""
+"""Why Revive is not drawn when the catalog's pin does not carry the fix (T218)."""
+
+REVIVE_NEEDS_UPDATE = (
+    "this server was built before Revive was fixed (it crashed the world server), so it stays "
+    "off until the server is updated: press "
+    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}, "
+    "then open Yu'lon again"
+)
+"""Why Revive is not drawn on a server whose build may be the one that crashes (T218)."""
 
 
-def withheld(entry: CatalogEntry) -> Mapping[str, str]:
-    """Verb -> why it is not offered, for every verb `CONFIRMED_LIVE` does not name."""
+def _core_source(entry: CatalogEntry) -> tuple[str, str, str] | None:
+    """`(repo, dest, rev)` of Centurion's one source, the core, or None for a shape it is not."""
+    sources = entry.emulator.sources
+    if len(sources) != 1:
+        return None
+    (source,) = sources
+    rev = source.rev
+    return (source.repo, source.dest, rev) if rev else None
+
+
+def _checkout_head(checkout: Path) -> str | None:
+    """The commit the checkout is on, read from `.git` without running git; None if unreadable.
+
+    A detached HEAD holds the sha. A branch is followed through `refs/` and then
+    `packed-refs`. No container or process is started: this runs when the tab is built.
+    """
+    git_dir = checkout / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head or None
+        ref = head[4:].strip()
+        try:
+            loose = (git_dir / ref).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            loose = ""
+        if loose:
+            return loose
+        for line in (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines():
+            sha, _, name = line.partition(" ")
+            if name == ref and not line.startswith(("#", "^")):
+                return sha
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.debug(f"could not read what {checkout} is on: {exc}")
+    return None
+
+
+def revive_is_fixed(entry: CatalogEntry, server_dir: Path | None) -> bool:
+    """Does the build this server was made from answer a console `revive`? (T218)
+
+    Yes only when the catalog's pin carries the fix AND the install's checkout is on that
+    pin, or on a commit an Update to latest / Return to the tested pin moved it to while the
+    catalog had this pin (the install record's `source_revs` row names the pin it was made
+    against, and the checkout's head begins with the commit it recorded) AND the install
+    record says the build finished with no failed or stopped press since (`last_error`).
+    Anything that cannot be read answers no: the cost is a button that appears after an
+    update, not a world server that goes down. Not covered: a crash that kills Yu'lon itself
+    part way through an update, which leaves the moved checkout and no `last_error`.
+    """
+    core = _core_source(entry)
+    if core is None or core[2] not in REVIVE_FIXED_PINS or server_dir is None:
+        return False
+    repo, dest, pin = core
+    head = _checkout_head(server_dir / dest)
+    # The checkout is where the SOURCE is, not what was compiled (Codex): an update that
+    # moved it and then failed or was stopped leaves the old binary running. A finished
+    # build, and no unfinished press recorded since, is the evidence the binary is this code.
+    # `valid=()`: not asking about stages, so no "stages this build does not know" warning;
+    # every recorded name then reads back in `unknown`.
+    state = read_state(server_dir, valid=())
+    if head is None or state is None or "build" not in state.unknown or state.last_error:
+        return False
+    if head == pin:
+        return True
+    row = state.rev_for(repo)
+    if row is None or row.pin != pin:
+        return False
+    built = row.built.split(git.VERSION_SEPARATOR)[0].strip()
+    return len(built) >= 7 and head.startswith(built)
+
+
+def withheld(entry: CatalogEntry, server_dir: Path | None = None) -> Mapping[str, str]:
+    """Verb -> why it is not offered, for every verb `CONFIRMED_LIVE` does not name.
+
+    Revive is also named when this server's build (`server_dir`) may still be the one that
+    crashes on it (`revive_is_fixed()`); a call without a folder withholds it.
+    """
     untried = NOT_CONFIRMED.format(game=entry.name)
-    return {
-        verb: REVIVE_CRASHED if verb == "revive" else untried
-        for verb in play.VERBS
-        if verb not in CONFIRMED_LIVE
+    core = _core_source(entry)
+    pin_fixed = core is not None and core[2] in REVIVE_FIXED_PINS
+    reasons = {
+        verb: untried for verb in play.VERBS if verb not in CONFIRMED_LIVE and verb != "revive"
     }
+    if "revive" not in CONFIRMED_LIVE and not (pin_fixed and revive_is_fixed(entry, server_dir)):
+        reasons["revive"] = REVIVE_NEEDS_UPDATE if pin_fixed else REVIVE_CRASHED
+    return {verb: reasons[verb] for verb in play.VERBS if verb in reasons}

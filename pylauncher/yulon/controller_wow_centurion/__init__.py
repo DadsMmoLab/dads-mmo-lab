@@ -31,7 +31,8 @@ What is this core's own, and where each fact comes from:
   server whose realm-list updates no longer audit and whose tournament kit is gone.
 * **Characters.** `characters.withheld()`: the verbs T208's live check watched a
   Centurion server run are offered; the rest are not drawn, each with the
-  sentence that says why.
+  sentence that says why. Revive is offered only on a server whose build carries
+  the fork's console fix (T218, `characters.revive_is_fixed()`).
 
 What it does not have, said rather than stubbed: no one-shot import service (the
 import is the install engine's marker-gated SQL plan, as on CMaNGOS, so there is
