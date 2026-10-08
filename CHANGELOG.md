@@ -42,6 +42,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 
 ### Changed
+- Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 - A stopped install or rebuild says what the Stop left, after **Stopped:**.
 

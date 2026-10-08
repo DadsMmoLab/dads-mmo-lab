@@ -987,7 +987,9 @@ def _wotlk_server(root: Path) -> Path:
     _write(root / GENREV, (WOTLK_DATA / "genrev.cmake").read_bytes())
     _write(
         root / composegen.BUILD_FILE,
-        _rendered("wow-wotlk/native/build.yml.tmpl", {"BUILD_CONTEXT": "."}),
+        _rendered(
+            "wow-wotlk/native/build.yml.tmpl", {"CONTAINER_PREFIX": "ac-", "BUILD_CONTEXT": "."}
+        ),
     )
     _write(root / composegen.BASE_FILE, "services:\n  ac-worldserver:\n    image: ac:local\n")
     _write(root / composegen.OVERRIDE_FILE, "services: {}\n")

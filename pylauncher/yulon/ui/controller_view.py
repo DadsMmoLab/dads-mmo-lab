@@ -3001,13 +3001,81 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+def _realm_port_keeper(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> Callable[[], str | None] | None:
+    """Before the servers start, the realm row gets this server's world port; None for 8085 (T552).
+
+    The install sets the row before its first `up` (`AzerothCoreInstaller.
+    _realm_port()`), but AzerothCore's importer seeds it with 8085, WotLK's
+    world port, and a repair import runs that importer again; a statement that
+    failed once must be tried again at the next start, not left behind a repair
+    that now refuses (Codex adversarial review, rounds 1 and 2). So the
+    controller asks this once every refusal has passed (`Controller.
+    before_servers`): the port check and the missing-database check (T377) come
+    first, so it never brings up a database Docker lost (Codex review, round
+    2). It starts the database the presence check found, runs the guarded
+    UPDATE, and reads the row back: the start goes ahead only when the row says
+    this server's port (round 3: an UPDATE that matched nothing also exits 0).
+    The authserver hands clients the row's port, and prints it once at its
+    start in the line the ready wait reads. An entry on 8085 gets no step, so
+    WotLK starts exactly as it did.
+    """
+    port = entry.ports.world
+    if port == azerothcore.SEEDED_WORLD_PORT:
+        return None
+    statement = networking.realm_port_sql(entry)
+    read_back = networking.realm_port_query(entry)
+
+    def keep() -> str | None:
+        try:
+            docker.start_database(
+                spec,
+                server_dir,
+                because="the realm could not be given this server's world port",
+                wsl_distro=wsl_distro,
+            )
+            sql.run_statement("auth", statement)
+            said = sql.query("auth", read_back).split()
+        except Exception as exc:  # noqa: BLE001 - any failure refuses the start, worded once
+            why = str(exc)
+        else:
+            if said == [str(port)]:
+                return None
+            why = f"the realm row reads {' '.join(said) or 'nothing'}"
+        return (
+            f"The realm could not be given this server's world port {port} ({why}), so the "
+            "server was not started: its players would be sent to another server's world. "
+            "Press Start again."
+        )
+
+    return keep
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
     client_dir: Path | None,
     wsl_distro: str | None,
 ) -> ControllerServices:
-    """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
+    """AzerothCore: the base `Controller`, the only import gate, the only manifest store.
+
+    Every seam is bound to `entry`'s own containers, never to WotLK's
+    `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
+    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
+    entry that names another tree is refused rather than handed WotLK's.
+    """
+    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
+            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
+            "Nothing was opened."
+        )
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
     settings_mods = _settings_mods(wotlk_modules.store())
@@ -3139,6 +3207,7 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            db_container=spec.db,
         )
         if entry.has_manifests
         else None
@@ -3213,6 +3282,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
+            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -3260,7 +3330,7 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
                 )
             )
             if spec.import_service
@@ -11210,7 +11280,10 @@ class ControllerView(QWidget):
         problem: str | None = None
         try:
             networking.write_ready_to_play_realmlists(
-                choice.target, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                choice.target,
+                PLAY_CLIENT_ADDRESS,
+                self.entry.client.realmlist_file,
+                auth_port=self.entry.ports.auth,
             )
         except OSError as exc:
             problem = str(exc)
@@ -11725,7 +11798,10 @@ class ControllerView(QWidget):
             else:
                 try:
                     networking.write_ready_to_play_realmlists(
-                        play, _realm_address(record), client.realmlist_file
+                        play,
+                        _realm_address(record),
+                        client.realmlist_file,
+                        auth_port=self.entry.ports.auth,
                     )
                 except OSError as exc:
                     raise play_client.PlayClientError(
@@ -11892,6 +11968,7 @@ class ControllerView(QWidget):
                     play,
                     _realm_address(client_packs.read_record(play)),
                     self.entry.client.realmlist_file,
+                    auth_port=self.entry.ports.auth,
                 )
             except OSError as exc:
                 raise play_launch.LaunchRefusal(

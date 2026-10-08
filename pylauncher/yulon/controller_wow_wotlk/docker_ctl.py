@@ -3,8 +3,7 @@
 This is the per-game surface only — the shared behavior (`start`/`stop`/
 `status`/`health`/polling/`port_conflicts`) lives in `yulon.docker` (DRY,
 style-guide §4). What belongs *here* is exclusively the WotLK-specific
-`ContainerSpec`: the three AzerothCore container names (mirroring
-`dml-start.sh` constants) and the published ports shared by all v1 WoW servers.
+`ContainerSpec`, read from the `wow-wotlk` catalog entry (T552).
 """
 
 from __future__ import annotations
@@ -15,8 +14,8 @@ from yulon import docker
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 
-# WotLK AzerothCore containers (mirrors dml-start.sh constants).
-_NATIVE = load_catalog().get("wow-wotlk").install.native
+_ENTRY = load_catalog().get("wow-wotlk")
+_NATIVE = _ENTRY.install.native
 if _NATIVE is None:  # pragma: no cover - a catalog this broken fails everywhere
     raise RuntimeError("wow-wotlk has no install.native block, so nothing can install or manage it")
 
@@ -32,16 +31,16 @@ CMaNGOS games, and a value that is only ever correct by luck is the kind that
 survives being copied to a game where it is wrong.
 """
 
-SPEC = docker.ContainerSpec(
-    db="ac-database",
-    auth="ac-authserver",
-    world="ac-worldserver",
-    ports=(3724, 8085),
-    # The one-shot that populates the three schemas. It is named here so
-    # `repair_import()` can select it deliberately; every other path in this
-    # package exists to make sure nothing selects it by accident.
-    import_service="ac-db-import",
-)
+SPEC = _ENTRY.container_spec()
+"""WotLK's containers and ports, read from its catalog entry (T552) as Vanilla's are.
+
+Until T552 a literal `ac-database`/`ac-authserver`/`ac-worldserver`, `(3724, 8085)`
+and `import_service="ac-db-import"` -- the same values, spelled a second time.
+`SPEC` is WotLK's and no other server's: every seam the AzerothCore tab builds
+is handed `entry.container_spec()` instead (`ui.controller_view._for_wotlk`), and
+`tests/test_second_azerothcore.py` refuses a WotLK-bound default left to it.
+`import_service` is still the one-shot only `repair_import()` may select.
+"""
 
 # Re-export the shared operations so callers import from here, not from
 # yulon.docker directly — this package stays the single entry point for WotLK.
