@@ -402,8 +402,9 @@ def test_the_manifest_names_the_conf_key_the_module_actually_has() -> None:
 
     The manifest said `ALE.EnableLuaEngine`, which appears in neither. A key
     that does not exist is not written and not read, so the engine would have
-    taken its COMPILED default — and that default is false while the shipped
-    conf's own comment says true.
+    taken its COMPILED default. (That default compiles to true, not the spelled
+    "false": a string literal passed as a bool. Read at mod-ale 1cb86c96 on
+    2026-10-08; nothing here relies on it.)
     """
     keys = [k["key"] for k in _ale_manifest()["conf"][0]["keys"]]
     assert "ALE.Enabled" in keys
@@ -411,8 +412,9 @@ def test_the_manifest_names_the_conf_key_the_module_actually_has() -> None:
 
 
 def test_the_manifest_writes_the_engine_on_rather_than_naming_the_key() -> None:
-    """A key with no default is surfaced, not set. The compiled default is
-    false, so surfacing it leaves the engine off."""
+    """A key with no default is surfaced, not set, and the engine's compiled default
+    is not relied on (its source spells `false` and compiles to `true`), so the
+    manifest writes 1."""
     enabled = next(k for k in _ale_manifest()["conf"][0]["keys"] if k["key"] == "ALE.Enabled")
     assert enabled.get("default") == "1"
 
@@ -879,8 +881,7 @@ def test_the_conf_is_read_for_both_keys_or_for_neither(tmp_path: Path) -> None:
     """`ALE.Enabled` and `ALE.ScriptPath` are read from column 0 only, the same
     rule `conf.patch()` writes by: the shipped `mod_ale.conf.dist` is full of
     commented prose, and a looser pattern reads its own comment saying `true`
-    as the setting — which is the exact lie the compiled default `false` makes
-    expensive (`ALEConfig.cpp:20`)."""
+    as the setting."""
     conf = tmp_path / "mod_ale.conf"
     conf.write_text(
         "# ALE.Enabled = 1\n"
@@ -990,20 +991,40 @@ def test_wotlk_still_reads_its_lua_engine_settings_from_its_conf(tmp_path: Path)
         ("0", False),
         ("false", False),
         ("off", False),
-        ("2", False),
-        ("banana", False),
+        ("2", None),
+        ("banana", None),
     ],
 )
 def test_ale_enabled_counts_as_on_exactly_where_the_cores_bool_reader_would(
-    tmp_path: Path, value: str, on: bool
+    tmp_path: Path, value: str, on: bool | None
 ) -> None:
     """`GetOption<bool>` parses through `StringTo<bool>` non-strict
     (`StringConvert.h:94-122`, 7f12e89e): 1/y/on/yes/true are on, 0/n/off/no/
     false off, any case. Anything else is a bad value and the engine falls back
-    to its compiled default, which `preconditions()` treats as off."""
+    to its compiled default, so this reads it as unknown (`None`), not as off."""
     conf = tmp_path / "mod_ale.conf"
     conf.write_text(f"ALE.Enabled = {value}\n")
     assert party.read_conf(conf).enabled is on
+
+
+def test_no_sentence_claims_the_engines_compiled_default_is_off() -> None:
+    """mod-ale 1cb86c96 `ALEConfig.cpp:20` passes the STRING "false" as the default of
+    `SetConfigValue<bool>`; a string literal converts to `true`, so the engine's
+    compiled default for ALE.Enabled is ON (re-review note 2). The reading still
+    errs on the safe side -- a missing or unreadable key is unknown, not on -- and
+    the sentences say that rather than the old claim."""
+    for facts in (
+        _facts(conf_present=False),
+        _facts(engine_enabled=None),
+        _facts(engine_enabled=False),
+    ):
+        said = party.blocker(facts) or ""
+        assert "compiled default is off" not in said
+        assert "compiled default for ALE.Enabled is off" not in said
+    unknown = party.blocker(_facts(engine_enabled=None)) or ""
+    assert "1 (or true)" in unknown
+    missing = party.blocker(_facts(conf_present=False)) or ""
+    assert party.ALE_SCRIPT_PATH in missing
 
 
 def test_an_ac_ale_variable_wins_over_the_conf_either_way(tmp_path: Path) -> None:
@@ -2648,8 +2669,8 @@ def test_a_rule_whose_conf_key_could_not_be_read_is_greyed_and_never_offered(
     A `.dist`-only install -- which is what `yulon-ubuntu2` is -- has said
     nothing about these keys, and the compiled defaults behind them were never
     measured on this fork. Offering the row on the shipped template's value
-    would be this app asserting a fact about somebody's server: the mistake
-    `ALE.Enabled`'s own comment makes about ITS compiled default.
+    would be this app asserting a fact about somebody's server: `ALE.Enabled`'s
+    compiled default turned out to be the opposite of what its source spells.
 
     Mutation: read `None` as on (`if flags.account is not False`). The row is
     offered on a key nobody read.
