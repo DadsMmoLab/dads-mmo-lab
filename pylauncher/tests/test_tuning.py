@@ -1135,3 +1135,33 @@ def test_two_spellings_of_a_file_name_are_one_file_where_the_disk_ignores_case(
     a = tuning.file_key("env/dist/etc/modules/Playerbots.conf")
     b = tuning.file_key("env/dist/etc/modules/playerbots.conf")
     assert (a == b) is same
+
+
+def test_two_spellings_that_exist_as_two_files_are_two_files_on_a_case_sensitive_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3, Codex P2: a Mac volume can be case-sensitive; the disk, not the OS, decides.
+
+    This test disk is case-sensitive, so both spellings exist as separate files, as on such a
+    volume. Mutation: answer from the platform alone and the second file is called the first.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    (tmp_path / "playerbots.conf").write_text("a", encoding="utf-8")
+    (tmp_path / "Playerbots.conf").write_text("b", encoding="utf-8")
+
+    assert not tuning.is_one_of("Playerbots.conf", ["playerbots.conf"], root=tmp_path)
+    assert tuning.is_one_of("playerbots.conf", ["playerbots.conf"], root=tmp_path)
+
+
+def test_two_spellings_that_are_one_file_on_disk_stay_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case-blind volume: a spelling that reaches the same file (here a hard link) is it.
+
+    Mutation: ignore `samefile` agreeing and a hard-linked spelling gets its own editable button.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    (tmp_path / "playerbots.conf").write_text("a", encoding="utf-8")
+    os.link(tmp_path / "playerbots.conf", tmp_path / "Playerbots.conf")
+
+    assert tuning.is_one_of("Playerbots.conf", ["playerbots.conf"], root=tmp_path)

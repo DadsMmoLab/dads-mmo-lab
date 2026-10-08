@@ -600,10 +600,29 @@ def file_key(name: str) -> str:
     return name.replace("\\", "/").casefold() if _disk_ignores_case() else name
 
 
-def is_one_of(name: str, names: Iterable[str]) -> bool:
-    """Whether `name` is one of `names`, by `file_key`."""
+def is_one_of(name: str, names: Iterable[str], root: Path | None = None) -> bool:
+    """Whether `name` is one of `names`, by `file_key`.
+
+    `file_key` assumes the platform's usual disk, and a Mac volume can be
+    case-sensitive (Codex review). So when `root` (the server folder) is given and
+    two spellings differ only in case, both files existing there and not being the
+    same file (`os.path.samefile`) settles it: they are two files. A spelling that
+    does not exist on disk falls back to the key, the safe side (read-only).
+    """
     key = file_key(name)
-    return any(file_key(other) == key for other in names)
+    for other in names:
+        if other == name:
+            return True
+        if file_key(other) != key:
+            continue
+        if root is not None:
+            try:
+                if not os.path.samefile(root / name, root / other):
+                    continue
+            except OSError:
+                pass
+        return True
+    return False
 
 
 MAX_EDIT_BYTES = 2 * 1024 * 1024

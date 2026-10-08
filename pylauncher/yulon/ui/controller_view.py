@@ -19395,7 +19395,7 @@ class ControllerView(QWidget):
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
         for name in self._tuning_core_files():
-            if not tuning.is_one_of(name, found) and (server_dir / name).is_file():
+            if not tuning.is_one_of(name, found, server_dir) and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
 
@@ -19605,15 +19605,18 @@ class ControllerView(QWidget):
         """Show one conf in the raw editor, read-only when it is the server's own."""
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        core = tuning.is_one_of(file, self._tuning_core_files())
+        core = tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        )
         try:
             # A conf that is a link out of the install is another file's text
             # and another file's Save (T573): shown empty and read-only.
             tuning.check_inside(path, server_dir)
-            with open(path, encoding="utf-8", newline="") as handle:
-                # One character past the cap, so a file over it is seen without being read whole.
-                raw = handle.read(tuning.MAX_EDIT_BYTES + 1)
-            if len(raw) > tuning.MAX_EDIT_BYTES:
+            with open(path, "rb") as handle:
+                # One BYTE past the cap, so a file over it is seen without being read whole
+                # (a text-mode read counts characters: 2 M three-byte ones are 6 MB).
+                blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(blob) > tuning.MAX_EDIT_BYTES:
                 self.tuning_panel.set_file_text(
                     "",
                     read_only=True,
@@ -19622,6 +19625,7 @@ class ControllerView(QWidget):
                     ),
                 )
                 return
+            raw = blob.decode("utf-8")
         except tuning.TuningError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=str(exc))
             return
@@ -19678,7 +19682,9 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(file, self._tuning_core_files()):
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -19714,7 +19720,9 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(file, self._tuning_core_files()):
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is None:
