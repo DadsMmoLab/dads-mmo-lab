@@ -19411,18 +19411,33 @@ class ControllerView(QWidget):
             self.open_tuning_file(current)
 
     def _tuning_files(self) -> tuple[str, ...]:
-        """What the raw editor offers: this install's module confs, then its own.
+        """What the raw editor offers: the modules' confs, then the server's own.
+
+        The modules Yu'lon has cards for come first, in the cards' order; every
+        other `.conf` in the modules folder follows by name (T569: the list was
+        the cards' files alone, so a module the catalog does not describe, or
+        one with only a wildcard key, could not be opened at all).
 
         Only files that are ON DISK. A conf a manifest names but nothing has
         deployed would open as an empty editor, and saving that empty editor
         would create the file -- which is an install step, not a tuning one.
         """
         server_dir = self.services.controller.server_dir
+        core = self._tuning_core_files()
         found: list[str] = []
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
-        for name in self._tuning_core_files():
+        # Spelled as the file system would compare them: on Windows a conf the
+        # manifest calls `Solocraft.conf` and the folder calls `solocraft.conf`
+        # is ONE file, and so is the server's own `playerbots.conf` however the
+        # folder cases it -- one button, and read-only for the server's own.
+        taken = {os.path.normcase(name) for name in (*found, *core)}
+        for name in tuning.module_conf_files(server_dir):
+            if os.path.normcase(name) not in taken:
+                taken.add(os.path.normcase(name))
+                found.append(name)
+        for name in core:
             if name not in found and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)

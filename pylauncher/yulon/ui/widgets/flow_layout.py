@@ -35,9 +35,9 @@ and `ui.gamepad` hands an open menu its own keys so the pad can walk it.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QResizeEvent
-from PySide6.QtWidgets import QLayout, QLayoutItem, QSizePolicy, QWidget
+from PySide6.QtWidgets import QFrame, QLayout, QLayoutItem, QScrollArea, QSizePolicy, QWidget
 
 FLOW_SPACING = 6
 """Between two controls on a line, and between one line and the next.
@@ -247,6 +247,13 @@ class FlowBar(QWidget):
     under the bar, which on the Modules tab is the module list (T73).
     """
 
+    height_needed_changed = Signal()
+    """Said when the height this bar needs at its width has changed (T569).
+
+    For a holder that limits the bar's height (`FlowScroll`) and must restate
+    its limit when a wrap moves. Nothing else listens.
+    """
+
     def __init__(self, parent: QWidget | None = None, spacing: int = FLOW_SPACING) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -259,6 +266,7 @@ class FlowBar(QWidget):
         if needed != self._needed:
             self._needed = needed
             self.updateGeometry()
+            self.height_needed_changed.emit()
 
     def flow(self) -> FlowLayout:
         """This bar's layout, typed -- `layout()` answers a bare `QLayout`."""
@@ -268,3 +276,60 @@ class FlowBar(QWidget):
 def flow_bar(parent: QWidget | None = None, spacing: int = FLOW_SPACING) -> FlowBar:
     """A `FlowBar`, named as the thing a caller builds rather than as a class."""
     return FlowBar(parent, spacing)
+
+
+class FlowScroll(QScrollArea):
+    """A `FlowBar` that wraps like one, but never takes more than `max_lines` lines of height.
+
+    A bar of sixty buttons wraps onto a dozen lines, and left in the page that
+    pushes everything under it off the screen (T569: the Tuning tab's file
+    buttons on a Steam Deck). Up to `max_lines` lines this is the bar and
+    nothing more -- no frame, no scroll bar. Past them it keeps `max_lines`
+    lines of height and the rest is reached by scrolling, with a bar that is
+    only there then. The height follows the bar's own: a window resized wide
+    enough to fit the buttons in fewer lines gives the height back.
+    """
+
+    def __init__(self, bar: FlowBar, max_lines: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._bar = bar
+        self._max_lines = max(1, max_lines)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        # Not a stop of its own for the pad or Tab: the buttons in it are, and the
+        # pad scrolls to whichever it lands on (`ui.gamepad._scroll_into_view`).
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setWidget(bar)
+        # The bar says when a wrap moved its height (a width given, a restyle);
+        # `refit()` is also called by whoever adds buttons to it.
+        bar.height_needed_changed.connect(self.refit)
+        self.refit()
+
+    def bar(self) -> FlowBar:
+        return self._bar
+
+    def wanted_height(self) -> int:
+        """The bar's height at this width, up to `max_lines` lines of it."""
+        flow = self._bar.flow()
+        width = self.viewport().width()
+        if width <= 0:
+            width = self.width()
+        needed = flow.heightForWidth(width) if width > 0 else flow.sizeHint().height()
+        line = flow.sizeHint().height()
+        cap = self._max_lines * line + flow.spacing() * (self._max_lines - 1)
+        return max(0, min(needed, cap))
+
+    def refit(self) -> None:
+        """Re-state this area's height; a no-op while it is the one it already has."""
+        height = self.wanted_height()
+        if self.maximumHeight() != height or self.minimumHeight() != height:
+            self.setFixedHeight(height)
+
+    def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        return QSize(self._bar.sizeHint().width(), self.wanted_height())
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().resizeEvent(event)
+        self.refit()

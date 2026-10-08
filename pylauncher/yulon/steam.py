@@ -51,7 +51,7 @@ import struct
 import subprocess
 import sys
 import zlib
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +59,7 @@ from typing import Any
 
 from yulon import platform, resources, runner
 from yulon.log import get_logger
+from yulon.selfupdate.detect import appimage_file
 
 logger = get_logger(__name__)
 
@@ -466,17 +467,33 @@ def client_executable(client_dir: Path) -> Path:
     return client_dir / "WoW.exe"
 
 
-def launcher_command() -> tuple[str, str]:
+def launcher_command(
+    *,
+    frozen: bool | None = None,
+    executable: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
     """How to start THIS Yu'lon again: `(exe, launch options)`.
 
-    Frozen, `sys.executable` is the `yulon` binary and there is nothing else to
-    say. From source it is the interpreter, and `main.py` — the real entry point,
-    beside the package rather than in it — goes in the launch options, which is
-    where Steam puts arguments.
+    Frozen, there is nothing to say in the launch options. What `exe` is depends
+    on the delivery: from an AppImage it is the `.AppImage` FILE, because
+    `sys.executable` is then a path inside the runtime's temporary FUSE mount
+    (`/tmp/.mount_XXXXXX/usr/bin/yulon`), which has a random name and is gone
+    when Yu'lon exits, so a Steam entry holding it never launches (T575). From a
+    tarball it is the `yulon` binary, which stays where it is. From source it is
+    the interpreter, and `main.py` — the real entry point, beside the package
+    rather than in it — goes in the launch options, which is where Steam puts
+    arguments.
+
+    The AppImage rule is `selfupdate.detect.appimage_file`'s, shared so the two
+    cannot disagree about when `$APPIMAGE` is believed.
     """
-    if resources.frozen():
-        return sys.executable, ""
-    return sys.executable, str(resources.bundle_root() / "main.py")
+    is_frozen = resources.frozen() if frozen is None else frozen
+    exe = sys.executable if executable is None else executable
+    if is_frozen:
+        image = appimage_file(environ)
+        return (str(image) if image is not None else exe), ""
+    return exe, str(resources.bundle_root() / "main.py")
 
 
 # --------------------------------------------------------------------------
