@@ -48,17 +48,95 @@ def test_a_checkout_is_source() -> None:
     assert _detect(frozen=False).kind is InstallKind.SOURCE
 
 
+def test_an_appimage_env_pointing_at_nothing_is_not_an_appimage() -> None:
+    """An inherited `$APPIMAGE` from some other app is not this app's install."""
+    assert _detect(environ={"APPIMAGE": "/gone.AppImage"}).kind is InstallKind.TARBALL
+
+
+_MOUNT = "/tmp/.mount_YulonAbC123"
+_FOREIGN_MOUNT = "/tmp/.mount_OtherXyZ789"
+
+
 def test_appimage_by_its_env(tmp_path: Path) -> None:
     """`$APPIMAGE` names the file on disk; `sys.executable` is inside the mount."""
     f = tmp_path / "Yulon-v0.8.66-Public-x86_64.AppImage"
     f.write_bytes(b"x")
-    install = _detect(environ={"APPIMAGE": str(f)}, executable=Path("/tmp/.mount_x/yulon"))
+    install = _detect(
+        environ={"APPIMAGE": str(f), "APPDIR": _MOUNT},
+        executable=Path(f"{_MOUNT}/usr/bin/yulon"),
+    )
     assert (install.kind, install.target, install.executable) == (InstallKind.APPIMAGE, f, "")
 
 
-def test_an_appimage_env_pointing_at_nothing_is_not_an_appimage() -> None:
-    """An inherited `$APPIMAGE` from some other app is not this app's install."""
-    assert _detect(environ={"APPIMAGE": "/gone.AppImage"}).kind is InstallKind.TARBALL
+def test_an_appimage_inherited_from_another_app_is_not_this_install(tmp_path: Path) -> None:
+    """T578: an AppImage terminal or file manager exports APPIMAGE and APPDIR to its children.
+
+    A tarball started from inside one is not that app, and an update that
+    replaced the file named here would replace somebody else's program.
+    """
+    other = tmp_path / "OtherApp.AppImage"
+    other.write_bytes(b"x")
+    install = _detect(environ={"APPIMAGE": str(other), "APPDIR": _FOREIGN_MOUNT})
+    assert (install.kind, install.target, install.executable) == (
+        InstallKind.TARBALL,
+        Path("/opt/apps/yulon"),
+        "yulon",
+    )
+
+
+def test_an_appimage_variable_with_no_appdir_beside_it_is_not_believed(tmp_path: Path) -> None:
+    """The runtime always sets both; a lone `$APPIMAGE` cannot be shown to be ours."""
+    other = tmp_path / "OtherApp.AppImage"
+    other.write_bytes(b"x")
+    assert _detect(environ={"APPIMAGE": str(other)}).kind is InstallKind.TARBALL
+
+
+def test_the_appdir_must_hold_the_running_binary_not_merely_be_a_prefix(tmp_path: Path) -> None:
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    install = _detect(
+        environ={"APPIMAGE": str(f), "APPDIR": "/opt/apps/yul"},
+        executable=Path("/opt/apps/yulon/yulon"),
+    )
+    assert install.kind is InstallKind.TARBALL
+
+
+def test_running_from_a_mount_with_no_verified_appimage_is_its_own_kind(tmp_path: Path) -> None:
+    """Env stripped (`env -i`, a launcher that cleans it): the file cannot be found.
+
+    This is not a tarball: the binary is inside a mount that vanishes on exit,
+    so there is no folder to replace and nothing to point an entry at.
+    """
+    mounted = Path(f"{_MOUNT}/usr/bin/yulon")
+    for environ in ({}, {"APPIMAGE": "/gone.AppImage", "APPDIR": _MOUNT}):
+        install = _detect(environ=environ, executable=mounted)
+        assert install.kind is InstallKind.APPIMAGE_LOST
+        assert install.target is None
+        assert not install.can_swap
+        assert install.artifact_name("v1.2.3-Public") is None
+
+
+def test_a_foreign_appimage_in_the_environment_of_a_mounted_binary_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "OtherApp.AppImage"
+    other.write_bytes(b"x")
+    install = _detect(
+        environ={"APPIMAGE": str(other), "APPDIR": _FOREIGN_MOUNT},
+        executable=Path(f"{_MOUNT}/usr/bin/yulon"),
+    )
+    assert install.kind is InstallKind.APPIMAGE_LOST
+    assert install.target is None
+
+
+def test_appimage_file_answers_for_a_binary_inside_its_appdir_only(tmp_path: Path) -> None:
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    env = {"APPIMAGE": str(f), "APPDIR": _MOUNT}
+    assert detect.appimage_file(env, executable=f"{_MOUNT}/usr/bin/yulon") == f
+    assert detect.appimage_file(env, executable="/opt/yulon/yulon") is None
+    assert detect.appimage_file({"APPIMAGE": str(f)}, executable=f"{_MOUNT}/usr/bin/yulon") is None
+    assert detect.appimage_file({**env, "APPDIR": "/"}, executable="/opt/yulon/yulon") is None
 
 
 def test_tarball_target_is_the_folder_holding_the_binary() -> None:
@@ -112,7 +190,10 @@ def test_a_machine_with_no_artifact_names_none() -> None:
     [
         ({}, "Yulon-v1.2.3-Public-x86_64.tar.gz"),
         (
-            {"environ": {"APPIMAGE": __file__}, "executable": Path("/tmp/.mount_x/yulon")},
+            {
+                "environ": {"APPIMAGE": __file__, "APPDIR": "/tmp/.mount_x"},
+                "executable": Path("/tmp/.mount_x/yulon"),
+            },
             "Yulon-v1.2.3-Public-x86_64.AppImage",
         ),
         ({"platform_id": "windows", "machine": "AMD64"}, "Yulon-v1.2.3-Public-windows-x64.zip"),
@@ -203,7 +284,7 @@ def test_a_folder_install_is_asked_about_itself_and_an_appimage_about_its_parent
     appimage = tmp_path / "Yulon.AppImage"
     appimage.write_bytes(b"x")
     _detect(
-        environ={"APPIMAGE": str(appimage)},
+        environ={"APPIMAGE": str(appimage), "APPDIR": "/tmp/.mount_x"},
         executable=Path("/tmp/.mount_x/yulon"),
         probe_writable=lambda p: asked.append(p) or True,
     )
