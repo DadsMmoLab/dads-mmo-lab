@@ -1687,16 +1687,20 @@ def test_fresh_edits_in_big_files_of_repeated_sections_keep_every_other_lines_by
         assert lost == [], case
 
 
-def test_a_1_mb_file_of_one_letter_lines_with_swaps_everywhere_saves_at_once() -> None:
+def test_a_1_mb_file_of_one_letter_lines_with_swaps_everywhere_saves_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T573 Codex adversarial review: the in-order match's windows were not budgeted.
 
     About 420,000 lines of `a` or `b` at random, LF and CRLF by turns, with every third
     pair of lines swapped: no line is unique and the two texts differ every few lines, so
     every difference opened an exactly lined-up window (1.8 s for 500,000 such lines, on the
     window's thread). The windows are charged to the save's `_EXACT_CELLS`, and once those
-    are spent the rest is matched in linear time. Measured 0.3 s; the bound leaves room
-    for a slower machine.
-    Mutation: never charge a window and this takes seconds.
+    are spent the rest is matched in linear time. The work is counted, which no machine's
+    speed changes: the line pairs lined up exactly stay within `_EXACT_CELLS`. The time
+    is a loose second check: 0.3 s here, 0.85 s on a CI runner sharing its cores with
+    three other test workers.
+    Mutation: never charge a window and 23 times the cells are lined up (1.5 s here).
     """
     import random
     import time
@@ -1709,6 +1713,14 @@ def test_a_1_mb_file_of_one_letter_lines_with_swaps_everywhere_saves_at_once() -
     for k in range(0, n - 1, 3):
         new[k], new[k + 1] = new[k + 1], new[k]
     edited = "\n".join(new) + "\n"
+    cells = [0]
+    line_up = tuning._line_up
+
+    def counted(old: list[str], new: list[str], *rest: object) -> list[tuple[int, int]]:
+        cells[0] += len(old) * len(new)
+        return line_up(old, new, *rest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tuning, "_line_up", counted)
 
     started = time.perf_counter()
     out = tuning.save_text(raw, edited)
@@ -1716,7 +1728,8 @@ def test_a_1_mb_file_of_one_letter_lines_with_swaps_everywhere_saves_at_once() -
 
     assert tuning.editor_view(out) == edited
     assert len(raw) > 1000 * 1000
-    assert took < 0.75, took
+    assert 0 < cells[0] <= tuning._EXACT_CELLS, cells[0]
+    assert took < 2.0, took
 
 
 def test_a_line_added_at_the_top_of_a_lone_cr_file_ends_in_a_lone_cr() -> None:
