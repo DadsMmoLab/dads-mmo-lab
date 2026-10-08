@@ -12666,7 +12666,10 @@ def test_a_card_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
 
     assert outside.read_text(encoding="utf-8") == before
     assert "outside the server folder" in view.tuning_report.toPlainText()
-    assert not list(outside.parent.glob("**/*.bak"))
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
 
 
 def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
@@ -12682,7 +12685,10 @@ def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
 
     assert outside.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
     assert "outside the server folder" in view.tuning_report.toPlainText()
-    assert not list(outside.parent.glob("**/*.bak"))
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
 
 
 def test_the_raw_editor_opens_a_conf_that_links_out_read_only_and_says_why(
@@ -13748,7 +13754,10 @@ def test_the_picker_lists_a_core_conf_once_whatever_the_case_of_a_module_rows_sp
 
     files = view._tuning_files()
 
-    assert [f.lower() for f in files] == ["env/dist/etc/worldserver.conf"], files
+    # The folder's other confs (the view lists every module .conf since T569) are not the point.
+    assert [f.lower() for f in files if f.lower().endswith("/worldserver.conf")] == [
+        "env/dist/etc/worldserver.conf"
+    ], files
 
 
 def test_a_conf_over_the_editors_size_cap_opens_empty_and_read_only_and_says_so(
