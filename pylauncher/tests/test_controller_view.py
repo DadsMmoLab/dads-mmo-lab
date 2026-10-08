@@ -2533,6 +2533,26 @@ def _with_custom_route(
     return route
 
 
+def _with_the_card_buttons(services: ControllerServices) -> None:
+    """Give the custom-module card its two presses and nothing else (T596).
+
+    A game with no install seam draws a sentence in that card instead of the
+    buttons, so a layout test about the card WotLK really has must wire the seams
+    -- but not `_with_custom_route`'s layered store, whose rows those tests count.
+    """
+    route = _FakeCustomRoute(cast(Any, services.store))
+    services.module_from_link = route.derive_link
+    services.module_from_folder = route.derive_folder
+    services.module_install_custom = route.install
+
+
+def _services_with_the_card_buttons(ps: _Ps, tmp_path: Path) -> ControllerServices:
+    """`_services` for WotLK's layout tests: the card has its two presses, as the real game's does."""
+    services = _services(ps, tmp_path, [])
+    _with_the_card_buttons(services)
+    return services
+
+
 def _listed(view: ControllerView) -> list[str]:
     """Every row's name and description, the way the cards read them out."""
     return [f"{r.data.name} — {r.data.description}" for r in view.modules_panel.rows()]
@@ -20297,6 +20317,8 @@ def _past_its_pin(
     services, spy = _latest(ps, tmp_path)
     if custom_route:
         _with_custom_route(services)
+    else:
+        _with_the_card_buttons(services)
     view = ControllerView(WOTLK, services, status_poll_ms=0, **kwargs)
     spy.revs = (
         native.SourceRev("mod-playerbots/azerothcore-wotlk", "7f12e89 · 2026-09-20", pin=_PIN),
@@ -20537,6 +20559,74 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view.module_folder_button.setEnabled(True)
     process_events()
     assert folder.isEnabled(), "the line did not follow its card's button back"
+
+
+def test_a_game_with_no_outside_module_route_says_so_instead_of_two_dead_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Tortoise's box offered two greyed buttons and never said why.
+
+    A game with no custom-module route at all (no install seam: every game but
+    WotLK) draws no "Install from link…" / "Install from folder…" in the box,
+    card or line; it says in one sentence that the server cannot take modules
+    from outside yet and that the list above is what it can take. The busy lock
+    finishing must not hand the hidden buttons back.
+    """
+    services = _services(ps, tmp_path, [])
+    assert services.module_install_custom is None
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert TORTOISE.name in said and "from outside" in said and "listed above" in said
+    assert said != controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for dead in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert dead.isHidden(), f"{dead.text()!r} is still offered with no route behind it"
+    assert not view.custom_module_card.isHidden()
+    assert not view.custom_module_line_note.isHidden()
+    assert view.custom_module_line_note.toolTip() == said
+
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_no_add_on_modules_does_not_promise_a_list_above(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Centurion's list is empty on purpose; the box must not point at it."""
+    centurion = load_catalog().get("wow-centurion")
+    services = _services(ps, tmp_path, [])
+    services.no_modules_note = controller_view_module.NO_ADDON_MODULES.format(game=centurion.name)
+    view = ControllerView(centurion, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert centurion.name in said and "no add-on modules" in said
+    assert "listed above" not in said
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: WotLK's box is not touched by the explanation."""
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for live in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert not live.isHidden() and live.isEnabled()
+    assert view.custom_module_line_note.isHidden()
 
 
 THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))
@@ -21816,7 +21906,9 @@ def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
     import main
 
     for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
-        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        view = ControllerView(
+            WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0
+        )
         window, _tab = _controller_in_the_real_window(view, "Modules")
         _at(window, DESKTOP_1080P)
         _ran_a_job(view)
@@ -21875,7 +21967,7 @@ def test_folding_the_log_by_hand_gives_the_report_its_height_back(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -21925,7 +22017,7 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     """
     from yulon.ui.theme import apply_dadcraft_theme
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -22001,7 +22093,7 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)

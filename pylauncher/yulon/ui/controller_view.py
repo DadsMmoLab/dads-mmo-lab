@@ -7012,6 +7012,23 @@ CUSTOM_MODULE_CARD_NOTE = (
 """The card's sentence: drawn in the card whole, and the line's tooltip (T153)."""
 
 
+CUSTOM_MODULE_NO_ROUTE_NOTE = (
+    "{game} can't take a module from outside yet, whether from a link or from a folder. "
+    "It works with the ones listed above."
+)
+"""The card's sentence on a game with no custom-module route at all (T596).
+
+Said instead of two buttons that are greyed with no reason on them. Only the
+WotLK tree has the install seam behind them; the sentence is true of every other
+game because it claims nothing but "not yet" and "the list above is what works".
+"""
+
+CUSTOM_MODULE_NO_ROUTE_LINE = "not available on this server yet"
+"""The one-line form's version of `CUSTOM_MODULE_NO_ROUTE_NOTE`; the note is its tooltip (T596)."""
+
+CUSTOM_MODULE_NO_ADDONS_LINE = "this server has no add-on modules"
+"""As `CUSTOM_MODULE_NO_ROUTE_LINE` for a game whose Modules tab is empty on purpose (T596)."""
+
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
     "Its name must start with mod-. The module is cloned into this server's modules folder; "
@@ -15939,6 +15956,7 @@ class ControllerView(QWidget):
         custom_box = QVBoxLayout(custom)
         custom_note = QLabel(CUSTOM_MODULE_CARD_NOTE, custom)
         custom_note.setWordWrap(True)
+        self.custom_module_note = custom_note
         custom_box.addWidget(custom_note)
         custom_row = QHBoxLayout()
         custom_row.addWidget(self.module_link_button)
@@ -15959,6 +15977,11 @@ class ControllerView(QWidget):
         # The sentence the line leaves out, for a pointer that asks. Not the only
         # place it is: the card whole says it wherever the window has the room.
         line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+        self.custom_module_line_title = line_title
+        # T596: in place of the two presses on a game that has no route for them.
+        self.custom_module_line_note = QLabel("", self.custom_module_line)
+        self.custom_module_line_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.custom_module_line_note.setVisible(False)
         self.module_link_line_button = _RelayButton(
             self.module_link_button, self.custom_module_line
         )
@@ -15966,6 +15989,7 @@ class ControllerView(QWidget):
             self.module_folder_button, self.custom_module_line
         )
         line_box.addWidget(line_title)
+        line_box.addWidget(self.custom_module_line_note)
         line_box.addWidget(self.module_link_line_button)
         line_box.addWidget(self.module_folder_line_button)
         line_box.addStretch(1)
@@ -16741,6 +16765,7 @@ class ControllerView(QWidget):
         beats one that is pressed and then explains itself (roadmap 6.1).
         """
         route = self._custom_route()
+        self._say_where_the_custom_route_is_absent(route is None)
         link = route is not None and self.services.module_from_link is not None
         folder = route is not None and self.services.module_from_folder is not None
         self.module_link_button.setEnabled(link)
@@ -16749,6 +16774,40 @@ class ControllerView(QWidget):
         self.module_folder_button.setToolTip(
             MODULE_FOLDER_TIP if folder else MODULE_CUSTOM_NO_ROUTE
         )
+
+    def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
+        """T596: a game with no route has a sentence in the box and no presses in it.
+
+        Two greyed buttons with nothing beside them read as a broken app (a player
+        asked on Discord why they were grey). Where there is no install seam at all
+        the buttons, in the card and on its one-line form, are taken off and the box
+        says what is true of the game. Where there IS a route the card is as it was
+        built, WotLK's included, so a route that comes later needs no change here.
+        """
+        presses = (
+            self.module_link_button,
+            self.module_folder_button,
+            self.module_link_line_button,
+            self.module_folder_line_button,
+        )
+        for press in presses:
+            press.setVisible(not absent)
+        self.custom_module_line_note.setVisible(absent)
+        if not absent:
+            self.custom_module_note.setText(CUSTOM_MODULE_CARD_NOTE)
+            self.custom_module_line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+            return
+        # Centurion's list is empty on purpose; "the ones listed above" would point at nothing.
+        if self.services.no_modules_note:
+            said = self.services.no_modules_note
+            line = CUSTOM_MODULE_NO_ADDONS_LINE
+        else:
+            said = CUSTOM_MODULE_NO_ROUTE_NOTE.format(game=self.entry.name)
+            line = CUSTOM_MODULE_NO_ROUTE_LINE
+        self.custom_module_note.setText(said)
+        self.custom_module_line_note.setText(line)
+        self.custom_module_line_note.setToolTip(said)
+        self.custom_module_line_title.setToolTip(said)
 
     @Slot()
     def install_module_from_link(self) -> None:
