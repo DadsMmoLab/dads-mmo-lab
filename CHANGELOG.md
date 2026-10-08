@@ -37,6 +37,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
+- While Yu'lon is open, a Tortoise realm shows offline while it reloads after a crash, and not over a running server.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
