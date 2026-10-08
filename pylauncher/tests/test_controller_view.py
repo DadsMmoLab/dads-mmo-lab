@@ -25943,15 +25943,17 @@ FOLDER_ADDONS = {
 }
 
 
-def _lay_folder_module(server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS) -> None:
+def _lay_folder_module(
+    server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS, module: str = FOLDER_MODULE
+) -> None:
     """The module's addon folder in the server's checkout, and its sha256sum list."""
     lines = []
     for name, data in sorted(files.items()):
-        path = server_dir / FOLDER_PATH / name
+        path = server_dir / module / "client/Interface/AddOns" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         lines.append(f"{hashlib.sha256(data).hexdigest()}  client/Interface/AddOns/{name}\n")
-    (server_dir / FOLDER_MODULE / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
+    (server_dir / module / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
 
 
 FOLDER_PACK = ClientPack.model_validate(
@@ -26093,6 +26095,127 @@ def test_a_missing_folder_or_list_is_named_before_a_ready_to_play_client_is_made
     missing_folder = refusal(FOLDER_PACK, tmp_path)
     assert missing_folder is not None and FOLDER_PATH in missing_folder
     assert controller_view_module.server_build_presses.UPDATE_TO_LATEST in missing_folder
+
+
+# -- WoW Unbound's own entry (T555 T2) ------------------------------------------------
+
+UNBOUND = load_catalog().get("wow-unbound")
+UNBOUND_MODULE = "modules/mod-unbound"
+CHECK_ADDONS = 'SET checkAddonVersion "0"'
+
+
+def _unbound_client(tmp_path: Path) -> tuple[Path, Path]:
+    """The player's own client and Unbound's ready-to-play copy, the module laid in the checkout."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    target = play_client.default_target(original, UNBOUND.name, tmp_path)
+    play_client.create(
+        original,
+        target,
+        game=UNBOUND.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    return original, target
+
+
+def _config(play: Path) -> str:
+    return (play / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+
+
+def test_play_puts_unbounds_addons_in_its_client_and_leaves_the_players_own_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    original, play = _unbound_client(tmp_path)
+    own = play / "Interface" / "AddOns" / "Questie" / "Questie.toc"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"## Title: Questie\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == [] and steps == ["install unbound-addons", "config", "launch"]
+    for name, data in FOLDER_ADDONS.items():
+        assert (play / "Interface" / "AddOns" / name).read_bytes() == data, name
+    assert own.read_bytes() == b"## Title: Questie\n"
+    assert not (original / "Interface" / "AddOns" / "multiclass-resources").exists()
+    assert CHECK_ADDONS in _config(play)
+
+
+def test_the_realmlist_keeps_unbounds_own_login_port(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Config.wtf in the entry makes the Play pipeline write the realmlist, not `_launch`; it
+    must still say :3725 so the client does not reach WotLK's login on 3724."""
+    original, play = _unbound_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith("set realmlist 127.0.0.1:3725\n")
+    assert ":3724" not in _realmlist(play)
+
+
+def test_a_client_that_pressed_play_before_the_addons_still_gets_the_out_of_date_switch(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """A `seed` is written once; a client made and played before the addons shipped has used it
+    up, so the key must be an `always`."""
+    original, play = _unbound_client(tmp_path)
+    old = UNBOUND.model_copy(update={"client": UNBOUND.client.model_copy(update={"packs": ()})})
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=old)
+    ps.names = WORLD_UP
+    first.play()
+    assert client_packs.read_record(play).config_seeded
+    config = play / "WTF" / "Config.wtf"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(CHECK_ADDONS, 'SET checkAddonVersion "1"')
+        + 'SET gxWindow "1"\n',
+        encoding="utf-8",
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+
+    view.play()
+
+    text = _config(play)
+    assert CHECK_ADDONS in text and 'checkAddonVersion "1"' not in text
+    assert 'SET gxWindow "1"' in text, "a line of the player's own was touched"
+
+
+def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dropped(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    original, play = _unbound_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+    view.play()
+    addons = play / "Interface" / "AddOns"
+    old_res = addons / "multiclass-resources" / "multiclass-resources.lua"
+    old_art = addons / "multiclass-talents-ui" / "Art" / "UI-Frame.blp"
+    old_art.write_bytes(b"BLP2 the player's edit")  # a dropped file the player changed
+    own = addons / "Questie" / "Questie.toc"
+    own.parent.mkdir()
+    own.write_bytes(b"## Title: Questie\n")
+    shutil.rmtree(tmp_path / UNBOUND_MODULE)  # the module moves: one file changed, one dropped
+    newer = dict(FOLDER_ADDONS)
+    del newer["multiclass-talents-ui/Art/UI-Frame.blp"]
+    newer["multiclass-resources/multiclass-resources.lua"] = b"return 2\r\n"
+    _lay_folder_module(tmp_path, newer, module=UNBOUND_MODULE)
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["install unbound-addons", "config", "launch"]
+    assert old_res.read_bytes() == b"return 2\r\n", "the changed file was not replaced"
+    assert old_art.read_bytes() == b"BLP2 the player's edit", "an edited file was removed"
+    assert own.read_bytes() == b"## Title: Questie\n"
+    assert any(
+        "left alone because you changed them" in note and "UI-Frame.blp" in note
+        for note in view._play_notes
+    ), view._play_notes
 
 
 def test_a_folder_pack_is_no_download_in_the_make_dialog(

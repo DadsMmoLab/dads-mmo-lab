@@ -2547,7 +2547,30 @@
         "build": 12340,
         "notes": [
           "set realmlist 127.0.0.1:3725 (or the host's LAN/public IP and :3725 for other players); this server's login port is not WoW WotLK's"
-        ]
+        ],
+        "packs": [
+          {
+            "id": "unbound-addons",
+            "label": "Unbound addons",
+            "description": "The Unbound talent window, the multi-resource bar and the Unbound spellbook.",
+            "source": {
+              "kind": "checkout_folder",
+              "path": "modules/mod-unbound/client/Interface/AddOns"
+            },
+            "sha256_file": "modules/mod-unbound/MANIFEST.sha256",
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ]
+          }
+        ],
+        "config_wtf": {
+          "always": {
+            "checkAddonVersion": "0"
+          }
+        }
       },
       "play": {
         "equipped": {

@@ -187,6 +187,46 @@ def test_the_install_checks_what_the_unbound_sql_must_have_made() -> None:
     ]
 
 
+# -- T2: the ready-to-play client's addons ------------------------------------------
+
+
+def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> None:
+    client = unbound().client
+    assert [p.id for p in client.packs] == ["unbound-addons"]
+    pack = client.packs[0]
+    assert pack.label == "Unbound addons"
+    assert (pack.source.kind, pack.source.path) == (
+        "checkout_folder",
+        "modules/mod-unbound/client/Interface/AddOns",
+    )
+    assert pack.sha256_file == "modules/mod-unbound/MANIFEST.sha256"
+    assert (pack.sha256, pack.md5, pack.md5_file) == (None, None, None)
+    assert [(r.member, r.to_dir, r.to) for r in pack.install] == [("*", "Interface/AddOns", None)]
+    assert not pack.optional, "required: every Play keeps the client half in step with the server"
+
+
+def test_the_pack_reads_the_module_the_entry_builds() -> None:
+    """The folder and the list sit in the checkout the entry pins as `modules/mod-unbound`."""
+    pack = unbound().client.packs[0]
+    dests = {s.dest for s in unbound().emulator.sources}
+    for path in (pack.source.path, pack.sha256_file):
+        assert path is not None and path.startswith("modules/mod-unbound/")
+    assert "modules/mod-unbound" in dests
+
+
+def test_load_out_of_date_addons_is_set_at_every_play_never_only_once() -> None:
+    cfg = unbound().client.config_wtf
+    assert cfg is not None
+    assert {k.casefold(): v for k, v in cfg.always.items()} == {"checkaddonversion": "0"}
+    assert cfg.seed == {}, "a seed is skipped on a client that already pressed Play once"
+    assert not cfg.remove_locale_realmlists
+
+
+def test_wotlks_client_has_no_packs_and_no_config_wtf() -> None:
+    client = load_catalog().get("wow-wotlk").client
+    assert client.packs == () and client.config_wtf is None and client.exe_patch is None
+
+
 def test_the_installer_runs_the_patch_and_lua_stages_and_wotlks_tuple_is_unchanged() -> None:
     names = make_installer(unbound()).stage_names()
     assert "patch-sources" in names and "lua-and-sql" in names
