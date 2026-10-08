@@ -560,7 +560,9 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     # The press again: the fetch lays the repository's unpatched bytes, as a
     # real `reset --hard` does, and the press patches them before it compiles.
     rec.on_clone = lay_patch_sources(TBC)
-    _, raised = _said(tbc_engine(rec).update_to_latest(InstallOptions(server_dir=server_dir)))
+    # T531: the update's world catch-up asks whether the world is down; it is.
+    stopped = tbc_engine(rec, world_running=lambda container: False)
+    _, raised = _said(stopped.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert raised is None, raised
     assert {path: path.read_bytes() for path in patched} == patched_bytes
 
