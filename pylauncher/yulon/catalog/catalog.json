@@ -94,6 +94,7 @@
       "client": {
         "version": "3.3.5a",
         "build": 12340,
+        "required_build": 12340,
         "notes": [
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
@@ -1891,6 +1892,7 @@
       "client": {
         "version": "3.3.5a",
         "build": 12342,
+        "required_build": 12340,
         "notes": [
           "Your own English (enUS) 3.3.5a client, build 12340: Yu'lon makes a ready-to-play copy of it with Centurion's patches and a Wow.exe that reports build 12342, and leaves your client as it was."
         ],

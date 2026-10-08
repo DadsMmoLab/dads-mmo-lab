@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
+- **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
@@ -48,6 +49,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 - **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
+- A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
