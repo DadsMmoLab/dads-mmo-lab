@@ -1426,7 +1426,12 @@ def source_version(
         line = _revs_line(read)
         if moved:
             line = f"{line}\n{PIN_MOVED_NOTE}"
-        return SourceVersion(line=line, past_the_pin=any(not on_its_pin(row) for row in read))
+        # A row for a repo the press no longer moves (the catalog renamed or dropped
+        # it) is history on the line, not a reason to offer a compile that cannot
+        # move it. Without a catalog reading every row counts, as before T588.
+        moves = {pin.repo for pin in pins}
+        counted = [row for row in read if not moves or row.repo in moves]
+        return SourceVersion(line=line, past_the_pin=any(not on_its_pin(row) for row in counted))
     by_repo = {row.repo: row for row in off}
     rows = source_revs_line(state).splitlines() if state is not None else []
     revs = state.source_revs if state is not None else ()

@@ -353,3 +353,18 @@ def test_a_stale_record_whose_folder_is_already_on_the_new_pin_is_offered_nothin
     # HEAD unread: the record still decides, as before.
     unread = native.source_version(_state(row), (), (_pin(CORE, NEW_CORE, None),))
     assert unread.past_the_pin is True
+
+
+def test_a_recorded_source_the_catalog_no_longer_moves_offers_nothing() -> None:
+    """Codex adversarial round 2: a row for a repo the press no longer moves cannot drive it.
+
+    The press moves `sources_that_move()` only; a row left from a source the
+    catalog renamed or dropped would keep an hour's compile on offer that never
+    moves it. It stays on the line as history.
+    """
+    gone = native.SourceRev("old/renamed", f"{AHEAD[:7]} · 2026-09-01", pin=OLD_CORE, ahead=4)
+    said = native.source_version(_state(gone), (), (_pin(CORE, NEW_CORE, NEW_CORE),))
+    assert said.past_the_pin is False
+    assert said.line.startswith(f"Built from {AHEAD[:7]}")
+    # With no catalog reading at all, the record alone decides, as before T588.
+    assert native.source_version(_state(gone)).past_the_pin is True
