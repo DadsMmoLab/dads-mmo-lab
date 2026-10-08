@@ -87,8 +87,34 @@ public:
         PLAYERHOOK_ON_PLAYER_HAS_ACTIVE_POWER_TYPE,
         PLAYERHOOK_ON_LOGIN,
         PLAYERHOOK_ON_AFTER_UPDATE_MAX_POWER,
-        PLAYERHOOK_ON_DELETE_FROM_DB
+        PLAYERHOOK_ON_DELETE_FROM_DB,
+        PLAYERHOOK_ON_PLAYER_IS_CLASS
     }) {}
+
+    // Rogue and hunter abilities for a character that added the class.
+    // The core asks Player::IsClass(CLASS_ROGUE, CLASS_CONTEXT_ABILITY) before
+    // it hands out pickpocket loot (LootHandler.cpp, three sites: "You do not
+    // have permission to loot that corpse" otherwise), and
+    // IsClass(CLASS_HUNTER, CLASS_CONTEXT_PET) before Tame Beast tames
+    // (Spell::EffectTameCreature returns silently otherwise) and before a
+    // stable master offers the stable (PlayerGossip.cpp).
+    // Keyed on the spell, not on the Unbound class mask: the mask is built at
+    // login, so it is stale after an unlock until the next login, while the
+    // spell is there the moment it is learned. Only "true" is ever answered;
+    // every other question falls through to the native class.
+    // mod-multiclass-summons answers the hunter PET question for Call Pet (883)
+    // the same way; this adds Tame Beast (1515) for a character without it.
+    Optional<bool> OnPlayerIsClass(Player const* player, Classes playerClass, ClassContext context) override
+    {
+        constexpr uint32 SPELL_PICK_POCKET = 921;
+        constexpr uint32 SPELL_TAME_BEAST  = 1515;
+
+        if (playerClass == CLASS_ROGUE && context == CLASS_CONTEXT_ABILITY && player->HasSpell(SPELL_PICK_POCKET))
+            return true;
+        if (playerClass == CLASS_HUNTER && context == CLASS_CONTEXT_PET && player->HasSpell(SPELL_TAME_BEAST))
+            return true;
+        return std::nullopt;
+    }
 
     // Called only when a character is removed for good (Player::DeleteFromDB,
     // CHAR_DELETE_REMOVE, after the core's own deletes and before the commit).

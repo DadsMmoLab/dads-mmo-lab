@@ -82,4 +82,10 @@ VALUES
 (10058, 762, 0, 0, 0, 0, 0, 0),
 (10059, 770, 0, 0, 0, 0, 0, 0),
 (10060, 771, 0, 0, 0, 0, 0, 0),
-(10061, 772, 0, 0, 0, 0, 0, 0);
+(10061, 772, 0, 0, 0, 0, 0, 0),
+-- ── Lockpicking (added after v1.4.0) ────────────────────────────────────────
+-- Without a row, a character that adds rogue never keeps Lockpicking: learning
+-- Pick Lock gives no skill (LearnDefaultSkill finds no row), _LoadSkills
+-- deletes any it has at the next login, and UpdateSkillsForLevel never raises
+-- its cap. SkillTierID=0 makes it level-scaled (cap = level x 5), as for a rogue.
+(10062, 633, 0, 0, 0, 0, 0, 0);
