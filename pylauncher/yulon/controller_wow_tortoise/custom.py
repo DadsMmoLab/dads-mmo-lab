@@ -150,7 +150,7 @@ def read_package(root: Path, name: str, shipped_addons: Mapping[str, str]) -> Pa
     agree. A refusal is a sentence without a closing clause: whether anything
     was changed is the caller's to say.
     """
-    cpp = _first_cpp(root / "src")
+    cpp = _first_cpp(root)
     if cpp is not None:
         return (
             f"{name} holds C++ source ({cpp.relative_to(root).as_posix()}), so it is a server "
@@ -207,11 +207,19 @@ def unused(manifest: Manifest) -> tuple[str, ...]:
 # ------------------------------------------------------------------ reading
 
 
-def _first_cpp(src: Path) -> Path | None:
-    if not src.is_dir():
+def _first_cpp(root: Path) -> Path | None:
+    """The first C/C++ source anywhere in the package (`.git` aside), in name order.
+
+    Anywhere, not only `src/` (Codex review): a module's code in `Src/`, at the
+    top or one folder down is still server code, and taking the package as an
+    add-on would leave it unused without a word.
+    """
+    if not root.is_dir():
         return None
-    for path in sorted(src.rglob("*")):
-        if path.is_file() and path.suffix.lower() in CPP_SUFFIXES:
+    for path in sorted(root.rglob("*")):
+        if ".git" in path.relative_to(root).parts:
+            continue
+        if path.suffix.lower() in CPP_SUFFIXES and path.is_file():
             return path
     return None
 

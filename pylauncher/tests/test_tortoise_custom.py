@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from yulon import module_source
-from yulon.apply import CompletionRefused
+from yulon.apply import ApplyRefusal, CompletionRefused
 from yulon.controller_wow_tortoise import custom
 from yulon.manifest import Manifest
 from yulon.module_source import DeriveError
@@ -229,6 +229,9 @@ def test_an_addon_in_a_top_folder_of_its_own_name_is_found(tmp_path: Path) -> No
     ("files", "said"),
     [
         ({"src/core.cpp": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "C++"),
+        ({"Src/core.CPP": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "C++"),
+        ({"mod.cpp": "int x;\n", "Addon.toc": "## Interface: 11200\n"}, "C++"),
+        ({"server/inc/gear.h": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "C++"),
         ({"Wotlk.toc": "## Interface: 30300\n"}, "30300"),
         ({"sql/only.sql": "DELETE FROM a;\n", "patches/core.patch": "x\n"}, "nothing in"),
         ({}, "nothing in"),
@@ -423,3 +426,28 @@ def test_a_folder_carrying_a_shipped_addon_is_refused_before_the_copy(tmp_path: 
     with pytest.raises(DeriveError) as refused:
         tortoise_modules.derive_folder(folder)
     assert "already ships" in str(refused.value) and str(refused.value).endswith(NOTHING)
+
+
+def test_a_first_install_refused_by_a_running_world_leaves_no_folder_and_no_record(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the record `complete()` persisted goes with the folder taken back."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    git = _Clone({"data/sql/character/20260915090000_char.sql": CHAR_SQL})
+    sql = _Db()
+    applier = tortoise_modules.applier(
+        server,
+        sql=sql,
+        arming=lambda: autoupdate.Arming(enabled=False),
+        world_running=lambda: True,
+        git=git,  # type: ignore[arg-type]
+        client_dir=client,
+    )
+    manifest = tortoise_modules.derive_link("you/bot-gear-pack")
+    with pytest.raises(ApplyRefusal) as refused:
+        tortoise_modules.install_custom(applier)(manifest, None)
+    assert "world server is running" in str(refused.value)
+    assert sql.sent == []
+    assert not (server / "sql_scripts" / "clones" / "bot-gear-pack").exists()
+    assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("mod")}

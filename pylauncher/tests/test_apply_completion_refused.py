@@ -108,3 +108,78 @@ def test_a_refused_completion_over_a_folder_that_was_there_keeps_it_and_says_so(
     said = str(refused.value)
     assert "Nothing was changed" not in said
     assert "sql_scripts/clones/mobstats" in said
+
+
+def test_a_first_install_refused_after_its_completion_takes_its_folder_back_too(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the running-world refusal comes after the completion; the folder goes too."""
+
+    class _Sql:
+        def run_file(self, db: str, path: Path) -> None:
+            raise AssertionError("nothing may be sent")
+
+        def run_statement(self, db: str, statement: str) -> None:
+            raise AssertionError("nothing may be sent")
+
+    def with_sql(manifest: Manifest, clone: Path) -> Manifest:
+        (clone / "a.sql").write_text("DELETE FROM x;\n", encoding="utf-8")
+        return parse_manifest({**manifest.model_dump(), "sql": [{"db": "world", "path": "a.sql"}]})
+
+    applier = Applier(tmp_path, git=_Clone(), sql=_Sql(), world_running=lambda: True)
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(_manifest(source=True), complete=with_sql)
+    assert not (tmp_path / "sql_scripts" / "clones" / ITEM).exists()
+    assert "world server is running" in str(refused.value)
+    assert str(refused.value).endswith(
+        "sql_scripts/clones/mobstats, which this press had just made, was taken back."
+    )
+
+
+def test_a_first_install_that_failed_while_sending_sql_keeps_its_folder(tmp_path: Path) -> None:
+    """Once anything went to the database, the folder and its record stay for Remove."""
+    from yulon.apply import ApplyError
+
+    class _Sql:
+        def run_file(self, db: str, path: Path) -> None:
+            raise ApplyError("ERROR 1146: no such table")
+
+        def run_statement(self, db: str, statement: str) -> None:
+            raise ApplyError("ERROR 1146: no such table")
+
+    def with_sql(manifest: Manifest, clone: Path) -> Manifest:
+        (clone / "a.sql").write_text("DELETE FROM x;\n", encoding="utf-8")
+        return parse_manifest({**manifest.model_dump(), "sql": [{"db": "world", "path": "a.sql"}]})
+
+    applier = Applier(tmp_path, git=_Clone(), sql=_Sql(), world_running=lambda: False)
+    with pytest.raises(ApplyError):
+        applier.install(_manifest(source=True), complete=with_sql)
+    assert (tmp_path / "sql_scripts" / "clones" / ITEM).is_dir()
+
+
+def test_a_wotlk_first_install_refused_after_completion_forgets_its_record(
+    tmp_path: Path,
+) -> None:
+    """The WotLK binding persists in `complete()`; a folder taken back takes the record too."""
+    import os
+
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("not the module's\n", encoding="utf-8")
+
+    class _LinkedConf:
+        def clone(self, spec: CloneSpec) -> None:
+            (spec.dest / "conf").mkdir(parents=True)
+            os.symlink(target, spec.dest / "conf" / "linked.conf.dist")
+            (spec.dest / ".git").mkdir()
+
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, git=_LinkedConf())
+    manifest = wotlk_modules.derive_link("https://github.com/you/mod-linked-conf")
+    with pytest.raises(ApplyRefusal) as refused:
+        wotlk_modules.install_custom(applier)(manifest, None)
+    assert "was taken back" in str(refused.value)
+    assert not (server / "modules" / "mod-linked-conf").exists()
+    assert "mod-linked-conf" not in {m.id for m in wotlk_modules.store().load_all("module")}

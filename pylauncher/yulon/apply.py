@@ -2408,6 +2408,10 @@ class _Log:
     # T476. Set by `_check_exists()` when IT had to start the database alone:
     # `Applier._says_the_database_is_up()` then names it if the install stops early.
     database_started: bool = False
+    # T596. Set by `_sql()` just before it hands anything to the SQL runner:
+    # from then on a failed first install keeps its folder (and its record),
+    # because the database may hold part of what it sent.
+    sql_attempted: bool = False
 
 
 def take_back_file(
@@ -3498,25 +3502,34 @@ class Applier:
             try:
                 manifest = self._completed(manifest, clone, complete)
             except BaseException as exc:
-                self._after_a_refused_completion(clone, first, exc)
+                self._take_back_a_first_install(clone, first, exc, completing=True)
                 raise
-        self._refuse_checkout_links(manifest, clone, "install", vals)
-        self._refuse_a_clash(manifest, clone)
-        self._refuse_links(manifest, clone)
-        self._deploy(manifest, clone, log)
-        self._folders(manifest, log)
-        self._patches(manifest, clone, vals, "install", log)
-        # Both SQL passes are refused as one, BEFORE either runs: the guard's
-        # own sentence says no rows were written, and after the install-time
-        # pass that would be false of the configure-time one.
-        if first_configure_sql:
-            self._refuse_direct_sql_into_a_running_world(manifest, "configure")
         sent = log.sql_sent
-        if restore is None:
-            self._sql(manifest, clone, vals, "install", log, undo=undo)
-        elif restore.sql:
-            # D5: nothing is undone in the database, and the report says so.
-            log.skipped.append(PUT_BACK_KEPT_SQL)
+        try:
+            self._refuse_checkout_links(manifest, clone, "install", vals)
+            self._refuse_a_clash(manifest, clone)
+            self._refuse_links(manifest, clone)
+            self._deploy(manifest, clone, log)
+            self._folders(manifest, log)
+            self._patches(manifest, clone, vals, "install", log)
+            # Both SQL passes are refused as one, BEFORE either runs: the guard's
+            # own sentence says no rows were written, and after the install-time
+            # pass that would be false of the configure-time one.
+            if first_configure_sql:
+                self._refuse_direct_sql_into_a_running_world(manifest, "configure")
+            if restore is None:
+                self._sql(manifest, clone, vals, "install", log, undo=undo)
+            elif restore.sql:
+                # D5: nothing is undone in the database, and the report says so.
+                log.skipped.append(PUT_BACK_KEPT_SQL)
+        except BaseException as exc:
+            # T596 (Codex review): a FIRST install from a link or a folder that is
+            # refused before any SQL was sent -- a link in the checkout, a clash,
+            # the running-world guard, an unreadable ledger, a failed backup --
+            # takes its new folder back, so the next press starts clean.
+            if first and complete is not None and not log.sql_attempted:
+                self._take_back_a_first_install(clone, first, exc, completing=False)
+            raise
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "install", log)
             if moving:
@@ -4588,29 +4601,36 @@ class Applier:
             )
         return finished
 
-    def _after_a_refused_completion(self, clone: Path, first: bool, exc: BaseException) -> None:
-        """Take a first install's folder back, and finish a `CompletionRefused` sentence (T596).
+    def _take_back_a_first_install(
+        self, clone: Path, first: bool, exc: BaseException, *, completing: bool
+    ) -> None:
+        """Take a first install's folder back, and say so in the refusal (T596).
 
         Only a FIRST install's: a folder that was there before this press held
         the player's earlier install of the same item, and deleting it would be a
         Remove nobody pressed. Its claim and receipts went with the folder, so
-        nothing else of this press is left behind.
+        nothing else of this press is left behind. A `CompletionRefused` sentence
+        is finished here ("Nothing was changed."); any other refusal gets a
+        clause saying the folder went back.
         """
         rel = _rel(self.server_dir, clone)
         ending = f"{rel} now holds what was just fetched; nothing else was changed."
+        if not completing:
+            ending = f"{rel}, which this press had just made, was taken back."
         if first and os.path.lexists(clone):
             try:
                 rmtree.remove_tree(clone)
-                ending = "Nothing was changed."
+                if completing:
+                    ending = "Nothing was changed."
             except OSError as gone:
                 ending = (
                     f"{rel}, which this press made, could not be removed ({gone}); delete it "
                     "before trying again."
                 )
                 logger.warning(f"could not take back {clone} after a refused completion: {gone}")
-        elif first:
+        elif first and completing:
             ending = "Nothing was changed."
-        if isinstance(exc, CompletionRefused):
+        if isinstance(exc, CompletionRefused) or (not completing and isinstance(exc, ApplyError)):
             exc.args = (f"{exc} {ending}", *exc.args[1:])
 
     # -- the answers -------------------------------------------------------
@@ -5436,6 +5456,7 @@ class Applier:
             and reapplies_on_top(manifest)
             and not reapply_steps_problem(manifest)
         ):
+            log.sql_attempted = True
             self._run_relative(manifest, vals, when, undo, log)
             return
         for index, step in enumerate(manifest.sql):
@@ -5460,6 +5481,7 @@ class Applier:
                 continue
             if not self._precondition_met(step, log):
                 continue
+            log.sql_attempted = True
             if index in migrations:
                 self._run_migration(step, migrations[index], log)
             else:
@@ -5736,6 +5758,7 @@ class Applier:
         if self.sql is None:
             return {}
         found: dict[int, _Migration] = {}
+        refusals: list[str] = []
         for index, step in enumerate(manifest.sql):
             if step.migration_module is None or step.when != when or step.path is None:
                 continue
@@ -5754,23 +5777,29 @@ class Applier:
             try:
                 text = data.decode("utf-8-sig")
             except UnicodeDecodeError as exc:
-                found[index] = _Migration(
-                    name, path, digest, record, None, f"not UTF-8 text ({exc.reason})"
+                refusals.append(
+                    f"{name}: not UTF-8 text ({exc.reason} at byte {exc.start}), and Yu'lon "
+                    "sends a package's SQL as text"
                 )
                 continue
-            refusal = transaction_refusal(name, text)
-            if refusal:
-                found[index] = _Migration(name, path, digest, record, None, refusal)
-                continue
             body = text if text.endswith("\n") else text + "\n"
+            alone = transaction_refusal(name, text)
+            if alone:
+                # Still ONE script: `mysql` stops at the first error, so the row
+                # is written only when every statement of the file succeeded.
+                found[index] = _Migration(
+                    name, digest, record, MIGRATIONS_TABLE_DDL + body + record + "\n", alone
+                )
+                continue
             found[index] = _Migration(
                 name,
-                path,
                 digest,
                 record,
                 MIGRATIONS_TABLE_DDL + "START TRANSACTION;\n" + body + record + "\nCOMMIT;\n",
                 "",
             )
+        if refusals:
+            raise ApplyRefusal(f"{manifest.id}: nothing was run. " + " ".join(refusals))
         return found
 
     def _already_in_the_ledger(
@@ -5870,30 +5899,35 @@ class Applier:
                 log.world_stopped = True
 
     def _run_migration(self, step: SqlStep, migration: _Migration, log: _Log) -> None:
-        """Send a ledgered file and its row: as one transaction, or the file then the row."""
+        """Send a ledgered file and its row as ONE script: in a transaction when it can be.
+
+        Either way the row is the script's last statement and `mysql` stops at the
+        first error, so the row exists only when the whole file ran. A file that
+        cannot be one transaction (DDL commits by itself) can still be left part
+        applied by a failure, and the error says so.
+        """
         assert self.sql is not None
         where = f"recorded in its migrations ledger as {step.migration_module}"
-        if migration.text is not None:
-            self.sql.run_statement(step.db, migration.text)
-            log.done.append(f"sql {migration.name} → {step.db} ({where})")
-            return
-        self.sql.run_statement(step.db, MIGRATIONS_TABLE_DDL)
         try:
-            self.sql.run_file(step.db, migration.path)
+            self.sql.run_statement(step.db, migration.text)
         except ApplyError as exc:
-            exc.args = (
-                f"{exc}. {migration.name} could not run inside one transaction "
-                f"({migration.alone}), so the statements before the failing one may have stayed "
-                "applied. Its row was not written to the migrations ledger, so installing again "
-                "sends it again.",
-                *exc.args[1:],
-            )
+            if migration.alone:
+                exc.args = (
+                    f"{exc}. {migration.name} could not run inside one transaction "
+                    f"({migration.alone}), so the statements before the failing one may have "
+                    "stayed applied, and its row in the migrations ledger was not written: "
+                    "check the database before installing again, which sends the whole file "
+                    "again.",
+                    *exc.args[1:],
+                )
             raise
-        self.sql.run_statement(step.db, migration.record)
-        log.done.append(
-            f"sql {migration.name} → {step.db}, then {where} (not one transaction: "
-            f"{migration.alone})"
-        )
+        if migration.alone:
+            log.done.append(
+                f"sql {migration.name} → {step.db}, then {where} (not one transaction: "
+                f"{migration.alone})"
+            )
+        else:
+            log.done.append(f"sql {migration.name} → {step.db} ({where})")
 
     def _run_transaction(
         self, step: SqlStep, planned: tuple[tuple[str, ...], str], log: _Log
@@ -7134,13 +7168,12 @@ class _Migration:
 
     name: str
     """The clone-relative path, as the report names it."""
-    path: Path
     digest: str
     """SHA1 of the bytes, upper-case hex: the server updater's own `Hash`."""
     record: str
     """The `INSERT` of its ledger row."""
-    text: str | None
-    """The DDL, the file and its row as ONE transaction, or None when it must go alone."""
+    text: str
+    """The table's DDL, the file and its row as ONE script: one transaction when it can be."""
     alone: str
     """Why it cannot be one transaction; empty when it can."""
 

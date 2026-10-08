@@ -10,6 +10,7 @@ particular module does; that is all in `manifests/wow-wotlk/` (§3).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
@@ -212,9 +213,18 @@ def install_custom(applier: Applier) -> CustomInstall:
 
     def install(manifest: Manifest, folder: Path | None, *, replacing: bool = False) -> ApplyReport:
         source = FolderSource(folder, copy_folder) if folder is not None else None
-        return applier.install(
-            manifest, None, folder=source, complete=complete, replacing=replacing
-        )
+        first = not os.path.lexists(applier.clone_dir(manifest))
+        try:
+            return applier.install(
+                manifest, None, folder=source, complete=complete, replacing=replacing
+            )
+        except BaseException:
+            # T596: the applier takes a refused FIRST install's folder back, so the
+            # record `complete()` persisted goes too; a row with nothing behind it
+            # would offer an Install of a folder that is gone.
+            if first and not os.path.lexists(applier.clone_dir(manifest)):
+                forget(manifest)
+            raise
 
     return install
 

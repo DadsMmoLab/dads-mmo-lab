@@ -232,37 +232,53 @@ def test_a_reader_less_runner_refuses_a_ledgered_step_rather_than_guessing(
     assert runner.sent == []
 
 
-def test_a_file_that_cannot_be_one_transaction_runs_then_gets_its_row(tmp_path: Path) -> None:
-    """DDL commits by itself, so the file goes alone and the row follows only if it ran."""
+def test_a_file_that_cannot_be_one_transaction_still_goes_with_its_row_as_one_script(
+    tmp_path: Path,
+) -> None:
+    """DDL commits by itself, so no transaction; the row is still the script's last statement.
+
+    `mysql` stops at the first error, so the row is written only when every
+    statement of the file ran (Codex review: a separate INSERT could fail after
+    the file and leave it unrecorded, to be sent again).
+    """
     server = _server(tmp_path, {WORLD_FILE: WITH_DDL})
     ledger = _Ledger()
     report = _applier(server, ledger).install(_manifest(("world", WORLD_FILE)))
 
-    assert [(k, db) for k, db, _ in ledger.sent] == [
-        ("statement", "world"),
-        ("file", "world"),
-        ("statement", "world"),
-    ]
-    assert ledger.sent[0][2].startswith("CREATE TABLE IF NOT EXISTS `migrations`")
-    assert ledger.sent[1][2] == WITH_DDL
-    assert ledger.sent[2][2] == _insert(ITEM, "20260915090100_world", _sha1(WITH_DDL))
+    assert len(ledger.sent) == 1, ledger.sent
+    kind, db, text = ledger.sent[0]
+    assert (kind, db) == ("statement", "world")
+    assert text.startswith("CREATE TABLE IF NOT EXISTS `migrations`")
+    row = _insert(ITEM, "20260915090100_world", _sha1(WITH_DDL))
+    assert text.endswith(WITH_DDL + row + "\n")
+    assert "START TRANSACTION" not in text
     assert any("one transaction" in line for line in report.done), report.done
 
 
-def test_a_lone_file_that_fails_says_part_may_be_applied_and_writes_no_row(
-    tmp_path: Path,
-) -> None:
+def test_a_lone_file_that_fails_says_part_may_be_applied(tmp_path: Path) -> None:
     class _Fails(_Ledger):
-        def run_file(self, db: Db, path: Path) -> None:
+        def run_statement(self, db: Db, statement: str) -> None:
             raise ApplyError("ERROR 1062 (23000) at line 2: Duplicate entry")
 
     server = _server(tmp_path, {WORLD_FILE: WITH_DDL})
-    ledger = _Fails()
     with pytest.raises(ApplyError) as failed:
-        _applier(server, ledger).install(_manifest(("world", WORLD_FILE)))
-    assert not any("INSERT INTO `migrations`" in text for _, _, text in ledger.sent)
+        _applier(server, _Fails()).install(_manifest(("world", WORLD_FILE)))
     said = str(failed.value)
-    assert "Duplicate entry" in said and "may have stayed" in said
+    assert "Duplicate entry" in said and "may have" in said and "was not written" in said
+
+
+def test_a_file_that_is_not_utf8_is_refused_before_anything_is_sent(tmp_path: Path) -> None:
+    server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY})
+    clone = server / "sql_scripts" / "clones" / ITEM
+    (clone / WORLD_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (clone / WORLD_FILE).write_bytes(b"UPDATE x SET name = '\xe9t\xe9';\n")
+    ledger = _Ledger()
+    with pytest.raises(ApplyRefusal) as refused:
+        _applier(server, ledger).install(
+            _manifest(("characters", CHAR_FILE), ("world", WORLD_FILE))
+        )
+    assert ledger.sent == [] and ledger.queries == []
+    assert "not UTF-8" in str(refused.value)
 
 
 def test_files_run_in_the_order_the_manifest_lists_them(tmp_path: Path) -> None:
