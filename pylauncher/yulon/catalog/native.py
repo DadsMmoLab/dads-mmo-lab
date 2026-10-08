@@ -7925,11 +7925,17 @@ class StagedInstaller:
         missing_images_ok: bool = False,
         servers_down: ServersDownWork | None = None,
         press: str = server_build_presses.REBUILD,
+        landed: Callable[[], None] | None = None,
     ) -> Iterator[str]:
         """Recompile this install and restart it on what was compiled. Yields output live.
 
         `press` is the "Server build ▾" entry that started this, named where a sentence
         says what pressing it again does (T223); the update route passes its own.
+
+        `landed` is the update route's record of where its sources landed (`source_revs`,
+        T589 cold review): called once the press has succeeded and the build record is
+        written, BEFORE `after_ready()`, which may start the movement-map job that stamps
+        its generation from both. Must not raise.
 
         `servers_down` is the update route's (T179): what the family does between
         the recreate's stop and its start, and again in a rollback's window before
@@ -8421,6 +8427,8 @@ class StagedInstaller:
         # T589: and from these commits. Before `after_ready()`, which may start the movement
         # map job that stamps its generation from this record.
         remember_built_from(server_dir, compiled_from)
+        if landed is not None:
+            landed()
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
@@ -8933,8 +8941,17 @@ class StagedInstaller:
                 did_not_come_back=lambda: self._old_build_down(copy),
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
+            releases = {repo: said.tag for repo, said in targets.items() if said.tag}
             try:
-                yield from self.rebuild(opts, cancel=cancel, servers_down=work, press=press)
+                # T589 cold review: the row is written inside `rebuild()`, after its success
+                # and before `after_ready()` starts the movement-map job, which reads it.
+                yield from self.rebuild(
+                    opts,
+                    cancel=cancel,
+                    servers_down=work,
+                    press=press,
+                    landed=lambda: self._record_source_revs(server_dir, state, moved, releases),
+                )
                 yield from work.done()
                 self._forget_older_copies(server_dir, copy)
             except WorldStoppedAfterReadyError as exc:
@@ -9093,12 +9110,6 @@ class StagedInstaller:
                 # T217: nor is the copy put back -- that needs a yield and a restore.
                 work.settle()
                 raise
-            self._record_source_revs(
-                server_dir,
-                state,
-                moved,
-                {repo: said.tag for repo, said in targets.items() if said.tag},
-            )
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )
@@ -9531,7 +9542,9 @@ class StagedInstaller:
     ) -> None:
         """Write where each moved source ended up into the install record.
 
-        LAST, after the rebuild succeeded, and that is the point of it: this key
+        LAST, after the rebuild succeeded (since T589's cold review from inside
+        `rebuild()`, as its `landed`, so the movement-map job its `after_ready()` may
+        start reads this row), and that is the point of it: this key
         is read by the tab's version line as "what the running server was built
         from", and a record written before the compile would describe a build
         that may never have happened. A press that fails writes nothing here at

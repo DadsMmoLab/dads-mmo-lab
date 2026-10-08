@@ -1472,6 +1472,42 @@ def test_a_run_is_stamped_with_the_generation_of_the_build_not_of_the_catalog(
     assert record(server)["generation"] == 2
 
 
+def test_an_update_past_the_pin_stamps_its_run_with_the_pins_generation(box: Machine) -> None:
+    """T589 cold review: the route records where it landed BEFORE the run starts.
+
+    `rebuild()` starts the job (`after_ready()`) at its end, and the update route used to write
+    the `source_revs` row only after `rebuild()` returned, so a run after an Update that landed
+    past the pin read the old row and was stamped 1; the next Update then threw the finished
+    set away (`_drop_outdated()`), every time. A second Update keeps it.
+    """
+    current = with_generation(2)
+    (source,) = current.emulator.sources
+    lay = box.rec.on_clone
+
+    def on_clone(dest: Path) -> None:
+        if lay is not None:
+            lay(dest)
+        (dest / ".git" / "HEAD").write_text(f"{box.rec.heads[dest]}\n", encoding="utf-8")
+
+    box.rec.on_clone = on_clone
+    install(box, entry=current)
+    assert native.read_built_from(box.server_dir) == {source.repo: source.rev}
+    box.mmaps.finish(139)
+    dest = box.server_dir / source.dest
+    eng = engine(box, entry=current)
+    box.rec.upstream[dest] = "b" * 40
+    list(eng.update_to_latest(InstallOptions(server_dir=box.server_dir)))
+    assert native.read_built_from(box.server_dir) == {source.repo: "b" * 40}
+    assert record(box.server_dir)["state"] == "queued" or box.mmaps.jobs, "a run started"
+    assert record(box.server_dir)["generation"] == 2
+    box.mmaps.finish(0, tiles=MIN_FILES)
+    assert eng.mmaps_status(box.server_dir).state == "done"
+    box.rec.upstream[dest] = "c" * 40
+    list(eng.update_to_latest(InstallOptions(server_dir=box.server_dir)))
+    assert len(output(box.server_dir)) == MIN_FILES, "the second Update keeps the finished set"
+    assert record(box.server_dir)["state"] == "done"
+
+
 def test_kept_tiles_of_another_generator_are_not_continued(server: Path) -> None:
     """T589: a failed run's tiles from the old generator are not finished by the new one."""
     current = with_generation(2)
