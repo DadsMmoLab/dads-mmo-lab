@@ -5,8 +5,9 @@ its talent bridge, its talent data) names the scripts in its catalog block
 (`AzerothCoreData.lua_scripts`): a folder or a file inside a checkout the install
 cloned, and the folder under `env/dist/etc/modules/lua_scripts/` it goes to. The
 world reads that folder only when it starts, so the scripts are laid before the
-world first starts, again before every rebuild, and again when an update has moved
-the checkout they come from (`AzerothCoreInstaller`'s hooks say where).
+world first starts, again on every rebuild, and again when an update has moved
+the checkout they come from -- with the old world stopped (T562), after the
+compile (`AzerothCoreInstaller`'s hooks say where).
 
 **Only Yu'lon's own copies are ever replaced.** Each file written is recorded by
 its SHA-256 in `RECORD_FILE`, in the script folder. A file on disk is replaced only
@@ -329,6 +330,41 @@ def _renamed_in_place(
     return found
 
 
+def _refuse_before_writing(
+    server_dir: Path, specs: Sequence[LuaScripts]
+) -> tuple[str, list[_Planned]]:
+    """The refusals that come before any write: a link at the destination, a bad source.
+
+    Returns the press `lay()` names when it refuses, and every file it would lay.
+    """
+    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    # The script folder, each entry's own folder in it, and the record: none may be
+    # a link (or under one), or the press would write where the link points. Asked
+    # before anything is read or written, so a refusal here writes nothing at all.
+    for target in (
+        record_path(server_dir),
+        *(server_dir / spec.dest.rstrip("/") / RECORD_FILE for spec in specs),
+    ):
+        link = target if target.is_symlink() else _through_a_link(server_dir, target)
+        if link is not None:
+            raise _link_refusal(server_dir, link, remedy)
+    return remedy, _plan(server_dir, specs, remedy)
+
+
+def check_layable(server_dir: Path, specs: Sequence[LuaScripts]) -> None:
+    """Make `lay()`'s refusals that come before a write, without laying anything (T562).
+
+    A press that lays with the old world stopped asks this first, while a refusal
+    still leaves everything as it was: the lay itself runs after the compile.
+
+    Raises:
+        InstallerError: a source is not there or has a link in it, or the place the
+            scripts go is a link.
+    """
+    if specs or record_path(server_dir).exists():
+        _refuse_before_writing(server_dir, specs)
+
+
 def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -> Iterator[str]:
     """Lay every script the specs name; one line per file that changed or was kept.
 
@@ -346,18 +382,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     """
     if not specs and not record_path(server_dir).exists():
         return
-    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
-    # The script folder, each entry's own folder in it, and the record: none may be
-    # a link (or under one), or the press would write where the link points. Asked
-    # before anything is read or written, so a refusal here writes nothing at all.
-    for target in (
-        record_path(server_dir),
-        *(server_dir / spec.dest.rstrip("/") / RECORD_FILE for spec in specs),
-    ):
-        link = target if target.is_symlink() else _through_a_link(server_dir, target)
-        if link is not None:
-            raise _link_refusal(server_dir, link, remedy)
-    planned = _plan(server_dir, specs, remedy)
+    remedy, planned = _refuse_before_writing(server_dir, specs)
     folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
     to_delete = f"{folders} and that file" if folders else "that file"
     record, unreadable, had_pending = _read_record(server_dir)

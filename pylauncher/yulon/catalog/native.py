@@ -6538,6 +6538,24 @@ class StagedInstaller:
         """
         return iter(())
 
+    def lays_scripts_with_the_servers_down(self, server_dir: Path) -> bool:
+        """Does a rebuild of this install lay files once the old world has stopped (T562)?
+
+        False on the spine. The AzerothCore family's Lua scripts are read when the
+        world starts, so they are laid in the window between the stop and the start,
+        and a plain Rebuild then stops the servers in a call of its own, as the update
+        route always did, for the window to exist.
+        """
+        return False
+
+    def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
+        """Lay what `lays_scripts_with_the_servers_down()` says, with the servers stopped (T562).
+
+        Called by `stage_recreate()` after the stop and before the start, and by the
+        update route's put-back with the old sources back. Nothing on the spine.
+        """
+        return iter(())
+
     def check_moved_sources(
         self,
         server_dir: Path,
@@ -7932,7 +7950,9 @@ class StagedInstaller:
         and `before_replace` as its `before_signal`), `forward()`, then the same
         recreate as always -- its own stop finds nothing running. Without it, and on
         a rollback (whose servers `_restore_rollback()` has already stopped), the
-        one `recreate` call below.
+        one `recreate` call below. **A family that lays files for the world's start
+        (`lays_scripts_with_the_servers_down()`, T562) takes the two calls on a plain
+        Rebuild as well**, and lays between them.
 
         The stage the whole feature turns on. Everything above it can be
         perfect -- an hour of compiler output, four fresh images -- and if the
@@ -8006,8 +8026,12 @@ class StagedInstaller:
         # `before_replace` is its `before_signal`: past it, something may have
         # been touched; a Cancel before it leaves nothing touched.
         control = _stop_control(ctx, rollback=rollback)
-        if servers_down is not None and not rollback:
-            yield from servers_down.prepare()
+        stop_first = servers_down is not None or self.lays_scripts_with_the_servers_down(
+            ctx.server_dir
+        )
+        if stop_first and not rollback:
+            if servers_down is not None:
+                yield from servers_down.prepare()
 
             def stop_them(say: docker.OutputSink) -> None:
                 self._seams.stop_servers(
@@ -8041,7 +8065,10 @@ class StagedInstaller:
                     f"The server was rebuilt, but its servers could not be stopped to start the "
                     f"new build: {exc}"
                 ) from exc
-            yield from servers_down.forward(ctx)
+            # T562: the scripts the world reads at its start, laid now that nothing runs.
+            yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
+            if servers_down is not None:
+                yield from servers_down.forward(ctx)
 
         # T577: marked offline before the replace starts the new world, so the realm list says
         # Offline for the whole load. On the update route the old world is already down here,
@@ -9550,6 +9577,9 @@ class StagedInstaller:
             return failed
         try:
             yield from self.apply_carried_patches(server_dir)
+            # T562: the scripts follow the sources back; laid here, with the servers
+            # down on a rollback, and a no-op before the compile (nothing was laid yet).
+            yield from self.lay_scripts(server_dir, quiet=False)
         except SelfExplainedError as exc:
             # T563: a stage that already said what failed and what to do (a Lua
             # link, a record that could not be saved) is passed through as it
