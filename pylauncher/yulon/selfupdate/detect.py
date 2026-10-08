@@ -125,6 +125,15 @@ _MOUNT_PREFIXES = (".mount_", "appimage_extracted_")
 when the app exits.
 """
 
+_FIXED_RUNTIME_ROOTS = (Path("/run/firejail/appimage"),)
+"""Runtime folders with a fixed name: `firejail --appimage` loop-mounts there."""
+
+_PAYLOAD = Path("usr") / "bin" / "yulon"
+"""Where `release.yml` puts the program inside the AppImage (`$APPDIR/usr/bin/yulon`)."""
+
+_DESKTOP = "yulon.desktop"
+"""The desktop file `release.yml` writes at the root of the AppImage."""
+
 
 def _real(path: str | os.PathLike[str]) -> Path:
     """`path` with symlinks followed, whether or not it exists (a test's paths do not)."""
@@ -133,8 +142,10 @@ def _real(path: str | os.PathLike[str]) -> Path:
 
 def in_appimage_mount(executable: str | os.PathLike[str] | None = None) -> bool:
     """Whether `executable` sits inside a folder the AppImage runtime made for this run."""
-    exe = sys.executable if executable is None else executable
-    return any(part.startswith(_MOUNT_PREFIXES) for part in _real(exe).parts)
+    exe = _real(sys.executable if executable is None else executable)
+    return any(part.startswith(_MOUNT_PREFIXES) for part in exe.parts) or any(
+        exe.is_relative_to(root) for root in _FIXED_RUNTIME_ROOTS
+    )
 
 
 def appimage_file(
@@ -148,10 +159,17 @@ def appimage_file(
     environment is inherited: an AppImage terminal or file manager exports
     `APPIMAGE` and `APPDIR` to everything it starts, and a tarball launched
     from one is not that app (T578). So it is believed only when this process
-    really runs from that AppImage: `$APPDIR` is set to a runtime-made folder
-    (`_MOUNT_PREFIXES`), the running binary (`sys.executable`) lies under it, and
-    `$APPIMAGE` names a file that exists.
-    The runtime sets both variables together, so a real AppImage always passes.
+    is Yu'lon's own payload in that AppImage: `$APPDIR` is set, the running
+    binary (`sys.executable`) is exactly `$APPDIR/usr/bin/yulon`, the folder
+    holds the `yulon.desktop` `release.yml` writes, and `$APPIMAGE` names a file
+    that exists. The runtime sets both variables together, so a real AppImage
+    always passes.
+
+    **The layout, not the folder's name, is the proof**, because runtimes name
+    the folder differently: `.mount_XXXXXX` (type 2), `appimage_extracted_*`
+    (extract-and-run) and `/run/firejail/appimage` (`firejail --appimage`).
+    A broad `$APPDIR` (`/opt/apps`) does not hold a tarball's binary at that
+    spot, and an unrelated app's folder holds no `yulon`.
 
     The running binary is NOT the AppImage file; it is a path inside the
     runtime's temporary mount, gone when the app exits. Anything that must
@@ -164,12 +182,8 @@ def appimage_file(
     if not appimage or not appdir or not Path(appimage).is_file():
         return None
     root = _real(appdir)
-    if not root.name.startswith(_MOUNT_PREFIXES):
-        # The runtime's folder for this run, not a broad folder a launcher or a
-        # script set by hand: `/opt/apps` would contain a tarball's binary too.
-        return None
     exe = _real(sys.executable if executable is None else executable)
-    if not exe.is_relative_to(root):
+    if exe != _real(root / _PAYLOAD) or not (root / _DESKTOP).is_file():
         return None
     return Path(appimage)
 
@@ -189,9 +203,9 @@ def detect_install(
     variable of ours: where an update comes from, and what it replaces, are
     facts about the running process. `$APPIMAGE` is read because it is the
     AppImage runtime's own way of telling a payload where its file is — and it
-    is believed only when it names a file that exists, since an unrelated
-    AppImage earlier in the session leaves it set in the environment a child
-    inherits.
+    is believed only when `appimage_file` can show it is this process's own
+    (T578), since an unrelated AppImage earlier in the session leaves it, and
+    its `$APPDIR`, set in the environment a child inherits.
     """
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if not frozen:

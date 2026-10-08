@@ -57,14 +57,26 @@ _MOUNT = "/tmp/.mount_YulonAbC123"
 _FOREIGN_MOUNT = "/tmp/.mount_OtherXyZ789"
 
 
+def _payload(base: Path, name: str = ".mount_YulonAbC123") -> tuple[str, Path]:
+    """A real AppImage payload folder, laid out the way `release.yml` builds it.
+
+    Returns `(APPDIR, the binary)`. The layout is what `appimage_file` checks, so
+    the folder has to exist rather than be a spelled path.
+    """
+    root = base / name
+    (root / "usr" / "bin").mkdir(parents=True)
+    exe = root / "usr" / "bin" / "yulon"
+    exe.write_bytes(b"\x7fELF")
+    (root / "yulon.desktop").write_text("[Desktop Entry]\n", encoding="utf-8")
+    return str(root), exe
+
+
 def test_appimage_by_its_env(tmp_path: Path) -> None:
     """`$APPIMAGE` names the file on disk; `sys.executable` is inside the mount."""
     f = tmp_path / "Yulon-v0.8.66-Public-x86_64.AppImage"
     f.write_bytes(b"x")
-    install = _detect(
-        environ={"APPIMAGE": str(f), "APPDIR": _MOUNT},
-        executable=Path(f"{_MOUNT}/usr/bin/yulon"),
-    )
+    appdir, exe = _payload(tmp_path)
+    install = _detect(environ={"APPIMAGE": str(f), "APPDIR": appdir}, executable=exe)
     assert (install.kind, install.target, install.executable) == (InstallKind.APPIMAGE, f, "")
 
 
@@ -129,14 +141,35 @@ def test_a_foreign_appimage_in_the_environment_of_a_mounted_binary_is_not_adopte
     assert install.target is None
 
 
-def test_appimage_file_answers_for_a_binary_inside_its_appdir_only(tmp_path: Path) -> None:
+def test_appimage_file_answers_for_the_payload_binary_of_its_appdir_only(tmp_path: Path) -> None:
     f = tmp_path / "Yulon.AppImage"
     f.write_bytes(b"x")
-    env = {"APPIMAGE": str(f), "APPDIR": _MOUNT}
-    assert detect.appimage_file(env, executable=f"{_MOUNT}/usr/bin/yulon") == f
+    appdir, exe = _payload(tmp_path)
+    env = {"APPIMAGE": str(f), "APPDIR": appdir}
+    assert detect.appimage_file(env, executable=exe) == f
     assert detect.appimage_file(env, executable="/opt/yulon/yulon") is None
-    assert detect.appimage_file({"APPIMAGE": str(f)}, executable=f"{_MOUNT}/usr/bin/yulon") is None
+    assert detect.appimage_file({"APPIMAGE": str(f)}, executable=exe) is None
     assert detect.appimage_file({**env, "APPDIR": "/"}, executable="/opt/yulon/yulon") is None
+
+
+def test_the_binary_must_be_exactly_the_payload_not_just_somewhere_under_appdir(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    appdir, exe = _payload(tmp_path)
+    other = Path(appdir) / "usr" / "bin" / "other-tool"
+    other.write_bytes(b"x")
+    assert detect.appimage_file({"APPIMAGE": str(f), "APPDIR": appdir}, executable=other) is None
+
+
+def test_an_appdir_without_the_yulon_desktop_file_is_not_our_payload(tmp_path: Path) -> None:
+    """A foreign app that carries a `usr/bin/yulon` of its own is still not this release."""
+    f = tmp_path / "Other.AppImage"
+    f.write_bytes(b"x")
+    appdir, exe = _payload(tmp_path)
+    (Path(appdir) / "yulon.desktop").unlink()
+    assert detect.appimage_file({"APPIMAGE": str(f), "APPDIR": appdir}, executable=exe) is None
 
 
 def test_a_broad_appdir_is_not_a_runtime_folder(tmp_path: Path) -> None:
@@ -150,12 +183,12 @@ def test_a_broad_appdir_is_not_a_runtime_folder(tmp_path: Path) -> None:
 def test_a_symlinked_tmp_still_finds_the_mount(tmp_path: Path) -> None:
     """`/tmp` that is a link to somewhere else: the env and the binary may spell it differently."""
     real = tmp_path / "real"
-    (real / ".mount_YulonQ1" / "usr" / "bin").mkdir(parents=True)
+    real.mkdir()
+    _, exe = _payload(real, ".mount_YulonQ1")
     link = tmp_path / "link"
     link.symlink_to(real)
     f = tmp_path / "Yulon.AppImage"
     f.write_bytes(b"x")
-    exe = real / ".mount_YulonQ1" / "usr" / "bin" / "yulon"
     env = {"APPIMAGE": str(f), "APPDIR": str(link / ".mount_YulonQ1")}
     assert detect.appimage_file(env, executable=exe) == f
     assert detect.in_appimage_mount(link / ".mount_YulonQ1" / "usr" / "bin" / "yulon")
@@ -164,9 +197,32 @@ def test_a_symlinked_tmp_still_finds_the_mount(tmp_path: Path) -> None:
 def test_extract_and_run_is_recognised_the_same_way(tmp_path: Path) -> None:
     f = tmp_path / "Yulon.AppImage"
     f.write_bytes(b"x")
-    root = "/tmp/appimage_extracted_0a1b2c"
-    env = {"APPIMAGE": str(f), "APPDIR": root}
-    assert detect.appimage_file(env, executable=f"{root}/usr/bin/yulon") == f
+    appdir, exe = _payload(tmp_path, "appimage_extracted_0a1b2c")
+    assert detect.appimage_file({"APPIMAGE": str(f), "APPDIR": appdir}, executable=exe) == f
+
+
+def test_firejail_appimage_is_recognised_by_its_layout_not_its_folder_name(
+    tmp_path: Path,
+) -> None:
+    """`firejail --appimage` loop-mounts at the fixed `/run/firejail/appimage` (cold review).
+
+    APPDIR is that folder and APPIMAGE the real file. The folder name tells
+    nothing, so the proof is that the binary is exactly `$APPDIR/usr/bin/yulon`
+    beside the `yulon.desktop` the release writes.
+    """
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    appdir, exe = _payload(tmp_path, "firejail-appimage")
+    env = {"APPIMAGE": str(f), "APPDIR": appdir}
+    install = _detect(environ=env, executable=exe)
+    assert (install.kind, install.target) == (InstallKind.APPIMAGE, f)
+
+
+def test_the_fixed_firejail_mount_counts_as_a_runtime_mount() -> None:
+    """With the env stripped inside firejail the binary is still in a vanishing mount."""
+    exe = Path("/run/firejail/appimage/usr/bin/yulon")
+    assert detect.in_appimage_mount(exe)
+    assert _detect(environ={}, executable=exe).kind is InstallKind.APPIMAGE_LOST
 
 
 def test_tarball_target_is_the_folder_holding_the_binary() -> None:
@@ -220,17 +276,19 @@ def test_a_machine_with_no_artifact_names_none() -> None:
     [
         ({}, "Yulon-v1.2.3-Public-x86_64.tar.gz"),
         (
-            {
-                "environ": {"APPIMAGE": __file__, "APPDIR": "/tmp/.mount_x"},
-                "executable": Path("/tmp/.mount_x/yulon"),
-            },
+            "appimage",
             "Yulon-v1.2.3-Public-x86_64.AppImage",
         ),
         ({"platform_id": "windows", "machine": "AMD64"}, "Yulon-v1.2.3-Public-windows-x64.zip"),
         ({"platform_id": "macos", "machine": "arm64"}, "Yulon-v1.2.3-Public-macos.dmg"),
     ],
 )
-def test_artifact_names_match_release_yml(kw: dict[str, object], name: str) -> None:
+def test_artifact_names_match_release_yml(
+    kw: dict[str, object] | str, name: str, tmp_path: Path
+) -> None:
+    if kw == "appimage":
+        appdir, exe = _payload(tmp_path)
+        kw = {"environ": {"APPIMAGE": __file__, "APPDIR": appdir}, "executable": exe}
     assert _detect(**kw).artifact_name("v1.2.3-Public") == name
 
 
@@ -313,9 +371,10 @@ def test_a_folder_install_is_asked_about_itself_and_an_appimage_about_its_parent
     asked.clear()
     appimage = tmp_path / "Yulon.AppImage"
     appimage.write_bytes(b"x")
+    appdir, exe = _payload(tmp_path)
     _detect(
-        environ={"APPIMAGE": str(appimage), "APPDIR": "/tmp/.mount_x"},
-        executable=Path("/tmp/.mount_x/yulon"),
+        environ={"APPIMAGE": str(appimage), "APPDIR": appdir},
+        executable=exe,
         probe_writable=lambda p: asked.append(p) or True,
     )
     assert asked == [tmp_path], "an AppImage stages beside itself, so its parent is the question"

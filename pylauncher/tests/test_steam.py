@@ -959,6 +959,15 @@ _MOUNT_DIR = "/tmp/.mount_YulonAbC123"
 _MOUNTED = f"{_MOUNT_DIR}/usr/bin/yulon"
 
 
+def _payload(base: Path) -> tuple[str, str]:
+    """A real AppImage payload folder as `release.yml` lays it out: `(APPDIR, binary)`."""
+    root = base / ".mount_YulonAbC123"
+    (root / "usr" / "bin").mkdir(parents=True)
+    (root / "usr" / "bin" / "yulon").write_bytes(b"\x7fELF")
+    (root / "yulon.desktop").write_text("[Desktop Entry]\n", encoding="utf-8")
+    return str(root), str(root / "usr" / "bin" / "yulon")
+
+
 def test_inside_an_appimage_the_server_entry_starts_the_appimage_file(tmp_path: Path) -> None:
     """The measured defect: Exe was the binary inside the runtime's FUSE mount.
 
@@ -968,11 +977,10 @@ def test_inside_an_appimage_the_server_entry_starts_the_appimage_file(tmp_path: 
     image = tmp_path / "Apps" / "Yulon-v0.9.13-x86_64.AppImage"
     image.parent.mkdir()
     image.write_bytes(b"\x7fELF")
+    appdir, binary = _payload(tmp_path)
 
     exe, opts = steam.launcher_command(
-        frozen=True,
-        executable=_MOUNTED,
-        environ={"APPIMAGE": str(image), "APPDIR": _MOUNT_DIR},
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     assert exe == str(image)
@@ -1058,8 +1066,9 @@ def test_the_server_entry_is_written_with_the_appimage_and_its_folder(tmp_path: 
     image.parent.mkdir()
     image.write_bytes(b"\x7fELF")
     shortcuts = _shortcuts(tmp_path, client_dir=client)
+    appdir, binary = _payload(tmp_path)
     shortcuts.launcher = lambda: steam.launcher_command(
-        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image), "APPDIR": _MOUNT_DIR}
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     shortcuts.add()
@@ -1087,8 +1096,9 @@ def test_a_second_press_repairs_an_entry_that_points_into_the_mount(tmp_path: Pa
     ) | {"LastPlayTime": 1789071688, "SomeFieldValveAddsNextYear": "keep me"}
     (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {"0": broken}}))
     shortcuts = _shortcuts(tmp_path, client_dir=client)
+    appdir, binary = _payload(tmp_path)
     shortcuts.launcher = lambda: steam.launcher_command(
-        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image), "APPDIR": _MOUNT_DIR}
+        frozen=True, executable=binary, environ={"APPIMAGE": str(image), "APPDIR": appdir}
     )
 
     shortcuts.add()
