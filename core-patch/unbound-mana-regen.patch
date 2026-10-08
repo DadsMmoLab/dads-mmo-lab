@@ -1,8 +1,10 @@
 diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
-index 489450092..8059c385b 100644
+index ece84ce32..ed3ce03b6 100644
 --- a/src/server/game/Entities/Player/Player.cpp
 +++ b/src/server/game/Entities/Player/Player.cpp
-@@ -5418,6 +5418,15 @@ float Player::OCTRegenMPPerSpirit()
+@@ -5416,10 +5416,19 @@ float Player::OCTRegenHPPerSpirit()
+ float Player::OCTRegenMPPerSpirit()
+ {
      uint8 level = GetLevel();
      uint32 pclass = getClass();
  
@@ -18,3 +20,5 @@ index 489450092..8059c385b 100644
      if (level > GT_MAX_LEVEL)
          level = GT_MAX_LEVEL;
  
+     //    GtOCTRegenMPEntry     const* baseRatio = sGtOCTRegenMPStore.LookupEntry((pclass-1)*GT_MAX_LEVEL + level-1);
+     GtRegenMPPerSptEntry  const* moreRatio = sGtRegenMPPerSptStore.LookupEntry((pclass - 1) * GT_MAX_LEVEL + level - 1);
