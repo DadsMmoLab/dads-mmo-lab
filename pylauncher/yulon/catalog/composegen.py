@@ -44,7 +44,13 @@ from pathlib import Path, PurePosixPath
 
 from yulon import platform, tuning
 from yulon.catalog import bot_dashboard, time_zone
-from yulon.catalog.catalog import CatalogEntry, CmangosData, NativeInstall, TrinityCoreData
+from yulon.catalog.catalog import (
+    NATIVE_DEFAULT_DB_PORT,
+    CatalogEntry,
+    CmangosData,
+    NativeInstall,
+    TrinityCoreData,
+)
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -582,7 +588,7 @@ def render(
         texts["base.yml.tmpl"],
         {
             "PROJECT_NAME": project,
-            "DB_PORT": str(entry.ports.db or 3306),
+            "DB_PORT": str(entry.ports.db or NATIVE_DEFAULT_DB_PORT),
             "AUTH_PORT": str(entry.ports.auth),
             "WORLD_PORT": str(entry.ports.world),
             "SOAP_PORT": str(native.soap_port),

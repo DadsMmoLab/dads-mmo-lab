@@ -176,6 +176,16 @@ def test_two_entries_that_can_run_together_may_not_share_a_soap_port() -> None:
         parse_catalog({"games": [wotlk_json(), clash]})
 
 
+def test_an_omitted_database_port_is_the_3306_compose_publishes() -> None:
+    """`composegen` writes `ports.db or 3306`, so two entries that omit it both bind 3306 (r8)."""
+    clash = second_ac_json()
+    del clash["ports"]["db"]
+    plain = wotlk_json()
+    del plain["ports"]["db"]
+    with pytest.raises(ValidationError, match="3306"):
+        parse_catalog({"games": [plain, clash]})
+
+
 def test_an_entry_without_operations_still_publishes_its_soap_port() -> None:
     """The base file publishes `install.native.soap_port` whether or not a channel dials it."""
     clash = second_ac_json(operations=None)
@@ -322,6 +332,19 @@ def test_the_networking_plan_tells_players_the_port_too() -> None:
     assert realmlist(second_ac_entry(), "lan") == "192.168.1.25:3725"
     assert realmlist(wotlk, "loopback") == "127.0.0.1"
     assert realmlist(wotlk, "lan") == "192.168.1.25"
+
+
+@pytest.mark.parametrize("auth_port", [3724, 3725])
+def test_an_address_that_already_names_a_port_is_left_as_typed(auth_port: int) -> None:
+    """A typed `host:3725` is the whole endpoint; the catalog's port is not added (Codex, r8)."""
+    from yulon import networking
+
+    assert networking.realmlist_value("logon.example.com:3725", auth_port) == (
+        "logon.example.com:3725"
+    )
+    assert networking.realmlist_value("10.0.0.7", auth_port) == (
+        "10.0.0.7" if auth_port == 3724 else "10.0.0.7:3725"
+    )
 
 
 def test_every_realmlist_writer_call_passes_its_entrys_auth_port() -> None:

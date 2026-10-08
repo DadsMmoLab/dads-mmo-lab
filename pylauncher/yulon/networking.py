@@ -3429,8 +3429,11 @@ def realmlist_value(address: str, auth_port: int) -> str:
     The bare address on the standard port, which is every realmlist this app
     wrote before T552, so a server on 3724 is told exactly what it was told.
     Anything else carries the port, `host:port`, which the client reads as the
-    auth server's port: a second server on 3725 beside WotLK on 3724.
+    auth server's port: a second server on 3725 beside WotLK on 3724. An address
+    that already names a port (a typed launcher address) is left as it is.
     """
+    if ":" in address:
+        return address  # a typed `host:port` is the whole endpoint already
     return address if auth_port == STANDARD_AUTH_PORT else f"{address}:{auth_port}"
 
 

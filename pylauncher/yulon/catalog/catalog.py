@@ -1721,6 +1721,9 @@ class Install(_Strict):
         return platform_id in self.platforms
 
 
+NATIVE_DEFAULT_DB_PORT = 3306
+"""The host database port a native compose file publishes when `ports.db` is omitted (T552)."""
+
 AZEROTHCORE_CONTAINER_SUFFIXES: dict[str, str] = {
     "db": "database",
     "auth": "authserver",
@@ -3088,8 +3091,8 @@ class CatalogEntry(_Strict):
         candidates = (
             (self.ports.auth, "auth port"),
             (self.ports.world, "world port"),
-            (self.ports.db, "database port"),
-            (native.soap_port if native and native.family == "azerothcore" else None, "SOAP port"),
+            (native.soap_port if native else None, "SOAP port"),
+            (self.ports.db or (NATIVE_DEFAULT_DB_PORT if native else None), "database port"),
             (self.operations.port if self.operations else None, "command-channel port"),
         )
         for number, what in candidates:

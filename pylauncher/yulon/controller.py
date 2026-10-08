@@ -541,11 +541,10 @@ class Controller:
         the stop (T552, Codex review). With nothing in the way it is asked first,
         like every press that stops something: a refusal leaves everything as it was.
         """
-        if self.port_conflicts():
-            self.refuse_start()
-            self.refuse_a_missing_database()
-        else:
-            self.refuse_before_a_stop()
+        self.refuse_start()
+        self.refuse_a_missing_database()
+        if not self.port_conflicts():
+            self._ask_before_the_servers()
         stopped = self.stop_conflicting()
         self.start()
         return stopped
