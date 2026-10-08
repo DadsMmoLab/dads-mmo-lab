@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import dbreads, platform, play, resources, runner
+from yulon import dbreads, platform, play, resources, runner, tuning
 from yulon.actions import Outcome
 from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
@@ -457,13 +457,13 @@ class ConfRead:
 
 
 def read_conf(path: Path) -> ConfRead:
-    """Read both of ALE's keys out of one conf file, column 0 only.
+    """Read both of ALE's keys out of one conf file, as the server reads them.
 
-    Column 0 is `conf.patch()`'s rule and it is here for the reason that rule
-    exists: the shipped `mod_ale.conf.dist` carries a commented `ALE.Enabled =
-    true` beside a compiled default of `false` (`ALEConfig.cpp:20`), so a
-    pattern that matches indented or commented lines reads the file's own
-    prose as its settings and reports an engine that is off as on.
+    Trimmed and first-wins (`_conf_value`, T572). A commented line is never a
+    setting: the shipped `mod_ale.conf.dist` carries a commented `ALE.Enabled =
+    true` beside a compiled default of `false` (`ALEConfig.cpp:20`), and
+    reading that comment as the setting would report an engine that is off as
+    on.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -475,18 +475,17 @@ def read_conf(path: Path) -> ConfRead:
 
 
 def _conf_value(text: str, key: str) -> str | None:
-    """The LAST active setting of `key`, unquoted, or `None`.
+    """The setting of `key` the SERVER reads, unquoted, or `None` (T572).
 
-    The last rather than the first: a conf file read top to bottom by the
-    server takes the last assignment, and an applier that appends a corrected
-    key leaves the old one above it.
+    `tuning.conf_value()`, which is AzerothCore's own rule (`Config.cpp` at
+    7f12e89e): each line is trimmed, so an INDENTED assignment is live, and the
+    FIRST copy of a key wins because `IsDuplicateOption` skips the later ones.
+    This reader used to take column 0 only and the last copy, so a hand-edited
+    conf with an indented or repeated key read one way here and another by the
+    server. A commented key (`# ALE.Enabled = true`) is still no setting: its
+    trimmed name starts with `#` and never equals the key.
     """
-    found: str | None = None
-    for line in text.splitlines():
-        head, sep, tail = line.partition("=")
-        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t"):
-            found = tail.strip().strip('"')
-    return found
+    return tuning.conf_value(text, key)
 
 
 def read_facts(
@@ -906,9 +905,9 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
       contiguous run from 0 is returned — offering the rest would be offering
       names this server cannot be made to take.
 
-    Column 0 only, which is `read_conf`'s rule for `read_conf`'s reason: the
-    shipped file carries commented keys and a pattern that matched them would
-    read the file's prose as its settings.
+    Read as the server reads it (`_conf_value`, T572): each line trimmed, and
+    the first copy of a name wins. A commented key is no setting, and the
+    shipped file carries many.
 
     **A value is taken verbatim to the end of the line, `#` included**, and
     whether the core's own reader would drop a trailing comment is NOT measured
@@ -922,11 +921,17 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
     read the value the module actually holds.
     """
     seen: dict[int, dict[int, str]] = {}
+    taken: set[str] = set()
     for line in text.splitlines():
-        head, sep, tail = line.partition("=")
-        if not sep or head[:1] in ("#", " ", "\t"):
+        body = line.strip()
+        if not body or body[0] in "#[":
             continue
+        head, sep, tail = body.partition("=")
         key = head.strip()
+        # The first copy of a name wins whatever it holds, a blank one included.
+        if not sep or key in taken:
+            continue
+        taken.add(key)
         if not key.startswith(SPEC_NAME_KEY):
             continue
         parts = key[len(SPEC_NAME_KEY) :].split(".")
