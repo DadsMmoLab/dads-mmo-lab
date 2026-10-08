@@ -1076,9 +1076,11 @@ def reset(
             try:
                 # `modules/tortoise_bots.conf` may have lost its folder too;
                 # `materialise` makes the same one.
+                # A linked folder on the way out of the install is somebody else's (T573).
+                tuning.check_inside(path, server_dir)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 seams.write(path, texts[file], mode=_install_mode(entry, server_dir, file))
-            except (OSError, InstallerError) as exc:
+            except (OSError, InstallerError, tuning.TuningError) as exc:
                 return _rolled_back(files, skipped, done, file, exc, server_dir, seams)
             logger.info(f"recreated {path} as {entry.id} installs it")
             done[file] = FileResult(file, "recreated")
@@ -1087,6 +1089,9 @@ def reset(
             continue
         made: Path | None = None
         try:
+            # Before the backup AND the write: `tuning.backup()` called without a root
+            # trusts the file's own folder, so a linked parent folder went unseen (T573).
+            tuning.check_inside(path, server_dir)
             made = seams.backup(path, press)
             seams.write(path, texts[file])
         except (OSError, InstallerError, tuning.TuningError) as exc:
@@ -1267,6 +1272,7 @@ def undo(
             continue
         tagged = _tag_of(item.backup, server_dir / item.file)
         try:
+            tuning.check_inside(server_dir / item.file, server_dir)
             before = backup(server_dir / item.file, tagged.press if tagged else new_press())
         except (OSError, tuning.TuningError) as exc:
             results.append(

@@ -1038,6 +1038,31 @@ def test_an_ac_ale_variable_wins_over_the_conf_either_way(tmp_path: Path) -> Non
     assert untouched.script_path == party.ALE_SCRIPT_PATH
 
 
+def test_an_ac_ale_variable_wins_over_an_indented_conf_line_and_is_used_as_it_stands(
+    tmp_path: Path,
+) -> None:
+    """T572 meets Unbound's world_env: env first and RAW, else the file as the core reads it.
+
+    The file line is indented (live for the core, trimmed) and the variable beats it. The
+    variable's value is not trimmed or unquoted: only the file parser does that, so
+    `AC_ALE_SCRIPT_PATH='"/x"'` keeps its quotes. Without the variable the indented line counts,
+    and the first copy of a key wins.
+    Mutation: strip the variable (the old rule) and the quoted path loses its quotes.
+    """
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(
+        '   ALE.Enabled = 1\nALE.Enabled = 0\n  ALE.ScriptPath = "/from/file"\n', encoding="utf-8"
+    )
+
+    from_env = party.read_conf(conf, env={"AC_ALE_ENABLED": "0", "AC_ALE_SCRIPT_PATH": '"/x"'})
+    from_file = party.read_conf(conf, env={})
+
+    assert from_env.enabled is False
+    assert from_env.script_path == '"/x"'
+    assert from_file.enabled is True
+    assert from_file.script_path == "/from/file"
+
+
 def test_settings_the_environment_supplies_are_not_called_compiled_defaults(
     tmp_path: Path,
 ) -> None:
@@ -3535,3 +3560,58 @@ def test_the_seam_dismisses_a_character_the_party_read_does_hold(tmp_path: Path)
     assert result.removed is True
     assert "dml_uninvite Pakka Nore" in chan.sent
     assert memory.names("Pakka") == (), "a dismissed character is forgotten"
+
+
+# -- T572: the readers take AzerothCore's rule (Config.cpp at 7f12e89e): trimmed, first wins ---
+
+
+def test_an_indented_key_is_live_and_the_first_of_two_wins_as_the_core_reads_them(
+    tmp_path: Path,
+) -> None:
+    """`ParseFile` trims each line, and `IsDuplicateOption` skips every later copy of a key.
+
+    Mutation: back to column 0 and last-wins, and this reads `ALE.Enabled` off the second line
+    (0) and `ALE.ScriptPath` as absent.
+    """
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(
+        "    ALE.Enabled = 1\nALE.Enabled = 0\n"
+        '\tALE.ScriptPath = "/first"\nALE.ScriptPath = "/second"\n'
+    )
+
+    read = party.read_conf(conf)
+
+    assert read.enabled is True
+    assert read.script_path == "/first"
+
+
+def test_a_blank_first_value_is_what_the_core_keeps(tmp_path: Path) -> None:
+    server = tmp_path / "wowserver"
+    (server / "env" / "dist" / "etc").mkdir(parents=True)
+    (server / party.WORLD_CONF).write_text("MaxPlayerLevel =\nMaxPlayerLevel = 80\n")
+
+    assert party.max_player_level(server) is None
+
+
+def test_the_playerbots_flags_are_read_trimmed_and_first_wins(tmp_path: Path) -> None:
+    server = tmp_path / "wowserver"
+    (server / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
+    (server / party.PLAYERBOTS_CONF).write_text(
+        f"  {party.ALLOW_ACCOUNT_KEY} = 1\n{party.ALLOW_ACCOUNT_KEY} = 0\n"
+        f"{party.ALLOW_GUILD_KEY}=0\n"
+    )
+
+    read = party.allow_flags(server)
+
+    assert (read.account, read.guild) == (True, False)
+
+
+def test_the_spec_names_are_read_trimmed_and_the_first_copy_of_a_name_wins() -> None:
+    """Mutation: back to column 0, last-wins and 8.0 reads `frost pve`."""
+    conf = (
+        "   AiPlayerbot.PremadeSpecName.8.0 = arcane pve\n"
+        "AiPlayerbot.PremadeSpecName.8.0 = frost pve\n"
+        "AiPlayerbot.PremadeSpecName.8.1 = fire pve\n"
+    )
+
+    assert party.read_spec_names(conf)[8] == ("arcane pve", "fire pve")

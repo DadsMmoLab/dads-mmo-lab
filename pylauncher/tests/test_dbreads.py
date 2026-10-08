@@ -140,6 +140,18 @@ def test_a_conf_that_exists_and_cannot_be_read_is_still_refused(
     assert "Permission denied" in answer.problem
 
 
+def test_an_indented_prefix_setting_is_the_one_the_server_reads(tmp_path: Path) -> None:
+    """T572. Both cores trim each line, so an indented assignment is live.
+
+    Mutation: back to column 0 and the answer is the catalog default, not `indented`.
+    """
+    server_dir = _install(tmp_path, "    AiPlayerbot.RandomBotAccountPrefix = indented")
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
+    assert answer.marker is not None and answer.marker.prefix == "indented"
+
+
 def test_the_same_key_set_twice_to_different_values_is_refused(tmp_path: Path) -> None:
     """Which one the server takes is not something this reader is entitled to guess."""
     server_dir = _install(tmp_path, "AiPlayerbot.RandomBotAccountPrefix = one")

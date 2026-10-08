@@ -454,7 +454,7 @@ def write(entry: CatalogEntry, server_dir: Path, n: int) -> Written:
     except (OSError, UnicodeDecodeError, InstallerError) as exc:
         raise BotCountError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     try:
-        made = tuning.backup(path)
+        made = tuning.backup(path, root=server_dir)
     except (OSError, tuning.TuningError) as exc:
         raise BotCountError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     try:
