@@ -17,9 +17,18 @@ from typing import Any
 
 import pytest
 
-from yulon import module_moves
-from yulon.apply import Applier, ApplyError
-from yulon.git import CloneSpec, GitError, RunnerGit, git_available
+from yulon import git as git_module
+from yulon import module_moves, runner
+from yulon.apply import (
+    PUT_BACK_KEPT_SQL,
+    Applier,
+    ApplyError,
+    LastUpdate,
+    PutBackRefused,
+    clone_release,
+    reflog_update,
+)
+from yulon.git import CloneSpec, ContainerGit, GitError, ReflogEntry, RunnerGit, git_available
 from yulon.manifest import Manifest, parse_manifest
 
 pytestmark = pytest.mark.skipif(not git_available(), reason="needs a host git")
@@ -288,3 +297,285 @@ def test_an_update_with_no_database_changes_says_none(tmp_path: Path) -> None:
     rig.applier.update(rig.manifest)
 
     assert not rig.ledger().moves[KEY].sql
+
+
+# -- step 3: last_update(), put_back() ----------------------------------------
+
+
+def _argv_seen(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Every host git argv from here on, run for real."""
+    seen: list[list[str]] = []
+    real = git_module._run_git
+
+    def spy(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return real(argv, cwd)
+
+    monkeypatch.setattr(git_module, "_run_git", spy)
+    return seen
+
+
+def _updated_a_to_b(rig: _Rig) -> tuple[str, str]:
+    a = _installed_at_a(rig)
+    b = _publish(rig.origin, "B")
+    rig.applier.update(rig.manifest)
+    assert rig.head() == b
+    return a, b
+
+
+def test_last_update_reads_the_record_first(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+
+    last = rig.applier.last_update(rig.manifest)
+
+    assert last == LastUpdate(item_id=ITEM, from_sha=a, to_sha=b, source="ledger")
+
+
+def test_put_back_runs_no_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test 6: offline-safe. No `fetch`, and the clone seam is never asked."""
+    rig = _rig(tmp_path)
+    a, _b = _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None
+    clones = len(rig.git.specs)
+    seen = _argv_seen(monkeypatch)
+
+    rig.applier.put_back(rig.manifest, last=last)
+
+    assert rig.head() == a
+    assert len(rig.git.specs) == clones, "the put-back went through the clone seam"
+    assert not [argv for argv in seen if "fetch" in argv], seen
+    assert [argv for argv in seen if "checkout" in argv], "the restore is git's own checkout"
+
+
+def test_put_back_moves_the_move_to_skipped(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    _a, b = _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None
+
+    report = rig.applier.put_back(rig.manifest, last=last)
+
+    ledger = rig.ledger()
+    assert KEY not in ledger.moves
+    assert ledger.skipped[KEY].tip == b
+    assert rig.applier.last_update(rig.manifest) is None, "a put-back is not an update"
+    assert any("back on" in line for line in report.done), report.done
+
+
+def test_put_back_refused_on_an_edited_tree(tmp_path: Path) -> None:
+    """Test 7: `--force` would throw the player's edit away, so nothing moves."""
+    rig = _rig(tmp_path)
+    _a, b = _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None
+    (rig.clone / "src" / "x.cpp").write_text("// fixed by hand\n", encoding="utf-8")
+
+    with pytest.raises(PutBackRefused) as refused:
+        rig.applier.put_back(rig.manifest, last=last)
+
+    assert refused.value.edited
+    assert rig.head() == b
+    assert (rig.clone / "src" / "x.cpp").read_text(encoding="utf-8") == "// fixed by hand\n"
+    assert KEY in rig.ledger().moves
+
+
+def test_put_back_refused_when_head_moved(tmp_path: Path) -> None:
+    """Test 8: HEAD is not the update's `to` any more."""
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    stale = LastUpdate(item_id=ITEM, from_sha=a, to_sha="d" * 40, source="ledger")
+
+    with pytest.raises(PutBackRefused) as refused:
+        rig.applier.put_back(rig.manifest, last=stale)
+
+    assert not refused.value.edited
+    assert rig.head() == b
+
+
+def test_put_back_runs_no_sql_and_says_the_database_changes_were_kept(tmp_path: Path) -> None:
+    """D5."""
+    manifest = parse_manifest(
+        {
+            **_manifest().model_dump(mode="json", exclude_none=True),
+            "sql": [{"db": "world", "path": "data/sql/x.sql", "applied_by": "direct"}],
+        }
+    )
+    rig = _rig(tmp_path, manifest)
+    sql = _Sql()
+    rig.applier.sql = sql
+    (rig.origin / "data" / "sql").mkdir(parents=True)
+    (rig.origin / "data" / "sql" / "x.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None and last.sql
+    sent = len(sql.files)
+
+    report = rig.applier.put_back(rig.manifest, last=last)
+
+    assert len(sql.files) == sent, "a put-back sent SQL"
+    assert PUT_BACK_KEPT_SQL in report.skipped
+
+
+def test_put_back_restores_the_release_tag(tmp_path: Path) -> None:
+    """Test 17: the claim names the release the clone is back on."""
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    last = LastUpdate(item_id=ITEM, from_sha=a, to_sha=b, source="ledger", from_release="v1")
+
+    rig.applier.put_back(rig.manifest, last=last)
+
+    assert clone_release(rig.clone, item_id=ITEM) == "v1"
+
+
+def test_last_update_from_the_reflog_after_a_ledgerless_update(tmp_path: Path) -> None:
+    """Test 20: a pre-T557 update, against real git (depth 1, detached after the put-back)."""
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    (rig.server / module_moves.MOVES_FILE).unlink()
+
+    last = rig.applier.last_update(rig.manifest)
+    assert last == LastUpdate(item_id=ITEM, from_sha=a, to_sha=b, source="reflog")
+
+    rig.applier.update(rig.manifest)  # nothing new: one more reset onto the same commit
+    (rig.server / module_moves.MOVES_FILE).unlink(missing_ok=True)
+    assert rig.applier.last_update(rig.manifest) == last
+
+    rig.applier.put_back(rig.manifest, last=last)
+    assert rig.head() == a
+
+    c = _publish(rig.origin, "C")
+    rig.applier.update(rig.manifest)
+    assert rig.head() == c, "an Update after a put-back moves a detached shallow clone on"
+
+
+def test_a_hand_reset_is_not_read_as_an_update(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    _updated_a_to_b(rig)
+    (rig.server / module_moves.MOVES_FILE).unlink()
+    _git(rig.clone, "reset", "--hard", "HEAD@{1}")
+
+    assert rig.applier.last_update(rig.manifest) is None
+
+
+def test_a_fresh_install_has_no_last_update(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    _installed_at_a(rig)
+
+    assert rig.applier.last_update(rig.manifest) is None
+
+
+def test_an_unreadable_record_still_offers_the_reflog_answer(tmp_path: Path) -> None:
+    """Test 18's other half: the automatic path is closed, the press is not."""
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    (rig.server / module_moves.MOVES_FILE).write_text("{torn", encoding="utf-8")
+
+    last = rig.applier.last_update(rig.manifest)
+
+    assert last == LastUpdate(item_id=ITEM, from_sha=a, to_sha=b, source="reflog")
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ([("B", "reset: moving to FETCH_HEAD"), ("A", "clone: from x")], "A"),
+        (
+            [
+                ("B", "reset: moving to FETCH_HEAD"),
+                ("B", "reset: moving to FETCH_HEAD"),
+                ("A", "reset: moving to FETCH_HEAD"),
+            ],
+            "A",
+        ),
+        ([("B", f"checkout: moving from {'a' * 40} to {'b' * 40}"), ("A", "x")], "A"),
+        ([("B", f"checkout: moving from main to {'b' * 40}"), ("A", "clone: from x")], None),
+        ([("B", "reset: moving to HEAD@{1}"), ("A", "reset: moving to FETCH_HEAD")], None),
+        ([("B", "commit: mine"), ("A", "reset: moving to FETCH_HEAD")], None),
+        ([("B", "reset: moving to FETCH_HEAD")], None),
+        ([("A", "reset: moving to FETCH_HEAD")], None),
+        ([], None),
+    ],
+    ids=[
+        "reset",
+        "no-op-update-walked-past",
+        "release-checkout",
+        "first-install-pin",
+        "hand-reset",
+        "commit",
+        "nothing-before",
+        "head-not-newest",
+        "empty",
+    ],
+)
+def test_the_reflog_walk(entries: list[tuple[str, str]], expected: str | None) -> None:
+    said = tuple(ReflogEntry(sha=sha, subject=subject) for sha, subject in entries)
+    assert reflog_update(said, "B") == expected
+
+
+def test_container_git_reflog_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Test 21: the reflog is read in the read-only container, with no network."""
+    dest = tmp_path / "mod-x"
+    (dest / ".git").mkdir(parents=True)
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, f"{'b' * 40}\treset: moving to FETCH_HEAD\n", ""
+        )
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    impl = ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4")
+
+    assert impl.reflog(dest) == (ReflogEntry("b" * 40, "reset: moving to FETCH_HEAD"),)
+    (argv,) = seen
+    assert argv[-len(git_module.REFLOG_ARGS) :] == git_module.REFLOG_ARGS
+    assert argv[argv.index("--network") + 1] == "none"
+    assert f"{dest}:/git:ro" in argv
+
+
+def test_container_git_restore_has_no_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test 21: the put-back's restore is one checkout, in the container that may write."""
+    dest = tmp_path / "mod-x"
+    (dest / ".git").mkdir(parents=True)
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    impl = ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4")
+
+    impl.restore_rev(dest, "a" * 40)
+
+    (argv,) = seen
+    assert argv[-4:] == ["checkout", "--detach", "--force", "a" * 40]
+    assert "fetch" not in argv
+
+
+def test_a_second_put_back_of_a_detached_clone_offers_nothing_more(tmp_path: Path) -> None:
+    """After a put-back the clone is detached, so the next put-back's checkout reads as an update.
+
+    Its reflog's newest move is then `checkout: moving from <B> to <A>`, the same shape a
+    release module's Update leaves, and the commit before it is B, the tip just put back.
+    """
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    first = rig.applier.last_update(rig.manifest)
+    assert first is not None
+    rig.applier.put_back(rig.manifest, last=first)
+    module_moves.clear_skip(rig.server, KEY)  # the player said try it anyway
+    rig.applier.update(rig.manifest)
+    assert rig.head() == b
+    again = rig.applier.last_update(rig.manifest)
+    assert again is not None and again.from_sha == a
+
+    rig.applier.put_back(rig.manifest, last=again)
+
+    assert rig.head() == a
+    assert rig.applier.last_update(rig.manifest) is None

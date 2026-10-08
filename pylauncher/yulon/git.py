@@ -729,6 +729,55 @@ class HeadReader(Protocol):
 
 
 @dataclass(frozen=True)
+class ReflogEntry:
+    """One line of HEAD's reflog: the commit HEAD was moved ONTO, and git's own words for how."""
+
+    sha: str
+    subject: str
+
+
+REFLOG_ARGS = ["reflog", "show", "--format=%H%x09%gs", "-n", "20", "HEAD"]
+"""HEAD's last twenty moves, newest first, one `<sha>` TAB `<subject>` line each (T557).
+
+Twenty and not all: the walk that reads it (`apply.reflog_update()`) stops at
+the first entry that is not an update, and an update is one or two entries.
+"""
+
+
+def parse_reflog(raw: str) -> tuple[ReflogEntry, ...]:
+    """`REFLOG_ARGS`' output as entries, newest first. A line with no TAB is dropped."""
+    entries = []
+    for line in raw.splitlines():
+        sha, tab, subject = line.partition("\t")
+        if tab and sha:
+            entries.append(ReflogEntry(sha=sha.strip(), subject=subject.strip()))
+    return tuple(entries)
+
+
+@runtime_checkable
+class ReflogReader(Protocol):
+    """ "How did HEAD get here?" -- the last moves of HEAD, read locally (T557).
+
+    A one-method Protocol for `BehindReader`'s reason. `Applier.last_update()`
+    reads it to find the commit a module's clone was on before an update that
+    Yu'lon made no record of (one made before T557). `None` = could not ask.
+    """
+
+    def reflog(self, dest: Path) -> tuple[ReflogEntry, ...] | None: ...
+
+
+@runtime_checkable
+class RevRestorer(Protocol):
+    """ "Put this checkout back on that commit, with no fetch" (T64's `restore_rev()`; T557).
+
+    A one-method Protocol so `Applier.put_back()` reaches the same seam a
+    module's Update went through: `ContainerGit` on a machine with no git.
+    """
+
+    def restore_rev(self, dest: Path, rev: str) -> None: ...
+
+
+@dataclass(frozen=True)
 class Counted:
     """`commits_behind()`'s answer with the two commits it is an answer ABOUT (T148).
 
@@ -1422,6 +1471,20 @@ class RunnerGit:
             return None
         said = proc.stdout.strip()
         return said or None
+
+    def reflog(self, dest: Path) -> tuple[ReflogEntry, ...] | None:
+        """HEAD's last moves in this checkout, newest first, or `None` if git will not say (T557).
+
+        Local: the reflog is a file in `.git/logs`, and no remote is asked.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *REFLOG_ARGS], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read how {dest} got where it is: {exc}")
+            return None
+        return parse_reflog(proc.stdout)
 
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """Tracked files in `dest` that differ from HEAD, minus `ignoring`. None = cannot ask.
@@ -2273,6 +2336,17 @@ class ContainerGit:
             return None
         said = proc.stdout.strip()
         return said or None
+
+    def reflog(self, dest: Path) -> tuple[ReflogEntry, ...] | None:
+        """`RunnerGit.reflog()`, containerised: a read, so the read-only container."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, list(REFLOG_ARGS), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read how {dest} got where it is: {exc}")
+            return None
+        return parse_reflog(proc.stdout)
 
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """`RunnerGit.local_edits()`, containerised. Both must answer identically.
