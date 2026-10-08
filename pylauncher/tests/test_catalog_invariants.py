@@ -1164,8 +1164,8 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 51, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 51; "
+    assert len(values) == 52, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 52; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
@@ -1204,7 +1204,9 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     and date, and the README inside it -- not prose, not a bare folder, not a
     path that climbs out of the notes.
     """
-    shape = re.compile(r"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md")
+    shape = re.compile(
+        r"gates/(?:\d+\.\d+[a-z]?|live-t\d+)-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md"
+    )
     measured = {
         key: mark.cite
         for key, mark in catalog_provenance.PROVENANCE.items()
@@ -1213,7 +1215,7 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
 
     assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
-    assert len(measured) == 34, len(measured)
+    assert len(measured) == 35, len(measured)
     assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
     assert not shape.fullmatch(
         "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"

@@ -427,6 +427,8 @@ class AccountAdmin(Protocol):
 
     def set_gm_level(self, account: str, level: int) -> object: ...
 
+    def after_create(self, account: str, level: int) -> str: ...
+
     def delete_plan(self, account: str) -> object: ...
 
     def delete_account(self, confirmed: useraccounts.DeletePlan) -> object: ...
@@ -603,6 +605,13 @@ the moment they arrive, and only the LIST is scheduled.
 
 _LEVEL_ROLE = Qt.ItemDataRole.UserRole + 2
 """Where a character row keeps its level, for the Level box to start from (T188 A6)."""
+
+
+class _CreatedAccount(NamedTuple):
+    """A Create's result, with the sentence about the running world's level (T579)."""
+
+    result: object
+    note: str
 
 
 class _CharacterAnswer(NamedTuple):
@@ -13789,21 +13798,31 @@ class ControllerView(QWidget):
         # The password is passed straight into the call and the field cleared; it
         # is never stored on the view, so no later repr or traceback frame of
         # this widget can carry it.
-        self._run(
-            lambda: self.services.create_account(name, password, gm_level),
-            self._account_done,
-            self._account_failed,
-        )
+        admin = self.services.accounts
+
+        def create() -> _CreatedAccount:
+            made = self.services.create_account(name, password, gm_level)
+            # T579: the row is written, but a running world that caches ranks still treats the
+            # account as rank 0. Told here, on the worker, and only after the row is there.
+            told = getattr(admin, "after_create", None)
+            note = told(made.username, made.gm_level) if told is not None and made.gm_level else ""
+            return _CreatedAccount(made, note)
+
+        self._run(create, self._account_done, self._account_failed)
         self.account_password.clear()
 
     @Slot(object)
-    def _account_done(self, result: object) -> None:
+    def _account_done(self, answer: object) -> None:
         self.create_account_button.setEnabled(True)
+        result = answer.result if isinstance(answer, _CreatedAccount) else answer
         if not isinstance(result, wotlk_accounts.AccountResult):
             return
         made = "created" if result.created else "already existed"
         gm = f", GM level {result.gm_level}" if result.gm_level else ""
-        self.account_report.setText(f"{result.username}: {made} (id {result.account_id}){gm}.")
+        said = f"{result.username}: {made} (id {result.account_id}){gm}."
+        if isinstance(answer, _CreatedAccount) and answer.note:
+            said = f"{said} {answer.note}"
+        self.account_report.setText(said)
 
     @Slot(object)
     def _account_failed(self, exc: object) -> None:

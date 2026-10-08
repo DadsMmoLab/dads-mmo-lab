@@ -85,6 +85,7 @@ from yulon import (
     module_answers,
     networking,
     platform,
+    realm_flag,
     resources,
     runner,
     server_build_presses,
@@ -5755,6 +5756,12 @@ class Seams:
     wait's `docker.StopControl`, carrying the rebuild's Cancel) and
     `before_signal=` (the moment past which something may have been touched).
     """
+    mark_realm_offline: Callable[..., object] = realm_flag.mark_offline
+    """Set the realm row's offline bit before the world starts or is replaced (T577).
+
+    Called with `(entry, spec, server_dir)`; a no-op for an entry whose realm row names no
+    flag column. Best effort: it logs what it could not do and never raises.
+    """
     stop_servers: Callable[..., None] = docker.stop_servers_staged
     """The rollback's stop of the FAILED build's servers, before any tag moves back (T158).
 
@@ -6095,6 +6102,7 @@ class Seams:
             start_db=on(docker.start_database, wsl_distro=distro),
             start=on(docker.start_staged, wsl_distro=distro),
             recreate=on(docker.recreate_staged, wsl_distro=distro),
+            mark_realm_offline=on(realm_flag.mark_offline, wsl_distro=distro),
             stop_servers=on(docker.stop_servers_staged, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
@@ -7755,6 +7763,10 @@ class StagedInstaller:
                     f"new build: {exc}"
                 ) from exc
             yield from servers_down.forward(ctx)
+
+        # T577: marked offline before the replace stops the world and starts the new one, so
+        # the realm list says Offline for the whole load. Best effort, never raising.
+        self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
 
         def replace_them(say: docker.OutputSink) -> bool:
             return self._seams.recreate(
@@ -12718,6 +12730,9 @@ class StagedInstaller:
         warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
+        # T577: a core whose world never marks its realm offline while it loads is marked
+        # here, before the world exists to be logged in to. Best effort, never raising.
+        self._seams.mark_realm_offline(self.entry, self.entry.container_spec(), ctx.server_dir)
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:

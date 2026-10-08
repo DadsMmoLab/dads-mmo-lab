@@ -18,6 +18,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
+- An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
