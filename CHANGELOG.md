@@ -22,6 +22,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- **Add to Steam** and self-update no longer mistake another AppImage for Yu'lon when it is started from inside one.
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.

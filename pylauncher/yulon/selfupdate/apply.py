@@ -24,7 +24,7 @@ from pathlib import Path
 from yulon.log import get_logger
 from yulon.selfupdate import fetch, layout, swap
 from yulon.selfupdate import stage as stage_module
-from yulon.selfupdate.detect import Install
+from yulon.selfupdate.detect import Install, InstallKind
 from yulon.selfupdate.fetch import Cancelled, IsCancelled, Progress, UpdateError
 from yulon.selfupdate.swap import SwapPlan
 from yulon.update import CHECKSUMS_NAME, UpdateCheck
@@ -163,6 +163,11 @@ def _what_to_ask_for(result: UpdateCheck, install: Install) -> tuple[str, int]:
         raise UpdateError(
             "This release does not publish a SHA256SUMS file, so Yu'lon cannot prove a "
             "download of it. Use the release page instead."
+        )
+    if install.kind is InstallKind.APPIMAGE_LOST:
+        raise UpdateError(
+            "Yu'lon is running from an AppImage but cannot find its own file, so it cannot "
+            "replace it. Use the release page instead."
         )
     name = install.artifact_name(result.latest)
     if name is None:
