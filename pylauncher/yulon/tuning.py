@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from yulon import links
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest
 from yulon.manifest_store import FAMILY_FILES
@@ -601,7 +602,55 @@ def private_copy(src: Path, dst: Path) -> None:
     shutil.copystat(src, dst)
 
 
-def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
+OUTSIDE_THE_SERVER = (
+    "{file} is a link that leads outside the server folder (to {where}), so Yu'lon will not "
+    "read it, back it up or change it. Replace the link with the file itself to edit it here."
+)
+"""A conf that is a link out of the install is somebody else's file (T573).
+
+Reading it shows that file's text, a save writes to it, and a backup copies it
+into the server folder. All three are refused, in one sentence.
+"""
+
+
+def _real(path: Path) -> Path:
+    """Where `path` really is, every link on the way followed (a seam: tests stand in Windows')."""
+    return Path(os.path.realpath(path))
+
+
+def check_inside(path: Path, root: Path | None = None) -> None:
+    """Refuse when `path` is, or sits under, a link that leads outside `root`.
+
+    `root` is the server folder, `path.parent` when a caller has none. Each step
+    from `root` down to `path` is asked `links.is_link()` -- a symlink, or on
+    Windows a junction, which Python 3.11 reports as a plain folder -- and only
+    a link is followed (`_real`), so a tree with no links costs no resolving. A
+    link that leads to somewhere still inside `root` is the player's own tidy
+    layout and is allowed.
+
+    Raises:
+        TuningError: in a sentence for the player, before anything is read or written.
+        OSError: a step could not be looked at (`links.is_link`'s own rule).
+    """
+    base = path.parent if root is None else root
+    try:
+        parts = path.relative_to(base).parts
+        steps = [base.joinpath(*parts[: i + 1]) for i in range(len(parts))]
+    except ValueError:
+        steps = [path]
+    for step in steps:
+        if not links.is_link(step):
+            continue
+        inside = os.path.normcase(str(_real(base)))
+        where = _real(step)
+        target = os.path.normcase(str(where))
+        if target != inside and not target.startswith(inside.rstrip("\\/") + os.sep):
+            raise TuningError(OUTSIDE_THE_SERVER.format(file=path.name, where=where))
+
+
+def backup(
+    path: Path, *, now: datetime | None = None, tag: str = "", root: Path | None = None
+) -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
 
     `tag`, when given, goes between the stamp and `.bak` (T94: a Reset to
@@ -624,6 +673,7 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     and a Reset to default's Undo reads a tagged one as a record. A failure
     removes the sibling and raises; nothing named `.bak` is left.
     """
+    check_inside(path, root)
     when = now or datetime.now()
     for _ in range(_BACKUP_TRIES):
         # Microseconds, in a FIXED-WIDTH field, so a name sort is a time sort
@@ -671,6 +721,7 @@ def write(
     *,
     spec: Mapping[str, ConfKey] | None = None,
     now: datetime | None = None,
+    root: Path | None = None,
 ) -> Path:
     """Set these keys in this conf, change nothing else, and return the backup's path.
 
@@ -693,6 +744,8 @@ def write(
     """
     for key, value in edits.items():
         check(None if spec is None else spec.get(key), value)
+    # Before the file is opened: a link out of `root` is not read either (T573).
+    check_inside(path, root)
     # `newline=""` on the way IN as well as out. The default translates every
     # "\r\n" to "\n" while reading, so a CRLF conf arrives looking like an LF
     # one, is detected as LF, and is written back converted -- a whole-file diff
@@ -721,7 +774,7 @@ def write(
             appended.append(f"{key} = {value}{carriage}")
             continue
         lines[index] = _rewrite(lines[index], key, value)
-    made = backup(path, now=now)
+    made = backup(path, now=now, root=root)
     if appended:
         if lines and lines[-1].strip() == "":
             lines.pop()  # write under the trailing newline, not after a blank line

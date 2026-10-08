@@ -19480,9 +19480,19 @@ class ControllerView(QWidget):
                     )
                     self.action_failed.emit(str(exc))
                     return
+        # And every file's PATH, for the same reason: a link out of the server
+        # folder on the card's second file must not be found after the first was
+        # written (T573).
+        for file in per_file:
+            try:
+                tuning.check_inside(server_dir / file, server_dir)
+            except (tuning.TuningError, OSError) as exc:
+                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
+                self.action_failed.emit(str(exc))
+                return
         for file, values in per_file.items():
             try:
-                made = tuning.write(server_dir / file, values, spec=specs[file])
+                made = tuning.write(server_dir / file, values, spec=specs[file], root=server_dir)
             except tuning.TuningError as exc:
                 # Unreachable through the loop above, which has already checked
                 # every value on the card. Kept because `tuning.write()` is a
@@ -19592,11 +19602,18 @@ class ControllerView(QWidget):
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
         """Show one conf in the raw editor, read-only when it is the server's own."""
-        path = self.services.controller.server_dir / file
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
         core = file in self._tuning_core_files()
         try:
+            # A conf that is a link out of the install is another file's text
+            # and another file's Save (T573): shown empty and read-only.
+            tuning.check_inside(path, server_dir)
             with open(path, encoding="utf-8", newline="") as handle:
                 raw = handle.read()
+        except tuning.TuningError as exc:
+            self.tuning_panel.set_file_text("", read_only=True, note=str(exc))
+            return
         except OSError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
             return
@@ -19703,11 +19720,17 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        path = self.services.controller.server_dir / file
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
         try:
-            made = tuning.backup(path)
+            # Refuses a link out of the server folder, before any byte moves (T573).
+            made = tuning.backup(path, root=server_dir)
             with open(path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(text.replace("\n", self._tuning_newline))
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))

@@ -952,3 +952,130 @@ def test_a_save_keeps_the_files_own_mode(tmp_path: Path, mode: int) -> None:
         os.umask(old)
     assert path.read_text(encoding="utf-8") == "Key = 2\n"
     assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+# -- T573: a conf that is a link out of the server folder is neither read nor written ----------
+
+
+def _linked_conf(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """`(server_dir, the conf inside it, the file outside it that the conf points to)`."""
+    server = tmp_path / "server"
+    server.mkdir()
+    outside = tmp_path / "elsewhere.conf"
+    outside.write_text("Key = 1\n", encoding="utf-8")
+    link = server / "mod_x.conf"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    return server, link, outside
+
+
+def test_a_write_through_a_link_out_of_the_server_folder_is_refused(tmp_path: Path) -> None:
+    """Mutation: drop `check_inside` from `write` and the outside file is rewritten."""
+    server, link, outside = _linked_conf(tmp_path)
+
+    with pytest.raises(tuning.TuningError, match="outside the server folder"):
+        tuning.write(link, {"Key": "2"}, root=server)
+
+    assert outside.read_text(encoding="utf-8") == "Key = 1\n"
+    assert not list(tmp_path.glob("**/*.bak")), "a backup of the outside file was taken"
+
+
+def test_a_backup_through_a_link_out_of_the_server_folder_is_refused(tmp_path: Path) -> None:
+    """Mutation: drop `check_inside` from `backup` and a copy of the outside file lands here."""
+    server, link, _ = _linked_conf(tmp_path)
+
+    with pytest.raises(tuning.TuningError, match="outside the server folder"):
+        tuning.backup(link, root=server)
+
+    assert not list(server.glob("*.bak"))
+
+
+def test_a_link_that_stays_inside_the_server_folder_is_allowed(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    real = server / "real.conf"
+    real.write_text("Key = 1\n", encoding="utf-8")
+    link = server / "mod_x.conf"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+
+    tuning.check_inside(link, server)
+
+
+def test_a_linked_folder_on_the_way_to_the_conf_is_refused_too(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    away = tmp_path / "away"
+    away.mkdir()
+    (away / "mod_x.conf").write_text("Key = 1\n", encoding="utf-8")
+    try:
+        (server / "modules").symlink_to(away, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+
+    with pytest.raises(tuning.TuningError, match="outside the server folder"):
+        tuning.check_inside(server / "modules" / "mod_x.conf", server)
+
+
+def test_a_windows_junction_out_of_the_server_folder_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A junction is a folder to Python on 3.11; `links.is_link` is what sees it (T375).
+
+    Stood in on any platform: the folder is flagged as a name-surrogate reparse point and the
+    final path is reported as outside, which is the answer `realpath` gives on Windows.
+    """
+    from yulon import links
+
+    server = tmp_path / "server"
+    (server / "modules").mkdir(parents=True)
+    conf = server / "modules" / "mod_x.conf"
+    conf.write_text("Key = 1\n", encoding="utf-8")
+    junction = server / "modules"
+    real_lstat = os.lstat
+
+    class _Junction:
+        st_mode = stat.S_IFDIR
+        st_file_attributes = links.FILE_ATTRIBUTE_REPARSE_POINT
+        st_reparse_tag = links.IO_REPARSE_TAG_MOUNT_POINT
+
+    def fake_lstat(p: Any) -> Any:
+        return _Junction() if Path(p) == junction else real_lstat(p)
+
+    monkeypatch.setattr(links, "_lstat", fake_lstat)
+    monkeypatch.setattr(
+        tuning, "_real", lambda p: Path(p) if Path(p) == server else tmp_path / "away" / "x"
+    )
+
+    with pytest.raises(tuning.TuningError, match="outside the server folder"):
+        tuning.write(conf, {"Key": "2"}, root=server)
+    assert conf.read_text(encoding="utf-8") == "Key = 1\n"
+    assert not list(server.glob("**/*.bak"))
+
+
+def test_a_plain_file_is_not_resolved_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a link is chased: a plain tree costs no `realpath` call (9p reads are slow)."""
+    path = _write(tmp_path, CONF, CLEAN)
+
+    def boom(_: Any) -> NoReturn:
+        raise AssertionError("resolved a plain file")
+
+    monkeypatch.setattr(tuning, "_real", boom)
+    tuning.check_inside(path, tmp_path)
+
+
+def test_a_link_out_of_the_server_folder_is_refused_before_the_file_is_even_read(
+    tmp_path: Path,
+) -> None:
+    """Mutation: drop `write`'s own check and the (invalid) outside text is read first."""
+    server, link, outside = _linked_conf(tmp_path)
+    outside.write_bytes(b"Key = \xff\n")
+
+    with pytest.raises(tuning.TuningError, match="outside the server folder"):
+        tuning.write(link, {"Key": "2"}, root=server)

@@ -12640,6 +12640,66 @@ def test_saving_a_card_writes_what_changed_and_names_the_backup(
     assert not redrawn.changed
 
 
+def _link_out(path: Path, tmp_path: Path) -> Path:
+    """Replace `path` with a symlink to a same-text file outside `tmp_path`'s server folder."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.conf"
+    outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    return outside
+
+
+def test_a_card_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning` and the outside file is rewritten."""
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    assert not list(outside.parent.glob("**/*.bak"))
+
+
+def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning_file` and `open(path, "w")` writes through."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out(tmp_path / file, tmp_path)
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert outside.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    assert not list(outside.parent.glob("**/*.bak"))
+
+
+def test_the_raw_editor_opens_a_conf_that_links_out_read_only_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `open_tuning_file` and another file's text is on offer."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    _link_out(tmp_path / file, tmp_path)
+
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+
+
 def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -12928,6 +12988,78 @@ def test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad(
     assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
     assert tuning.backups_of(tmp_path / own) == ()
     assert tuning.backups_of(tmp_path / core) == ()
+
+
+def test_a_multi_file_card_writes_nothing_when_the_second_file_links_out_of_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the path pre-check in `save_tuning` and the first file lands alone."""
+    own = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    core = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, own, "[worldserver]\nBeastMaster.Enable = 1\n")
+    _deploy(tmp_path, core, '[worldserver]\nCreatures.CustomIDs = "1,2"\n')
+    outside = _link_out(tmp_path / core, tmp_path)
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-npc-beastmaster"}))
+    before = (tmp_path / own).read_bytes()
+    card = view.tuning_panel.card("mod-npc-beastmaster")
+    card.editors["BeastMaster.Enable"].control.setChecked(False)
+    card.editors["Creatures.CustomIDs"].control.setText("3")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
+    assert tuning.backups_of(tmp_path / own) == ()
+    assert outside.read_text(encoding="utf-8") == '[worldserver]\nCreatures.CustomIDs = "1,2"\n'
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The boundary is the SERVER folder, not the file's own folder.
+
+    Mutation: leave `root=server_dir` off the save's backup and a link into a sibling folder is
+    refused as if it had left the install.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    real = tmp_path / "shared" / "beast.conf"
+    real.parent.mkdir()
+    real.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    (tmp_path / file).unlink()
+    try:
+        (tmp_path / file).symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert real.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+
+
+def test_a_card_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: leave `root=server_dir` off the card's `tuning.write` and this is refused."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    real = tmp_path / "shared" / "transmog.conf"
+    real.parent.mkdir()
+    real.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.reload_tuning()
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert "Transmogrification.Enable = 0" in path.read_text(encoding="utf-8")
+    assert "outside the server folder" not in view.tuning_report.toPlainText()
 
 
 def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
