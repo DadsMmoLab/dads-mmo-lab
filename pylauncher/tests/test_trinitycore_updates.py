@@ -3925,10 +3925,14 @@ def test_a_claim_lost_as_the_old_map_data_is_set_aside_moves_nothing_and_runs_no
     lost = _watcher_claim(box)
     _lose_claim_as_called(monkeypatch, extract, "set_aside", lost)
     box.world.running = False
+    said: list[str] = []
     with pytest.raises(InstallerError) as raised:
-        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+        for line in box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None):
+            said.append(str(line))
     assert "reservation" in str(raised.value), raised.value
     assert trinitycore.REEXTRACT_KEPT_ASIDE_CLAIM_LOST in str(raised.value), raised.value
+    # The press must not carry on as if the folders had been moved.
+    assert not any("moved aside" in line for line in said), said
     assert data_files(box) == before, "map data moved under a lost claim"
     assert not box.m.tools.seen, f"a tool ran under a lost claim: {box.m.tools.seen}"
 
