@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
+- WoW Unbound's Mentor stands in every capital and in Dalaran, and the install checks that all nine are there.
 - **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
