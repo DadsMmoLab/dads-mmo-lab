@@ -30,9 +30,9 @@ SERVER_DIR = Path("/home/user/wow")
 
 @pytest.fixture(autouse=True)
 def _no_real_port_questions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`gather()` binds real ports unless told otherwise.
+    """`gather()` binds real ports and asks the real daemon who holds them unless told otherwise.
 
-    T574 added it. A test that wants it passes its own seam; the rest must
+    T574 added both. A test that wants either passes its own seam; the rest must
     not depend on whether this machine happens to run a MySQL on 3306.
     """
     monkeypatch.setattr(
@@ -40,6 +40,7 @@ def _no_real_port_questions(monkeypatch: pytest.MonkeyPatch) -> None:
         "bind_tcp",
         lambda host, port, **_kw: platform_module.PortBind(host, port, "free", ""),
     )
+    monkeypatch.setattr(docker, "port_holders", lambda *_a, **_kw: docker.PortHolders())
 
 
 def facts(**overrides: object) -> preflight.Facts:
@@ -752,6 +753,7 @@ def _gather_with(tmp_path: Path, **seams: object) -> preflight.Facts:
         port_conflicts=lambda: [],
         probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
         bind_port=_free,
+        port_holders=lambda _ports: docker.PortHolders(),
     )
     base.update(seams)
     return preflight.gather(ENTRY, tmp_path, **base)  # type: ignore[arg-type]
@@ -836,6 +838,42 @@ def test_a_refused_connect_is_still_not_proof_a_port_is_in_use(tmp_path: Path) -
         probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", "refused"),
     )
     assert facts_.ports_in_use == () and facts_.port_blocks == ()
+
+
+def test_our_own_container_holding_the_port_is_not_bound_and_not_refused(tmp_path: Path) -> None:
+    """A resume re-runs preflight with the database still up on 3306."""
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        # What the OS says when OUR container holds the port.
+        if port in (3306, ENTRY.ports.auth):
+            return platform_module.PortBind(host, port, "in_use", "WinError 10048")
+        return _free(host, port)
+
+    held = docker.PortHolders(ours=frozenset({3306, ENTRY.ports.auth}))
+    facts_ = _gather_with(tmp_path, bind_port=bind, port_holders=lambda _ports: held)
+    assert 3306 not in asked and ENTRY.ports.auth not in asked
+    assert facts_.port_blocks == () and facts_.port_conflicts == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_someone_elses_container_on_the_database_port_is_a_conflict_not_a_bind_probe(
+    tmp_path: Path,
+) -> None:
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    held = docker.PortHolders(foreign={3306: ("old-mysql",)})
+    facts_ = _gather_with(tmp_path, bind_port=bind, port_holders=lambda _ports: held)
+    assert 3306 not in asked
+    assert facts_.port_conflicts == ("old-mysql",)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    assert "old-mysql" in report.message()
 
 
 def test_the_dotenv_port_overrides_are_the_ports_that_get_bound(tmp_path: Path) -> None:

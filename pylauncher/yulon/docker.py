@@ -5137,6 +5137,57 @@ def blocked_port_sentence(
     )
 
 
+@dataclass(frozen=True)
+class PortHolders:
+    """Who publishes the host ports asked about, split by ownership (T574).
+
+    `ours`: ports published by a container of the asked-for compose project.
+    `foreign`: port -> the other containers publishing it (an unreadable owner
+    counts as foreign, for `foreign_port_conflicts()`'s reason).
+    """
+
+    ours: frozenset[int] = frozenset()
+    foreign: dict[int, tuple[str, ...]] = field(default_factory=dict)
+
+
+def port_holders(
+    ports: Sequence[int], project: str, *, wsl_distro: str | None = None
+) -> PortHolders:
+    """Which running containers publish any of `ports`, and which of them are `project`'s.
+
+    The bind probe's partner: a socket bind cannot tell a port our own database
+    holds (a resume, with `restart: unless-stopped` containers up) from a port a
+    stranger holds, so preflight asks this first and binds only the rest. Same
+    ownership proof as `foreign_port_conflicts()`: the compose project label.
+    Containers publishing none of `ports` are not asked about at all.
+    """
+    wanted = set(ports)
+    if not wanted:
+        return PortHolders()
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
+    ours: set[int] = set()
+    foreign: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_field = line.split("\t", 1)
+        published: set[int] = set()
+        for part in ports_field.split(","):
+            if "->" not in part:
+                continue
+            _, _, port_text = part.split("->", 1)[0].rpartition(":")
+            if port_text.strip().isdigit() and int(port_text) in wanted:
+                published.add(int(port_text))
+        if not published:
+            continue
+        if container_project(name, wsl_distro=wsl_distro) == project:
+            ours |= published
+        else:
+            for port in sorted(published):
+                foreign.setdefault(port, []).append(name)
+    return PortHolders(frozenset(ours), {port: tuple(names) for port, names in foreign.items()})
+
+
 def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:
     """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
 

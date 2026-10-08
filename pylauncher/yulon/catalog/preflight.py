@@ -334,6 +334,7 @@ def gather(
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
     bind_port: Callable[[str, int], platform.PortBind] | None = None,
+    port_holders: Callable[[tuple[int, ...]], docker.PortHolders] | None = None,
     selinux: Callable[[], bool | None] | None = None,
     fs_type: Callable[[Path], str | None] | None = None,
     in_wsl: Callable[[], bool] | None = None,
@@ -385,7 +386,15 @@ def gather(
         if probe_port("127.0.0.1", port).status == "open":
             listening.append(port)
     targets = bind_targets(entry, server_dir)
-    blocks = _bind_blocks(targets, bind_port, here == "windows") if ready else ()
+    holders = docker.PortHolders()
+    if ready:
+        ask_holders = (
+            port_holders
+            if port_holders is not None
+            else _default_holders(entry, server_dir, platform_id)
+        )
+        holders = ask_holders(tuple(port for _host, port, _what in targets))
+    blocks = _bind_blocks(targets, holders, bind_port, here == "windows") if ready else ()
     # SELinux is a Linux fact. Off Linux the questions are not asked, so the
     # check below can tell "not applicable" from "could not read it".
     #
@@ -467,7 +476,7 @@ def gather(
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
         bind_mount=bind,
-        port_conflicts=tuple(conflicts()) if ready else (),
+        port_conflicts=_with_foreign_holders(conflicts() if ready else (), holders),
         ports_in_use=tuple(listening),
         port_blocks=blocks,
         selinux_enforcing=enforcing,
@@ -573,16 +582,22 @@ def bind_targets(entry: CatalogEntry, server_dir: Path) -> list[tuple[str, int, 
 
 def _bind_blocks(
     targets: Sequence[tuple[str, int, str]],
+    holders: docker.PortHolders,
     bind_port: Callable[[str, int], platform.PortBind] | None,
     windows: bool,
 ) -> tuple[PortBlock, ...]:
-    """Bind each target; a definite refusal becomes a `PortBlock`.
+    """Bind each target no container holds; a definite refusal becomes a `PortBlock`.
 
+    Ports a container publishes are skipped: ours would answer "in use" to our
+    own resume, and a stranger's is reported as a conflict by name instead.
     `unknown` (any other error) is dropped, like a refused connect.
     """
     bind = bind_port if bind_port is not None else platform.bind_tcp
+    skip = holders.ours | holders.foreign.keys()
     blocks: list[PortBlock] = []
     for host, port, what in targets:
+        if port in skip:
+            continue
         got = bind(host, port)
         if got.status in ("reserved", "in_use"):
             blocks.append(PortBlock(port, what, got.status))
@@ -590,6 +605,22 @@ def _bind_blocks(
         else:
             logger.debug(f"preflight: binding {host}:{port} answered {got.status}")
     return tuple(blocks)
+
+
+def _default_holders(
+    entry: CatalogEntry, server_dir: Path, platform_id: Callable[[], str]
+) -> Callable[[tuple[int, ...]], docker.PortHolders]:
+    """`docker.port_holders` for this install's compose project (the ownership proof)."""
+    project = composegen.project_name(entry.id, server_dir, platform_id=platform_id)
+    return lambda ports: docker.port_holders(ports, project)
+
+
+def _with_foreign_holders(conflicts: Sequence[str], holders: docker.PortHolders) -> tuple[str, ...]:
+    """The auth/world conflicts, plus any stranger on the database or SOAP port."""
+    names = list(conflicts)
+    for held in holders.foreign.values():
+        names += [name for name in held if name not in names]
+    return tuple(names)
 
 
 def free_bytes(path: Path) -> int | None:

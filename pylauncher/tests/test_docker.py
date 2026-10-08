@@ -816,6 +816,56 @@ def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_el
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
 
 
+def test_port_holders_split_our_containers_from_everyone_elses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T574: a resume has our own database on 3306 and must not be told it is taken."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(
+            0,
+            "tbc-db\t127.0.0.1:3306->3306/tcp\n"
+            "tbc-auth\t0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp\n"
+            "old-mysql\t0.0.0.0:3307->3306/tcp\n"
+            "stranger\t127.0.0.1:7878->7878/tcp\n"
+            "idle\t\n",
+            "",
+        ),
+    )
+    owners = {"tbc-db": "mine", "tbc-auth": "mine", "stranger": "another", "old-mysql": "another"}
+    monkeypatch.setattr(docker, "container_project", lambda name, **_kw: owners.get(name))
+    got = docker.port_holders((3306, 3724, 7878, 3307, 8085), "mine")
+    assert got.ours == frozenset({3306, 3724})
+    assert got.foreign == {7878: ("stranger",), 3307: ("old-mysql",)}
+
+
+def test_port_holders_do_not_ask_who_owns_a_container_that_publishes_nothing_we_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(0, "other\t0.0.0.0:9999->9999/tcp\n", ""),
+    )
+    monkeypatch.setattr(
+        docker, "container_project", lambda _n, **_kw: pytest.fail("asked about an unrelated one")
+    )
+    assert docker.port_holders((3306,), "mine") == docker.PortHolders()
+
+
+def test_a_holder_docker_will_not_name_an_owner_for_is_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(0, "x\t127.0.0.1:3306->3306/tcp\n", ""),
+    )
+    monkeypatch.setattr(docker, "container_project", lambda _n, **_kw: docker.UNREADABLE)
+    assert docker.port_holders((3306,), "mine").foreign == {3306: ("x",)}
+
+
 def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
