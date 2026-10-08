@@ -24,7 +24,9 @@ Unbound.ReagentFree = 0
 #    Unbound.InstantSummons
 #        Description: Class summons (warlock demons and Inferno, Water
 #                     Elemental, Raise Dead, Feral Spirit) cast instantly, cost
-#                     nothing and have no cooldown. A big balance change:
+#                     no mana and have no cooldown. Reagents (soul shards,
+#                     Infernal Stone, Corpse Dust) are still used unless
+#                     Unbound.ReagentFree is also on. A big balance change:
 #                     Inferno's one-hour cooldown goes away.
 #        Default:     0 - (Disabled)
 #                     1 - (Enabled)

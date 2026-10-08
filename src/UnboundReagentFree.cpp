@@ -21,7 +21,8 @@
 // mod_unbound.conf and both are OFF unless the conf turns them on (a missing
 // conf also means off):
 //   Unbound.ReagentFree   = 0   free casting reagents
-//   Unbound.InstantSummons = 0  instant, free, cooldown-less class summons
+//   Unbound.InstantSummons = 0  instant, no-mana, cooldown-less class summons
+//                               (reagents stay under Unbound.ReagentFree)
 // The settings are read once, at startup.
 
 namespace
@@ -106,7 +107,7 @@ private:
     static void MakeSummonsInstant()
     {
         // Pet/summon QoL (user request 2026-08-17): every class summon casts
-        // instantly, costs nothing and has no cooldown, so one macro can chain
+        // instantly, costs no mana and has no cooldown, so one macro can chain
         // the whole menagerie. GCD is zeroed server-side too; the client may
         // still enforce its own GCD locally, in which case the macro is spammed
         // once per summon instead of firing in a single press.
@@ -143,7 +144,7 @@ private:
             }
         }
 
-        LOG_INFO("module", "[UNBOUND] instant summons: on ({} summon spells now instant, free and cooldown-less)", summons);
+        LOG_INFO("module", "[UNBOUND] instant summons: on ({} summon spells now instant, no mana cost and no cooldown; reagents follow Unbound.ReagentFree)", summons);
     }
 };
 
