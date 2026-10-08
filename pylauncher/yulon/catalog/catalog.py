@@ -2813,6 +2813,17 @@ class Client(_Strict):
 
     version: str = Field(min_length=1)
     build: int = Field(gt=0)
+    required_build: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The build the PLAYER's own Wow.exe must report (its file version), when the "
+            "server drops every other one: AzerothCore's authserver accepts several WotLK "
+            "builds at the password and its world server then disconnects all but 12340. "
+            "Distinct from `build`, which is what the ready-to-play copy reports after an "
+            "`exe_patch` (Centurion: 12342). None: Yu'lon does not read the exe's build."
+        ),
+    )
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()

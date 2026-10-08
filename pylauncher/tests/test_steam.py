@@ -949,3 +949,109 @@ def test_the_details_have_no_doubled_spaces(tmp_path: Path) -> None:
 
     assert "  " not in details, details
     assert ".vdf. It was backed up first as" in details, details
+
+
+# --------------------------------------------------------------------------
+# the server entry's launcher (T575)
+# --------------------------------------------------------------------------
+
+_MOUNTED = "/tmp/.mount_YulonAbC123/usr/bin/yulon"
+
+
+def test_inside_an_appimage_the_server_entry_starts_the_appimage_file(tmp_path: Path) -> None:
+    """The measured defect: Exe was the binary inside the runtime's FUSE mount.
+
+    That path has a random name and is gone the moment Yu'lon exits, so a Steam
+    entry holding it can never launch from Gaming Mode.
+    """
+    image = tmp_path / "Apps" / "Yulon-v0.9.13-x86_64.AppImage"
+    image.parent.mkdir()
+    image.write_bytes(b"\x7fELF")
+
+    exe, opts = steam.launcher_command(
+        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+    )
+
+    assert exe == str(image)
+    assert opts == ""
+
+
+def test_an_appimage_variable_naming_a_missing_file_is_not_believed(tmp_path: Path) -> None:
+    """An earlier AppImage in the session leaves `$APPIMAGE` set in what a child inherits."""
+    exe, _ = steam.launcher_command(
+        frozen=True,
+        executable="/opt/yulon/yulon",
+        environ={"APPIMAGE": str(tmp_path / "gone.AppImage")},
+    )
+
+    assert exe == "/opt/yulon/yulon"
+
+
+def test_a_tarball_install_still_starts_the_binary_in_its_folder() -> None:
+    exe, opts = steam.launcher_command(frozen=True, executable="/opt/yulon/yulon", environ={})
+
+    assert (exe, opts) == ("/opt/yulon/yulon", "")
+
+
+def test_a_source_checkout_still_starts_the_interpreter_with_main_py(tmp_path: Path) -> None:
+    image = tmp_path / "x.AppImage"
+    image.write_bytes(b"\x7fELF")
+
+    exe, opts = steam.launcher_command(
+        frozen=False, executable="/usr/bin/python3", environ={"APPIMAGE": str(image)}
+    )
+
+    assert exe == "/usr/bin/python3"
+    assert opts.endswith("main.py")
+
+
+def test_the_server_entry_is_written_with_the_appimage_and_its_folder(tmp_path: Path) -> None:
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    image = tmp_path / "Apps" / "Yulon.AppImage"
+    image.parent.mkdir()
+    image.write_bytes(b"\x7fELF")
+    shortcuts = _shortcuts(tmp_path, client_dir=client)
+    shortcuts.launcher = lambda: steam.launcher_command(
+        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+    )
+
+    shortcuts.add()
+
+    root, _ = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())
+    server = next(e for e in root["shortcuts"].values() if e["AppName"] == "Turtle WoW Server")
+    assert server["Exe"] == f'"{image}"'
+    assert server["StartDir"] == f'"{image.parent}"'
+
+
+def test_a_second_press_repairs_an_entry_that_points_into_the_mount(tmp_path: Path) -> None:
+    """An entry written by a build before the fix is mended by pressing the button again.
+
+    `Exe` and `StartDir` are rewritten; the appid Steam issued, the play history
+    and the fields this module does not know all stay.
+    """
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    image = tmp_path / "Apps" / "Yulon.AppImage"
+    image.parent.mkdir()
+    image.write_bytes(b"\x7fELF")
+    broken = steam.new_entry(
+        name="Turtle WoW Server", exe=_MOUNTED, startdir=str(Path(_MOUNTED).parent)
+    ) | {"LastPlayTime": 1789071688, "SomeFieldValveAddsNextYear": "keep me"}
+    (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {"0": broken}}))
+    shortcuts = _shortcuts(tmp_path, client_dir=client)
+    shortcuts.launcher = lambda: steam.launcher_command(
+        frozen=True, executable=_MOUNTED, environ={"APPIMAGE": str(image)}
+    )
+
+    shortcuts.add()
+
+    root, _ = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())
+    server = root["shortcuts"]["0"]
+    assert server["Exe"] == f'"{image}"'
+    assert server["StartDir"] == f'"{image.parent}"'
+    assert server["appid"] == broken["appid"]
+    assert server["LastPlayTime"] == 1789071688
+    assert server["SomeFieldValveAddsNextYear"] == "keep me"

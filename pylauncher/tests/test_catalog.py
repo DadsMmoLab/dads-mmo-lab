@@ -1264,3 +1264,15 @@ def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:
     tbc["install"]["native"]["cmangos"]["patches"][0]["source"] = "src/somewhere-else"
     with pytest.raises(ValidationError, match="src/somewhere-else"):
         parse_catalog(data)
+
+
+def test_the_catalog_names_the_build_a_players_own_client_must_report_t576() -> None:
+    """3.3.5a servers say 12340 (Centurion's own copy reports 12342, the player's is stock)."""
+    cat = load_catalog()
+
+    assert cat.get("wow-wotlk").client.required_build == 12340
+    assert cat.get("wow-centurion").client.required_build == 12340
+    assert cat.get("wow-unbound").client.required_build == 12340
+    assert cat.get("wow-centurion").client.build == 12342
+    assert cat.get("wow-tbc").client.required_build is None
+    assert cat.get("wow-vanilla").client.required_build is None

@@ -115,6 +115,24 @@ def _probe(directory: Path) -> bool:
     return True
 
 
+def appimage_file(environ: Mapping[str, str] | None = None) -> Path | None:
+    """The AppImage FILE this process was started from, or None.
+
+    `$APPIMAGE` is the runtime's own statement of where the file is, and it is
+    believed only when it names a file that exists: an unrelated AppImage
+    earlier in the session leaves it set in the environment a child inherits.
+    The running binary (`sys.executable`) is NOT this file; it is a path inside
+    the runtime's temporary FUSE mount, gone when the app exits. Anything that
+    must still work after Yu'lon closes (an autostart entry, a Steam shortcut)
+    has to name this file instead.
+    """
+    env = os.environ if environ is None else environ
+    appimage = env.get("APPIMAGE")
+    if appimage and Path(appimage).is_file():
+        return Path(appimage)
+    return None
+
+
 def detect_install(
     *,
     frozen: bool | None = None,
@@ -155,9 +173,8 @@ def detect_install(
     # `layout.shipped_entries()`, never by this function.
     if which == "windows":
         return Install(InstallKind.WINDOWS_ZIP, exe.parent, exe.name, probe_writable(exe.parent))
-    appimage = env.get("APPIMAGE")
-    if appimage and Path(appimage).is_file():
-        target = Path(appimage)
+    target = appimage_file(env)
+    if target is not None:
         # A file install stages beside itself, so the PARENT is what has to
         # take a new file; a folder install stages inside itself.
         return Install(InstallKind.APPIMAGE, target, "", probe_writable(target.parent))

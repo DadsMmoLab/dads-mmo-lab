@@ -1732,3 +1732,177 @@ def test_readiness_is_judged_from_the_log_that_the_reading_was_made_from(tmp_pat
 
     assert first.module_line.startswith("Unbound did not load:")
     assert second.module_line == GOOD_LINE
+
+
+# --- T576: a client that is not 3.3.5a, seen in the world server's log ----------------------
+
+WRONG_CLIENT_LINE = (
+    "2026-10-08 04:29:18 WorldSocket::HandleAuthSession: Client 172.19.0.1 requested "
+    "connecting with realm id 2197369053 but this realm has id 1 set in config.\n"
+)
+
+
+def _client_watch(
+    tmp_path: Path,
+    run: str,
+    log: Callable[[str, str], str],
+    clock: list[datetime],
+    entry: catalog_module.CatalogEntry = WOTLK,
+) -> dashboard.Dashboard:
+    return dashboard.Dashboard(
+        entry.container_spec(),
+        entry,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _c: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: BANNER,
+        login_log_of=log,
+        now=lambda: clock[0],
+    )
+
+
+def test_a_world_log_that_refuses_a_foreign_realm_id_tells_the_player_the_client_is_not_3_3_5a(
+    tmp_path: Path,
+) -> None:
+    """The world server drops a non-3.3.5a client after the password; the tab says why."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: WRONG_CLIENT_LINE, [NOW])
+
+    verdict = watch.tick()
+
+    assert "3.3.5a" in verdict.warning and "12340" in verdict.warning
+    assert "not" in verdict.warning
+    assert verdict.warning in dashboard.line(verdict)
+
+
+def test_a_log_without_that_line_adds_no_warning(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: "ready...\nsome other line\n", [NOW])
+
+    assert watch.tick().warning == ""
+
+
+def test_a_server_that_names_no_client_build_never_reads_the_log_for_it(tmp_path: Path) -> None:
+    """Data-driven: the catalog's `required_build`, not a game id, decides."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"required_build": None})}
+    )
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, [NOW], entry
+    )
+
+    assert watch.tick().warning == ""
+    assert asked == []
+
+
+def test_the_log_is_read_for_it_once_a_minute_and_only_what_is_new(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", clock)
+
+    for seconds in (0, 10, 20, 59):
+        clock[0] = NOW + timedelta(seconds=seconds)
+        watch.tick()
+    assert asked == [run]
+    clock[0] = NOW + timedelta(seconds=61)
+    watch.tick()
+
+    assert len(asked) == 2
+    assert asked[1] != run
+    assert (
+        asked[1] == "72s"
+    ), "how long ago (61 s + the overlap, rounded up), not a wall-clock stamp"
+
+
+def test_a_clock_that_goes_backwards_reads_the_run_again_and_ages_the_sentence_from_then(
+    tmp_path: Path,
+) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, clock
+    )
+    assert watch.tick().warning
+
+    clock[0] = NOW - timedelta(hours=1)  # the machine's clock is set back
+    assert watch.tick().warning
+    assert asked == [run, run], "carried on from a read that is now in the future"
+    clock[0] = NOW - timedelta(hours=1) + dashboard.WRONG_CLIENT_STAYS * 2
+    watch._login_log_of = lambda _c, _s: ""
+    assert watch.tick().warning == ""
+
+
+def test_the_warning_stays_a_while_after_the_line_and_then_goes(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    lines = [WRONG_CLIENT_LINE]
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, _s: lines.pop(0) if lines else "", clock)
+
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS - timedelta(seconds=1)
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS + timedelta(seconds=1)
+    assert watch.tick().warning == ""
+
+
+def _realm_line(asked: int, set_in_config: int = 1) -> str:
+    return (
+        "WorldSocket::HandleAuthSession: Client 172.19.0.1 requested connecting with realm id "
+        f"{asked} but this realm has id {set_in_config} set in config.\n"
+    )
+
+
+@pytest.mark.parametrize("asked", [1, 2, 255])
+def test_a_plausible_realm_id_in_that_line_does_not_blame_the_client(
+    tmp_path: Path, asked: int
+) -> None:
+    """A correct client sends the realm list's id; a realm row that differs from the config's
+    RealmID (a hand edit, a second row) must not read as a wrong client."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked, 7), [NOW])
+
+    assert watch.tick().warning == ""
+
+
+@pytest.mark.parametrize("asked", [256, 298563881, 2197369053])
+def test_a_realm_id_no_realm_list_would_hold_blames_the_client(tmp_path: Path, asked: int) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked), [NOW])
+
+    assert "3.3.5a" in watch.tick().warning
+
+
+def test_a_plausible_line_does_not_hide_a_later_random_one(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    text = _realm_line(1, 7) + _realm_line(941848916)
+    watch = _client_watch(tmp_path, run, lambda _c, _s: text, [NOW])
+
+    assert watch.tick().warning
+
+
+def test_the_first_read_of_a_long_running_server_covers_only_the_sentences_lifetime(
+    tmp_path: Path,
+) -> None:
+    """An old refused login in a days-old log must not read as fresh, nor a huge log be read."""
+    run = _stamp(NOW - timedelta(days=3))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [f"{int(dashboard.WRONG_CLIENT_STAYS.total_seconds())}s"]
+
+
+def test_the_first_read_of_a_young_run_starts_at_the_run(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=14))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [run]
