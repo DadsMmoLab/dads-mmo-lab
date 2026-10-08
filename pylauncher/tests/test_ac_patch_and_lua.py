@@ -1262,3 +1262,96 @@ def test_a_crash_before_the_write_keeps_the_old_claim_on_the_old_bytes(
 
     assert laid.read_text(encoding="utf-8") == "v2\n", said
     assert not any("changed on this machine" in line for line in said), said
+
+
+def test_a_stale_pending_entry_cannot_claim_a_file_the_player_put_there_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: `pending` must not outlive the next press, or its digest claims a stranger.
+
+    A press saved "a.lua is pending" and died before writing it. Upstream then dropped
+    a.lua, and the next press had nothing to do (so it never rewrote the record). The
+    player later put their own a.lua there, with those exact bytes; the press after
+    that must leave it alone, not adopt it and then remove it as no longer shipped.
+    """
+    server_dir, src, spec, laid = crashed_press_tree(tmp_path)
+    (src / "a.lua").unlink()
+    (src / "b.lua").write_text("b\n", encoding="utf-8")
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "a.lua").write_text("v1\n", encoding="utf-8")
+    real_write, real_publish = scriptdeploy._write_record, scriptdeploy._publish
+
+    def dies_before_the_closing_save(
+        root: Path, files: dict[str, str], pending: dict[str, str] | None = None
+    ) -> None:
+        if pending is not None:
+            real_write(root, files, pending)
+
+    def dies_before_the_script(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            raise OSError(5, "the machine went away")
+        real_publish(target, data)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(scriptdeploy, "_write_record", dies_before_the_closing_save)
+        patched.setattr(scriptdeploy, "_publish", dies_before_the_script)
+        with pytest.raises(InstallerError):
+            list(scriptdeploy.lay(server_dir, [spec]))
+    assert "pending" in scriptdeploy.record_path(server_dir).read_text(encoding="utf-8")
+    (src / "a.lua").unlink()
+
+    list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+
+    assert "pending" not in scriptdeploy.record_path(server_dir).read_text(encoding="utf-8")
+    laid.write_text("v1\n", encoding="utf-8")
+    said = list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+    assert laid.read_text(encoding="utf-8") == "v1\n", said
+    assert not any("Removed" in line for line in said), said
+
+
+def test_the_laying_failures_name_the_press_and_never_claim_the_server_was_not_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """These sentences are also said on a rollback, where the server may well have been started."""
+    from yulon import server_build_presses
+    from yulon.catalog.catalog import LuaScripts
+
+    press = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    server_dir, _src, spec, _laid = crashed_press_tree(tmp_path)
+    missing = LuaScripts(src="modules/gone/lua", dest=f"{LUA_SCRIPTS_DIR}/gone")
+    with pytest.raises(InstallerError) as absent:
+        list(scriptdeploy.lay(server_dir, [missing]))
+    monkeypatch.setattr(
+        scriptdeploy, "_publish", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    with pytest.raises(InstallerError) as unwritable:
+        list(scriptdeploy.lay(server_dir, [spec]))
+
+    for raised in (absent, unwritable):
+        assert press in str(raised.value), raised.value
+        assert "not started" not in str(raised.value), raised.value
+        assert "would start without" not in str(raised.value), raised.value
+
+
+def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import server_build_presses
+
+    real = scriptdeploy._publish
+    scripts: list[int] = []
+
+    def fourth_script_fails(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(1)
+            if len(scripts) >= 4:  # the install, the update's two, then the rollback's
+                raise OSError(5, "the disk went away")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", fourth_script_fails)
+
+    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+
+    back = next(line for line in said if "back on their old commits, but" in line)
+    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in back, back
+    assert "source patch" not in back and "not started" not in back, back

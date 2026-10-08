@@ -83,19 +83,25 @@ def read_record(server_dir: Path) -> dict[str, str]:
     return _read_record(server_dir)[0]
 
 
-def _read_record(server_dir: Path) -> tuple[dict[str, str], str]:
-    """The record and, when there is one that cannot be read, why not ("" otherwise)."""
+def _read_record(server_dir: Path) -> tuple[dict[str, str], str, bool]:
+    """The record, why it cannot be read ("" when it can), and whether it held `pending`.
+
+    A record that held `pending` is saved again by the press that read it, so the
+    entry never outlives that press (T563 cold review): left on disk, a no-op press
+    would keep it, and a file the player put there later, with those very bytes,
+    would be adopted as Yu'lon's and removed or replaced.
+    """
     path = record_path(server_dir)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}, ""
+        return {}, "", False
     except (OSError, ValueError) as exc:
         logger.warning(f"{path} could not be read ({exc}); no script there counts as Yu'lon's")
-        return {}, str(exc)
+        return {}, str(exc), False
     files = parsed.get("files") if isinstance(parsed, dict) else None
     if not isinstance(files, dict):
-        return {}, "it holds no list of files"
+        return {}, "it holds no list of files", False
     kept = {
         k: v
         for k, v in files.items()
@@ -107,7 +113,7 @@ def _read_record(server_dir: Path) -> tuple[dict[str, str], str]:
             if isinstance(rel, str) and isinstance(digest, str) and _inside_the_script_dir(rel):
                 if _is_ours_by_pending(server_dir, rel, digest):
                     kept[rel] = digest
-    return kept, ""
+    return kept, "", bool(pending)
 
 
 def _is_ours_by_pending(server_dir: Path, rel: str, digest: str) -> bool:
@@ -172,8 +178,9 @@ def _publish(target: Path, data: bytes) -> None:
     try:
         # Whatever sits at the temp name is removed, not written through: a link
         # planted there (T563) would send the bytes, and the chmod, to its target.
-        # `O_EXCL` then refuses a name that reappeared, and `O_NOFOLLOW` a link
-        # even where `O_EXCL` alone would not (Windows has no `O_NOFOLLOW`).
+        # `O_EXCL` then refuses a name that reappeared (on POSIX it refuses a link
+        # too, even a dangling one); `O_NOFOLLOW` is belt and braces where there is
+        # one, and Windows has none.
         tmp.unlink(missing_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(tmp, flags | getattr(os, "O_BINARY", 0), SCRIPT_MODE)
@@ -269,8 +276,8 @@ def _plan(server_dir: Path, specs: Sequence[LuaScripts], remedy: str) -> list[_P
                 )
         else:
             raise SelfExplainedError(
-                f"{spec.src} is not in {server_dir}, so its Lua scripts cannot be laid and "
-                "the server would start without them. Nothing was changed."
+                f"{spec.src} is not in {server_dir}, so its Lua scripts cannot be laid. Nothing "
+                f"was changed. Once that folder is back, press {remedy}."
             )
         for source, target in pairs:
             rel = target.relative_to(server_dir).as_posix()
@@ -348,8 +355,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             raise _link_refusal(server_dir, link, remedy)
     planned = _plan(server_dir, specs, remedy)
     folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
-    record, unreadable = _read_record(server_dir)
-    if not specs and not record:
+    record, unreadable, had_pending = _read_record(server_dir)
+    if not specs and not record and not had_pending:
         return
     if unreadable:
         yield (
@@ -427,11 +434,11 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
         finished = True
     except OSError as exc:
         raise SelfExplainedError(
-            f"The Lua scripts could not be laid ({exc}). The server would start without them, "
-            "so it was not started."
+            f"The Lua scripts could not be laid ({exc}). Once the reason is fixed, press "
+            f"{remedy}: it lays them again."
         ) from exc
     finally:
-        if kept_record != record or pending_written:
+        if kept_record != record or pending_written or had_pending:
             try:
                 _write_record(server_dir, kept_record)
             except OSError as exc:
