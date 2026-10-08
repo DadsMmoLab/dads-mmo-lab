@@ -786,7 +786,12 @@ def _fetch_checkout_folder(
         raise _folder_refusal(
             pack, f"this server's checkout has no files in {source.path} at the commit it is on"
         )
-    dest = cache_dir() / entry_id / pack.id / _tree_digest(listed)[:16] / f"{pack.id}.zip"
+    # One folder per server (cold review): two servers of a game playing at once
+    # neither rename over the zip the other installs from nor prune it.
+    owner = hashlib.sha256(os.fspath(server_dir).encode("utf-8", "replace")).hexdigest()[:10]
+    dest = (
+        cache_dir() / f"{entry_id}.{owner}" / pack.id / _tree_digest(listed)[:16] / f"{pack.id}.zip"
+    )
     dest.parent.mkdir(parents=True, exist_ok=True)
     _refuse_without_room(
         pack, dest.parent, sum(path.stat().st_size for path in files.values()) + 1024 * len(files)
@@ -807,7 +812,12 @@ def _fetch_checkout_folder(
                 archive.writestr(_folder_zip_info(name, len(data)), data)
         _stop_if_asked(pack, cancelled)
         sha256 = _file_sha256(part)
-        os.replace(part, dest)
+        if _holds(dest, sha256):
+            # The same bytes are there already, maybe open in an install: kept, not
+            # renamed over (Windows refuses a rename onto an open file).
+            part.unlink()
+        else:
+            os.replace(part, dest)
     except BaseException:
         _unlink_quietly(part)
         raise
@@ -829,9 +839,10 @@ def fetch_checkout_folder(
     line under it a file; no link anywhere inside it or on the way to it. A
     missing, extra, changed or linked file refuses, naming it, before anything
     is kept: the zip is written as `<pack>.zip.part` and renamed to
-    `cache_dir()/<entry>/<pack>/<list digest[:16]>/<pack>.zip` only once every
-    file in it was proved. `version` is None; `sha256` is the zip's own, the
-    same for the same folder every time. `cancelled` is asked between files.
+    `cache_dir()/<entry>.<server>/<pack>/<list digest[:16]>/<pack>.zip` only once
+    every file in it was proved (a zip already there with the same bytes is kept).
+    `version` is None; `sha256` is the zip's own, the same for the same folder every
+    time. `cancelled` is asked between files.
     """
     try:
         return _fetch_checkout_folder(pack, server_dir, entry_id, cancelled)

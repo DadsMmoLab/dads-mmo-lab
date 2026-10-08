@@ -2742,9 +2742,9 @@ def test_a_folder_pack_is_proved_and_packed_into_the_same_zip_every_time(
     assert first.version is None
     assert first.sha256 == _sha(first.path.read_bytes())
     digest = first.path.parent.name
-    assert first.path == _cache_in_tmp / "wow-unbound" / "unbound-addons" / digest / (
-        "unbound-addons.zip"
-    )
+    assert first.path.parent.parent == _cache_in_tmp / first.path.parts[-4] / "unbound-addons"
+    assert first.path.parts[-4].startswith("wow-unbound."), "one cache folder per server"
+    assert first.path.name == "unbound-addons.zip"
     with zipfile.ZipFile(first.path) as archive:
         infos = archive.infolist()
         assert [info.filename for info in infos] == sorted(FOLDER_FILES)
@@ -2752,7 +2752,7 @@ def test_a_folder_pack_is_proved_and_packed_into_the_same_zip_every_time(
         assert {info.compress_type for info in infos} == {zipfile.ZIP_STORED}
         assert {info.date_time for info in infos} == {(1980, 1, 1, 0, 0, 0)}
     assert _cache_files(_cache_in_tmp) == [
-        f"wow-unbound/unbound-addons/{digest}/unbound-addons.zip"
+        f"{first.path.parts[-4]}/unbound-addons/{digest}/unbound-addons.zip"
     ], "no .part left, and nothing else"
 
 
@@ -2921,6 +2921,45 @@ def test_two_agreeing_lines_for_one_file_are_one_line(tmp_path: Path) -> None:
 
     with zipfile.ZipFile(fetched.path) as archive:
         assert sorted(archive.namelist()) == sorted(FOLDER_FILES)
+
+
+def test_two_servers_of_one_game_never_share_a_folder_packs_zip(
+    tmp_path: Path, _cache_in_tmp: Path
+) -> None:
+    """Cold review note 3: two servers playing at once must not rename over the zip the other
+    is installing from (Windows refuses that), nor prune it from under the other."""
+    one, two = tmp_path / "srv-one", tmp_path / "srv-two"
+    _lay_module(one)
+    _lay_module(two)
+
+    first, second = _fetch_folder(one), _fetch_folder(two)
+
+    assert first.sha256 == second.sha256, "the same folder, the same zip"
+    assert first.path != second.path
+    assert first.path.parents[2] != second.path.parents[2]
+
+
+def test_a_zip_already_there_with_the_same_bytes_is_not_renamed_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zip an earlier Play made may be open (an install reading it); the same bytes are
+    kept as they are rather than renamed over, which Windows refuses for an open file."""
+    server = tmp_path / "srv"
+    _lay_module(server)
+    first = _fetch_folder(server)
+    real = os.replace
+
+    def refuse_onto_the_zip(src: Any, dst: Any) -> None:
+        if Path(dst) == first.path:
+            raise PermissionError(13, "The process cannot access the file", str(dst))
+        real(src, dst)
+
+    monkeypatch.setattr(client_packs.os, "replace", refuse_onto_the_zip)
+
+    again = _fetch_folder(server)
+
+    assert again == first
+    assert sorted(p.name for p in first.path.parent.iterdir()) == ["unbound-addons.zip"]
 
 
 def test_a_list_line_with_a_star_and_windows_slashes_names_the_same_file(tmp_path: Path) -> None:
