@@ -684,3 +684,28 @@ def test_a_claim_its_press_lets_go_is_not_lost(fake_docker: Path, tmp_path: Path
         pass
     time.sleep(0.3)  # the watcher has seen the CLI end by now
     assert not held.lost.is_set()
+
+
+def test_one_slow_answer_about_a_held_claim_does_not_lose_it(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review of T549: one `docker inspect` slower than its bound counted as lost, and a
+    loss is sticky, so a finished extraction could fail on one slow answer. The claim is
+    asked again, with the claim's own bound, before it is called lost.
+
+    Mutations this catches: one ask only; the 1 s look bound instead of `_CLAIM_ASK_TIMEOUT`.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        real = docker._claim_facts
+        timeouts: list[float] = []
+
+        def first_slow(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+            timeouts.append(timeout)
+            return None if len(timeouts) == 1 else real(name, timeout=timeout)
+
+        monkeypatch.setattr(docker, "_claim_facts", first_slow)
+        assert held.held(), "one slow answer lost the claim"
+        assert not held.lost.is_set()
+        assert timeouts and all(t == docker._CLAIM_ASK_TIMEOUT for t in timeouts), timeouts

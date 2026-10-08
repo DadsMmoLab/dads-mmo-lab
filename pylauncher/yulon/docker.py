@@ -7568,10 +7568,21 @@ def folder_claim(
         _release_claim(held)
 
 
+_CLAIM_STILL_OURS_ASKS = 2
+"""How many answers it takes to call a claim lost (cold review of T549): one slow or failed
+`docker inspect` is not a lost claim, and a loss, once said, stays said."""
+
+
 def _claim_still_ours(held: _Claim) -> bool:
-    """Does Docker say the claim `held` still runs, carrying this press's nonce? (T549)"""
-    facts = _claim_facts(held.name, timeout=_CLAIM_LOOK_TIMEOUT)
-    return facts is not None and facts.nonce == held.nonce and facts.status == "running"
+    """Does Docker say the claim `held` still runs, carrying this press's nonce? (T549)
+
+    Asked with `_CLAIM_ASK_TIMEOUT`, and once more before the answer is no.
+    """
+    for _ in range(_CLAIM_STILL_OURS_ASKS):
+        facts = _claim_facts(held.name, timeout=_CLAIM_ASK_TIMEOUT)
+        if facts is not None and facts.nonce == held.nonce and facts.status == "running":
+            return True
+    return False
 
 
 def _watch_claim(held: _Claim, lost: threading.Event, letting_go: threading.Event) -> None:

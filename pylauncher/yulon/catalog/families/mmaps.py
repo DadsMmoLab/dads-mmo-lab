@@ -814,6 +814,7 @@ def discard(
     *,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
+    stop: Callable[[], bool] | None = None,
 ) -> None:
     """Throw the movement maps away because the map data they were made from is replaced.
 
@@ -823,12 +824,20 @@ def discard(
     next start makes a whole new set. A complete set goes too: it describes maps
     that are about to change.
 
+    `stop` (T549): asked per tile; when it says stop, the record is forgotten anyway and
+    `rmtree.StoppedPartWay` raised, so a part-deleted set reads as not made, never done.
+
     Raises:
         MmapsError: the switch, the folder or the record could not be changed.
+        rmtree.StoppedPartWay: `stop` ended the deletion between two tiles.
     """
     job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
     with _LOCK:
-        _clear_output(job)
+        try:
+            _clear_output(job, stop)
+        except rmtree.StoppedPartWay:
+            _forget_record(server_dir)
+            raise
         _forget_record(server_dir)
 
 
@@ -1512,7 +1521,7 @@ def _tile_state(path: Path, header: MmapTileHeader) -> bool | None:
     return length == header.length + size
 
 
-def _clear_output(job: Job) -> None:
+def _clear_output(job: Job, stop: Callable[[], bool] | None = None) -> None:
     """Pathfinding switched off, then `data/mmaps` emptied and present for the next bind.
 
     Off FIRST, whenever the maps are emptied, whatever switched it on: a record
@@ -1525,7 +1534,10 @@ def _clear_output(job: Job) -> None:
     out = data_dir / MMAPS_DIR
     try:
         if out.exists():
-            rmtree.remove_tree(out)
+            if stop is not None:
+                rmtree.remove_tree_stoppably(out, stop)  # per tile (T549)
+            else:
+                rmtree.remove_tree(out)
         # Never `data/` itself: a server whose map data is gone gets no empty
         # folder in its place, only a start (which refuses without maps) needs it.
         if data_dir.is_dir():

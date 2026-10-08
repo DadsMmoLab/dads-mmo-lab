@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 from yulon.log import get_logger
@@ -33,6 +34,43 @@ class TreeRemovalError(OSError):
     catches `OSError` around a delete keeps catching this one, and the two
     `shutil.rmtree` failures it wraps stay the same kind of thing they were.
     """
+
+
+class StoppedPartWay(Exception):
+    """A removal or a move its `stop` ended between two files (T549); every file left is whole."""
+
+
+def remove_tree_stoppably(path: Path, stop: Callable[[], bool]) -> bool:
+    """`shutil.rmtree(path)` file by file, asking `stop()` before each; False when nothing there.
+
+    For a long change to a folder a press may lose its claim on during it (T549):
+    the claim watcher's flag is asked per file -- in process, no Docker call -- and
+    the removal stops at the next file boundary. A link inside is removed as a link,
+    never followed.
+
+    Raises:
+        StoppedPartWay: `stop()` answered True; what is left is whole files.
+        OSError: as `shutil.rmtree` would.
+    """
+    if not os.path.lexists(path):
+        return False
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            if stop():
+                raise StoppedPartWay(f"the removal of {path} was stopped part way")
+            os.unlink(os.path.join(root, name))
+        for name in dirs:
+            full = os.path.join(root, name)
+            if os.path.islink(full):
+                if stop():
+                    raise StoppedPartWay(f"the removal of {path} was stopped part way")
+                os.unlink(full)
+            else:
+                os.rmdir(full)
+    if stop():
+        raise StoppedPartWay(f"the removal of {path} was stopped part way")
+    os.rmdir(path)
+    return True
 
 
 def remove_tree(path: Path) -> None:
