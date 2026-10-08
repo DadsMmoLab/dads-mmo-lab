@@ -478,6 +478,23 @@ def test_a_stop_that_marks_while_the_clear_runs_gets_its_mark_back(rig: Rig) -> 
     assert sql.flags & 2
 
 
+def test_a_stop_that_began_and_ended_during_the_clear_gets_its_mark_back(rig: Rig) -> None:
+    """The whole Stop (hold, mark, world down, release) fell inside the clear's Docker calls."""
+    watch, _world, sql, writes, clock = rig
+    watch.tick()
+    clock.advance(61)
+    sql.flags = 2
+
+    def a_whole_stop_during_the_clear() -> None:
+        with realm_flag.deliberately_offline(SPEC):
+            sql.flags |= 2  # the Stop's own mark, before the clear's UPDATE lands
+
+    writes.during_clear = a_whole_stop_during_the_clear
+    watch.tick()
+    assert writes.names == ["clear", "mark"]
+    assert sql.flags & 2
+
+
 def test_a_stops_hold_never_waits_for_a_clear_stuck_in_docker(rig: Rig) -> None:
     """The hold's lock is never held across a Docker call: a wedged Docker blocks no Stop."""
     watch, _world, sql, writes, clock = rig
