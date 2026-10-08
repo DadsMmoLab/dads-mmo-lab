@@ -15,6 +15,7 @@ what it refuses.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -1077,3 +1078,86 @@ def test_no_scripts_and_no_record_writes_and_refuses_nothing(tmp_path: Path) -> 
 
     assert list(scriptdeploy.lay(server_dir, [])) == []
     assert not (tmp_path / "elsewhere").exists()
+
+
+@pytest.mark.parametrize("new_bytes", [False, True], ids=("same-bytes", "new-bytes"))
+def test_a_case_only_rename_on_a_case_insensitive_folder_keeps_the_script(
+    tmp_path: Path, new_bytes: bool
+) -> None:
+    """Upstream renames Mentor.lua to mentor.lua; there the folder holds ONE file for both.
+
+    A case-insensitive folder is simulated with a hard link: the new name and the
+    old one are the same inode, which is what `samefile` sees there too. Without
+    the check the old name reads as "no longer shipped" and is removed, which on a
+    real case-insensitive folder removes the file the press just called in place.
+    """
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    body = "mentor v2\n" if new_bytes else "mentor\n"
+    (src / "mentor.lua").write_text(body, encoding="utf-8")
+    try:
+        os.link(laid / "Mentor.lua", laid / "mentor.lua")
+    except OSError:  # pragma: no cover - a filesystem without hard links
+        pytest.skip("cannot make a hard link here")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    key = f"{LUA_SCRIPTS_DIR}/m/mentor.lua"
+    assert (laid / "Mentor.lua").exists(), said
+    assert (laid / "mentor.lua").read_text(encoding="utf-8") == body
+    assert not any("Removed" in line or "changed on this machine" in line for line in said), said
+    assert scriptdeploy.read_record(server_dir) == {key: scriptdeploy._sha(body.encode())}
+
+
+def test_a_case_only_rename_on_a_case_sensitive_folder_still_removes_the_old_name(
+    tmp_path: Path,
+) -> None:
+    """Two files there: the old spelling is stale, and nothing ties it to the new one."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    (src / "mentor.lua").write_text("mentor\n", encoding="utf-8")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert not (laid / "Mentor.lua").exists() and (laid / "mentor.lua").exists(), said
+    assert f"Laid {LUA_SCRIPTS_DIR}/m/mentor.lua." in said, said
+
+
+def test_a_hard_link_under_another_name_is_not_a_case_only_rename(tmp_path: Path) -> None:
+    """Codex review: sharing an inode is not enough; the names must differ only by case."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    (src / "other.lua").write_text("shipped other\n", encoding="utf-8")
+    try:
+        os.link(laid / "Mentor.lua", laid / "other.lua")
+    except OSError:  # pragma: no cover - a filesystem without hard links
+        pytest.skip("cannot make a hard link here")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert (laid / "other.lua").read_text(encoding="utf-8") == "mentor\n", said
+    assert any("was changed on this machine" in line for line in said), said

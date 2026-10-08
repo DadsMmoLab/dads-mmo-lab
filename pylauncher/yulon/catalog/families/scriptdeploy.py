@@ -238,6 +238,46 @@ def _plan(server_dir: Path, specs: Sequence[LuaScripts], remedy: str) -> list[_P
     return planned
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _renamed_in_place(
+    server_dir: Path, record: dict[str, str], planned: Sequence[_Planned]
+) -> dict[str, str]:
+    """Shipped name -> the record key for the very same file on disk (T563).
+
+    A case-insensitive folder (Windows, macOS) holds `Mentor.lua` and `mentor.lua`
+    in one file. When the checkout renames the first to the second, the record
+    knows the old spelling and the plan has the new one: without this the new
+    name reads as nobody's, and removing the old name as "no longer shipped"
+    deletes the file the plan just counted as in place. Asked of the disk (the
+    same file under both names), not guessed from the folder's kind, so a
+    case-sensitive folder, where they are two files, is left alone. Only names that
+    differ by case count: a hard link under another name is the player's own.
+    """
+    shipped = {item.rel for item in planned}
+    found: dict[str, str] = {}
+    for rel in sorted(record):
+        if rel in shipped:
+            continue
+        gone = server_dir.joinpath(*PurePosixPath(rel).parts)
+        if _through_a_link(server_dir, gone) is not None or gone.is_symlink() or not gone.is_file():
+            continue
+        for item in planned:
+            if item.rel in record or item.rel in found or item.target.is_symlink():
+                continue
+            if item.rel.casefold() != rel.casefold():
+                continue  # another name for the file (a hard link of the player's) is not a rename
+            if item.target.is_file() and _same_file(gone, item.target):
+                found[item.rel] = rel
+                break
+    return found
+
+
 def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -> Iterator[str]:
     """Lay every script the specs name; one line per file that changed or was kept.
 
@@ -279,6 +319,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             f"{remedy}."
         )
     kept_record = dict(record)
+    renamed = _renamed_in_place(server_dir, record, planned)
     wrote = current = 0
     finished = False
     try:
@@ -295,14 +336,15 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 old = _sha(item.target.read_bytes())
             except FileNotFoundError:
                 old = None
+            owned = record.get(item.rel) or record.get(renamed.get(item.rel, ""))
             if old == new:
                 # Claimed only if it was already Yu'lon's: a file that was there
                 # first and happens to match stays the player's (Codex review).
-                if item.rel in record:
+                if owned is not None:
                     kept_record[item.rel] = new
                 current += 1
                 continue
-            if old is not None and record.get(item.rel) != old:
+            if old is not None and owned != old:
                 yield (
                     f"{item.rel} was changed on this machine, so it was left as it is and the "
                     f"server runs that copy, not the one this server ships. To take the shipped "
@@ -317,6 +359,9 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
         shipped = {item.rel for item in planned}
         for rel, digest in sorted(record.items()):
             if rel in shipped:
+                continue
+            if rel in renamed.values():
+                kept_record.pop(rel, None)
                 continue
             path = server_dir.joinpath(*PurePosixPath(rel).parts)
             kept_record.pop(rel, None)
