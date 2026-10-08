@@ -1541,8 +1541,28 @@ def test_the_log_is_read_for_it_once_a_minute_and_only_what_is_new(tmp_path: Pat
 
     assert len(asked) == 2
     assert asked[1] != run
-    assert asked[1] > _stamp(NOW - timedelta(minutes=1)), "re-read the whole run"
-    assert asked[1].endswith("Z")
+    assert (
+        asked[1] == "72s"
+    ), "how long ago (61 s + the overlap, rounded up), not a wall-clock stamp"
+
+
+def test_a_clock_that_goes_backwards_reads_the_run_again_and_ages_the_sentence_from_then(
+    tmp_path: Path,
+) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, clock
+    )
+    assert watch.tick().warning
+
+    clock[0] = NOW - timedelta(hours=1)  # the machine's clock is set back
+    assert watch.tick().warning
+    assert asked == [run, run], "carried on from a read that is now in the future"
+    clock[0] = NOW - timedelta(hours=1) + dashboard.WRONG_CLIENT_STAYS * 2
+    watch._login_log_of = lambda _c, _s: ""
+    assert watch.tick().warning == ""
 
 
 def test_the_warning_stays_a_while_after_the_line_and_then_goes(tmp_path: Path) -> None:

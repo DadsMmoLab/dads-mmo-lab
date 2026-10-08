@@ -28,10 +28,9 @@ def version_info(major: int, minor: int, patch: int, build: int) -> bytes:
         0,
     )
     key = "VS_VERSION_INFO".encode("utf-16-le") + b"\0\0"
-    head = struct.pack("<HHH", 0, len(fixed), 0) + key
+    head = struct.pack("<HHH", 40 + len(fixed), len(fixed), 0) + key
     head += b"\0" * (-len(head) % 4)
-    body = head + fixed
-    return struct.pack("<H", len(body) + 2) + body[2:]
+    return head + fixed
 
 
 def resource_section(payload: bytes, *, rtype: int = 16) -> bytes:

@@ -139,7 +139,7 @@ WRONG_CLIENT_EVERY = timedelta(seconds=60)
 """How often the world log is read for a client that was turned away (T576)."""
 
 WRONG_CLIENT_OVERLAP = timedelta(seconds=10)
-"""Each read starts this far before the last one: Docker's clock is not this one."""
+"""Each read starts this far before the last one: the two reads' edges are not exact."""
 
 WRONG_CLIENT_STAYS = timedelta(minutes=15)
 """How long the sentence stays after the last such line: the line only comes with an attempt."""
@@ -456,13 +456,21 @@ class Dashboard:
         now = self._now()
         if self._login_run != run:
             self._login_run, self._login_read_at, self._wrong_client_at = run, None, None
-        if self._login_read_at is None or now - self._login_read_at >= WRONG_CLIENT_EVERY:
+        elapsed = None if self._login_read_at is None else now - self._login_read_at
+        if elapsed is not None and elapsed < timedelta(0):
+            # This watcher's clock went backwards: what was read and seen is on a timeline
+            # that no longer exists, so read the run again and let the sentence age from now.
+            self._login_read_at, elapsed = None, None
+            if self._wrong_client_at is not None:
+                self._wrong_client_at = now
+        if elapsed is None or elapsed >= WRONG_CLIENT_EVERY:
+            # `--since` is told how long ago, not when: Docker works that out on ITS clock, which
+            # a Docker Desktop VM lets drift from this machine's, and an absolute stamp from
+            # here would then skip lines or repeat them.
             since = (
                 run
-                if self._login_read_at is None
-                else (self._login_read_at - WRONG_CLIENT_OVERLAP)
-                .astimezone(UTC)
-                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                if elapsed is None
+                else f"{int((elapsed + WRONG_CLIENT_OVERLAP).total_seconds()) + 1}s"
             )
             self._login_read_at = now
             if WRONG_CLIENT_LINE.search(self._login_log_of(self.spec.world, since)):

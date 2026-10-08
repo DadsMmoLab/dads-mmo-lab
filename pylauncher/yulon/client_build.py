@@ -103,12 +103,18 @@ def _walk(handle: BinaryIO) -> ExeVersion | None:
 
     root = file_offset(rsrc_rva)
 
+    def inside(offset: int, size: int) -> int:
+        """`root + offset`, when `size` bytes there lie within the declared resource directory."""
+        if offset < 0 or offset + size > rsrc_size:
+            raise _Unreadable("a resource offset points outside the resource directory")
+        return root + offset
+
     def entries(directory: int) -> list[tuple[int, int]]:
-        named, ids = struct.unpack("<HH", _at(handle, directory + 12, 4))
+        named, ids = struct.unpack("<HH", _at(handle, inside(directory, 16) + 12, 4))
         count = named + ids
         if count > _MAX_DIRECTORY_ENTRIES:
             raise _Unreadable("too many resource entries")
-        raw = _at(handle, directory + 16, 8 * count)
+        raw = _at(handle, inside(directory, 16 + 8 * count) + 16, 8 * count)
         return [struct.unpack_from("<II", raw, 8 * i) for i in range(count)]
 
     def first_below(offset_field: int) -> int:
@@ -116,37 +122,48 @@ def _walk(handle: BinaryIO) -> ExeVersion | None:
         offset = offset_field
         for _ in range(3):
             if not offset & 0x80000000:
-                return root + offset
-            below = entries(root + (offset & 0x7FFFFFFF))
+                return offset
+            below = entries(offset & 0x7FFFFFFF)
             if not below:
                 raise _Unreadable("an empty resource directory")
             offset = below[0][1]
-        return root + offset
+        return offset
 
-    for ident, offset in entries(root):
+    for ident, offset in entries(0):
         if ident != _RT_VERSION or not offset & 0x80000000:
             continue
         data_entry = first_below(offset)
-        data_rva, data_size = struct.unpack("<II", _at(handle, data_entry, 8))
+        data_rva, data_size = struct.unpack("<II", _at(handle, inside(data_entry, 16), 8))
         if not 0 < data_size <= _MAX_RESOURCE_BYTES:
             raise _Unreadable("odd version resource size")
-        block = _at(handle, file_offset(data_rva), data_size)
-        return _fixed_version(block)
+        if data_rva < rsrc_rva or data_rva + data_size > rsrc_rva + rsrc_size:
+            raise _Unreadable("the version resource lies outside the resource directory")
+        return _fixed_version(_at(handle, file_offset(data_rva), data_size))
     return None
+
+
+_KEY = "VS_VERSION_INFO\0".encode("utf-16-le")
+_FIXED_AT = 40
+"""Where VS_FIXEDFILEINFO starts: the 6-byte header, the 32-byte key, padded to 4."""
 
 
 def _fixed_version(block: bytes) -> ExeVersion | None:
-    """The file version of a VS_VERSIONINFO block, found by its VS_FIXEDFILEINFO signature.
+    """The file version of a VS_VERSIONINFO block, or None when it is not one.
 
-    The signature sits at the first 4-aligned place after the block's key string
-    (`VS_VERSION_INFO`), within its first bytes; searched for there and nowhere
-    else, so a stray copy of the number deep in the strings is never read.
+    The block is checked as the structure it is: a header whose value length is
+    VS_FIXEDFILEINFO's 52 bytes, the key `VS_VERSION_INFO`, and the fixed info's
+    signature at the one place it sits. Bytes that merely contain the signature
+    somewhere are not a version, so a stray or hostile resource never invents a build.
     """
-    for at in range(0, min(len(block) - 16, 96), 4):
-        if struct.unpack_from("<I", block, at)[0] == _FIXED_SIGNATURE:
-            ms, ls = struct.unpack_from("<II", block, at + 8)
-            return ExeVersion(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
-    return None
+    if len(block) < _FIXED_AT + 16 or block[6 : 6 + len(_KEY)] != _KEY:
+        return None
+    length, value_length = struct.unpack_from("<HH", block, 0)
+    if value_length != 52 or length < _FIXED_AT + 52 or length > len(block) + 3:
+        return None
+    if struct.unpack_from("<I", block, _FIXED_AT)[0] != _FIXED_SIGNATURE:
+        return None
+    ms, ls = struct.unpack_from("<II", block, _FIXED_AT + 8)
+    return ExeVersion(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
 
 
 _cache: dict[tuple[str, int, int], ExeVersion | None] = {}

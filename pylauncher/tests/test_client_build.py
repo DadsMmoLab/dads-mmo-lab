@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.pe_fixture import RSRC_RAW
 from tests.pe_fixture import exe as _exe
 from tests.pe_fixture import pe as _pe
 from tests.pe_fixture import resource_section as _resource_section
@@ -151,3 +152,36 @@ def test_the_build_asked_for_is_the_catalogs_and_not_12340(tmp_path: Path) -> No
 
     assert said is not None
     assert "3.3.5 (12340)" in said and "2.4.3" in said and "8606" in said
+
+
+# --- a resource that only looks like a version (hostile or odd files never invent a build) ---
+
+
+def test_bytes_that_merely_contain_the_signature_are_not_a_version(tmp_path: Path) -> None:
+    """No VS_VERSIONINFO header around the fixed info: not a version, so nothing is refused."""
+    real = _version_info(3, 3, 3, 11723)
+    fake = b"\x01\x02\x03\x04" * 2 + real[40:] + b"\0" * 40
+    data = _pe(_resource_section(fake))
+
+    exe = _exe(tmp_path, "Wow.exe", data)
+
+    assert client_build.read_version(exe) is None
+    assert client_build.refusal(exe, version="3.3.5a", build=12340) is None
+
+
+def test_a_version_block_outside_the_resource_directory_is_not_read(tmp_path: Path) -> None:
+    """The data entry points into `.text`, where a perfect block sits: not the resource section."""
+    image = bytearray(_pe(_resource_section(_version_info(3, 3, 5, 12340))))
+    block = _version_info(3, 3, 3, 11723)
+    image[0x200 : 0x200 + len(block)] = block
+    entry = RSRC_RAW + 0x48
+    struct.pack_into("<I", image, entry, 0x1000)
+
+    assert client_build.read_version(_exe(tmp_path, "Wow.exe", bytes(image))) is None
+
+
+def test_a_directory_offset_past_the_resource_directory_is_not_followed(tmp_path: Path) -> None:
+    image = bytearray(_pe(_resource_section(_version_info(3, 3, 3, 11723))))
+    struct.pack_into("<I", image, RSRC_RAW + 0x14, 0x80000000 | 0x7000)
+
+    assert client_build.read_version(_exe(tmp_path, "Wow.exe", bytes(image))) is None
