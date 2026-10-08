@@ -559,17 +559,18 @@ def _dotenv_literal(raw: str) -> str | None:
     """What compose reads from the right-hand side of a `.env` line; None when it cannot be known.
 
     A quoted value is what is inside the quotes (anything after them is a
-    comment); an unquoted one ends at the first whitespace-then-`#`. A `$`
-    anywhere means compose will interpolate it (`${DB_PORT:-13306}`), which
-    only compose can resolve, so the answer is "unknown" and the caller probes
-    and refuses nothing for that port (T574).
+    comment); an unquoted one ends at the first space-then-`#` (a tab does not
+    count: compose-go cuts only at a space). A `$` anywhere means compose will
+    interpolate it (`${DB_PORT:-13306}`), which only compose can resolve, so the
+    answer is "unknown" and the caller probes and refuses nothing for that port
+    (T574).
     """
     text = raw.strip()
     if text[:1] in ("'", '"'):
         end = text.find(text[0], 1)
         text = text[1:] if end == -1 else text[1:end]
     else:
-        match = re.search(r"(?:^|\s)#", text)
+        match = re.search(r"(?:^| )#", text)
         if match is not None:
             text = text[: match.start()]
     return None if "$" in text else text.strip()

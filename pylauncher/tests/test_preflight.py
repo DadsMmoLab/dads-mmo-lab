@@ -950,8 +950,12 @@ def test_the_default_bind_is_told_the_platform_gather_was_given(
     assert told and set(told) == {platform_name == "windows"}
 
 
-def _db_ports_bound(tmp_path: Path, dotenv_line: str) -> tuple[set[int], preflight.Facts]:
-    (tmp_path / ".env").write_text(dotenv_line + "\n", encoding="utf-8")
+def _db_ports_bound(
+    tmp_path: Path, dotenv_line: str, *, bom: bool = False
+) -> tuple[set[int], preflight.Facts]:
+    (tmp_path / ".env").write_bytes(
+        ("\ufeff" if bom else "").encode() + (dotenv_line + "\n").encode()
+    )
     asked: set[int] = set()
 
     def bind(host: str, port: int) -> platform_module.PortBind:
@@ -967,7 +971,9 @@ def _db_ports_bound(tmp_path: Path, dotenv_line: str) -> tuple[set[int], preflig
         "DOCKER_DB_EXTERNAL_PORT=13306 # moved off 3306",
         'DOCKER_DB_EXTERNAL_PORT="13306" # moved',
         "DOCKER_DB_EXTERNAL_PORT='13306'",
-        "export DOCKER_DB_EXTERNAL_PORT=13306\t#moved",
+        "export\tDOCKER_DB_EXTERNAL_PORT=13306",
+        "DOCKER_DB_EXTERNAL_PORT: 13306",
+        "DOCKER_DB_EXTERNAL_PORT:13306 # moved",
     ],
 )
 def test_a_dotenv_port_with_a_comment_or_quotes_is_the_port_compose_reads(
@@ -976,6 +982,22 @@ def test_a_dotenv_port_with_a_comment_or_quotes_is_the_port_compose_reads(
     asked, facts_ = _db_ports_bound(tmp_path, line)
     assert 13306 in asked and 3306 not in asked
     assert facts_.port_blocks == ()
+
+
+def test_a_dotenv_that_starts_with_a_byte_order_mark_is_read_from_its_first_line(
+    tmp_path: Path,
+) -> None:
+    """PowerShell 5.1's `-Encoding UTF8` and old Notepad write one; compose strips it."""
+    asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306", bom=True)
+    assert 13306 in asked and 3306 not in asked
+    assert facts_.port_blocks == ()
+
+
+def test_a_tab_before_a_hash_is_not_a_comment_to_compose(tmp_path: Path) -> None:
+    """compose-go cuts an unquoted value at a SPACE then `#`; a tab keeps the whole text."""
+    _asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306\t#moved")
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "not a port number" in said and "13306" in said
 
 
 def test_a_dotenv_port_only_compose_can_resolve_is_neither_probed_nor_refused(
