@@ -29,6 +29,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Save file** on the Tuning tab keeps the file's line endings and byte-order mark.
 - The Tuning tab no longer opens, saves, backs up or reverts a setting file that is a link out of the server folder.
 - **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
+- **Add to Steam** and self-update no longer mistake another AppImage for Yu'lon when it is started from inside one.
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
