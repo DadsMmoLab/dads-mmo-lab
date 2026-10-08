@@ -504,33 +504,37 @@ class InstallPlay:
         stored = self._stored(character)
         if stored is None or not stored.online:
             return taken
+        stays = (
+            f"the list may keep showing the old level until {stored.name} next saves or logs out"
+        )
         channel = self._channel_for_saved()
         if channel is None:
-            return taken
+            return Outcome(
+                True,
+                text=f"{taken.text.strip()} The server could not be asked to save, so {stays}.",
+            )
         saved = send(channel, SAVE_COMMAND)
-        if not saved.done:
+        if not saved.done and not saved.indeterminate:
             said = (saved.problem or saved.text).strip()
             return Outcome(
                 True,
-                text=(
-                    f"{taken.text.strip()} The server would not save now ({said}), so the list "
-                    f"may keep showing the old level until {stored.name} next saves or logs out."
-                ).strip(),
+                text=f"{taken.text.strip()} The server would not save now ({said}), so {stays}.",
             )
+        # An indeterminate save may well have run, so it is read back like a good one.
         row: int | None = None
         for attempt in range(tries):
             if attempt:
                 sleep(pause)
             row = self._level_of(stored.name)
-            if row == level or row is None:
+            if row == level:
                 return taken
+        seen = "could not be read" if row is None else f"still reads {row}"
         return Outcome(
             True,
             text=(
-                f"{taken.text.strip()} The server has not written the new level to its database "
-                f"yet, so the list may keep showing level {row} until {stored.name} next saves "
-                "or logs out."
-            ).strip(),
+                f"{taken.text.strip()} The new level has not been confirmed in the database "
+                f"(it {seen}), so {stays}."
+            ),
         )
 
     def _level_of(self, name: str) -> int | None:

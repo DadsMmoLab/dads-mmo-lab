@@ -674,7 +674,7 @@ def test_a_row_that_never_agrees_ends_in_a_plain_sentence_after_a_bounded_wait(t
 
     assert outcome.done is True, "the server did take the level"
     assert outcome.text.startswith("Level changed.")
-    assert "has not written" in outcome.text and "12" in outcome.text
+    assert "not been confirmed" in outcome.text and "still reads 12" in outcome.text
     assert reader.level_reads == 4
     assert naps == [0.5, 0.5, 0.5]
 
@@ -714,3 +714,62 @@ def test_a_save_the_server_refuses_is_said_and_the_row_is_not_polled(tmp_path) -
     assert outcome.done is True, "the level itself was taken"
     assert "the server said no" in outcome.text
     assert reader.level_reads == 0
+
+
+def test_a_row_that_cannot_be_read_is_not_taken_for_agreement(tmp_path) -> None:
+    """Codex adversarial 2026-10-08: a vanished or renamed row read as `None` and ended the poll
+    as if it agreed, which told the person the level was confirmed."""
+    reader = _LevelRows("1", [""])
+    install = _install(tmp_path, sql=reader, channel=_Channel(text="Level changed."))
+
+    outcome = install.set_level_and_save("guglu", 70, tries=3, sleep=lambda _: None)
+
+    assert reader.level_reads == 3
+    assert "could not be read" in outcome.text
+    assert "not been confirmed" in outcome.text
+
+
+def test_a_channel_that_is_gone_after_the_level_says_no_save_was_asked(tmp_path) -> None:
+    """Codex normal 2026-10-08: the success came back bare, with the row still at the old level."""
+    channel = _Channel(text="Level changed.")
+    gone = [channel]
+    install = play.InstallPlay(
+        WOTLK,
+        tmp_path,
+        sql=_LevelRows("1", ["12"]),
+        channel_for_saved=lambda: gone.pop() if gone else None,
+    )
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert outcome.done is True
+    assert "could not be asked to save" in outcome.text
+
+
+def test_a_save_that_timed_out_is_still_read_back_because_it_may_have_run(tmp_path) -> None:
+    """Codex normal 2026-10-08: an indeterminate `saveall` was reported as the server refusing."""
+
+    class _TimesOut(_Channel):
+        def send(self, command: str) -> object:
+            answer = super().send(command)
+            if command == "saveall":
+                return type(
+                    "Answer",
+                    (),
+                    {
+                        "outcome": "unknown",
+                        "text": "",
+                        "reason": "the server did not answer in time",
+                        "indeterminate": True,
+                        "denied": False,
+                    },
+                )()
+            return answer
+
+    reader = _LevelRows("1", ["12", "70"])
+    install = _install(tmp_path, sql=reader, channel=_TimesOut(text="Level changed."))
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert reader.level_reads == 2
+    assert outcome.text == "Level changed."
