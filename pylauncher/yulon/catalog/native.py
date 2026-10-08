@@ -1395,6 +1395,14 @@ class SourceVersion:
     """The version line, or `""` for an install still on its catalog pins."""
     past_the_pin: bool
     """Whether "Return to the tested pin…" has anything to do."""
+    pin_moved: bool = False
+    """Whether a source is off a tested pin the catalog MOVED since this server was built (T588).
+
+    Only then is the return a way onto the commits this version of Yu'lon was
+    tested with rather than a way back off an update, which is what lets the
+    Modules tab's report name it as a remedy for a module that needs other
+    server code (T586).
+    """
 
 
 def source_version(
@@ -1431,7 +1439,11 @@ def source_version(
         # move it. Without a catalog reading every row counts, as before T588.
         moves = {pin.repo for pin in pins}
         counted = [row for row in read if not moves or row.repo in moves]
-        return SourceVersion(line=line, past_the_pin=any(not on_its_pin(row) for row in counted))
+        return SourceVersion(
+            line=line,
+            past_the_pin=any(not on_its_pin(row) for row in counted),
+            pin_moved=bool(moved),
+        )
     by_repo = {row.repo: row for row in off}
     rows = source_revs_line(state).splitlines() if state is not None else []
     revs = state.source_revs if state is not None else ()

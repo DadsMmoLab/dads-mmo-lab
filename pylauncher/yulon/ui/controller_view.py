@@ -16911,7 +16911,12 @@ class ControllerView(QWidget):
         if not isinstance(result, ApplyReport):
             return
         self.module_report.setPlainText(
-            _format_report(result, server_moves=self.services.update_to_latest is not None)
+            _format_report(
+                result,
+                **self._module_report_options(
+                    getattr(self, "_last_source_version", None), self.services.update_to_latest
+                ),
+            )
         )
         self._note_session_facts(result, acted_on)
         # The record is dropped AFTER the report is on screen and after the
@@ -17483,6 +17488,16 @@ class ControllerView(QWidget):
             any(a.isEnabled() for a in self.server_build_menu.actions())
         )
 
+    @staticmethod
+    def _module_report_options(
+        said: native.SourceVersion | None, route: native.LatestRoute | None
+    ) -> dict[str, bool]:
+        """What the module report may name (T586): the server presses, from the last reading."""
+        return {
+            "server_moves": route is not None,
+            "pin_moved": route is not None and said is not None and said.pin_moved,
+        }
+
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
@@ -17511,6 +17526,7 @@ class ControllerView(QWidget):
         offering nothing.
         """
         route = self.services.update_to_latest
+        self._last_source_version: native.SourceVersion | None = None
         if route is None:
             self.source_version_label.setVisible(False)
             self.return_to_pin_action.setVisible(False)
@@ -17522,6 +17538,7 @@ class ControllerView(QWidget):
         except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
             said = native.SourceVersion(line="", past_the_pin=False)
+        self._last_source_version = said
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
         self.return_to_pin_action.setVisible(said.past_the_pin)
@@ -20162,7 +20179,9 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     return lines
 
 
-def _format_report(report: ApplyReport, *, server_moves: bool = False) -> str:
+def _format_report(
+    report: ApplyReport, *, server_moves: bool = False, pin_moved: bool = False
+) -> str:
     """The run, drawn so that every tick is something that happened.
 
     Two things were wrong with this function on 2026-09-07 and they are the same
@@ -20202,11 +20221,13 @@ def _format_report(report: ApplyReport, *, server_moves: bool = False) -> str:
     compiled into the worldserver" was false of both -- so it says which case
     would be bad rather than which case this is.
 
-    `server_moves` (T586) says the install has "Update the server to latest…"
-    (and so "Return to the tested pin…"). A module's new commit can need newer
-    server code than the server has -- mod-ale after #408 calls a core function
-    the older WotLK core lacks -- and the report cannot know that before the
-    build, so it names both routes and the order, once, as a condition.
+    `server_moves` (T586) says the install has "Update the server to latest…".
+    A module's new commit can need newer server code than the server has --
+    mod-ale after #408 calls a core function the older WotLK core lacks -- and
+    the report cannot know that before the build, so it names the route and the
+    order, once, as a condition. "Return to the tested pin…" is named as well
+    only when `pin_moved` (`SourceVersion.pin_moved`): off a pin that did not
+    move it is the way BACK off an update, to older code (Codex adversarial).
 
     Nothing here is asserted about the machine. Every claim is about this app's
     own code, which is the same code on Windows as on the Linux box the
@@ -20251,9 +20272,10 @@ def _format_report(report: ApplyReport, *, server_moves: bool = False) -> str:
                 lines.append(
                     f"  ⚠ If that build stops on an error in {item}'s code, {item} may need newer "
                     "server code than this server has: press "
-                    f'"{server_build_presses.UPDATE_TO_LATEST}" or, when it is offered, '
-                    f'"{server_build_presses.RETURN_TO_PIN}" under '
-                    f'"{SERVER_BUILD_LABEL}" instead, which build the server code with {item}. If '
+                    f'"{server_build_presses.UPDATE_TO_LATEST}"'
+                    + (f' or "{server_build_presses.RETURN_TO_PIN}"' if pin_moved else "")
+                    + f' under "{SERVER_BUILD_LABEL}" instead, which '
+                    f"{'build' if pin_moved else 'builds'} the server code with {item}. If "
                     f"Yu'lon put {item} back after that build, update it here again first, without "
                     f'pressing "{REBUILD_BUTTON_LABEL}" in between.'
                 )

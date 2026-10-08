@@ -54,6 +54,7 @@ def test_an_install_that_never_pressed_update_is_offered_a_pin_that_moved() -> N
     said = native.source_version(None, (), pins)
 
     assert said.past_the_pin is True
+    assert said.pin_moved is True
     rows = said.line.splitlines()
     assert rows[0] == f"{CORE}: built from {OLD_CORE[:7]}; the tested pin is {NEW_CORE[:7]}"
     assert rows[1] == f"{BOTS}: built from {OLD_BOTS[:7]}; the tested pin is {NEW_BOTS[:7]}"
@@ -300,11 +301,16 @@ def test_a_cpp_module_report_names_both_server_presses_where_the_install_has_the
 
     report = ApplyReport(action, "mod-ale", family="module", rebuild_required=True)  # type: ignore[arg-type]
 
-    text = controller_view._format_report(report, server_moves=True)
+    text = controller_view._format_report(report, server_moves=True, pin_moved=True)
 
     assert server_build_presses.UPDATE_TO_LATEST in text
     assert server_build_presses.RETURN_TO_PIN in text
     assert "mod-ale" in text.split(server_build_presses.UPDATE_TO_LATEST)[0].rsplit("\n", 1)[-1]
+    # Codex adversarial round 3: off a pin that did NOT move (an Update to latest
+    # left the server ahead of it), Return goes to older code: not named as the cure.
+    ahead = controller_view._format_report(report, server_moves=True)
+    assert server_build_presses.UPDATE_TO_LATEST in ahead
+    assert server_build_presses.RETURN_TO_PIN not in ahead
     # Where the install has no such presses, the report names none.
     plain = controller_view._format_report(report)
     assert server_build_presses.UPDATE_TO_LATEST not in plain
@@ -368,3 +374,28 @@ def test_a_recorded_source_the_catalog_no_longer_moves_offers_nothing() -> None:
     assert said.line.startswith(f"Built from {AHEAD[:7]}")
     # With no catalog reading at all, the record alone decides, as before T588.
     assert native.source_version(_state(gone)).past_the_pin is True
+
+
+def test_an_update_ahead_of_an_unmoved_pin_is_not_a_moved_pin() -> None:
+    row = native.SourceRev(CORE, f"{AHEAD[:7]} · 2026-10-05", pin=NEW_CORE, ahead=3)
+    said = native.source_version(_state(row), (), (_pin(CORE, NEW_CORE, AHEAD),))
+    assert said.past_the_pin is True and said.pin_moved is False
+
+
+def test_the_tab_tells_the_report_whether_the_pin_moved(tmp_path: Path) -> None:
+    """The view keeps the moved-pin answer of its last version reading for the module report."""
+    from yulon.ui import controller_view
+
+    _checkout(tmp_path, {CORE: OLD_CORE, BOTS: OLD_BOTS})
+    route = install_wiring.update_to_latest_for_app(ENTRY, tmp_path)
+    assert route is not None
+    said = route.source_version()
+    assert said.pin_moved is True
+    assert controller_view.ControllerView._module_report_options(said, route) == {
+        "server_moves": True,
+        "pin_moved": True,
+    }
+    assert controller_view.ControllerView._module_report_options(None, None) == {
+        "server_moves": False,
+        "pin_moved": False,
+    }
