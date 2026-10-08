@@ -762,7 +762,7 @@ def container_prefix(entry: CatalogEntry) -> str:
 
 
 def _container_prefix(entry: CatalogEntry) -> str:
-    """The part the three container names share: `ac-` for WotLK, `tbc-` for TBC.
+    """The part the container names share: `ac-` for WotLK, `tbc-` for TBC, `ub-` for Unbound.
 
     The shared CMaNGOS templates name services `{{CONTAINER_PREFIX}}db`,
     `..realmd`, `..mangosd` so they equal the entry's container names — the
@@ -786,7 +786,7 @@ def _container_prefix(entry: CatalogEntry) -> str:
       writes the compose file, and the service keys in it are the templates' own
       — read 2026-09-04: `shared/cmangos/base.yml.tmpl` writes
       `{{CONTAINER_PREFIX}}db`/`realmd`/`mangosd`, `wow-wotlk/native/base.yml.tmpl`
-      writes the literal `ac-database`/`ac-authserver`/`ac-worldserver` — so a
+      writes `{{CONTAINER_PREFIX}}database`/`authserver`/`worldserver` — so a
       declaration on the entry can only restate them or contradict them.
 
     What the refusal is allowed to say, measured 2026-09-04 on m910q (§30,

@@ -716,6 +716,30 @@ def test_stopping_the_other_server_comes_before_the_step_that_starts_our_databas
     assert order == []
 
 
+@pytest.mark.parametrize("in_the_way", [False, True])
+def test_stop_the_other_and_start_asks_the_step_once_whether_or_not_something_is_in_the_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, in_the_way: bool
+) -> None:
+    """With nothing in the way the step ran twice, before the stop and again in `start()` (T565)."""
+    from yulon import controller, docker
+
+    calls: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: calls.append("before_servers") or None,
+    )
+    held = ["ac-worldserver"] if in_the_way else []
+    monkeypatch.setattr(ctl, "refuse_start", lambda: None)
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: list(held))
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: None)
+    monkeypatch.setattr(ctl, "stop_conflicting", lambda: held.clear() or [])
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: calls.append("servers"))
+    ctl.stop_conflicting_and_start()
+    assert calls == ["before_servers", "servers"]
+
+
 def test_a_wotlk_start_has_no_port_step() -> None:
     from yulon.ui import controller_view
 

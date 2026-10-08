@@ -313,11 +313,14 @@ class Controller:
 
     # -- lifecycle -------------------------------------------------------
 
-    def start(self) -> None:
+    def start(self, *, asked_before_the_servers: bool = False) -> None:
         """Bring the install up, refusing if another install holds our ports.
 
         Uses `docker.start_staged()`, so restarting an installed server never
         re-runs its one-shot database import (see that function).
+
+        `asked_before_the_servers`: the caller already asked `before_servers` and it
+        agreed (`stop_conflicting_and_start()`), so it is not asked a second time (T565).
 
         Raises:
             PortConflictError: A container that is not part of this install
@@ -334,7 +337,8 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.refuse_a_missing_database()
-        self._ask_before_the_servers()
+        if not asked_before_the_servers:
+            self._ask_before_the_servers()
         self._before_the_servers_start()
         self.zone_problem = self._put_back_the_zone_file()
         # The map-data fingerprint was written by `refuse_start()` above (T219).
@@ -543,10 +547,11 @@ class Controller:
         """
         self.refuse_start()
         self.refuse_a_missing_database()
-        if not self.port_conflicts():
+        asked = not self.port_conflicts()
+        if asked:
             self._ask_before_the_servers()
         stopped = self.stop_conflicting()
-        self.start()
+        self.start(asked_before_the_servers=asked)
         return stopped
 
     def stop(self) -> bool:
