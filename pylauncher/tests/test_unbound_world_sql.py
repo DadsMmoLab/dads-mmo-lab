@@ -39,7 +39,7 @@ DROPPED_CREATURE_COLUMNS = {"id1", "id2", "id3"}
 """`creature` has had one `id` column since `2026_06_16_00.sql`; these are gone at the pin."""
 
 GIT_BLOBS = {
-    "MANIFEST.sha256": "fcfd88fd5a848114d668e223baa2d293356eb1b0",
+    "MANIFEST.sha256": "32d8c077424ad24542c253f722da409ada0d1618",
     "data/sql/db-characters/01_unbound_characters.sql": "9636121a034fcb53f177cdad2214f06534a61b95",
     "data/sql/db-characters/02_dml_autobuff_kv.sql": "d28d4c0d5473a6d8cffd556e3fa38ef77ba71c25",
     "data/sql/db-world/00_npc_setup.sql": "38da9ac832d90dd2fc6a1d77209c8622841d8159",
@@ -60,7 +60,7 @@ GIT_BLOBS = {
     "data/sql/db-world/base/multiclass_summons.sql": "ffd768cc8275ce3c25b22c429226afd25207bf95",
 }
 """Git's own blob id of each file of the snapshot at the pinned revision, as the GitHub trees API
-lists them for DadsMmoLab/dads-mmo-lab `456ce5b6` (`gh api repos/DadsMmoLab/dads-mmo-lab/git/trees/
+lists them for DadsMmoLab/dads-mmo-lab `49b334be` (`gh api repos/DadsMmoLab/dads-mmo-lab/git/trees/
 <rev>?recursive=1`). The module's `MANIFEST.sha256` sits beside the files it attests, so it cannot
 tell a snapshot of another revision; these ids can, because they are the repository's."""
 
@@ -318,7 +318,7 @@ def test_the_mentor_check_tells_a_player_what_to_press() -> None:
 
 SOURCE_BLOBS = {
     "src/UnboundReagentFree.cpp": "702af0f6a651bedbd7008c7a3b9a178efc9d2c9b",
-    "lua_scripts/unbound_mentor.lua": "70e9909aa8c056e12284ba423305b0d9c2272e55",
+    "lua_scripts/unbound_mentor.lua": "880704a08d87a50c2bba8345506bea1ee3638f0e",
 }
 """Git's blob id of the two source files that print the health markers, at the pinned revision
 (`git rev-parse <rev>:<path>`)."""
