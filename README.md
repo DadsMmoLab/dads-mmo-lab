@@ -26,7 +26,7 @@ on the `main` branch of this repository is the older v1.2.2.
 
 The installer carries its whole server payload as quoted shell heredocs. Every server file
 on this branch is one of those heredocs, byte for byte, laid out by what it is rather than
-where the installer wrote it (the one exception is `src/UnboundSystem_loader.cpp`, see Layout). The installer itself is not on this branch. The client
+where the installer wrote it (the exceptions are `src/UnboundSystem_loader.cpp`, see Layout, and the files under "Changes on top of v1.4.0"). The installer itself is not on this branch. The client
 addons are the zip's contents, unzipped unchanged. The only files written for this branch
 are this README, `.gitattributes`, `MANIFEST.sha256` and the two files in `conf/`, which
 spell out the settings the installer writes into existing config files.
@@ -39,10 +39,11 @@ module folder that has a `src/` directory, and only applies module SQL from
 `data/sql/<db-world|db-characters>/`. The v1.4.0 release record (commit `d29fac97`) kept the
 installer's own layout instead, which cannot be built from a plain clone. Its files are still
 byte-identical to the release: the SQL, the C++ sources and the Lua are `git mv` renames only.
+Fixes made since are listed under "Changes on top of v1.4.0" below.
 
 | Path | What it is | Where the installer put it |
 |---|---|---|
-| `src/UnboundSystem.cpp`, `src/UnboundSystem_loader.cpp` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped) and its loader (`Addmod_unboundScripts()`). The loader is the one change to the release's files: it also calls `Addmod_multiclass_summonsScripts()`, because AzerothCore only calls the loader of a folder that has the module's own name. The release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
+| `src/UnboundSystem.cpp`, `src/UnboundSystem_loader.cpp` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped; since v1.4.0 also the character-delete cleanup and the rogue/hunter class answers listed under "Changes on top of v1.4.0") and its loader (`Addmod_unboundScripts()`). The loader is the one change to the release's files: it also calls `Addmod_multiclass_summonsScripts()`, because AzerothCore only calls the loader of a folder that has the module's own name. The release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
 | `src/UnboundMulticlassBridge.cpp` | The multi-class talent bridge in C++, by ValentineSin (see Credits), with the rank handling added on the Dad's MMO Lab server (a repeated spell id is mapped to the talent's next rank, and the server's rank count is echoed back as `LEARNED:class:spell:rank`). It answers the client addon's `MCUB` messages (`SYNC`, `RESET`, `LEARN`) and hands each pick to the core's own `Player::LearnTalent`, so talents are stored natively in `character_talent`, prerequisites and tier points use the core's rules, and a respec is `resetTalents`. The Mentor stays the authority: a class that is not unlocked is refused. It needs a core patch that lets `Player::LearnTalent` accept the unlocked classes' talents. It replaces `unbound_addon_sync.lua` and `unbound_talent_data.lua`, which were in v1.4.0 and answer the same messages; never run both. | new in this branch |
 | `src/UnboundReagentFree.cpp` | Two optional server house rules, each behind its own switch and each **off** unless the conf turns it on: free casting reagents (`Unbound.ReagentFree`; soul shards, candles, powders, symbols, seeds, runes, ankh, corpse dust and the like; crafting materials are untouched; bots included) and instant, free, cooldown-less class summons (`Unbound.InstantSummons`; warlock demons and Inferno, Water Elemental, Raise Dead, Feral Spirit). Both rewrite the spell store at start-up. The world log prints `[UNBOUND] free reagents: off` / `on (...)` and `[UNBOUND] instant summons: off` / `on (...)`. | new in this branch |
 | `conf/mod_unbound.conf.dist` | The switches `Unbound.ReagentFree`, `Unbound.InstantSummons` and `Unbound.AutoBuff`, all `0`. A missing conf also means off. | `env/dist/etc/modules/mod_unbound.conf` (copied from the `.dist`) |
@@ -52,6 +53,7 @@ byte-identical to the release: the SQL, the C++ sources and the Lua are `git mv`
 | `data/sql/db-world/` | SQL for the world database (`acore_world`). `npc_setup.sql` is renamed `00_npc_setup.sql` so that AzerothCore's updater, which orders by file name, applies it first. | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
 | `data/sql/db-characters/` | SQL for the characters database (`acore_characters`). | `modules/mod-unbound/data/sql/db-characters/` |
 | `core-patch/unbound-core-access.patch` | The AzerothCore core patch: 6 files (`Player.h`, `Player.cpp`, `PlayerQuest.cpp`, `PlayerStorage.cpp`, `Trainer.cpp`, `ConditionMgr.cpp`). It adds `Player::m_unboundClassMask` with `Get`/`SetUnboundClassMask()` and ORs it into the class checks for trainers, spells, quests, items and `CONDITION_CLASS`. The worldserver does not compile with `mod-unbound` unless this patch is applied. | `modules/mod-unbound/unbound-core-access.patch`, then `git apply` at the server root |
+| `core-patch/unbound-mana-regen.patch` | A second core patch, 1 file (`Player.cpp`): a class whose own power is not mana reads the priest's spirit-regen row, so a warrior, rogue or death knight who unlocks a mana class regenerates mana. Apply it after `unbound-core-access.patch`. | new in this branch |
 | `conf/mod_ale.conf` | The `mod_ale.conf` the installer writes when the server has none (`ALE.Enabled = 1`, `ALE.ScriptPath = "/azerothcore/env/dist/etc/modules/lua_scripts"`). | `env/dist/etc/modules/mod_ale.conf` |
 | `conf/worldserver.conf.unbound` | `ValidateSkillLearnedBySpells = 0`, which the installer sets in `worldserver.conf`. Without it AzerothCore removes cross-class spells from every character at login. | `env/dist/etc/worldserver.conf` |
 | `client/Interface/AddOns/` | The three client addons: `multiclass-talents-ui` (2.9.27-unbound-gm; `/mc`), `multiclass-resources` (1.3; `/mcr`) and `UnboundSpellbook` (1.0; `/usbk`, `/usbkrescan`, `/usbk macros`, `/usbk adopt`). The Dad's MMO Lab server's later versions of `multiclass-talents-ui/Core.lua` (the talent window; matched to `src/UnboundMulticlassBridge.cpp`, which echoes the rank the server holds) and of `UnboundSpellbook` (three tabs, spells past the client's 1024-slot cap can go on bars) replace the v1.4.0 files; every other addon file is as released. They need "Load out of date AddOns". The client is otherwise a stock 3.3.5a client: no MPQ, DBC or map changes. | the player's `Interface/AddOns/` |
@@ -59,6 +61,19 @@ byte-identical to the release: the SQL, the C++ sources and the Lua are `git mv`
 | `MANIFEST.sha256` | sha256 of every other file on this branch (`sha256sum -c MANIFEST.sha256`). | |
 
 There is no auth-database SQL in this release.
+
+## Changes on top of v1.4.0
+
+Fixes for problems players reported in #wow-unbound and in this repository's issues. `git log`
+holds each change with its reason.
+
+| File | Change |
+|---|---|
+| `src/UnboundSystem.cpp` | **A deleted character's Unbound rows are deleted with it.** AzerothCore gives the next new character `MAX(guid)+1` after a restart, which is the deleted character's GUID when it was the newest, so a new level-1 character used to start with the deleted one's unlocked classes. `OnPlayerDeleteFromDB` deletes the character's rows from `unbound_character_unlocks`, `unbound_character_talents` and `dml_autobuff_kv` in the core's own delete transaction. At each start, before the world opens, a sweep removes rows whose GUID has no character and logs `[UNBOUND] Orphan sweep done: …`. Each table is checked for before it is touched (the core stops the worldserver on a query against a missing table), and the sweep does nothing unless the `characters` table can be read. Rows of living, soft-deleted (restorable) and bot characters are never touched. |
+| `src/UnboundSystem.cpp` | **An added rogue can pick pockets, and an added hunter can tame.** The core asks `Player::IsClass` before it hands out pickpocket loot, before Tame Beast tames and before a stable master offers the stable; the module now answers "rogue" for a character that knows Pick Pocket (921) and "hunter" (pet questions only) for one that knows Tame Beast (1515). Every other class question still gets the native class. |
+| `data/sql/db-world/06_universal_skill_access.sql` | Row 10062 for Lockpicking (skill 633), like the weapon and armour rows: a character that adds rogue now gets the skill when it learns Pick Lock, keeps it across logins, and it rises to level × 5. |
+| `data/sql/db-characters/01_unbound_characters.sql` | Its comment no longer says the unlock rows are never deleted. No schema change. |
+| `core-patch/unbound-mana-regen.patch` | New: mana regeneration for a warrior, rogue or death knight who unlocks a mana class (see Layout). |
 
 ## SQL apply order
 
@@ -109,6 +124,10 @@ The Call Pet fix in `src/mod-multiclass-summons/multiclass_pet_fix.cpp` is by pj
 `src/UnboundMulticlassBridge.cpp` is based on the multi-class talent bridge by ValentineSin
 (Wrath-Unbound-Multiclass-Mentor-Fix, posted in #wow-unbound on 2026-08-11), with the rank
 handling added by Dad's MMO Lab.
+
+`core-patch/unbound-mana-regen.patch` follows Decon White's mana-regeneration fix (posted in
+#wow-unbound on 2026-09-22 and 2026-10-07): read the spirit regeneration of a class without
+mana from the priest's row.
 
 `UnboundSpellbook/DATA_CREDITS.txt` credits
 the trainer data to "What's Training? WotLK" by anhility (MIT) and the talent ranks to
