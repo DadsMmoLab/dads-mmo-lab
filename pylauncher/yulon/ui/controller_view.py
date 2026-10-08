@@ -19121,8 +19121,14 @@ class ControllerView(QWidget):
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
+        # Spelled as the file system would compare them: on Windows a conf the
+        # manifest calls `Solocraft.conf` and the folder calls `solocraft.conf`
+        # is ONE file, and so is the server's own `playerbots.conf` however the
+        # folder cases it -- one button, and read-only for the server's own.
+        taken = {os.path.normcase(name) for name in (*found, *core)}
         for name in tuning.module_conf_files(server_dir):
-            if name not in found and name not in core:
+            if os.path.normcase(name) not in taken:
+                taken.add(os.path.normcase(name))
                 found.append(name)
         for name in core:
             if name not in found and (server_dir / name).is_file():

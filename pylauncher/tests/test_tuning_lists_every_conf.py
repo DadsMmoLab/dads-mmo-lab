@@ -227,3 +227,29 @@ def test_the_open_files_button_is_scrolled_into_view(
     area = panel.file_buttons_area
     top = last.mapTo(area.viewport(), last.rect().topLeft()).y()
     assert 0 <= top and top + last.height() <= area.viewport().height() + 1
+
+
+def test_a_conf_the_file_system_calls_the_same_file_gets_one_button(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: on Windows `PlayerBots.conf` IS `playerbots.conf`, and must stay read-only.
+
+    `os.path.normcase` is what folds case there; it is folded here the same way
+    so the rule is tested on this file system. A conf the cards name in another
+    case than the folder does is one button too.
+
+    Mutation: compare the raw names and both spellings get a button.
+    """
+    import os
+
+    monkeypatch.setattr(os.path, "normcase", lambda name: name.lower())
+    view = _players_view(ps, tmp_path, frozenset({"mod-npc-beastmaster", "mod-transmog"}))
+    _deploy(tmp_path, f"{MODULES}/PlayerBots.conf", "# other case\n")
+    _deploy(tmp_path, f"{MODULES}/Mod_NPC_BeastMaster.conf", "# other case\n")
+    files = view._tuning_files()
+    assert [f for f in files if f.lower().endswith("/playerbots.conf")] == [
+        f"{MODULES}/playerbots.conf"
+    ]
+    assert [f for f in files if f.lower().endswith("/mod_npc_beastmaster.conf")] == [
+        f"{MODULES}/mod_npc_beastmaster.conf"
+    ]
