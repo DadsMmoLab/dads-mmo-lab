@@ -402,8 +402,9 @@ def test_the_manifest_names_the_conf_key_the_module_actually_has() -> None:
 
     The manifest said `ALE.EnableLuaEngine`, which appears in neither. A key
     that does not exist is not written and not read, so the engine would have
-    taken its COMPILED default — and that default is false while the shipped
-    conf's own comment says true.
+    taken its COMPILED default. (That default compiles to true, not the spelled
+    "false": a string literal passed as a bool. Read at mod-ale 1cb86c96 on
+    2026-10-08; nothing here relies on it.)
     """
     keys = [k["key"] for k in _ale_manifest()["conf"][0]["keys"]]
     assert "ALE.Enabled" in keys
@@ -411,8 +412,9 @@ def test_the_manifest_names_the_conf_key_the_module_actually_has() -> None:
 
 
 def test_the_manifest_writes_the_engine_on_rather_than_naming_the_key() -> None:
-    """A key with no default is surfaced, not set. The compiled default is
-    false, so surfacing it leaves the engine off."""
+    """A key with no default is surfaced, not set, and the engine's compiled default
+    is not relied on (its source spells `false` and compiles to `true`), so the
+    manifest writes 1."""
     enabled = next(k for k in _ale_manifest()["conf"][0]["keys"] if k["key"] == "ALE.Enabled")
     assert enabled.get("default") == "1"
 
@@ -455,6 +457,7 @@ def test_the_script_path_the_manifest_writes_is_the_absolute_container_path() ->
 # excluded it. A sibling's list would have refused a class this server supports.
 
 WOTLK = load_catalog().get("wow-wotlk")
+UNBOUND = load_catalog().get("wow-unbound")
 RNDBOT = dbreads.Marker(prefix="rndbot", source="default")
 
 
@@ -878,8 +881,7 @@ def test_the_conf_is_read_for_both_keys_or_for_neither(tmp_path: Path) -> None:
     """`ALE.Enabled` and `ALE.ScriptPath` are read from column 0 only, the same
     rule `conf.patch()` writes by: the shipped `mod_ale.conf.dist` is full of
     commented prose, and a looser pattern reads its own comment saying `true`
-    as the setting — which is the exact lie the compiled default `false` makes
-    expensive (`ALEConfig.cpp:20`)."""
+    as the setting."""
     conf = tmp_path / "mod_ale.conf"
     conf.write_text(
         "# ALE.Enabled = 1\n"
@@ -926,6 +928,162 @@ def test_the_facts_are_gathered_from_the_disk_the_binary_and_the_wire(tmp_path: 
     assert party.ready(facts) is True
     assert facts.deployed == tuple(sorted(party.BRIDGE_SCRIPTS))
     assert facts.engine_cloned is True
+
+
+# mod-ale's own `.dist`, copied unchanged: what `confs_from_dist` lays for
+# Unbound (`catalog.json` wow-unbound), whose real settings are in the env.
+ALE_DIST_AS_SHIPPED = 'ALE.Enabled = true\nALE.ScriptPath = "lua_scripts"\n'
+
+
+def _unbound_like_install(tmp_path: Path, conf: str | None) -> Path:
+    server = _ready_install(tmp_path)
+    if conf is None:
+        (server / party.ALE_CONF).unlink()
+    else:
+        (server / party.ALE_CONF).write_text(conf)
+    return server
+
+
+def test_unbound_reads_its_lua_engine_settings_from_the_environment_it_starts_with(
+    tmp_path: Path,
+) -> None:
+    """T554 rework item 1. Unbound's `mod_ale.conf` is mod-ale's `.dist` copied
+    unchanged (`ALE.Enabled = true`, `ALE.ScriptPath = "lua_scripts"`); the
+    settings the server runs with are `AC_ALE_ENABLED` / `AC_ALE_SCRIPT_PATH` in
+    the entry's `world_env`, and AzerothCore's config lets an `AC_*` variable
+    win over the file (`Config.cpp` GetValueDefault, 7f12e89e). Reading the file
+    alone blocked My Party on Unbound forever, pointing at a mod-ale install the
+    Modules tab refuses there."""
+    server = _unbound_like_install(tmp_path, ALE_DIST_AS_SHIPPED)
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    seam = party.InstallParty(
+        UNBOUND,
+        server,
+        sql=_Sql(),
+        channel_for_saved=lambda: chan,
+        container="ub-worldserver",
+        world_running=lambda: True,
+        engine=lambda: party.BinaryRead(True, "in"),
+    )
+    facts = seam.facts()
+    assert facts.engine_enabled is True
+    assert facts.script_path == party.ALE_SCRIPT_PATH
+    assert party.blocker(facts) is None
+
+
+def test_wotlk_still_reads_its_lua_engine_settings_from_its_conf(tmp_path: Path) -> None:
+    """WotLK's entry sets no `AC_ALE_*` variable, so its conf is still the
+    source: the shipped relative path is still the blocker it was."""
+    server = _unbound_like_install(tmp_path, ALE_DIST_AS_SHIPPED)
+    facts = _install(server, _Sql(), _Chan()).facts()
+    assert facts.script_path == "lua_scripts"
+    assert "relative path" in (party.blocker(facts) or "")
+
+
+@pytest.mark.parametrize(
+    ("value", "on"),
+    [
+        ("1", True),
+        ("true", True),
+        ("True", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        ("2", None),
+        ("banana", None),
+    ],
+)
+def test_ale_enabled_counts_as_on_exactly_where_the_cores_bool_reader_would(
+    tmp_path: Path, value: str, on: bool | None
+) -> None:
+    """`GetOption<bool>` parses through `StringTo<bool>` non-strict
+    (`StringConvert.h:94-122`, 7f12e89e): 1/y/on/yes/true are on, 0/n/off/no/
+    false off, any case. Anything else is a bad value and the engine falls back
+    to its compiled default, so this reads it as unknown (`None`), not as off."""
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(f"ALE.Enabled = {value}\n")
+    assert party.read_conf(conf).enabled is on
+
+
+def test_no_sentence_claims_the_engines_compiled_default_is_off() -> None:
+    """mod-ale 1cb86c96 `ALEConfig.cpp:20` passes the STRING "false" as the default of
+    `SetConfigValue<bool>`; a string literal converts to `true`, so the engine's
+    compiled default for ALE.Enabled is ON (re-review note 2). The reading still
+    errs on the safe side -- a missing or unreadable key is unknown, not on -- and
+    the sentences say that rather than the old claim."""
+    for facts in (
+        _facts(conf_present=False),
+        _facts(engine_enabled=None),
+        _facts(engine_enabled=False),
+    ):
+        said = party.blocker(facts) or ""
+        assert "compiled default is off" not in said
+        assert "compiled default for ALE.Enabled is off" not in said
+    unknown = party.blocker(_facts(engine_enabled=None)) or ""
+    assert "1 (or true)" in unknown
+    missing = party.blocker(_facts(conf_present=False)) or ""
+    assert party.ALE_SCRIPT_PATH in missing
+
+
+def test_an_ac_ale_variable_wins_over_the_conf_either_way(tmp_path: Path) -> None:
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(f'ALE.Enabled = 1\nALE.ScriptPath = "{party.ALE_SCRIPT_PATH}"\n')
+    read = party.read_conf(conf, env={"AC_ALE_ENABLED": "0", "AC_ALE_SCRIPT_PATH": "/x"})
+    assert read.enabled is False
+    assert read.script_path == "/x"
+    untouched = party.read_conf(conf, env={"AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"})
+    assert untouched.enabled is True
+    assert untouched.script_path == party.ALE_SCRIPT_PATH
+
+
+def test_an_ac_ale_variable_wins_over_an_indented_conf_line_and_is_used_as_it_stands(
+    tmp_path: Path,
+) -> None:
+    """T572 meets Unbound's world_env: env first and RAW, else the file as the core reads it.
+
+    The file line is indented (live for the core, trimmed) and the variable beats it. The
+    variable's value is not trimmed or unquoted: only the file parser does that, so
+    `AC_ALE_SCRIPT_PATH='"/x"'` keeps its quotes. Without the variable the indented line counts,
+    and the first copy of a key wins.
+    Mutation: strip the variable (the old rule) and the quoted path loses its quotes.
+    """
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(
+        '   ALE.Enabled = 1\nALE.Enabled = 0\n  ALE.ScriptPath = "/from/file"\n', encoding="utf-8"
+    )
+
+    from_env = party.read_conf(conf, env={"AC_ALE_ENABLED": "0", "AC_ALE_SCRIPT_PATH": '"/x"'})
+    from_file = party.read_conf(conf, env={})
+
+    assert from_env.enabled is False
+    assert from_env.script_path == '"/x"'
+    assert from_file.enabled is True
+    assert from_file.script_path == "/from/file"
+
+
+def test_settings_the_environment_supplies_are_not_called_compiled_defaults(
+    tmp_path: Path,
+) -> None:
+    """The `conf_present` sentence says the engine runs on its compiled
+    defaults. With `AC_ALE_ENABLED` set that is false, file or no file."""
+    server = _unbound_like_install(tmp_path, None)
+    facts = party.read_facts(
+        server,
+        world_running=True,
+        engine=party.BinaryRead(True, "in"),
+        probe=party.Probe(True, "answered", "DML-BRIDGE-READY"),
+        env={"AC_ALE_ENABLED": "1", "AC_ALE_SCRIPT_PATH": party.ALE_SCRIPT_PATH},
+    )
+    assert party.blocker(facts) is None
+    bare = party.read_facts(
+        server,
+        world_running=True,
+        engine=party.BinaryRead(True, "in"),
+        probe=party.Probe(True, "answered", "DML-BRIDGE-READY"),
+    )
+    assert "no mod_ale.conf" in (party.blocker(bare) or "")
 
 
 def test_the_facts_carry_a_server_that_was_never_installed(tmp_path: Path) -> None:
@@ -2536,8 +2694,8 @@ def test_a_rule_whose_conf_key_could_not_be_read_is_greyed_and_never_offered(
     A `.dist`-only install -- which is what `yulon-ubuntu2` is -- has said
     nothing about these keys, and the compiled defaults behind them were never
     measured on this fork. Offering the row on the shipped template's value
-    would be this app asserting a fact about somebody's server: the mistake
-    `ALE.Enabled`'s own comment makes about ITS compiled default.
+    would be this app asserting a fact about somebody's server: `ALE.Enabled`'s
+    compiled default turned out to be the opposite of what its source spells.
 
     Mutation: read `None` as on (`if flags.account is not False`). The row is
     offered on a key nobody read.

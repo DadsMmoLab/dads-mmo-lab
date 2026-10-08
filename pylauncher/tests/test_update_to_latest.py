@@ -172,14 +172,20 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 11, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 10
+    assert len(every) == 15, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 13
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
     }
     assert moving == {
         "wow-wotlk": ("mod-playerbots/azerothcore-wotlk", "mod-playerbots/mod-playerbots"),
+        "wow-unbound": (
+            "mod-playerbots/azerothcore-wotlk",
+            "mod-playerbots/mod-playerbots",
+            "azerothcore/mod-ale",
+            "DadsMmoLab/dads-mmo-lab",
+        ),
         "wow-tbc": ("cmangos/mangos-tbc", "cmangos/playerbots"),
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
@@ -232,7 +238,14 @@ def test_only_wotlk_has_a_server_source_inside_a_folder_the_modules_tab_lists() 
         for dest in native.server_update_dests(entry)
         if dest.parent in folders
     }
-    assert listed == {("wow-wotlk", "modules/mod-playerbots")}, listed
+    # WoW Unbound (T554) is WotLK's sources plus mod-ale and its own branch: the Modules tab
+    # shows both as part of the server, and never as a module to add or remove.
+    assert listed == {
+        ("wow-wotlk", "modules/mod-playerbots"),
+        ("wow-unbound", "modules/mod-playerbots"),
+        ("wow-unbound", "modules/mod-ale"),
+        ("wow-unbound", "modules/mod-unbound"),
+    }, listed
 
 
 def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id() -> None:
@@ -249,6 +262,7 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
 
     assert {entry.id: entry.install.native.update_to_latest for entry in load_catalog().games} == {
         "wow-wotlk": True,
+        "wow-unbound": True,
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,

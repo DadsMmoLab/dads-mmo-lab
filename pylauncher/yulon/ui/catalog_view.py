@@ -357,6 +357,7 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
 
 _CAMPAIGN_GLYPHS = {
     "wow-wotlk": "❄️",
+    "wow-unbound": "🌀",
     "wow-tbc": "🔥",
     "wow-vanilla": "⚔️",
     "wow-tortoise": "🐢",
@@ -365,6 +366,7 @@ _CAMPAIGN_GLYPHS = {
 
 _CAMPAIGN_SUBTITLES = {
     "wow-wotlk": "Wrath of the Lich King",
+    "wow-unbound": "Wrath of the Lich King, multi-class",
     "wow-tbc": "The Burning Crusade",
     "wow-vanilla": "Classic Vanilla",
     "wow-tortoise": "Turtle WoW Solo",
@@ -377,6 +379,7 @@ Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18
 
 _SERVER_SOFTWARE = {
     "wow-wotlk": "AzerothCore with mod-playerbots",
+    "wow-unbound": "AzerothCore with mod-playerbots and Wrath Unbound",
     "wow-tbc": "CMaNGOS TBC with playerbots",
     "wow-vanilla": "CMaNGOS Classic with playerbots",
     "wow-tortoise": "the Tortoise WoW core with TortoiseBots",
