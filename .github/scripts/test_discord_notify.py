@@ -725,6 +725,7 @@ def test_release_workflow_passes_the_run_to_the_script_and_gates_on_success_and_
     assert "workflow_run.conclusion == 'success'" in cond
     assert "startsWith(github.event.workflow_run.head_branch, 'v')" in cond
     env = job["steps"][-1]["env"]
+    assert load_workflow("discord-release.yml")["permissions"]["actions"] == "read"
     assert env["RELEASE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
     assert env["RELEASE_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
 

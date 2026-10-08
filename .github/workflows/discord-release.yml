@@ -26,6 +26,8 @@ on:
 
 permissions:
   contents: read
+  # to read the earlier attempts of the release run
+  actions: read
 
 jobs:
   notify:
