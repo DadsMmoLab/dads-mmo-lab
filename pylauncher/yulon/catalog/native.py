@@ -1518,7 +1518,10 @@ _STOPS_THE_WORLD = (
 )
 
 
-NEWER_WORLD_CONTENT_WAITS = "Yu'lon's newer world content waits for Update to latest."
+NEWER_WORLD_CONTENT_WAITS = (
+    "Yu'lon's newer world content waits for "
+    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}."
+)
 """Said after a retry press left a world-database checkout short of this Yu'lon's pin (T545)."""
 
 
