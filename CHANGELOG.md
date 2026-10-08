@@ -45,6 +45,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 - **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
+- A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.

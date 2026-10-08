@@ -72,6 +72,7 @@ from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
+    client_build,
     client_config,
     client_exe,
     client_names,
@@ -10771,6 +10772,19 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
         show_warning(self, f"{self.entry.name}", message)
 
+    def _wrong_build_refusal(self, client_dir: Path) -> str | None:
+        """Why this client folder's Wow.exe may not be used for this server, or None (T576).
+
+        Asked of the catalog entry's `client.required_build` and never of a game id; an
+        exe with no readable version is accepted. Cached per exe by size and mtime.
+        """
+        client = self.entry.client
+        return client_build.refusal(
+            steam_module.client_executable(client_dir),
+            version=client.version,
+            build=client.required_build,
+        )
+
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
 
@@ -10844,6 +10858,10 @@ class ControllerView(QWidget):
                 f"The client folder cannot be the server folder or inside it ({server_dir}): "
                 "Uninstall removes that whole tree."
             )
+            return
+        wrong = self._wrong_build_refusal(chosen)
+        if wrong is not None:
+            self._client_dir_refused(wrong)
             return
         spec = preflight.client_spec_for(self.entry)
         if spec is not None:
@@ -11256,6 +11274,9 @@ class ControllerView(QWidget):
                 )
                 if missing is not None:
                     raise play_client.PlayClientError(missing)
+        wrong = self._wrong_build_refusal(original)
+        if wrong is not None:
+            raise play_client.PlayClientError(wrong)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
