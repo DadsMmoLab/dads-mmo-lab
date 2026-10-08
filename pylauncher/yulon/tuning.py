@@ -25,7 +25,7 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
-import difflib
+import bisect
 import math
 import os
 import re
@@ -690,10 +690,10 @@ def save_text(raw: str, edited: str) -> str:
     `raw` is the file as it was read (`newline=""`, so nothing is translated) and
     `edited` is what the editor now holds. The editor cannot carry a byte-order
     mark or tell `\\r\\n` from `\\n` from a lone `\\r`, so writing its text back
-    converted the whole file (T573 item 2). Here the two are lined up by line,
-    and a line the player did not change is written with its own bytes: its text
-    and its own ending. A line they changed or added takes the ending of the line
-    it replaced, or else of the one above it, or else the file's usual one
+    converted the whole file (T573 item 2). Here the two are lined up by line
+    (`_matched_lines`), and a line the player did not change is written with its own
+    bytes: its text and its own ending. A line they changed or added takes the ending
+    of the line it replaced, or else of the one above it, or else the file's usual one
     (`_newline_of`). A leading BOM is kept.
     """
     bom = BOM if raw.startswith(BOM) else ""
@@ -710,47 +710,20 @@ def save_text(raw: str, edited: str) -> str:
     old_ends.append("")
     new_lines = _TERMINATOR.sub("\n", edited).split("\n")
     ends = [default] * len(new_lines)
-    # The lines both texts start and end with are matched without any diff: a typical edit
-    # touches a few lines, and a line diff of a whole big file took seconds on the window's
-    # thread. What is left in the middle is diffed only when it is small; a rewrite bigger than
-    # `MAX_DIFF_LINES` on either side takes the file's usual ending (a lone edit of every line
-    # has no line worth keeping the bytes of).
-    low = len(old_lines)
-    high = len(new_lines)
-    head = 0
-    while head < min(low, high) and old_lines[head] == new_lines[head]:
-        ends[head] = old_ends[head] or default
-        head += 1
-    tail = 0
-    while tail < min(low, high) - head and old_lines[low - 1 - tail] == new_lines[high - 1 - tail]:
-        ends[high - 1 - tail] = old_ends[low - 1 - tail] or default
-        tail += 1
-    old_mid = old_lines[head : low - tail]
-    new_mid = new_lines[head : high - tail]
-    if len(old_mid) <= MAX_DIFF_LINES and len(new_mid) <= MAX_DIFF_LINES:
-        plan = difflib.SequenceMatcher(a=old_mid, b=new_mid, autojunk=False)
-        for _, i1, i2, j1, j2 in plan.get_opcodes():
-            for k in range(j2 - j1):
-                at = head + j1 + k
-                if i1 + k < i2:
-                    ends[at] = old_ends[head + i1 + k] or default
-                elif at > 0:
-                    ends[at] = ends[at - 1]
-    else:
-        # Too big to diff, but not to keep: each new line takes the ending of the old line
-        # it sits on -- the one at the same place counted from the top, or from the bottom --
-        # when that line has the same text, and every line of an in-place edit (as many
-        # lines before as after) keeps the ending of the line it replaced. Only a line that
-        # is truly new takes the file's usual one. Linear in the file, so the window stays
-        # responsive, and an untouched line keeps its own bytes (a lone CR stays a lone CR).
-        in_place = len(old_mid) == len(new_mid)
-        for at in range(head, high - tail):
-            from_top = at
-            from_bottom = low - (high - at)
-            if in_place or (from_top < low and old_lines[from_top] == new_lines[at]):
-                ends[at] = old_ends[from_top] or default
-            elif 0 <= from_bottom < low and old_lines[from_bottom] == new_lines[at]:
-                ends[at] = old_ends[from_bottom] or default
+    # Between two matched lines (or a file's start or end) the old and new lines left over
+    # were replaced: the first new one takes the first old one's ending, and so on; a new
+    # line with no old one left takes the ending of the line above it.
+    pairs = [*_matched_lines(old_lines, new_lines), (len(old_lines), len(new_lines))]
+    was, now = 0, 0
+    for i, j in pairs:
+        for k in range(j - now):
+            if was + k < i:
+                ends[now + k] = old_ends[was + k] or default
+            elif now + k > 0:
+                ends[now + k] = ends[now + k - 1]
+        if j < len(new_lines):
+            ends[j] = old_ends[i] or default
+        was, now = i + 1, j + 1
     ends[-1] = ""
     # A lone-CR line followed by an empty line that ends in a bare LF would read back as ONE
     # CRLF: the blank line gone. Such an empty line takes a lone CR as well.
@@ -760,11 +733,182 @@ def save_text(raw: str, edited: str) -> str:
     return bom + "".join(line + end for line, end in zip(new_lines, ends, strict=True))
 
 
-MAX_DIFF_LINES = 1500
-"""The most lines of either side `save_text` lines up with a diff (about a second at worst).
+def _matched_lines(old: Sequence[str], new: Sequence[str]) -> list[tuple[int, int]]:
+    """Which old line each unchanged new line is: (old index, new index) pairs, both rising.
 
-Past it the lines are matched by their place from the top and from the bottom instead
-(`save_text`), which keeps every untouched line's ending without a diff."""
+    A line diff of a whole big file took seconds on the window's thread (7.7 s for 2 MB of
+    alike sections), and matching the lines by their place alone gave hundreds of untouched
+    lines a neighbour's ending once an edit added or removed a line. So, patience style:
+    the lines both sides start and end with match first; in what is left, a line whose
+    text occurs exactly once in the old part and once in the new is an anchor, and the
+    longest run of anchors in the same order on both sides is matched (n log n); each gap
+    between two anchors is lined up the same way again. A gap with no anchor (every line
+    in it occurs twice or more, or on one side only) is lined up exactly
+    (`_common_lines`) when it has at most `MAX_DIFF_LINES` lines a side, and else by
+    equal text in order (`_in_order`). Only equal lines are ever matched.
+    """
+    pairs: list[tuple[int, int]] = []
+    # Each gap costs a pass over its lines. A file built to make every pass find one anchor
+    # only would make that quadratic, so past a few passes over the file's size no more
+    # anchors are looked for. An exact line-up costs a cell per pair of lines; many of them
+    # (a hundred gaps of 200 alike lines, each rewritten) took seconds with `difflib`, so
+    # past `_EXACT_CELLS` in all the rest goes to `_in_order`.
+    budget = 8 * (len(old) + len(new)) + 10_000
+    cells = _EXACT_CELLS
+    todo = [(0, len(old), 0, len(new))]
+    while todo:
+        a1, a2, b1, b2 = todo.pop()
+        while a1 < a2 and b1 < b2 and old[a1] == new[b1]:
+            pairs.append((a1, b1))
+            a1, b1 = a1 + 1, b1 + 1
+        while a1 < a2 and b1 < b2 and old[a2 - 1] == new[b2 - 1]:
+            a2, b2 = a2 - 1, b2 - 1
+            pairs.append((a2, b2))
+        if a1 == a2 or b1 == b2:
+            continue
+        budget -= (a2 - a1) + (b2 - b1)
+        anchors = _anchors(old, a1, a2, new, b1, b2) if budget > 0 else []
+        small = a2 - a1 <= MAX_DIFF_LINES and b2 - b1 <= MAX_DIFF_LINES
+        if not anchors and small and (a2 - a1) * (b2 - b1) <= cells:
+            cells -= (a2 - a1) * (b2 - b1)
+            found = _common_lines(old[a1:a2], new[b1:b2])
+            pairs.extend((a1 + i, b1 + j) for i, j in found)
+            continue
+        if not anchors:
+            pairs.extend(_in_order(old, a1, a2, new, b1, b2))
+            continue
+        for i, j in anchors:
+            pairs.append((i, j))
+            todo.append((a1, i, b1, j))
+            a1, b1 = i + 1, j + 1
+        todo.append((a1, a2, b1, b2))
+    pairs.sort()
+    return pairs
+
+
+def _anchors(
+    old: Sequence[str], a1: int, a2: int, new: Sequence[str], b1: int, b2: int
+) -> list[tuple[int, int]]:
+    """The longest same-order run of lines that occur once in old[a1:a2] and once in new[b1:b2]."""
+    once: dict[str, int] = {}
+    for i in range(a1, a2):
+        once[old[i]] = -1 if old[i] in once else i
+    seen: dict[str, int] = {}
+    for j in range(b1, b2):
+        if once.get(new[j], -1) >= 0:
+            seen[new[j]] = -1 if new[j] in seen else j
+    found = sorted((j, once[text]) for text, j in seen.items() if j >= 0)
+    # Longest increasing run of old indexes, in new order (patience sorting).
+    tops: list[int] = []
+    top_at: list[int] = []
+    back = [-1] * len(found)
+    for k, (_, i) in enumerate(found):
+        pile = bisect.bisect_left(tops, i)
+        if pile == len(tops):
+            tops.append(i)
+            top_at.append(k)
+        else:
+            tops[pile] = i
+            top_at[pile] = k
+        back[k] = top_at[pile - 1] if pile else -1
+    run: list[tuple[int, int]] = []
+    k = top_at[-1] if top_at else -1
+    while k >= 0:
+        run.append((found[k][1], found[k][0]))
+        k = back[k]
+    run.reverse()
+    return run
+
+
+def _in_order(
+    old: Sequence[str], a1: int, a2: int, new: Sequence[str], b1: int, b2: int
+) -> list[tuple[int, int]]:
+    """Equal lines of old[a1:a2] and new[b1:b2] matched in order, never by place alone.
+
+    Where the two differ, the next `_WINDOW` lines of each side are lined up exactly
+    (`_common_lines`) and the matches in the window's first half are kept: a few lines
+    changed, added or deleted among alike ones resync at once. A window with no line in
+    common means a big block was added or deleted: the side whose line turns up again
+    sooner on the other side skips ahead to it, and a line that turns up on neither side
+    again was replaced, so both move on. Linear in the gap (times the window).
+    """
+    where_old: dict[str, list[int]] = {}
+    for i in range(a1, a2):
+        where_old.setdefault(old[i], []).append(i)
+    where_new: dict[str, list[int]] = {}
+    for j in range(b1, b2):
+        where_new.setdefault(new[j], []).append(j)
+
+    def next_at(places: list[int] | None, start: int) -> int | None:
+        if not places:
+            return None
+        k = bisect.bisect_left(places, start)
+        return places[k] if k < len(places) else None
+
+    pairs: list[tuple[int, int]] = []
+    i, j = a1, b1
+    while i < a2 and j < b2:
+        if old[i] == new[j]:
+            pairs.append((i, j))
+            i, j = i + 1, j + 1
+            continue
+        here, there = old[i : min(i + _WINDOW, a2)], new[j : min(j + _WINDOW, b2)]
+        if not set(here).isdisjoint(there):
+            found = _common_lines(here, there)
+            whole = i + _WINDOW >= a2 and j + _WINDOW >= b2
+            half = _WINDOW // 2
+            keep = found if whole else [p for p in found if p[0] < half and p[1] < half]
+            for di, dj in keep or found[:1]:
+                pairs.append((i + di, j + dj))
+            last_i, last_j = (keep or found[:1])[-1]
+            i, j = i + last_i + 1, j + last_j + 1
+            continue
+        in_old = next_at(where_old.get(new[j]), i)
+        in_new = next_at(where_new.get(old[i]), j)
+        if in_old is not None and (in_new is None or in_old - i <= in_new - j):
+            i = in_old
+        elif in_new is not None:
+            j = in_new
+        else:
+            i, j = i + 1, j + 1
+    return pairs
+
+
+def _common_lines(old: Sequence[str], new: Sequence[str]) -> list[tuple[int, int]]:
+    """A longest common subsequence of two short line lists, as (old, new) index pairs."""
+    longest = [[0] * (len(new) + 1) for _ in range(len(old) + 1)]
+    for x in range(len(old) - 1, -1, -1):
+        row, below = longest[x], longest[x + 1]
+        for y in range(len(new) - 1, -1, -1):
+            if old[x] == new[y]:
+                row[y] = below[y + 1] + 1
+            else:
+                row[y] = max(below[y], row[y + 1])
+    found: list[tuple[int, int]] = []
+    x = y = 0
+    while x < len(old) and y < len(new):
+        if old[x] == new[y]:
+            found.append((x, y))
+            x, y = x + 1, y + 1
+        elif longest[x + 1][y] >= longest[x][y + 1]:
+            x += 1
+        else:
+            y += 1
+    return found
+
+
+_WINDOW = 32
+"""How many lines a side `_in_order` lines up exactly where the two texts differ."""
+
+
+MAX_DIFF_LINES = 200
+"""The most lines a side of a gap with no anchor that `save_text` lines up exactly.
+
+About 1.5 ms for 200 alike lines a side; `_in_order` takes a bigger one. A line diff of a
+whole big file of alike lines took seconds (`_matched_lines`)."""
+
+_EXACT_CELLS = 2_000_000
+"""How many line pairs one save lines up exactly in all (`_common_lines`), about 70 ms."""
 
 
 PRIVATE_MODE = 0o600

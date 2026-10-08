@@ -1139,8 +1139,9 @@ def test_an_edit_in_place_keeps_every_untouched_lines_raw_ending(
 ) -> None:
     """T573 re-review, fuzz: changing lines without adding or removing any keeps the rest.
 
-    Run with the real cap and with caps of 0 and 2, which force the over-size path on tiny
-    files. The oracle is on the RAW endings: line i that was not changed ends as it did.
+    Run with the real cap and with caps of 0 and 2, which force the unique-line anchors and
+    the in-order match onto tiny files. The oracle is on the RAW endings: line i that was not
+    changed ends as it did.
     """
     import random
 
@@ -1216,7 +1217,7 @@ def test_a_big_conf_saves_fast_and_keeps_the_lines_that_were_not_touched() -> No
     One edit in the middle of a big mixed-ending file must keep every other line's bytes, and a
     rewrite of every line (the worst case for a line diff of alike lines: 4.6 s at 12000 lines
     without the size fallback) must still finish at once.
-    Mutation: set `MAX_DIFF_LINES` huge and the rewrite takes seconds.
+    The exact line-up is capped per gap (`MAX_DIFF_LINES`) and per save (`_EXACT_CELLS`) for this.
     """
     import time
 
@@ -1239,11 +1240,12 @@ def test_a_big_conf_saves_fast_and_keeps_the_lines_that_were_not_touched() -> No
 
 
 def test_two_far_apart_edits_in_a_big_mixed_ending_file_keep_every_other_lines_bytes() -> None:
-    """T573 re-review: past `MAX_DIFF_LINES` the lines between two edits lost their endings.
+    """T573 re-review: in a big file of alike lines the lines between two edits lost their endings.
 
-    2000 lines, every 5th LF, every 50th a lone CR, the rest CRLF; edit the first and the last.
-    Mutation: give every line of an over-size middle the file's usual ending again and 399 LF
-    lines turn CRLF and 40 lone CRs vanish.
+    3200 lines of 280 texts repeated (no line occurs once), every 5th LF, every 50th a lone CR,
+    the rest CRLF; edit the first and the last.
+    Mutation: let the in-order match jump to the next equal text instead of lining up the next
+    `_WINDOW` lines, and the changed first line is paired with a copy of itself 280 lines on.
     """
     n = 3200
     lines = [f"Key{i % 40} = {i % 7}" for i in range(n)]
@@ -1259,7 +1261,10 @@ def test_two_far_apart_edits_in_a_big_mixed_ending_file_keep_every_other_lines_b
 
 
 def test_a_line_added_in_a_big_file_leaves_the_lines_after_it_their_endings() -> None:
-    """The bottom-aligned half of the fallback: lines after an insertion keep their bytes."""
+    """A line added at the top of a big file of alike lines: every line after it keeps its bytes.
+
+    Mutation: match the lines left over by their place in the gap and this is red.
+    """
     n = 3200
     lines = [f"Key{i % 40} = {i % 7}" for i in range(n)]
     ends = ["\r" if i % 50 == 0 else "\n" if i % 5 == 0 else "\r\n" for i in range(n)]
@@ -1273,6 +1278,229 @@ def test_a_line_added_in_a_big_file_leaves_the_lines_after_it_their_endings() ->
     # than it did, and keeps its bytes.
     middle = "".join(line + end for line, end in zip(lines[: n - 6], ends[: n - 6], strict=True))
     assert out.startswith("Inserted = 1" + tuning._newline_of(raw) + middle)
+
+
+def _lines_and_ends(text: str) -> tuple[list[str], list[str]]:
+    """`text` cut into its lines and each line's own raw ending (the last one's is "")."""
+    lines, found, at = [], [], 0
+    for m in tuning._TERMINATOR.finditer(text):
+        lines.append(text[at : m.start()])
+        found.append(m.group())
+        at = m.end()
+    return [*lines, text[at:]], [*found, ""]
+
+
+def _mixed_file(n: int) -> tuple[list[str], list[str], str]:
+    """`n` unique key lines: every 50th ends in a lone CR, every 5th in LF, the rest CRLF."""
+    lines = [f"Key{i} = {i}" for i in range(n)]
+    ends = ["\r" if i % 50 == 0 else "\n" if i % 5 == 0 else "\r\n" for i in range(n)]
+    return lines, ends, "".join(line + end for line, end in zip(lines, ends, strict=True))
+
+
+def _edit(lines: list[str], steps: list[tuple[str, int]]) -> list[tuple[int | None, str]]:
+    """Apply `steps` (("ins"|"del"|"chg", at)) to `lines`, each line tracked by its old index."""
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    for op, at in steps:
+        if op == "ins":
+            items.insert(at, (None, f"New{at} = 1"))
+        elif op == "del":
+            del items[at]
+        else:
+            items[at] = (None, f"Changed{at} = 1")
+    return items
+
+
+def _unedited_lines_that_lost_their_bytes(
+    raw: str, items: list[tuple[int | None, str]], out: str
+) -> list[int]:
+    """New indexes of lines the player did not touch whose raw ending is not the one they had."""
+    old, old_ends = _lines_and_ends(raw.removeprefix(tuning.BOM))
+    got, got_ends = _lines_and_ends(out.removeprefix(tuning.BOM))
+    assert got[: len(items)] == [text for _, text in items]
+    return [
+        j
+        for j, (i, _) in enumerate(items)
+        if i is not None and i < len(old) - 1 and j < len(got) - 1 and got_ends[j] != old_ends[i]
+    ]
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param([("ins", 10), ("ins", 1991)], id="two-inserts-far-apart"),
+        pytest.param([("del", 10), ("del", 1989)], id="two-deletes-far-apart"),
+        pytest.param([("ins", 10), ("del", 1991)], id="insert-and-delete-net-zero"),
+        pytest.param([("del", 10), ("ins", 1990)], id="delete-and-insert-net-zero"),
+        pytest.param(
+            [("chg", 5), ("del", 1000), ("ins", 1500), ("chg", 1990)],
+            id="delete-and-insert-between-two-changes",
+        ),
+        pytest.param([("ins", 10), ("chg", 1991)], id="insert-and-change"),
+    ],
+)
+def test_far_apart_edits_that_move_lines_keep_every_untouched_lines_raw_bytes(
+    steps: list[tuple[str, int]],
+) -> None:
+    """T573 third review: past the diff size, lines that moved were matched by place alone.
+
+    2000 unique lines with CRLF, LF and lone-CR endings mixed; two edits far apart that change
+    the line count (or cancel out) shifted every line between them, and 395-791 untouched lines
+    took a neighbour's ending (lone CRs moved onto the next line). The oracle is the raw bytes
+    of every line the edit did not touch, tracked by identity.
+    Mutation: match the over-size middle by its place from the top/bottom again and this is red.
+    """
+    lines, _, raw = _mixed_file(2000)
+    items = _edit(lines, steps)
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert tuning.editor_view(out) == edited
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+def test_runs_of_alike_comment_lines_are_matched_to_their_own_run() -> None:
+    """T573 third review: runs of `#` lines were matched from the wrong side (596 lines).
+
+    3000 lines, every 10th-ish run of three `#` lines, CRLF and LF alternating; insert a line
+    near the top and change one near the bottom.
+    """
+    n = 3000
+    lines = ["#" if i % 10 in (3, 4, 5) else f"K{i} = {i}" for i in range(n)]
+    ends = ["\n" if i % 2 else "\r\n" for i in range(n)]
+    raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+    items = _edit(lines, [("chg", 2990), ("ins", 10)])
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+@pytest.mark.parametrize("cap", [0, 2, 1500])
+def test_a_pasted_copy_of_the_lines_below_does_not_take_their_endings(
+    monkeypatch: pytest.MonkeyPatch, cap: int
+) -> None:
+    """The lines that occur once on each side anchor the match, not the first equal text.
+
+    A copy of 40 lines pasted just above them (a section duplicated to start a new one), and a
+    change far below: matching equal text in order alone takes the pasted copy for the old
+    lines, so the old line above them and the real ones lose their endings.
+    Mutation: drop the unique-line anchors and this is red at caps 0 and 2.
+    """
+    monkeypatch.setattr(tuning, "MAX_DIFF_LINES", cap)
+    lines, _, raw = _mixed_file(300)
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    items[10:10] = [(None, text) for text in lines[11:51]]
+    items[290] = (None, "Changed = 1")
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+@pytest.mark.parametrize("cap", [1500, 6, 2, 0])
+def test_any_edit_keeps_the_raw_bytes_of_every_line_it_did_not_touch(
+    monkeypatch: pytest.MonkeyPatch, cap: int
+) -> None:
+    """T573 third review, fuzz with each line tracked by identity, through every path.
+
+    Files mixing CRLF, LF and lone CR, with or without a BOM, with alike lines (`#`, blank,
+    repeated keys) among unique ones; 1-6 edits of every kind. The caps force the diff, the
+    unique-line anchors and the in-order match onto small files. A line whose text occurs once
+    in the old and once in the new text must end exactly as it did. A line with alike twins can
+    honestly be matched to a twin (deleting one of two `#` lines reads the same either way), so
+    its ending must be one an alike old line had. An edit that typed a text the file already
+    had is only checked for its lines (deleting a blank line and typing one lower down reads
+    the same as moving the lines between, so neither reading is wrong).
+    """
+    import random
+
+    monkeypatch.setattr(tuning, "MAX_DIFF_LINES", cap)
+    rng = random.Random(5730 + cap)
+    alike = ["#", "", "# ---", "Enabled = 1"]
+    for case in range(2500):
+        n = rng.randint(1, 40)
+        old_lines = [
+            rng.choice(alike) if rng.random() < 0.4 else f"K{i} = {rng.randint(0, 9)}"
+            for i in range(n)
+        ]
+        raw = "".join(line + rng.choice(["\n", "\r\n", "\r"]) for line in old_lines)
+        raw += rng.choice(["", "tail"])
+        if rng.random() < 0.3:
+            raw = tuning.BOM + raw
+        old, old_ends = _lines_and_ends(raw.removeprefix(tuning.BOM))
+        items: list[tuple[int | None, str]] = list(enumerate(old))
+        for step in range(rng.randint(1, 6)):
+            op = rng.choice(["ins", "del", "chg"])
+            text = rng.choice(alike) if rng.random() < 0.3 else f"T{case}.{step} = x"
+            if op == "ins" or len(items) < 2:
+                items.insert(rng.randint(0, len(items)), (None, text))
+            elif op == "del":
+                del items[rng.randrange(len(items))]
+            else:
+                items[rng.randrange(len(items))] = (None, text)
+        edited = "\n".join(text for _, text in items)
+
+        out = tuning.save_text(raw, edited)
+
+        assert tuning.editor_view(out) == edited, (raw, edited, out)
+        assert out.startswith(tuning.BOM) == raw.startswith(tuning.BOM)
+        got, got_ends = _lines_and_ends(out.removeprefix(tuning.BOM))
+        new = [text for _, text in items]
+        if not {text for i, text in items if i is None}.isdisjoint(old):
+            continue
+        default = tuning._newline_of(raw)
+        for j, (i, text) in enumerate(items):
+            if i is None or i == len(old) - 1 or j == len(items) - 1:
+                continue
+            if text == "" and j > 0 and got_ends[j - 1] == "\r" and got_ends[j] == "\r":
+                continue  # the glue rule: a blank line after a lone CR takes a lone CR
+            if old.count(text) == 1 and new.count(text) == 1:
+                assert got_ends[j] == old_ends[i], (raw, edited, out, j)
+            else:
+                twins = {old_ends[k] or default for k in range(len(old)) if old[k] == text}
+                assert got_ends[j] in twins, (raw, edited, out, j)
+
+
+def test_a_1_mb_conf_of_repeated_sections_saves_fast_with_edits_far_apart() -> None:
+    """T573 third review: speed on a 1 MB conf whose sections repeat (no line is unique).
+
+    A whole-file line diff of such a file took 7.7 s at 2 MB on the window's thread. Three
+    edits far apart (an insert near the top, a change in the middle, a delete near the end)
+    must save in well under half a second and keep every untouched line's raw bytes.
+    """
+    import time
+
+    section = [
+        "[Bots]",
+        "#",
+        "#    Bot.Enabled",
+        "#        Description: Whether this bot is on.",
+        "#        Default:     1",
+        "",
+        "Bot.Enabled = 1",
+        "Bot.Count = 50",
+        "#",
+        "",
+    ]
+    lines = section * (1024 * 1024 // sum(len(line) + 2 for line in section) + 1)
+    n = len(lines)
+    # A lone CR before an empty LF line would read back as one CRLF: none of those.
+    ends = [
+        "\r" if i % 97 == 0 and lines[i + 1] else "\n" if i % 3 == 0 else "\r\n" for i in range(n)
+    ]
+    raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+    items = _edit(lines, [("del", n - 20), ("chg", n // 2), ("ins", 10)])
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    started = time.perf_counter()
+    out = tuning.save_text(raw, edited)
+    took = time.perf_counter() - started
+
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+    assert took < 0.5, took
 
 
 def test_an_emptied_editor_writes_an_empty_file() -> None:
