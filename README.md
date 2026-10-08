@@ -50,7 +50,7 @@ under "Changes on top of v1.4.0" below.
 | `src/mod-multiclass-summons/` | bdodroid's `mod-multiclass-summons` C++ sources, used with permission (see Credits). It fixes Warlock, Mage and Death Knight pet and mount conflicts for multi-class characters and lets them field several guardians at once; playerbots are excluded at runtime. The loader files are the release's copy, byte-identical to `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915` (that commit's `README.md` was not part of the release and is not here). `multiclass_pet_fix.cpp` is the one exception, the Dad's MMO Lab server's copy with a fix on top of bdodroid's file: a hunter's Call Pet works while a warlock demon holds the pet slot, and the demon steps aside as a side summon instead of being lost (`SummonManager::DemotePrimary`, and spell 883 added to the list that dismisses the pet first). The fix is meant to be offered to bdodroid for his module. The module's `CMakeLists.txt` (two `AC_ADD_SCRIPT` lines for files AzerothCore already collects from `src/`) is not carried over. | `modules/mod-multiclass-summons/src/` |
 | `data/sql/db-world/base/multiclass_summons.sql` | bdodroid's SQL: registers the `spell_summon_pet_override` spell script on spells 688, 697, 712, 691, 30146, 70907, 70908, 46584 and 52150. | `modules/mod-multiclass-summons/data/sql/db-world/base/` |
 | `lua_scripts/` | The ALE (Eluna) Lua scripts: `unbound_mentor.lua` (the Mentor and the Mentor Stone) and `dml_autobuff.lua` v3 (the `#buffs` auto-buff command from the Dad's MMO Lab server; it does nothing, and prints `[dml_autobuff] off (Unbound.AutoBuff = 0)`, unless `Unbound.AutoBuff = 1` in `mod_unbound.conf`). v1.4.0's `unbound_addon_sync.lua` and `unbound_talent_data.lua` (the Lua talent bridge and its data) are no longer here: `src/UnboundMulticlassBridge.cpp` does their job. On a successful start the world log prints `[UNBOUND] Prereq map built.` | `env/dist/etc/modules/lua_scripts/` |
-| `data/sql/db-world/` | SQL for the world database (`acore_world`). `npc_setup.sql` is renamed `00_npc_setup.sql` so that AzerothCore's updater, which orders by file name, applies it first. | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
+| `data/sql/db-world/` | SQL for the world database (`acore_world`). `npc_setup.sql` is renamed `00_npc_setup.sql` so that AzerothCore's updater, which orders by file name, applies it first. `15_unbound_mentor_spawns.sql` places the Mentor in the eight capitals and Dalaran (see "Changes on top of v1.4.0"). | `modules/mod-unbound/data/sql/db-world/` and `modules/mod-unbound/npc_setup.sql` |
 | `data/sql/db-characters/` | SQL for the characters database (`acore_characters`). | `modules/mod-unbound/data/sql/db-characters/` |
 | `core-patch/unbound-core-access.patch` | The AzerothCore core patch: 6 files (`Player.h`, `Player.cpp`, `PlayerQuest.cpp`, `PlayerStorage.cpp`, `Trainer.cpp`, `ConditionMgr.cpp`). It adds `Player::m_unboundClassMask` with `Get`/`SetUnboundClassMask()` and ORs it into the class checks for trainers, spells, quests, items and `CONDITION_CLASS`. The worldserver does not compile with `mod-unbound` unless this patch is applied. | `modules/mod-unbound/unbound-core-access.patch`, then `git apply` at the server root |
 | `core-patch/unbound-mana-regen.patch` | A second core patch, 1 file (`Player.cpp`): a class whose own power is not mana reads the priest's spirit-regen row, so a warrior, rogue or death knight who unlocks a mana class regenerates mana. Apply it after `unbound-core-access.patch`. | new in this branch |
@@ -77,6 +77,10 @@ layout. `git log` holds each change with its reason.
 - `src/mod-multiclass-summons/multiclass_pet_fix.cpp`: the Call Pet fix on top of bdodroid's file.
 - Five client addon files replaced with the server's later versions:
   `multiclass-talents-ui/Core.lua` and `UnboundSpellbook/{ClassData.lua, Core.lua, UI.lua, UnboundSpellbook.toc}`.
+- `data/sql/db-world/15_unbound_mentor_spawns.sql`: the Mentor stands beside the bank of each capital (Stormwind, Ironforge,
+  Darnassus, Exodar, Orgrimmar, Undercity, Thunder Bluff, Silvermoon) and in Dalaran's Runeweaver Square, spawn ids
+  9000101-9000109. The Mentor Stone still works anywhere. It names the creature table's `id` column, as the core does
+  since its 2026_06_16_00 update.
 - `src/UnboundSystem_loader.cpp`: calls the three new registration functions.
 - `conf/mod_unbound.conf.dist`: the three switches (`conf/mod_ale.conf` and `conf/worldserver.conf.unbound` are
   from the release).
@@ -103,7 +107,8 @@ AzerothCore's updater applies module SQL from `data/sql/db-world/` and
    `04_catalog_druid_forms.sql`, `05_individual_purchase_prereqs.sql`,
    `06_universal_skill_access.sql`, `07_mentor_stone.sql`, `08_catalog_additions.sql`,
    `10_catalog_audit_fixes.sql`, `11_catalog_gap_additions.sql`, `12_mount_spell_fix.sql`,
-   `13_flight_form_fix.sql`, `14_judgement_fix.sql`. There is no `09` in the release.
+   `13_flight_form_fix.sql`, `14_judgement_fix.sql`, `15_unbound_mentor_spawns.sql` (the Mentor's nine spawns;
+   it deletes and re-inserts only spawn ids 9000101-9000109). There is no `09` in the release.
 3. World: `base/multiclass_summons.sql` (safe to re-run: `DELETE` then `INSERT` of its own rows).
 4. Characters: `01_unbound_characters.sql`, `02_dml_autobuff_kv.sql` (the auto-buff script's table, created here so it always exists).
 
@@ -116,7 +121,8 @@ global world tables: `playercreateinfo_spell_custom`, `skillraceclassinfo_dbc` (
 ID 10000 and up) and `playercreateinfo_item` (the Mentor Stone, item 900100, for every new
 character).
 
-After the first start, a GM spawns the Mentor once in game with `.npc add 900001`.
+The Mentor already stands in the eight capitals and Dalaran (`15_unbound_mentor_spawns.sql`). A GM can add
+another anywhere in game with `.npc add 900001`.
 
 ## What else a server needs
 
