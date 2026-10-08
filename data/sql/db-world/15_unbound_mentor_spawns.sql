@@ -6,8 +6,10 @@
 -- player does not have to find a GM or use the Mentor Stone to meet it. The Mentor Stone
 -- (07_mentor_stone.sql) still summons the Mentor anywhere.
 --
--- Spawn ids 9000101-9000109 (the block 9000100-9000199 is reserved for Unbound; AzerothCore
--- refuses spawn ids at or above 16777215). Each position is 4.5 yards in front of a banker
+-- Spawn ids 9000101-9000109 only. The core numbers a new spawn MAX(guid)+1, so the next
+-- `.npc add` after this file gets 9000110 or higher: no later Unbound SQL file may ship
+-- spawn ids above 9000109 (INSERT IGNORE would skip them without a word). AzerothCore
+-- refuses spawn ids at or above 16777215. Each position is 4.5 yards in front of a banker
 -- spawn of the core's own world database, on the banker's floor, facing the way the banker
 -- faces (towards the walkway). The anchor banker's guid is in each row's Comment. Thunder
 -- Bluff's bankers face each other across the bank, so its Mentor stands in the middle.

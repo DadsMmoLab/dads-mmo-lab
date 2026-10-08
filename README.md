@@ -79,7 +79,10 @@ layout. `git log` holds each change with its reason.
   `multiclass-talents-ui/Core.lua` and `UnboundSpellbook/{ClassData.lua, Core.lua, UI.lua, UnboundSpellbook.toc}`.
 - `data/sql/db-world/15_unbound_mentor_spawns.sql`: the Mentor stands beside the bank of each capital (Stormwind, Ironforge,
   Darnassus, Exodar, Orgrimmar, Undercity, Thunder Bluff, Silvermoon) and in Dalaran's Runeweaver Square, spawn ids
-  9000101-9000109. The Mentor Stone still works anywhere. It names the creature table's `id` column, as the core does
+  9000101-9000109 only (later Unbound files must not ship spawn ids above 9000109: the core numbers a new
+  `.npc add` spawn MAX(guid)+1, so those ids are taken). A server that already placed a Mentor by hand with
+  `.npc add 900001` gets a second one in the same city (harmless; remove the hand-placed one with `.npc delete`).
+  The Mentor Stone still works anywhere. It names the creature table's `id` column, as the core does
   since its 2026_06_16_00 update.
 - `src/UnboundSystem_loader.cpp`: calls the three new registration functions.
 - `conf/mod_unbound.conf.dist`: the three switches (`conf/mod_ale.conf` and `conf/worldserver.conf.unbound` are
