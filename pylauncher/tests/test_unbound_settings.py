@@ -118,15 +118,48 @@ def test_a_key_the_file_lacks_is_appended_and_nothing_else_moves(tmp_path: Path)
     assert written.rstrip("\n").endswith("Unbound.AutoBuff = 1")
 
 
-@pytest.mark.parametrize("bad", ["2", "-1", "yes", "true", "01", "", " 1", "1.0", "on"])
-def test_a_value_other_than_zero_or_one_is_refused_and_writes_nothing(
+@pytest.mark.parametrize("bad", ["2", "-1", "yes", "01", "", " 1", "1.0", "on", "enabled"])
+def test_a_value_the_module_cannot_read_is_refused_and_writes_nothing(
     tmp_path: Path, bad: str
 ) -> None:
+    """The C++ reads `GetOption<bool>` and `dml_autobuff.lua` reads `1` or `true`, so a
+    value outside 0/1/true/false is one at least one reader of the file cannot take.
+    The sentence never repeats the value: on the Tuning tab nobody typed it, they
+    ticked a box."""
     path = put(tmp_path, DIST)
-    with pytest.raises(tuning.TuningError, match="Unbound.ReagentFree"):
+    with pytest.raises(tuning.TuningError, match="Unbound.ReagentFree") as refused:
         unbound_settings.write(tmp_path, {"Unbound.ReagentFree": bad}, now=NOW)
+    said = str(refused.value)
+    assert f"`{bad}`" not in said and f"'{bad}'" not in said and f'"{bad}"' not in said
     assert path.read_text(encoding="utf-8") == DIST
     assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+@pytest.mark.parametrize(("typed", "written"), [("true", "1"), ("false", "0"), ("True", "1")])
+def test_a_true_or_false_is_written_back_as_one_or_zero(
+    tmp_path: Path, typed: str, written: str
+) -> None:
+    """A hand-edited `true`/`false` is a value the module reads (T554 rework item 4). The
+    switch flips it in that spelling, and the writer puts the module's own 0/1 back."""
+    path = put(tmp_path, DIST.replace("ReagentFree = 0", "ReagentFree = false"))
+    unbound_settings.write(tmp_path, {"Unbound.ReagentFree": typed}, now=NOW)
+    assert f"Unbound.ReagentFree = {written}\n" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("current", "on"),
+    [("1", True), ("true", True), ("0", False), ("false", False), (None, False), ("2", False)],
+)
+def test_true_and_one_are_on_false_and_zero_are_off(
+    tmp_path: Path, current: str | None, on: bool
+) -> None:
+    text = DIST if current is None else DIST.replace("AutoBuff = 0", f"AutoBuff = {current}")
+    if current is None:
+        text = text.replace("Unbound.AutoBuff = 0\n", "")
+    put(tmp_path, text)
+    by_key = {row.key: row for row in unbound_settings.rows(tmp_path)}
+    assert by_key["Unbound.AutoBuff"].current == current
+    assert unbound_settings.is_on(by_key["Unbound.AutoBuff"]) is on
 
 
 def test_one_bad_value_in_a_save_writes_none_of_them(tmp_path: Path) -> None:

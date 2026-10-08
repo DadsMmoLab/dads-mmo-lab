@@ -19280,8 +19280,9 @@ class ControllerView(QWidget):
         for file, values in per_file.items():
             try:
                 if (family, module_id) == unbound_settings.CARD:
-                    # Only `0` and `1` reach the file: the module reads `== "1"` and a `true`
-                    # would silently mean off (`unbound_settings.write`).
+                    # Only `0` and `1` reach the file: a switch flipped from a hand-edited
+                    # `true`/`false` is written back as the module's own 1/0
+                    # (`unbound_settings.write`).
                     made = unbound_settings.write(server_dir, values)
                 else:
                     made = tuning.write(server_dir / file, values, spec=specs[file])

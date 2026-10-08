@@ -15,14 +15,16 @@ Instant summons does NOT remove reagents: a Soul Shard or Infernal Stone is stil
 unless `Unbound.ReagentFree` is on too, so no text here calls it "free" (U3 review).
 
 **Off is the default everywhere.** The shipped `mod_unbound.conf.dist` spells each
-`0`; the C++ reads `GetOption<bool>(key, false)` and the Lua reads
-`GetConfigValue(key) == "1"`, so a missing file or a missing key also means off.
+`0`; the C++ reads `GetOption<bool>(key, false)` and `dml_autobuff.lua` turns on only
+for the text `1` or `true`, so a missing file or a missing key also means off.
 That is why a key the file does not carry has `current=None` here -- the row says
 nothing about the file rather than inventing a `0` -- and `is_on()` answers `False`.
 
-The value is `0` or `1` and nothing else. `tuning.check` for a `bool` also lets
-`true` and `false` through, which this module's own readers (`== "1"`) would take
-as off while the person who typed `true` meant on; so the check here is narrower.
+Both readers take `1`/`true` as on and `0`/`false` as off, so a hand-edited `true` or
+`false` is a value the module reads, and the switch shows it as such. The Tuning
+tab's switch flips a value in the file's own spelling; `write()` puts the module's
+own `0`/`1` back, and refuses only a value outside those four words, which at least
+one of the module's readers cannot take (T554 rework).
 
 The write is `tuning.write`'s: one key's value moves, everything else in the file
 (comments, order, line endings) stays byte for byte, a backup is taken first, and a
@@ -53,7 +55,10 @@ CARD = ("core", "unbound")
 CARD_NAME = "Unbound"
 
 DEFAULT = "0"
-"""Every switch is off unless the conf says `1`."""
+"""Every switch is off unless the conf says `1` (or `true`)."""
+
+_WRITTEN_AS = {"1": "1", "true": "1", "0": "0", "false": "0"}
+"""What `write()` puts in the file for each value the module reads, by its lower case."""
 
 TAKES_EFFECT = "Takes effect at the next start."
 
@@ -129,28 +134,36 @@ def shown_for(entry: CatalogEntry) -> bool:
 
 
 def is_on(row: tuning.TuningRow) -> bool:
-    """Whether this row's switch is on: only an explicit `1` is. No value means off."""
-    return row.current == "1"
+    """Whether this row's switch is on: `1` or `true`. `0`, `false` and no value are off."""
+    return row.current is not None and row.current.strip() in ("1", "true")
 
 
 def write(server_dir: Path, edits: Mapping[str, str], *, now: datetime | None = None) -> Path:
     """Set these switches in `mod_unbound.conf` and return the backup's path.
 
-    Refused, before anything is written: a key that is not one of the three, a value
-    other than `0` or `1`, and a conf that is not on disk yet.
+    `true` and `false` (any case) are written as `1` and `0`. Refused, before anything is
+    written: a key that is not one of the three, any other value, and a conf that is not
+    on disk yet. The refusal does not repeat the value: on the Tuning tab nobody typed
+    it, they ticked a box.
     """
     spec = conf_keys()
+    written: dict[str, str] = {}
     for key, value in edits.items():
         if key not in spec:
             raise tuning.TuningError(f"{key}: is not an Unbound setting")
-        if value not in ("0", "1"):
-            raise tuning.TuningError(f"{key}: `{value}` is not 0 or 1 (0 is off, 1 is on)")
+        as_written = _WRITTEN_AS.get(value.lower()) if value == value.strip() else None
+        if as_written is None:
+            raise tuning.TuningError(
+                f"{key}: this switch can only be saved as on or off, and the value it was "
+                "given is neither"
+            )
+        written[key] = as_written
     path = server_dir / FILE
     if not path.is_file():
         raise tuning.TuningError(
             f"mod_unbound.conf is not there yet ({path}); install WoW Unbound first"
         )
-    return tuning.write(path, edits, spec=spec, now=now)
+    return tuning.write(path, written, spec=spec, now=now)
 
 
 def _read(path: Path) -> str | None:

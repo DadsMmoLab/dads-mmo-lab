@@ -2,7 +2,7 @@
 
 Three switches over `mod_unbound.conf`, all off, shown only for an entry whose
 `confs_from_dist` names that conf (data, not an id), saved through
-`unbound_settings.write` so only 0 and 1 reach the file.
+`unbound_settings.write`, which writes 0 or 1 back for a true or false.
 """
 
 from __future__ import annotations
@@ -145,16 +145,31 @@ def test_a_switch_turned_back_off_writes_zero(qapp: object, ps: Any, tmp_path: P
     assert "Unbound.AutoBuff = 0" in path.read_text(encoding="utf-8")
 
 
-def test_a_conf_that_spells_true_is_not_written_a_one_and_is_refused(
+def test_a_conf_that_spells_false_is_switched_on_and_written_back_as_one(
     qapp: object, ps: Any, tmp_path: Path
 ) -> None:
-    """The switch writes in the file's own spelling; the module reads only `1`, so `true`
-    would silently mean off. The save says so and writes nothing."""
+    """T554 rework item 4. The module reads `true`/`false` (C++ `GetOption<bool>`,
+    `dml_autobuff.lua`), so a hand-edited `false` is not refused: ticking the box saves,
+    and the line is written back in the module's own 0/1."""
     path = lay(tmp_path, DIST.replace("InstantSummons = 0", "InstantSummons = false"))
-    before = path.read_bytes()
     view = view_for(unbound(), tmp_path)
     card = card_of(view)
+    assert card.editors["Unbound.InstantSummons"].value() == "false"
     card.editors["Unbound.InstantSummons"].control.setChecked(True)
     card.save_button.click()
-    assert path.read_bytes() == before
-    assert "InstantSummons" in view.tuning_report.toPlainText()
+    assert "Unbound.InstantSummons = 1\n" in path.read_text(encoding="utf-8")
+    report = view.tuning_report.toPlainText()
+    assert "nothing was written" not in report
+    assert "true" not in report
+
+
+def test_a_conf_that_spells_true_shows_on_and_is_switched_off_as_zero(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    path = lay(tmp_path, DIST.replace("AutoBuff = 0", "AutoBuff = true"))
+    view = view_for(unbound(), tmp_path)
+    card = card_of(view)
+    assert card.editors["Unbound.AutoBuff"].control.isChecked()
+    card.editors["Unbound.AutoBuff"].control.setChecked(False)
+    card.save_button.click()
+    assert "Unbound.AutoBuff = 0\n" in path.read_text(encoding="utf-8")
