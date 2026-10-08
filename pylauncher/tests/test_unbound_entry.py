@@ -59,7 +59,7 @@ def test_every_unbound_patch_is_shipped_byte_exact(name: str, digest: str) -> No
 UNBOUND_ID = "wow-unbound"
 UNBOUND_REPO = "DadsMmoLab/dads-mmo-lab"
 UNBOUND_BRANCH = "mod-unbound"
-UNBOUND_REV = "fd247bed0ed39796101417d3ca1ef3e52cf3f131"
+UNBOUND_REV = "456ce5b6df63b7d219905f6669ad4813516b5b4a"
 """The `mod-unbound` head that carries U1-U7 (the AzerothCore module layout, T556's fixes, the
 mana-regen patch) and M1 (the Mentor spawns), as DadsMmoLab/dads-mmo-lab says it. The five patch
 files here equal that head's `core-patch/` files byte for byte (checked when this was set)."""
