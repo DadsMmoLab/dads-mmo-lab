@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
+- Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
@@ -29,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.
+- Installing NPC Teleporter on WotLK no longer breaks Mountaineer Pebblebitty's and Maggran Earthbinder's menus; Install again to mend.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
 - Updating a TBC or Vanilla server stops before building when the new code needs database changes it cannot apply.
 - Updating a TBC or Vanilla server reloads changed bot tables, replacing what the bots had generated in them.

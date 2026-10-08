@@ -4,7 +4,8 @@
   "name": "AzerothCore Lua Engine (ALE)",
   "type": "module",
   "game": "wow-wotlk",
-  "description": "Lua scripting engine (LuaJIT/5.2/5.3/5.4); required by every ALE mod and keg. ALE is not Eluna — scripts are not interchangeable.",
+  "description": "Lua scripting engine (LuaJIT/5.2/5.3/5.4): put your own .lua files in env/dist/etc/modules/lua_scripts in your server folder. Required by every ALE mod and keg; ALE is not Eluna, so scripts are not interchangeable.",
+  "folders": ["env/dist/etc/modules/lua_scripts"],
   "source": {
     "repo": "azerothcore/mod-ale"
   },
