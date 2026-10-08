@@ -38,7 +38,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon import docker, server_build_presses
 from yulon.catalog.catalog import LUA_SCRIPTS_DIR, LuaScripts, SqlCheck
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, SelfExplainedError
 from yulon.log import get_logger
 from yulon.manifest import Db
 
@@ -149,7 +149,7 @@ def _through_a_link(server_dir: Path, target: Path) -> Path | None:
 
 def _link_refusal(server_dir: Path, link: Path, remedy: str) -> InstallerError:
     """The press stops at a link where the scripts go: writing through it writes elsewhere."""
-    return InstallerError(
+    return SelfExplainedError(
         f"{link.relative_to(server_dir).as_posix()} is a link, so the Lua scripts were not laid "
         "through it and the server would start without them. Nothing was written there. Make "
         f"it a plain folder, then press {remedy}."
@@ -201,7 +201,7 @@ def _plan(server_dir: Path, specs: Sequence[LuaScripts], remedy: str) -> list[_P
         dest = server_dir / spec.dest.rstrip("/")
         link = _linked_source(server_dir, src)
         if link is not None:
-            raise InstallerError(
+            raise SelfExplainedError(
                 f"{link.relative_to(server_dir).as_posix()} is a link, so Yu'lon did not read "
                 "the Lua scripts through it and the server would start without them. Nothing "
                 f"was changed. Put a plain copy of the file or folder there, then press {remedy}."
@@ -216,7 +216,7 @@ def _plan(server_dir: Path, specs: Sequence[LuaScripts], remedy: str) -> list[_P
                     (here / name, dest / (here / name).relative_to(src)) for name in sorted(files)
                 )
         else:
-            raise InstallerError(
+            raise SelfExplainedError(
                 f"{spec.src} is not in {server_dir}, so its Lua scripts cannot be laid and "
                 "the server would start without them. Nothing was changed."
             )
@@ -320,7 +320,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 yield f"{rel} is no longer shipped and was changed on this machine; left as it is."
         finished = True
     except OSError as exc:
-        raise InstallerError(
+        raise SelfExplainedError(
             f"The Lua scripts could not be laid ({exc}). The server would start without them, "
             "so it was not started."
         ) from exc
@@ -331,7 +331,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             except OSError as exc:
                 logger.warning(f"could not write {record_path(server_dir)}: {exc}")
                 if finished:
-                    raise InstallerError(
+                    raise SelfExplainedError(
                         "The Lua scripts were copied, but Yu'lon could not save its list of "
                         f"them, {LUA_SCRIPTS_DIR}/{RECORD_FILE} ({exc}), so it stopped here and "
                         f"started nothing new. Once that is fixed, delete {folders} and that "

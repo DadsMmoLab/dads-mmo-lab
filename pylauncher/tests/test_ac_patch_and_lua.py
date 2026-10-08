@@ -930,18 +930,11 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
     assert sorted(p.name for p in elsewhere.iterdir()) == [scriptdeploy.RECORD_FILE]
 
 
-def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
+def failed_compile_after_laying(
     tmp_path: Path, installers: Path
-) -> None:
-    """Rollback re-lays the OLD set: the checkout goes back, so the scripts must follow it.
-
-    The put-back tests above refuse in `check_carried_patches` before anything is
-    laid, so "LAID unchanged" proves nothing there. Here the new checkout's scripts
-    ARE laid (one changed, one new), the compile then fails, and the old bytes come
-    back, the new-only file goes, and the record agrees with the disk.
-    """
+) -> tuple[Recorder, Path, list[str]]:
+    """An update whose new checkout changes one script and adds one, then fails to compile."""
     rec, server_dir, made = ready_to_update(tmp_path, installers)
-    new_only = server_dir / LUA_DEST / "extra.lua"
 
     def fetched(dest: Path) -> None:
         lay_tree(server_dir)(dest)
@@ -959,13 +952,48 @@ def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
     made._seams = rec.seams(restore_rev=checkout_force)
     rec.build_result = docker.AttachedRun(1, ("boom",))
     said: list[str] = []
-
     with pytest.raises(InstallerError):
         for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
             said.append(line)
+    return rec, server_dir, said
+
+
+def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
+    tmp_path: Path, installers: Path
+) -> None:
+    """Rollback re-lays the OLD set: the checkout goes back, so the scripts must follow it.
+
+    The put-back tests above refuse in `check_carried_patches` before anything is
+    laid, so "LAID unchanged" proves nothing there. Here the new checkout's scripts
+    ARE laid (one changed, one new), the compile then fails, and the old bytes come
+    back, the new-only file goes, and the record agrees with the disk.
+    """
+    rec, server_dir, said = failed_compile_after_laying(tmp_path, installers)
 
     assert f"Updated {LAID}." in said and f"Laid {LUA_DEST}/extra.lua." in said, said
     assert rec.heads[server_dir / MODULE] == OLD
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
-    assert not new_only.exists()
+    assert not (server_dir / LUA_DEST / "extra.lua").exists()
     assert scriptdeploy.read_record(server_dir) == {LAID: scriptdeploy._sha(LUA_BODY.encode())}
+
+
+def test_a_rollback_that_cannot_save_the_script_record_says_that_not_the_patch(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-lay's own sentence goes through; "press again" would not mend a full disk."""
+    real = scriptdeploy._write_record
+    writes: list[int] = []
+
+    def second_write_fails(server_dir: Path, files: dict[str, str]) -> None:
+        writes.append(1)
+        if len(writes) > 2:  # the install, the update, then the rollback re-lay
+            raise OSError(28, "No space left on device")
+        real(server_dir, files)
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", second_write_fails)
+
+    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+
+    back = next(line for line in said if "back on their old commits, but" in line)
+    assert scriptdeploy.RECORD_FILE in back and "delete" in back, back
+    assert "source patch" not in back and "again: it writes" not in back, back
