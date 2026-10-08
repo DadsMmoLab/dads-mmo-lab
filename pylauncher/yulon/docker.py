@@ -3591,6 +3591,16 @@ The command saves every player on the world thread before it answers; the answer
 itself is not needed, only that it was typed. A window too short for it reads as
 an unprompted reply and changes nothing: the queue looks that follow see the saves."""
 
+_SAVE_COMMAND_STALLED_WINDOW_SECONDS = 22.0
+"""The ceiling for `saveall` on a console that says when it has answered (T561).
+
+Measured on Tortoise with 500 bots (2026-10-08): `saveall` answers in 0.07-0.33 s, but in the first
+minutes after a start the world thread stalls for 13-18 s (p95 10.95 s, max 14.14 s), so 10 s
+missed the answer and the stop warned that characters might be missing. Twice the p95. Only for
+a console whose prompt follows its answer (`SaveFirst.prompt_precedes_answer` False): the
+console then ends the wait as soon as the answer is in, so this costs a normal stop nothing. A
+readline console (Centurion) sleeps its whole window, so it keeps the 10 s."""
+
 _QUEUE_LOOK_WINDOW_SECONDS = 4.0
 """How long the console is listened to for one `server debug` answer (T410).
 
@@ -3947,7 +3957,12 @@ def _save_everyone_first(
     for line in save.first:
         if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
             logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
-    reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
+    window = (
+        _SAVE_COMMAND_WINDOW_SECONDS
+        if save.prompt_precedes_answer
+        else _SAVE_COMMAND_STALLED_WINDOW_SECONDS
+    )
+    reply = _type_at_the_world(spec, save.command, window, wsl_distro)
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:

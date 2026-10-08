@@ -24,6 +24,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
+- Stopping a Tortoise server just after it starts now waits for its save, instead of warning that characters may be missing.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.

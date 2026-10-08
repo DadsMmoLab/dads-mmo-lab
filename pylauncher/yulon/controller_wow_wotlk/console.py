@@ -276,7 +276,13 @@ def send_command(
         # distro. Everything after the transport — the window, the prompt, the
         # parse — is shared with the pty path below.
         raw = _send_inside_distro(
-            command, container=container, wsl_distro=wsl_distro, window=window, popen=popen
+            command,
+            container=container,
+            wsl_distro=wsl_distro,
+            window=window,
+            prompt=prompt,
+            prompt_precedes_answer=prompt_precedes_answer,
+            popen=popen,
         )
         return _parse_reply(
             raw, command, prompt=prompt, prompt_precedes_answer=prompt_precedes_answer
@@ -329,7 +335,7 @@ def send_command(
     except OSError as exc:
         _close_console(proc, master, reader)
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
-    time.sleep(window)
+    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer)
     # Detach without stopping the server. `docker attach` ignores SIGTERM here,
     # so kill our client outright — the container is untouched either way. Both
     # halves were measured on the Ubuntu VM, 2026-08-23: an attach client sent
@@ -345,23 +351,105 @@ def send_command(
     )
 
 
-def _pump(proc: subprocess.Popen[bytes]) -> tuple[list[str], threading.Thread]:
-    """Drain the client's output into a list on a daemon thread.
+class _Lines(list[str]):
+    """The lines read so far, and the unfinished line after them (T561).
 
-    Shared by both transports: nothing here reads the stream while it is
-    arriving, so the window is a clock either way (see `_parse_reply()`).
+    A console that prompts with no newline (`mangos> `) leaves its prompt in the unfinished
+    line until something else is printed, so a reader that only hands over whole lines cannot
+    see the end of an answer. `tail` holds that line; at end of stream it becomes a line.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tail = ""
+        self.lock = threading.Lock()
+
+    def snapshot(self) -> list[str]:
+        """Every line so far including the unfinished one, as a copy."""
+        with self.lock:
+            return [*self, self.tail] if self.tail else list(self)
+
+
+def _pump(proc: subprocess.Popen[bytes]) -> tuple[_Lines, threading.Thread]:
+    """Drain the client's output into `_Lines` on a daemon thread.
+
+    Shared by both transports: `_wait_for_answer()` looks at it while it is arriving.
+    Whole lines are stripped of their line break exactly as iterating the stream did; the
+    unfinished line stays visible in `tail` and is appended when the stream ends.
     """
     assert proc.stdout is not None
-    out: list[str] = []
+    out = _Lines()
 
     def _drain() -> None:
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            out.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+        stream = proc.stdout
+        read = getattr(stream, "read1", None) or stream.read
+        pending = b""
+        while True:
+            try:
+                chunk = read(4096)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            pending += chunk
+            *done, pending = pending.split(b"\n")
+            with out.lock:
+                out.extend(raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in done)
+                out.tail = pending.decode("utf-8", errors="replace")
+        with out.lock:
+            if pending:
+                out.append(pending.decode("utf-8", errors="replace").rstrip("\r\n"))
+            out.tail = ""
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     return out, reader
+
+
+_ANSWER_POLL_SECONDS = 0.05
+
+
+def _wait_for_answer(
+    out: _Lines, window: float, command: str, prompt: str, prompt_precedes_answer: bool
+) -> None:
+    """Listen for up to `window` seconds; stop early when an `fgets` console has finished (T561).
+
+    The window is a ceiling, and for most consoles it is also the wait: an AzerothCore
+    (readline) console prints its prompt in FRONT of the answer, so no prompt proves the answer
+    is complete. An `fgets` console (CMaNGOS, Tortoise: `prompt_precedes_answer` False)
+    prompts only from `commandFinished()`, after the answer, so the first prompt that follows
+    our own echo is its end and nothing more is coming. Measured on Tortoise with 500 bots
+    (2026-10-08): `saveall` answers in 0.07-0.33 s, but 13-18 s in the first minutes after a
+    start, so a ceiling that covers the stall must not be slept out on every Stop.
+    """
+    deadline = time.monotonic() + window
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if not prompt_precedes_answer and _answer_closed(out.snapshot(), command, prompt):
+            return
+        time.sleep(min(_ANSWER_POLL_SECONDS, remaining))
+
+
+def _answer_closed(raw: list[str], command: str, prompt: str) -> bool:
+    """Has the console printed its prompt after our own echo of `command`?
+
+    Counted from the echo, as `_parse_reply()` does: a prompt before it belongs to an earlier
+    command and says nothing about this one. Only meaningful for an `fgets` console.
+    """
+    sent = command.strip()
+    anchored = False
+    for line in raw:
+        text = runner.strip_ansi(line).replace("\x1b", "").strip()
+        if anchored and text.startswith(prompt):
+            return True
+        while text.startswith(prompt):
+            text = text[len(prompt) :].lstrip()
+        if text == sent:
+            anchored = True
+    return False
 
 
 def _send_inside_distro(
@@ -370,6 +458,8 @@ def _send_inside_distro(
     container: str,
     wsl_distro: str,
     window: float,
+    prompt: str,
+    prompt_precedes_answer: bool,
     popen: type[subprocess.Popen[bytes]],
 ) -> list[str]:
     """One command through a pty the distro opens; returns the raw window.
@@ -400,7 +490,7 @@ def _send_inside_distro(
     except OSError as exc:
         _detach_console(proc, reader)
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
-    time.sleep(window)
+    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer)
     _detach_console(proc, reader)
     lines = list(out)
     # The one failure this transport has that the pty path does not: a distro

@@ -563,3 +563,193 @@ def test_the_azerothcore_prompt_is_still_the_default() -> None:
     captured = b"\x1b[0mgm list\r\nAC> No gamemasters.\r\nAC> next\r\n"
     pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(captured)]
     assert console._parse_reply(pumped, "gm list").lines == ("No gamemasters.",)
+
+
+# ------------------------------------------- the window ends when the answer has arrived
+# T561: the window used to be slept out whole. A `saveall` on a Tortoise world that is still
+# stalling after its start answered 13-18 s in, past a 10 s window, and a window raised to cover
+# that would have added the same wait to every Stop. An `fgets` console (mangos>) prints its
+# prompt only once the command has finished - after the answer, with no newline - so the
+# prompt after our own echo is the end of the answer and the wait can stop there.
+
+
+class _TimedProc:
+    """A `docker attach` whose output arrives on a schedule, through a real pipe.
+
+    `script` is `[(seconds after the command was written, bytes)]`. The chunks are written as
+    they are, so a prompt with no newline reaches the reader the way a pty delivers it.
+    """
+
+    def __init__(self, script: list[tuple[float, bytes]], **kwargs: Any) -> None:
+        import threading
+        import time
+
+        stdin = kwargs.get("stdin")
+        self.stdin = os.dup(stdin) if isinstance(stdin, int) and stdin >= 0 else stdin
+        r, w = os.pipe()
+        self.stdout = os.fdopen(r, "rb", buffering=0)
+        self._w = w
+        self._rc: int | None = None
+        self._script = script
+        self._t0 = time.monotonic()
+        self.feeder = threading.Thread(target=self._feed, daemon=True)
+        self.feeder.start()
+
+    def _feed(self) -> None:
+        import time
+
+        for at, chunk in self._script:
+            delay = self._t0 + at - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                os.write(self._w, chunk)
+            except OSError:
+                return
+
+    def kill(self) -> None:
+        self._rc = -9
+        try:
+            os.close(self._w)
+        except OSError:
+            pass
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._rc if self._rc is not None else 0
+
+    def poll(self) -> int | None:
+        return self._rc
+
+
+def _timed_send(
+    script: list[tuple[float, bytes]],
+    *,
+    window: float,
+    prompt: str,
+    precedes: bool,
+    command: str = "saveall",
+) -> tuple[console.ConsoleReply, float]:
+    import time
+
+    def popen(argv: list[str], **kwargs: Any) -> _TimedProc:
+        return _TimedProc(script, **kwargs)
+
+    started = time.monotonic()
+    reply = console.send_command(
+        command,
+        container="mangosd",
+        window=window,
+        prompt=prompt,
+        prompt_precedes_answer=precedes,
+        popen=popen,  # type: ignore[arg-type]
+    )
+    return reply, time.monotonic() - started
+
+
+@pytest.fixture
+def _no_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(console, "_ATTACH_SETTLE_SECONDS", 0.0)
+
+
+@needs_pty
+def test_a_fast_answer_ends_the_window_at_once(_no_settle: None) -> None:
+    script = [(0.0, b"saveall\r\n"), (0.2, b"All players saved.\r\nmangos> ")]
+    reply, took = _timed_send(script, window=8.0, prompt="mangos>", precedes=False)
+    assert reply.lines == ("All players saved.",)
+    assert reply.prompted is True
+    assert took < 3.0, f"the window was slept out ({took:.1f} s)"
+
+
+@needs_pty
+def test_a_late_answer_is_still_waited_for_up_to_the_window(_no_settle: None) -> None:
+    """The stall case at test scale: a reply 1.5 s in, a window of 4 s - old code slept all 4."""
+    script = [(0.0, b"saveall\r\n"), (1.5, b"All players saved.\r\nmangos> ")]
+    reply, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    assert reply.lines == ("All players saved.",)
+    assert 1.4 < took < 3.2, took
+
+
+@needs_pty
+def test_an_answer_past_the_window_is_still_a_miss(_no_settle: None) -> None:
+    script = [(0.0, b"saveall\r\n"), (3.0, b"All players saved.\r\nmangos> ")]
+    reply, took = _timed_send(script, window=1.0, prompt="mangos>", precedes=False)
+    assert reply.prompted is False
+    assert took < 2.5, took
+
+
+@needs_pty
+def test_a_prompt_from_before_our_echo_does_not_end_the_window(_no_settle: None) -> None:
+    """Somebody else's finished command prints `mangos> ` first; it is not our answer."""
+    script = [
+        (0.0, b"mangos> "),
+        (0.0, b"saveall\r\n"),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    reply, _ = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    assert reply.lines == ("All players saved.",)
+
+
+@needs_pty
+def test_a_readline_console_is_not_cut_short_by_the_prompt_in_front_of_its_answer(
+    _no_settle: None,
+) -> None:
+    """AzerothCore prints `AC> ` BEFORE the answer, so the first prompt proves nothing."""
+    script = [
+        (0.0, b"saveall\r\n"),
+        (0.0, b"AC> "),
+        (1.0, b"All players saved.\r\nAC> "),
+    ]
+    reply, took = _timed_send(script, window=2.0, prompt="AC>", precedes=True)
+    assert reply.lines == ("All players saved.",)
+    assert took >= 1.9, f"the readline console was ended early ({took:.1f} s)"
+
+
+@needs_pty
+def test_an_fgets_console_with_no_prompt_still_waits_the_whole_window(_no_settle: None) -> None:
+    script = [(0.0, b"saveall\r\n"), (0.1, b"All players saved.\r\n")]
+    reply, took = _timed_send(script, window=1.5, prompt="mangos>", precedes=False)
+    assert reply.prompted is False
+    assert took >= 1.4, took
+
+
+class _TimedDistroProc(_TimedProc):
+    """The same schedule behind the in-distro transport: stdin is a pipe, detach keys end it."""
+
+    def __init__(self, script: list[tuple[float, bytes]], **kwargs: Any) -> None:
+        super().__init__(script, **kwargs)
+        self.stdin = self  # type: ignore[assignment]
+
+    def write(self, data: bytes) -> int:
+        if console.DETACH_SEQUENCE in data:
+            self.kill()
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_the_in_distro_transport_ends_the_window_at_the_answer_too(
+    _no_settle: None, reachable_distro: None
+) -> None:
+    import time
+
+    script = [(0.0, b"saveall\r\n"), (0.2, b"All players saved.\r\nmangos> ")]
+
+    def popen(argv: list[str], **kwargs: Any) -> _TimedDistroProc:
+        return _TimedDistroProc(script, **kwargs)
+
+    started = time.monotonic()
+    reply = console.send_command(
+        "saveall",
+        container="mangosd",
+        wsl_distro="dml-arch",
+        window=8.0,
+        prompt="mangos>",
+        prompt_precedes_answer=False,
+        popen=popen,  # type: ignore[arg-type]
+    )
+    assert reply.lines == ("All players saved.",)
+    assert time.monotonic() - started < 3.0
