@@ -269,3 +269,24 @@ def test_the_update_counts_branch_table_reads_the_named_servers_user_layer(
     modules.module_updates(tmp_path, git=object())  # type: ignore[arg-type]
     assert "mod-linked" in asked[0]
     assert "mod-linked" not in asked[1]
+
+
+def test_a_module_added_from_a_link_on_unbound_is_unbounds_and_lands_in_its_layer(
+    tmp_path: Path,
+) -> None:
+    """The link route of item 2 (re-review note 1): the manifest Unbound's tab derives
+    from a link names `wow-unbound`, so `complete()` keeps it under Unbound's own
+    user layer and never under WotLK's."""
+    from yulon.controller_wow_wotlk import modules
+
+    unbound = ControllerServices.for_entry(entry("wow-unbound"), tmp_path / "unbound")
+    assert unbound.module_from_link is not None
+    linked = unbound.module_from_link("https://github.com/you/mod-linked")
+    assert linked.game == "wow-unbound"
+    clone = tmp_path / "clone"
+    (clone / "src").mkdir(parents=True)
+    modules.complete(linked, clone)
+    user_dir = modules.user_manifests_dir()
+    assert (user_dir / "wow-unbound" / "modules" / "mod-linked.json").is_file()
+    assert not (user_dir / "wow-wotlk" / "modules" / "mod-linked.json").exists()
+    assert "mod-linked" in _listed(unbound)
