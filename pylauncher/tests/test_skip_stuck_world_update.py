@@ -422,3 +422,93 @@ def test_a_stuck_file_that_is_still_there_gets_the_plain_dialog_and_no_skip(
     (box,) = seen
     assert box["buttons"] == SB.Yes | SB.No and box["yes"] != native.SKIP_STUCK_LABEL
     assert route.pressed[0][0].skip_missing is False
+
+
+# -- what Codex found: a claim that does not take the row it was shown ----------------------------
+
+
+def _claim_rename(db: _Db, *, at: int) -> None:
+    sqlplan.record_world_files(
+        (sqlplan.FileRow(PHASE, RENAMED, "a" * 64, "started"),),
+        marker_db="mangos",
+        container="tbc-db",
+        client="mariadb",
+        password="x",
+        exec_stdin=db.exec_stdin,
+        reclaim_at=at,
+        reclaim_state="failed",
+        reclaim_file=U2,
+    )
+
+
+def test_a_rename_claim_takes_the_old_row_and_writes_the_new_one(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    seen = _at(db)
+    _claim_rename(db, at=seen)
+    assert _ledger(db) == {U1: "seeded", RENAMED: "started"}
+
+
+def test_a_rename_claim_is_refused_when_the_old_row_changed_since_it_was_shown(
+    tmp_path: Path,
+) -> None:
+    """The old and new names are different keys, so a `DELETE` that matched nothing used to
+    leave the `INSERT` free to succeed: the press then ran a file it had not claimed."""
+    db, _ = _stuck_server(tmp_path)
+    seen = _at(db)
+    with pytest.raises(InstallerError):
+        _claim_rename(db, at=seen + 40)  # another press moved the row on: not the time shown
+    assert _ledger(db) == {U1: "seeded", U2: "failed"}, "nothing was kept"
+
+
+def test_a_rename_claim_is_refused_when_the_new_name_is_already_taken(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    seen = _at(db)
+    sqlplan.record_world_files(
+        (sqlplan.FileRow(PHASE, RENAMED, "b" * 64, "started"),),
+        marker_db="mangos",
+        container="tbc-db",
+        client="mariadb",
+        password="x",
+        exec_stdin=db.exec_stdin,
+    )
+    with pytest.raises(InstallerError):
+        _claim_rename(db, at=seen)
+    assert _ledger(db) == {U1: "seeded", U2: "failed", RENAMED: "started"}
+
+
+def _at(db: _Db) -> int:
+    (row,) = db.rows("mangos", f"SELECT at_unix FROM yulon_install_file WHERE file = '{U2}'")
+    return int(row[0])  # type: ignore[arg-type]
+
+
+def _agreed_then(
+    tmp_path: Path, *, rename: bool
+) -> tuple[_Db, Path, object, native.CorrectionCheck]:
+    db, server_dir = _stuck_server(tmp_path)
+    (_rename if rename else _remove)(server_dir)
+    engine, check = _read(db, tmp_path)
+    return db, server_dir, engine, replace(check, skip_missing=True)
+
+
+def _loop(engine: object, tmp_path: Path, agreed: native.CorrectionCheck) -> list[str]:
+    server_dir = folder(tmp_path).server_dir
+    ctx = engine._update_context(server_dir, None)  # type: ignore[attr-defined]
+    return list(engine._retry_stuck(ctx, agreed))  # type: ignore[attr-defined]
+
+
+def test_a_file_shown_as_a_rename_that_is_gone_by_the_press_is_not_skipped(tmp_path: Path) -> None:
+    """Skip is consent for the files the dialog showed as gone. A file it showed as there, even
+    under a new name, that vanishes after the reading is not skipped on that consent."""
+    db, server_dir, engine, agreed = _agreed_then(tmp_path, rename=True)
+    (server_dir / RENAMED).unlink()
+    lines = _loop(engine, tmp_path, agreed)
+    assert any(RENAMED in line and "gone from the sources" in line for line in lines), lines
+    assert _ledger(db) == {U1: "seeded", U2: "failed"}, "no skipped row, no half-moved record"
+
+
+def test_a_file_shown_as_gone_that_is_back_by_the_press_is_not_run(tmp_path: Path) -> None:
+    db, server_dir, engine, agreed = _agreed_then(tmp_path, rename=False)
+    _lay(server_dir, U2, "CREATE TABLE IF NOT EXISTS t2 (id INT);\n")
+    lines = _loop(engine, tmp_path, agreed)
+    assert any(U2 in line and "back in the sources" in line for line in lines), lines
+    assert _ledger(db) == {U1: "seeded", U2: "failed"} and "t2" not in db.tables("mangos")

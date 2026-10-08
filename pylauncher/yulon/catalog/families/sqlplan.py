@@ -1617,16 +1617,28 @@ def file_rows_sql(
         taken = row.file if reclaim_file is None else reclaim_file
         if not recordable(taken):
             raise InstallerError("internal: a reclaim names a file the ledger cannot hold")
-        return (
-            text
-            + "BEGIN;\n"
-            + f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
-            + f"AND file = '{taken}' AND state = '{reclaim_state}' "
-            + f"AND at_unix = {int(reclaim_at)};\n"
-            + f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
-            + f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
-            + "COMMIT;\n"
+        insert = (
+            f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+            f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
         )
+        delete = (
+            f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
+            f"AND file = '{taken}' AND state = '{reclaim_state}' "
+            f"AND at_unix = {int(reclaim_at)};\n"
+        )
+        if taken == row.file:
+            return text + "BEGIN;\n" + delete + insert + "COMMIT;\n"
+        # A record moved to another name (T566): the two keys differ, so the `INSERT` cannot
+        # tell whether the `DELETE` took the row the press was shown. It goes first, so a second
+        # press loses on the new key; and when the `DELETE` then took nothing (the row changed
+        # since), a copy of that `INSERT` is refused as a duplicate and the script stops with
+        # nothing committed (Codex, T566).
+        guard = (
+            f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+            f"SELECT '{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at} "
+            "FROM DUAL WHERE ROW_COUNT() = 0;\n"
+        )
+        return text + "BEGIN;\n" + insert + delete + guard + "COMMIT;\n"
     values = ", ".join(
         f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
     )

@@ -2684,6 +2684,15 @@ class CmangosInstaller(StagedInstaller):
         for one in agreed.stuck:
             self._check_cancel(ctx.cancel)
             path = ctx.server_dir / one.file
+            if one.missing == path.is_file():
+                # The dialog showed this file the other way round: only a file shown as gone
+                # is skipped, and only a file shown as there is run (Codex, T566).
+                yield (
+                    f"{one.file} is {'back in' if path.is_file() else 'gone from'} the sources "
+                    "since the confirmation was shown, so it was not touched. Nothing after it "
+                    "was run. Press Refresh on the Server tab and look again."
+                )
+                return
             if not path.is_file():
                 if not agreed.skip_missing:
                     yield (
