@@ -147,8 +147,8 @@ def test_failed_rebuild_naming_an_updated_module_puts_only_it_back(
     assert (
         "The build stopped on an error in mod-x, which was updated after your last build that "
         f"worked. Yu'lon put mod-x back on the version it had before that update "
-        f"({two.a['mod-x'][:7]}). Your server is still running the build it had. Press Rebuild "
-        "to build your other updates without it."
+        f"({two.a['mod-x'][:7]}). Your server is still running the build it had. Press "
+        "“Rebuild the server…” to build your other updates without it."
     ) in message
     ledger = two.ledger()
     assert "module/mod-x" not in ledger.moves
@@ -272,7 +272,7 @@ def test_error_naming_no_updated_module_changes_nothing_and_lists_waiting_update
         "The build stopped, and the error does not say which module caused it. These modules "
         "were updated since your last build that worked: mod-x, mod-y. To build without one of "
         "them, right-click it on the Modules tab, choose Put back the last update, then press "
-        "Rebuild."
+        "“Rebuild the server…”."
     )
 
 

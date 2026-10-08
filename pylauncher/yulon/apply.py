@@ -50,6 +50,7 @@ from yulon import (
     play_client,
     rmtree,
     runner,
+    server_build_presses,
     tuning,
 )
 from yulon.catalog import composegen, upstream
@@ -716,6 +717,9 @@ class PutBackRefused(ApplyRefusal):
         super().__init__(message)
         self.edited = edited
 
+
+_REBUILD = f"“{server_build_presses.REBUILD}”"
+"""The press a put-back's sentences send the player to, as its menu spells it (T155)."""
 
 PUT_BACK_KEPT_SQL = "The database changes that update made were kept."
 """D5's sentence: a put-back runs no SQL, and an update that ran some says so."""
@@ -3927,7 +3931,7 @@ class Applier:
                     f"The build stopped on an error in {item_id}. Its last update was made before "
                     f"Yu'lon kept track of updates, so Yu'lon did not put it back by itself. To "
                     f"build without that update, right-click {item_id} on the Modules tab, choose "
-                    f"Put back the last update, then press Rebuild."
+                    f"Put back the last update, then press {_REBUILD}."
                 )
                 continue
             try:
@@ -3937,7 +3941,7 @@ class Applier:
                     f"The build stopped on an error in {item_id}. Yu'lon did not put it back, "
                     f"because files in its folder were changed after the update and putting it "
                     f"back would throw those changes away. Undo your changes, or press Remove on "
-                    f"its row, then press Rebuild."
+                    f"its row, then press {_REBUILD}."
                     if exc.edited
                     else f"The build stopped on an error in {item_id}. Yu'lon did not put it "
                     f"back: {exc}"
@@ -3948,7 +3952,7 @@ class Applier:
                 other.append(
                     f"The build stopped on an error in {item_id}. Yu'lon tried to put it back on "
                     f"{last.from_sha[:7]} and could not ({exc}). To build without it, press "
-                    f"Remove on its row, then press Rebuild."
+                    f"Remove on its row, then press {_REBUILD}."
                 )
                 continue
             moved.add(item_id)
@@ -3961,7 +3965,7 @@ class Applier:
         said = list(put)
         if put and waiting:
             said.append(
-                "Your server is still running the build it had. Press Rebuild to build your "
+                f"Your server is still running the build it had. Press {_REBUILD} to build your "
                 f"other updates without {'it' if len(put) == 1 else 'them'}."
             )
         elif put:
@@ -3975,7 +3979,7 @@ class Applier:
                 "The build stopped, and the error does not say which module caused it. These "
                 f"modules were updated since your last build that worked: {', '.join(waiting)}. "
                 "To build without one of them, right-click it on the Modules tab, choose Put "
-                "back the last update, then press Rebuild."
+                f"back the last update, then press {_REBUILD}."
             )
         return " ".join(said)
 
