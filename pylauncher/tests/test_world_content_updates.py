@@ -505,6 +505,28 @@ def test_a_skipped_file_that_is_back_in_the_checkout_is_named_not_run_and_holds_
     assert not any("wait behind it" in line for line in lines), lines
 
 
+def test_a_new_file_with_a_skipped_ones_bytes_is_not_run_and_says_what_it_matches(
+    tmp_path: Path,
+) -> None:
+    """T566: after a Skip, a file holding the skipped bytes under another name is recorded and
+    not run -- and the update does not claim an update this server had held it."""
+    import hashlib
+
+    rec, server_dir, db, world = _installed(tmp_path)
+    for rel in (U1, U2):
+        db.rows[("content updates", rel)] = (sqlplan.file_digest(server_dir / rel), "seeded")
+    gone = "src/tbc-db/Updates/0000_chosen_to_skip.sql"
+    sha = hashlib.sha256(f"-- {U3}\nSELECT 3;\n".encode()).hexdigest()
+    db.rows[("content updates", gone)] = (sha, "skipped")
+    db.table = True
+    lines = _press(rec, server_dir, db, world)
+    assert _sent(rec, U3) == 0 and _sent(rec, U4) == 1
+    said = [line for line in lines if U3 in line]
+    assert said and gone in said[0] and "chose to skip" in said[0], lines
+    assert "already has held" not in said[0], said
+    assert db.state(U3) == "seeded"
+
+
 def test_a_file_that_fails_stops_the_world_updates_there_and_is_never_retried_unasked(
     tmp_path: Path,
 ) -> None:

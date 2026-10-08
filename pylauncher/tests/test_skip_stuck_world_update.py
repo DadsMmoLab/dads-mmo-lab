@@ -512,3 +512,53 @@ def test_a_file_shown_as_gone_that_is_back_by_the_press_is_not_run(tmp_path: Pat
     lines = _loop(engine, tmp_path, agreed)
     assert any(U2 in line and "back in the sources" in line for line in lines), lines
     assert _ledger(db) == {U1: "seeded", U2: "failed"} and "t2" not in db.tables("mangos")
+
+
+# -- the cold review's two folds ------------------------------------------------------------------
+
+
+def _twin_fixture(tmp_path: Path, twin_state: str | None) -> tuple[list[sqlplan.PhaseRun], dict]:  # type: ignore[type-arg]
+    old = "src/tbc-db/Updates/0002.sql"
+    new = "src/tbc-db/Updates/0002_renamed.sql"
+    twin = "src/tbc-db/Updates/0001_gone.sql"
+    runs = [_run(new, CONTENT, tmp_path)]
+    _lay(tmp_path, new, "-- the second\n")
+    sha = sqlplan.file_digest(tmp_path / new)
+    ledger = {(PHASE, old): sqlplan.FileRow(PHASE, old, sha, "failed")}
+    if twin_state is not None:
+        ledger[(PHASE, twin)] = sqlplan.FileRow(PHASE, twin, sha, twin_state)
+    return runs, ledger
+
+
+def test_a_stuck_row_is_re_pointed_when_nothing_else_gone_holds_its_bytes(tmp_path: Path) -> None:
+    runs, ledger = _twin_fixture(tmp_path, None)
+    assert {k: r.rel for k, r in sqlplan.renamed_stuck(runs, ledger).items()} == {
+        (PHASE, "src/tbc-db/Updates/0002.sql"): "src/tbc-db/Updates/0002_renamed.sql"
+    }
+
+
+@pytest.mark.parametrize("twin_state", ["seeded", "applied", "skipped"])
+def test_a_stuck_row_whose_bytes_a_gone_row_also_holds_is_not_re_pointed(
+    tmp_path: Path, twin_state: str
+) -> None:
+    """Two gone rows with one file's bytes: which of them the file is cannot be told."""
+    runs, ledger = _twin_fixture(tmp_path, twin_state)
+    assert sqlplan.renamed_stuck(runs, ledger) == {}
+
+
+def test_a_file_moved_from_a_skipped_one_is_said_to_match_what_was_skipped(tmp_path: Path) -> None:
+    runs, ledger = _twin_fixture(tmp_path, "skipped")
+    del ledger[(PHASE, "src/tbc-db/Updates/0002.sql")]
+    owed = sqlplan.pending_files(runs, ledger)
+    assert [r.rel for r in owed.moved] == ["src/tbc-db/Updates/0002_renamed.sql"]
+    assert owed.moved_from_skipped == (
+        ("src/tbc-db/Updates/0002_renamed.sql", "src/tbc-db/Updates/0001_gone.sql"),
+    )
+    # bytes an applied row also holds were held by an update: not worded as a skip
+    runs, ledger = _twin_fixture(tmp_path, "skipped")
+    del ledger[(PHASE, "src/tbc-db/Updates/0002.sql")]
+    other = "src/tbc-db/Updates/0003_gone.sql"
+    ledger[(PHASE, other)] = sqlplan.FileRow(
+        PHASE, other, ledger[(PHASE, "src/tbc-db/Updates/0001_gone.sql")].sha256, "applied"
+    )
+    assert sqlplan.pending_files(runs, ledger).moved_from_skipped == ()

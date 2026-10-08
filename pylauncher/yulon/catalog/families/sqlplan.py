@@ -2030,6 +2030,9 @@ class PendingFiles:
     never run again."""
     skipped: tuple[str, ...] = ()
     """In the ledger `skipped` (T566) and in the checkout again: never run, only named."""
+    moved_from_skipped: tuple[tuple[str, str], ...] = ()
+    """`(new name, skipped file)` for each `moved` run whose bytes only a `skipped` row holds
+    (T566): it is never run either, but it was never applied, and the report must not say so."""
 
 
 def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
@@ -2047,13 +2050,24 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     # (Codex, T531 round 5) -- a copy beside its original is new, and runs. Not bytes of a
     # `started`/`failed` row: that file never completed, so the same bytes under a new name
     # are still owed, and the corrections press moves its record there (T566).
-    gone_bytes = {
-        (phase, row.sha256)
+    gone_rows = [
+        (file, row)
         for (phase, file), row in ledger.items()
         if (phase, file) not in here and row.state not in _STUCK_STATES
+    ]
+    gone_bytes = {(row.phase, row.sha256) for _file, row in gone_rows}
+    skipped_only = {
+        (row.phase, row.sha256): file
+        for file, row in gone_rows
+        if row.state == FILE_SKIPPED
+        and not any(
+            other.state != FILE_SKIPPED and (other.phase, other.sha256) == (row.phase, row.sha256)
+            for _f, other in gone_rows
+        )
     }
     new: list[PhaseRun] = []
     moved: list[PhaseRun] = []
+    moved_skipped: list[tuple[str, str]] = []
     withheld: list[str] = []
     changed: list[str] = []
     unsure: list[str] = []
@@ -2064,6 +2078,9 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
         if row is None:
             if run.path is not None and (run.phase.name, file_digest(run.path)) in gone_bytes:
                 moved.append(run)
+                twin = skipped_only.get((run.phase.name, file_digest(run.path)))
+                if twin is not None:
+                    moved_skipped.append((run.rel, twin))
             elif run.phase.name in stuck:
                 withheld.append(run.rel)
             else:
@@ -2093,6 +2110,7 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
         withheld=tuple(withheld),
         moved=tuple(moved),
         skipped=tuple(skipped),
+        moved_from_skipped=tuple(moved_skipped),
     )
 
 

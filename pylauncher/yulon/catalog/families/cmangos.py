@@ -760,7 +760,14 @@ class CmangosInstaller(StagedInstaller):
                     if run.path is not None
                 )
             )
+            skipped_twins = dict(owed.moved_from_skipped)
             for run in owed.moved:
+                if run.rel in skipped_twins:
+                    yield (
+                        f"{run.rel} has the same contents as {skipped_twins[run.rel]}, which you "
+                        "chose to skip, so it is not run either."
+                    )
+                    continue
                 yield (
                     f"{run.rel} holds exactly what an update this server already has held under "
                     "another name, so it is recorded and not run again."
