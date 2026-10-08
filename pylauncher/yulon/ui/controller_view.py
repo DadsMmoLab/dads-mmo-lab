@@ -18508,8 +18508,9 @@ class ControllerView(QWidget):
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         # T302: the built-in Server rates card's rows, read with the modules'.
         self._rate_rows: tuple[tuning.TuningRow, ...] = ()
+        # The raw editor's file exactly as read (T573 item 2); see `tuning.save_text`.
+        self._tuning_raw = ""
         self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
-        self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
         # and forgotten on restart for the same reason: a persisted marker is
@@ -19551,17 +19552,18 @@ class ControllerView(QWidget):
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
-        # Spelled as the file system would compare them: on Windows a conf the
-        # manifest calls `Solocraft.conf` and the folder calls `solocraft.conf`
-        # is ONE file, and so is the server's own `playerbots.conf` however the
-        # folder cases it -- one button, and read-only for the server's own.
-        taken = {os.path.normcase(name) for name in (*found, *core)}
+        # Spelled as the disk would compare them (`tuning.is_one_of`): on Windows
+        # and a case-blind Mac volume a conf the manifest calls `Solocraft.conf` and
+        # the folder calls `solocraft.conf` is ONE file, and so is the server's own
+        # `playerbots.conf` however the folder cases it -- one button, and read-only
+        # for the server's own. On a case-sensitive disk they stay two files.
+        taken = [*found, *core]
         for name in tuning.module_conf_files(server_dir):
-            if os.path.normcase(name) not in taken:
-                taken.add(os.path.normcase(name))
+            if not tuning.is_one_of(name, taken, server_dir):
+                taken.append(name)
                 found.append(name)
         for name in core:
-            if name not in found and (server_dir / name).is_file():
+            if not tuning.is_one_of(name, found, server_dir) and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
 
@@ -19649,15 +19651,28 @@ class ControllerView(QWidget):
                     )
                     self.action_failed.emit(str(exc))
                     return
+        # And every file's PATH, for the same reason: a link out of the server
+        # folder on the card's second file must not be found after the first was
+        # written (T573).
+        for file in per_file:
+            try:
+                tuning.check_inside(server_dir / file, server_dir)
+            except (tuning.TuningError, OSError) as exc:
+                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
+                self.action_failed.emit(str(exc))
+                return
         for file, values in per_file.items():
             try:
                 if (family, module_id) == unbound_settings.CARD:
                     # Only `0` and `1` reach the file: a switch flipped from a hand-edited
                     # `true`/`false` is written back as the module's own 1/0
-                    # (`unbound_settings.write`).
+                    # (`unbound_settings.write`). Its file's path was checked above, with
+                    # every other card's (T573).
                     made = unbound_settings.write(server_dir, values)
                 else:
-                    made = tuning.write(server_dir / file, values, spec=specs[file])
+                    made = tuning.write(
+                        server_dir / file, values, spec=specs[file], root=server_dir
+                    )
             except tuning.TuningError as exc:
                 # Unreachable through the loop above, which has already checked
                 # every value on the card. Kept because `tuning.write()` is a
@@ -19706,7 +19721,7 @@ class ControllerView(QWidget):
                 continue
             try:
                 note = self._put_back(backups[-1], path)
-            except OSError as exc:
+            except (OSError, tuning.TuningError) as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
             self._note_tuning_owed(file)
@@ -19750,6 +19765,10 @@ class ControllerView(QWidget):
         bots. `put_back_file` keeps the file's own key lines whenever the backup
         asks for a rebuild anywhere; the sentence it returns goes in the report.
         """
+        # `tuning.restore` is a plain copy onto `target` and follows a link: a conf that
+        # was linked out of the install before an upgrade still has its `.bak` beside
+        # the link, and Revert would write the old text into the other file (T573).
+        tuning.check_inside(target, self.services.controller.server_dir)
         seam = self.services.bot_pool_rebuild
         if seam is None:
             tuning.restore(backup, target)
@@ -19767,11 +19786,32 @@ class ControllerView(QWidget):
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
         """Show one conf in the raw editor, read-only when it is the server's own."""
-        path = self.services.controller.server_dir / file
-        core = file in self._tuning_core_files()
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
+        core = tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        )
         try:
-            with open(path, encoding="utf-8", newline="") as handle:
-                raw = handle.read()
+            # A conf that is a link out of the install is another file's text
+            # and another file's Save (T573): shown empty and read-only.
+            tuning.check_inside(path, server_dir)
+            with open(path, "rb") as handle:
+                # One BYTE past the cap, so a file over it is seen without being read whole
+                # (a text-mode read counts characters: 2 M three-byte ones are 6 MB).
+                blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(blob) > tuning.MAX_EDIT_BYTES:
+                self.tuning_panel.set_file_text(
+                    "",
+                    read_only=True,
+                    note=tuning.TOO_BIG.format(
+                        file=file, limit=tuning.MAX_EDIT_BYTES // (1024 * 1024)
+                    ),
+                )
+                return
+            raw = blob.decode("utf-8")
+        except tuning.TuningError as exc:
+            self.tuning_panel.set_file_text("", read_only=True, note=str(exc))
+            return
         except OSError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
             return
@@ -19784,13 +19824,15 @@ class ControllerView(QWidget):
                 "", read_only=True, note=tuning.NOT_UTF8.format(file=file, why=exc)
             )
             return
-        # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
-        # "\n" whatever it was given, so a raw save of a CRLF conf would convert
-        # the whole file -- the same defect `tuning.write()` reads around.
-        self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
+        # Remembered at load and merged at save: `QPlainTextEdit` hands back "\n"
+        # whatever it was given and has no byte-order mark, so a raw save of the
+        # editor's text would convert the whole file -- the same defect
+        # `tuning.write()` reads around. `tuning.save_text()` keeps every line
+        # the player did not edit as it was (T573).
+        self._tuning_raw = raw
         note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
         self.tuning_panel.set_file_text(
-            raw.replace("\r\n", "\n"),
+            tuning.editor_view(raw),
             read_only=core,
             note=note,
             # Which of THIS file's keys the running containers override (T44
@@ -19823,7 +19865,9 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -19836,6 +19880,10 @@ class ControllerView(QWidget):
             return
         try:
             note = self._put_back(backups[-1], path)
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))
@@ -19859,7 +19907,9 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is None:
@@ -19878,11 +19928,17 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        path = self.services.controller.server_dir / file
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
         try:
-            made = tuning.backup(path)
+            # Refuses a link out of the server folder, before any byte moves (T573).
+            made = tuning.backup(path, root=server_dir)
             with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text.replace("\n", self._tuning_newline))
+                handle.write(tuning.save_text(self._tuning_raw, text))
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))

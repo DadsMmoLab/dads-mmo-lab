@@ -59,7 +59,7 @@ from typing import Any
 
 from yulon import platform, resources, runner
 from yulon.log import get_logger
-from yulon.selfupdate.detect import appimage_file
+from yulon.selfupdate.detect import appimage_file, in_appimage_mount
 
 logger = get_logger(__name__)
 
@@ -225,6 +225,13 @@ NO_CLIENT = (
     "This install has no client folder recorded, so there is nothing to point a "
     "client entry at. Yu'lon writes the path you gave it and never guesses one. "
     "Re-add this server with its client folder, then press Add to Steam… again."
+)
+
+NO_APPIMAGE = (
+    "Yu'lon is running from an AppImage but cannot find the AppImage file, so a "
+    "Steam entry would point at a temporary folder that is gone when Yu'lon "
+    "closes. Start Yu'lon again by opening the .AppImage file itself, then press "
+    "Add to Steam… again. Nothing was written."
 )
 
 NO_PROTON = (
@@ -486,12 +493,18 @@ def launcher_command(
     arguments.
 
     The AppImage rule is `selfupdate.detect.appimage_file`'s, shared so the two
-    cannot disagree about when `$APPIMAGE` is believed.
+    cannot disagree about when `$APPIMAGE` is believed. It is believed only when
+    this process runs from that AppImage, so a tarball started from inside
+    another AppImage does not write the other app into the entry (T578). A
+    binary inside an AppImage mount with no verified file refuses (`NO_APPIMAGE`):
+    the only path it knows is the one that vanishes on exit.
     """
     is_frozen = resources.frozen() if frozen is None else frozen
     exe = sys.executable if executable is None else executable
     if is_frozen:
-        image = appimage_file(environ)
+        image = appimage_file(environ, executable=exe)
+        if image is None and in_appimage_mount(exe):
+            raise SteamRefusal(NO_APPIMAGE)
         return (str(image) if image is not None else exe), ""
     return exe, str(resources.bundle_root() / "main.py")
 

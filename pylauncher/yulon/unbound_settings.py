@@ -232,7 +232,7 @@ def write(server_dir: Path, edits: Mapping[str, str], *, now: datetime | None = 
         raise tuning.TuningError(
             f"mod_unbound.conf is not there yet ({path}); install WoW Unbound first"
         )
-    return tuning.write(path, written, spec=spec, now=now)
+    return tuning.write(path, written, spec=spec, now=now, root=server_dir)
 
 
 def _read(path: Path) -> str | None:

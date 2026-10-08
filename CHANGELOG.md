@@ -24,6 +24,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
+- My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
+- The bot counts see an indented setting in a hand-edited conf.
+- A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
+- On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
+- **Save file** on the Tuning tab keeps the file's line endings and byte-order mark.
+- The Tuning tab no longer opens, saves, backs up or reverts a setting file that is a link out of the server folder.
+- **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
+- **Add to Steam** and self-update no longer mistake another AppImage for Yu'lon when it is started from inside one.
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
