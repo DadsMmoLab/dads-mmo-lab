@@ -472,11 +472,11 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
 
 _UI = Path(__file__).resolve().parents[1] / "yulon" / "ui"
 
-_HANDS_TO_THE_RUNNER = frozenset({"_run", "_jobs", "_read_alongside"})
+_HANDS_TO_THE_RUNNER = frozenset({"_run", "_jobs", "_read_alongside", "_run_module_job"})
 """The names a view or panel hands a job to the runner through.
 
-`_jobs` is the runner itself; `_run` and `_read_alongside` are the one-line
-wrappers that pass their callbacks straight on to it.
+`_jobs` is the runner itself; `_run`, `_run_module_job` (T557, `_run` plus a count) and
+`_read_alongside` are the one-line wrappers that pass their callbacks straight on to it.
 """
 
 

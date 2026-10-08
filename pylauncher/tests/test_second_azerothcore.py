@@ -222,6 +222,19 @@ def test_two_entries_that_share_an_auth_port_may_share_the_rest() -> None:
     parse_catalog({"games": [wotlk_json(), sibling]})
 
 
+def test_two_entries_that_share_only_a_world_port_may_share_the_rest() -> None:
+    """The port rule skips a pair sharing EITHER auth or world, not just auth (T565).
+
+    Their world port collides, so they cannot run at once and Start offers to
+    stop the other; the rest of their ports are then free to match.
+    """
+    sibling = second_ac_json(ports={**SECOND_PORTS, "world": 8085, "db": 3306})
+    assert sibling["ports"]["auth"] != 3724
+    sibling["install"]["native"]["soap_port"] = 7878
+    sibling["operations"]["port"] = 7878
+    parse_catalog({"games": [wotlk_json(), sibling]})
+
+
 def test_the_shipped_catalog_names_every_container_once() -> None:
     seen: dict[str, str] = {}
     for entry in load_catalog().games:
@@ -657,6 +670,56 @@ def test_stopping_the_other_server_comes_before_the_step_that_starts_our_databas
     with pytest.raises(controller.StartRefused, match="no port"):
         refusing.stop_conflicting_and_start()
     assert order == []
+
+
+@pytest.mark.parametrize("in_the_way", [False, True])
+def test_stop_the_other_and_start_asks_the_step_once_whether_or_not_something_is_in_the_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, in_the_way: bool
+) -> None:
+    """With nothing in the way the step ran twice, before the stop and again in `start()` (T565)."""
+    from yulon import controller, docker
+
+    calls: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: calls.append("before_servers") or None,
+    )
+    held = ["ac-worldserver"] if in_the_way else []
+    monkeypatch.setattr(ctl, "refuse_start", lambda: None)
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: list(held))
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: None)
+    monkeypatch.setattr(ctl, "stop_conflicting", lambda: held.clear() or [])
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: calls.append("servers"))
+    ctl.stop_conflicting_and_start()
+    assert calls == ["before_servers", "servers"]
+
+
+def test_a_conflict_that_appears_between_the_two_looks_still_gets_the_step_after_its_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing in the way at the first look, something stopped by the time of the stop (T565).
+
+    The step asked before the stop may then have run with that server still holding
+    our database port, so `start()` asks it again, after the stop.
+    """
+    from yulon import controller, docker
+
+    calls: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: calls.append("before_servers") or None,
+    )
+    monkeypatch.setattr(ctl, "refuse_start", lambda: None)
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: [])
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: None)
+    monkeypatch.setattr(ctl, "stop_conflicting", lambda: calls.append("stop") or ["ac-worldserver"])
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: calls.append("servers"))
+    assert ctl.stop_conflicting_and_start() == ["ac-worldserver"]
+    assert calls == ["before_servers", "stop", "before_servers", "servers"]
 
 
 def test_a_wotlk_start_has_no_port_step() -> None:

@@ -212,3 +212,60 @@ def test_a_junction_given_as_the_root_is_refused_and_its_target_survives(
         rmtree.remove_tree_stoppably(target, lambda: False)
     assert not isinstance(raised.value, rmtree.StoppedPartWay)
     assert (target / "keep.map").read_bytes() == b"MAPS"
+
+
+def test_a_stoppable_removal_asks_before_every_link_it_unlinks(tmp_path: Path) -> None:
+    """T567: nothing asked `stop` before a link went, and every test stayed green.
+
+    Mutation this catches: the `stop()` check dropped from `_empty_stoppably`'s link branch.
+    """
+    outside = tmp_path / "outside.map"
+    outside.write_bytes(b"MAPS")
+    tree = tmp_path / "old"
+    tree.mkdir()
+    for i in range(6):
+        try:
+            (tree / f"link{i}").symlink_to(outside)
+        except OSError:  # pragma: no cover - a Windows account without the link privilege
+            pytest.skip("cannot make a symlink here")
+    with pytest.raises(rmtree.StoppedPartWay):
+        rmtree.remove_tree_stoppably(tree, _stop_after(2))
+    assert len(list(tree.iterdir())) == 4, "two links removed, then it stopped"
+    assert outside.read_bytes() == b"MAPS"
+
+
+def test_a_path_that_cannot_be_looked_at_counts_as_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T567: `_is_link` answers True when the look fails, so the removal touches only that name.
+
+    Mutation this catches: `_is_link` answering False on an `OSError`.
+    """
+
+    def unreadable(path: object) -> bool:
+        raise PermissionError(13, "cannot look", os.fspath(path))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(links, "is_link", unreadable)
+    assert rmtree._is_link(os.fspath(tmp_path)) is True
+
+
+def test_a_folder_that_cannot_be_looked_at_is_not_entered_by_the_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule end to end: the unreadable folder's files are not walked and deleted."""
+    tree = tmp_path / "old"
+    mystery = tree / "mystery"
+    mystery.mkdir(parents=True)
+    keep = mystery / "keep.map"
+    keep.write_bytes(b"MAPS")
+    real = links.is_link
+
+    def look(path: str | os.PathLike[str]) -> bool:
+        if os.fspath(path) == os.fspath(mystery):
+            raise PermissionError(13, "cannot look", os.fspath(path))
+        return real(path)
+
+    monkeypatch.setattr(links, "is_link", look)
+    with pytest.raises(OSError):  # the folder is not empty, so it is not removed as a link
+        rmtree.remove_tree_stoppably(tree, lambda: False)
+    assert keep.read_bytes() == b"MAPS", "a folder that could not be looked at was walked"

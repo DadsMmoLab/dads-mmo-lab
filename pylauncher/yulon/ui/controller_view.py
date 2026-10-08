@@ -84,6 +84,7 @@ from yulon import (
     docker_advice,
     install_wiring,
     logsnap,
+    module_moves,
     networking,
     party,
     platform,
@@ -2843,7 +2844,18 @@ def _assemble(
         # construction rather than by remembering it four times. Only WotLK ever
         # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
         # the same kind of checkout and its users patch it the same way.
-        rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T557: a failed build puts back the modules its errors name, through the
+        # Modules tab's own applier and manifests; a game with neither has none.
+        rebuild=install_wiring.rebuild_for_app(
+            entry,
+            server_dir,
+            wsl_distro=wsl_distro,
+            put_back=(
+                apply_module.failed_build_put_back(applier, store.load)
+                if applier is not None and store is not None
+                else None
+            ),
+        ),
         rebuild_refusal=install_wiring.rebuild_refusal_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
@@ -7091,6 +7103,46 @@ before anything was derived, which is exactly what the sentence has to convey.
 
 MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
 
+TRY_UPDATE_AGAIN_TITLE = "Try {id}'s update again?"
+TRY_UPDATE_AGAIN = (
+    "The newest version of {id} ({new}) did not build on this server last time and was put "
+    "back. It will probably fail again unless the server itself has been updated since. "
+    "Update anyway?"
+)
+"""Update pressed on the version Yu'lon put back (T557, D2). No by default (`_confirm()`)."""
+
+MODULE_JOB_BLOCKS_REBUILD = (
+    "A Modules tab action ({what}) is still running. Wait for it to finish, then press "
+    + "“"
+    + server_build_presses.REBUILD
+    + "”"
+    + " again. Nothing was started."
+)
+"""The Rebuild press while a Modules tab job runs: both write the module-update record (T557)."""
+REBUILD_BLOCKS_MODULE_JOB = (
+    "{what} was not started. {wait} Try again when it has finished. Nothing was changed."
+)
+
+PUT_BACK_ACTION = "Put back the last update…"
+"""The module row's menu entry that undoes its last Update (T557)."""
+PUT_BACK_TITLE = "Put back {id}?"
+_REBUILD_PRESS = f"“{server_build_presses.REBUILD}”"
+PUT_BACK_QUESTION = (
+    "This puts {id} back on the version it had before its last update ({old}). The newer "
+    "version ({new}) is not offered again until its author publishes a newer one. Your server "
+    "keeps running. Press " + _REBUILD_PRESS + " afterwards to build without the update."
+    "\n\nPut it back?"
+)
+PUT_BACK_DONE = (
+    "{id} is back on {old}, the version it had before its last update. Press "
+    + _REBUILD_PRESS
+    + " to build your server without that update."
+)
+PUT_BACK_NOTHING = (
+    "Yu'lon cannot tell which version {id} was on before its last update, so there is "
+    "nothing to put back."
+)
+
 MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
 """The title over `Applier.replacement_question()`'s sentence (T47).
 
@@ -7430,6 +7482,10 @@ class ControllerView(QWidget):
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
         self._upstream_pending = False
         self._module_pending: str | None = None
+        # T557: how many Modules tab jobs are on a worker. `_module_pending` names one and
+        # the first to finish clears it while a second runs, so the guards that keep a
+        # Rebuild off the record of module updates read this count instead.
+        self._module_jobs = 0
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -7539,6 +7595,10 @@ class ControllerView(QWidget):
         self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
         self._behind: dict[tuple[str, str], int | Behind] = {}
+        # T557: the newest version of a row that failed to build and was put back, by key.
+        self._put_back_tip: dict[tuple[str, str], str] = {}
+        # T557: the update a "Put back the last update…" press found, for its done line.
+        self._put_back_pending: apply_module.LastUpdate | None = None
         # T126: the newest release's tag for a counted row that follows its
         # releases. Read only for a key `_behind` still has.
         self._behind_release: dict[tuple[str, str], str] = {}
@@ -9229,8 +9289,8 @@ class ControllerView(QWidget):
             return forgetting.BACKUP_RUNNING
         if self._restore_running:
             return forgetting.RESTORE_RUNNING
-        if self._module_pending is not None:
-            return forgetting.module_running(self._module_pending)
+        if self._module_job_running():
+            return forgetting.module_running(self._module_pending or "a Modules tab action")
         if self._network_applying:
             return forgetting.NETWORK_RUNNING
         if self.rebuild_log.running:
@@ -11057,9 +11117,10 @@ class ControllerView(QWidget):
         very folder Delete would remove, or racing the tab rebuild Make… and
         Delete end with. Then any Server action, and another of these four.
         """
-        if self._module_pending is not None:
+        if self._module_job_running():
             return (
-                f"“{self._module_pending}” is running on this server's Modules tab. "
+                f"“{self._module_pending or 'A Modules tab action'}” is running on this "
+                "server's Modules tab. "
                 "Wait for it to finish, then press this again. Nothing was changed."
             )
         if self._busy or self._play_client_running:
@@ -11277,7 +11338,7 @@ class ControllerView(QWidget):
         `_play_client_running` is Make…'s own, so only the other two halves of
         `_play_client_refusal()` are asked.
         """
-        if self._module_pending is None and not self._busy:
+        if not self._module_job_running() and not self._busy:
             return False
         self._play_client_running = False
         self._play_refused(
@@ -11858,6 +11919,7 @@ class ControllerView(QWidget):
             catalog_always=catalog_always,
             # Config.wtf the only channel: "Use this computer" writes this computer there.
             default_address=None if written_elsewhere else PLAY_CLIENT_ADDRESS,
+            auth_port=self.entry.ports.auth,
         )
         removed = client_packs.launcher_config_removals(
             record.launcher,
@@ -16319,6 +16381,7 @@ class ControllerView(QWidget):
         self._rebuild_owed &= here
         self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
         self._behind = {key: value for key, value in self._behind.items() if key in here}
+        self._put_back_tip = {k: v for k, v in self._put_back_tip.items() if k in here}
 
     def _refresh_rebuild_banner(self) -> None:
         """Show the amber banner iff something owes a rebuild, and name what.
@@ -16447,6 +16510,8 @@ class ControllerView(QWidget):
         """
         manifest = self.selected_manifest()
         applier = self.services.applier
+        if manifest is not None and self._build_is_running(f"{action} {manifest.id}"):
+            return
         if manifest is None and self._selected_row_is_uncatalogued():
             # T41's own rows: installed here, no manifest in this game's
             # catalog, so there is nothing for the applier to run. Said rather
@@ -16483,6 +16548,18 @@ class ControllerView(QWidget):
             and self.services.play_client_dir is not None
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
+            return
+        again_tip = (
+            self._put_back_tip.get((manifest.type, manifest.id)) if action == "update" else None
+        )
+        if again_tip is not None and not self._confirm(
+            TRY_UPDATE_AGAIN_TITLE.format(id=manifest.id),
+            TRY_UPDATE_AGAIN.format(id=manifest.id, new=again_tip[:7]),
+        ):
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"update {manifest.id}: cancelled — nothing on this machine was changed."
+            )
             return
         if action == "remove" and apply_module.settings_only(manifest):
             # T380 cold review: one press of Remove put every rate this mod
@@ -16562,7 +16639,21 @@ class ControllerView(QWidget):
         self._module_pending = f"{action} {manifest.id}"
         self._update_asked = (manifest, values) if action == "update" else None
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
+        if again_tip is None:
+            self._run_module_job(
+                lambda: run(manifest, values), self._module_done, self._module_failed
+            )
+            return
+
+        def update_anyway() -> ApplyReport:
+            # On the worker, not here: a file write. A tip that cannot be offered
+            # again is no reason to refuse the update the player just asked for.
+            problem = applier.allow_put_back_tip(manifest)
+            if problem:
+                logger.warning(f"{manifest.id}'s put-back version stays hidden: {problem}")
+            return run(manifest, values)
+
+        self._run_module_job(update_anyway, self._module_done, self._module_failed)
 
     def _module_values(
         self, manifest: Manifest, action: When, *, again: bool = False
@@ -16748,7 +16839,7 @@ class ControllerView(QWidget):
             return
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(
+        self._run_module_job(
             lambda: route(manifest, folder, replacing=question is not None),
             self._module_done,
             self._module_failed,
@@ -16843,6 +16934,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
+        self._module_job_ended()
         self._module_pending = None
         self._update_asked = None
         acted_on, self._acting_on = self._acting_on, None
@@ -16923,6 +17015,7 @@ class ControllerView(QWidget):
             self._rebuild_owed.discard(key)
             self._sql_owed.pop(key, None)
             self._behind.pop(key, None)
+            self._put_back_tip.pop(key, None)
             return
         # The clone has just been fetched and reset to its upstream tip -- that
         # is what `install()` does over a folder that is already there -- so
@@ -16931,6 +17024,7 @@ class ControllerView(QWidget):
         # recount costs a network round trip, and a stale number is a wrong one
         # (T44 item 2).
         self._behind.pop(key, None)
+        self._put_back_tip.pop(key, None)
         if result.rebuild_required:
             self._rebuild_owed.add(key)
         owed = _pending_sql_names(result)
@@ -16941,6 +17035,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
+        self._module_job_ended()
         asked, self._update_asked = self._update_asked, None
         if isinstance(exc, ReleaseDirectionUnknown) and asked is not None:
             self._ask_to_update_unchecked(exc, *asked)
@@ -17003,11 +17098,116 @@ class ControllerView(QWidget):
         # newest became another, comes back as a NEW question about that one.
         self._update_asked = (manifest, values)
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(
+        self._run_module_job(
             lambda: applier.update(manifest, values, approved=exc.approval),
             self._module_done,
             self._module_failed,
         )
+
+    def _run_module_job(
+        self,
+        work: Callable[[], object],
+        on_done: Callable[[object], None],
+        on_error: Callable[[object], None],
+    ) -> None:
+        """`_run()` for a Modules tab job: counted until its done or failed slot ends it."""
+        self._module_jobs += 1
+        self._run(work, on_done, on_error)
+
+    def _module_job_ended(self) -> None:
+        self._module_jobs = max(0, self._module_jobs - 1)
+
+    def _module_job_running(self) -> bool:
+        return self._module_jobs > 0 or self._module_pending is not None
+
+    def _build_is_running(self, what: str) -> bool:
+        """True (and said in the module report) when a server job is on: nothing is started.
+
+        The rows' buttons are greyed while the tab is busy, but the context menu and
+        a press already in flight are not, and a module job writes the record of
+        module updates that a failing Rebuild also writes (T557).
+        """
+        if not (self._busy or self.rebuild_log.running):
+            return False
+        job = self._busy_job if self._busy and self._busy_job else "the server build"
+        self.module_report.setPlainText(
+            REBUILD_BLOCKS_MODULE_JOB.format(what=what[:1].upper() + what[1:], wait=wait_for(job))
+        )
+        return True
+
+    @Slot()
+    def _put_back_last_update(self) -> None:
+        """ "Put back the last update…" on the selected module row (T557).
+
+        Two steps, both on a worker because both read git (`ContainerGit` is a
+        `docker run`): find which update this was (`Applier.last_update()`), then,
+        once the player said yes, put it back. The question needs the two commits,
+        which is why the finding comes first and the menu entry is not greyed by
+        it: the entry is always there for an installed module, and a clone that
+        cannot say gets the "nothing to put back" sentence.
+        """
+        manifest = self.selected_manifest()
+        applier = self.services.applier
+        if manifest is None or applier is None or manifest.type != "module":
+            return
+        if self._build_is_running(f"put back {manifest.id}"):
+            return
+        self._acting_on = manifest
+        self._module_pending = f"put back {manifest.id}"
+        self._put_back_pending = None
+        self.module_report.setPlainText(f"{self._module_pending}…")
+        self._run_module_job(
+            lambda: applier.last_update(manifest), self._put_back_found, self._module_failed
+        )
+
+    @Slot(object)
+    def _put_back_found(self, result: object) -> None:
+        self._module_job_ended()
+        manifest, applier = self._acting_on, self.services.applier
+        if manifest is None or applier is None:
+            self._module_pending = None
+            return
+        if not isinstance(result, apply_module.LastUpdate):
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(PUT_BACK_NOTHING.format(id=manifest.id))
+            return
+        if not self._confirm(
+            PUT_BACK_TITLE.format(id=manifest.id),
+            PUT_BACK_QUESTION.format(
+                id=manifest.id, old=result.from_sha[:7], new=result.to_sha[:7]
+            ),
+        ):
+            logger.info(f"put back {manifest.id} declined")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"put back {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
+        self._put_back_pending = result
+        self._run_module_job(
+            lambda: applier.put_back(manifest, None, last=result),
+            self._put_back_done,
+            self._module_failed,
+        )
+
+    @Slot(object)
+    def _put_back_done(self, result: object) -> None:
+        self._module_job_ended()
+        self._module_pending = None
+        acted_on, self._acting_on = self._acting_on, None
+        last, self._put_back_pending = self._put_back_pending, None
+        if not isinstance(result, ApplyReport) or last is None:
+            return
+        lines = [PUT_BACK_DONE.format(id=result.item_id, old=last.from_sha[:7])]
+        if apply_module.PUT_BACK_KEPT_SQL in result.skipped:
+            lines.append(apply_module.PUT_BACK_KEPT_SQL)
+        self.module_report.setPlainText(" ".join(lines))
+        # The clone is on another commit: the version and the count read at the old one are
+        # dropped before the redraw (`_note_session_facts()`), as after any Update.
+        self._note_session_facts(result, acted_on)
+        self.reload_modules()
 
     @Slot()
     def check_module_updates(self) -> None:
@@ -17032,10 +17232,11 @@ class ControllerView(QWidget):
         self._set_busy(True, "Check for updates")
         self._module_pending = "check for module updates"
         self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
-        self._run(route, self._module_updates_done, self._module_updates_failed)
+        self._run_module_job(route, self._module_updates_done, self._module_updates_failed)
 
     @Slot(object)
     def _module_updates_done(self, result: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_pending = None
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -17058,6 +17259,9 @@ class ControllerView(QWidget):
         self._behind = {
             (row.family, row.key): row.behind for row in result if is_behind(row.behind)
         }
+        self._put_back_tip = {
+            (row.family, row.key): row.put_back_tip for row in result if row.put_back_tip
+        }
         self._behind_release = {(row.family, row.key): row.release for row in result if row.release}
         self._behind_updated = {
             (row.family, row.key)
@@ -17068,6 +17272,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_pending = None
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -17114,7 +17319,7 @@ class ControllerView(QWidget):
         self.module_report.setPlainText(MODULE_SQL_RUNNING)
         # The sink is the relay's emitter, not `_module_sql_line`: this lambda
         # runs on a worker thread and everything it calls runs there too.
-        self._run(
+        self._run_module_job(
             lambda: route(self._module_sql_relay.emit_line),
             self._module_sql_done,
             self._module_sql_failed,
@@ -17137,6 +17342,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_sql_done(self, result: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
@@ -17161,6 +17367,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_sql_failed(self, exc: object) -> None:
+        self._module_job_ended()
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
@@ -17231,6 +17438,19 @@ class ControllerView(QWidget):
                 "Server tab, then press "
                 f"{server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)} again. "
                 "Nothing was started.",
+            )
+            return False
+        if self._module_job_running():
+            # T557: a module Update, Put back or Remove is on a worker and the Modules
+            # tab's jobs do not set `_busy`. A failing Rebuild writes the same record of
+            # module updates, and it puts modules back: two such writers at once is how
+            # an entry loses its destination. Refused, not queued, like the case above.
+            show_information(
+                self,
+                "Something else is running",
+                MODULE_JOB_BLOCKS_REBUILD.format(
+                    what=self._module_pending or "another Modules tab job"
+                ),
             )
             return False
         # T217 live proof, item 3: a refusal the press would make anyway comes BEFORE
@@ -18004,6 +18224,8 @@ class ControllerView(QWidget):
             # nothing about the running server changed.
             self._rebuild_owed.clear()
             self.reload_modules()
+        if not ok and not self.rebuild_log.cancelled:
+            self._reload_after_a_failed_build()
         if not ok:
             self.action_failed.emit(message)
             sentence = database_presence.sentence_in(message)
@@ -18026,6 +18248,29 @@ class ControllerView(QWidget):
             # A Stop that landed after T123 owed its restart: T123's own cancel
             # rule is "do not restart, say so", and that is kept.
             self._say_restart_owed()
+
+    def _reload_after_a_failed_build(self) -> None:
+        """A build that failed may have put modules back; read the clones again (T557).
+
+        The put-back runs inside the Rebuild (`install_wiring.with_module_moves()`),
+        so the tab learns of it from the record: a module whose newest version is
+        recorded as put back has a clone on another commit than the one its count
+        and its version were read at. Those are dropped before the redraw, as an
+        Update drops them, and every version is read again (a local `rev-parse` per
+        clone, off the GUI thread). Not on a Stop: nothing is put back on one.
+        """
+        if self._waits_for_the_distro(
+            "modules after a failed build", self._reload_after_a_failed_build
+        ):
+            return
+        ledger = module_moves.read(self.services.controller.server_dir)
+        if ledger is not None:
+            for item in ledger.skipped:
+                family, _slash, item_id = item.partition("/")
+                self._behind.pop((family, item_id), None)
+                self._put_back_tip.pop((family, item_id), None)
+        self._versions.clear()
+        self.reload_modules()
 
     def log_panels(self) -> tuple[LogPanel, ...]:
         """Every streaming panel this view owns, for the exit path to join.
@@ -19852,6 +20097,11 @@ class ControllerView(QWidget):
                 # T399: the row's own button is Install or Remove by whether it is here.
                 rem_act = menu.addAction("Remove Selected Module")
                 rem_act.triggered.connect(lambda: self._module_action("remove"))
+                manifest = self.selected_manifest()
+                if manifest is not None and manifest.type == "module":
+                    # T557. Only a compiled module's update can break the build.
+                    put_act = menu.addAction(PUT_BACK_ACTION)
+                    put_act.triggered.connect(self._put_back_last_update)
             if self._selected_row_is_record_backed():
                 forget_act = menu.addAction(FORGET_RECORD_ACTION)
                 forget_act.triggered.connect(self._forget_module_record)

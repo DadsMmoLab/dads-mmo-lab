@@ -45,10 +45,12 @@ from yulon import (
     folder_swap,
     links,
     module_answers,
+    module_moves,
     platform,
     play_client,
     rmtree,
     runner,
+    server_build_presses,
     tuning,
 )
 from yulon.catalog import composegen, upstream
@@ -66,7 +68,10 @@ from yulon.git import (
     GitError,
     HeadReader,
     HistoryReader,
+    ReflogEntry,
+    ReflogReader,
     RemoteReader,
+    RevRestorer,
     RunnerGit,
     TreeReader,
     git_available,
@@ -709,6 +714,98 @@ def _kept(cause: BaseException, message: str) -> ApplyError:
     # T248: what goes under Details travels with the sentence it explains.
     refusal.detail = cause.detail
     return refusal
+
+
+class PutBackRefused(ApplyRefusal):
+    """`Applier.put_back()` refused before it changed anything (T557).
+
+    `edited` is the one refusal the Rebuild's own sentence names: files in the
+    module's folder were changed after the update (§4 of the T557 design).
+    """
+
+    def __init__(self, message: str, *, edited: bool) -> None:
+        super().__init__(message)
+        self.edited = edited
+
+
+_REBUILD = f"“{server_build_presses.REBUILD}”"
+"""The press a put-back's sentences send the player to, as its menu spells it (T155)."""
+
+PUT_BACK_KEPT_SQL = "The database changes that update made were kept."
+"""D5's sentence: a put-back runs no SQL, and an update that ran some says so."""
+
+
+@dataclass(frozen=True)
+class LastUpdate:
+    """Where a module's clone was before its last update, and where it is now (T557).
+
+    `source` is "ledger" for an update this app recorded and nobody has built
+    since, which a failed build may put back by itself, and "reflog" for one
+    read off git's reflog, which is only ever offered (D4).
+    """
+
+    item_id: str
+    from_sha: str
+    to_sha: str
+    source: Literal["ledger", "reflog"]
+    from_release: str = ""
+    sql: bool = False
+
+
+_UPDATE_SUBJECTS = (
+    # An unpinned module's Update: `git reset --hard FETCH_HEAD`.
+    re.compile(r"reset: moving to FETCH_HEAD"),
+    # A pinned or release-following module's Update: `checkout --detach --force <sha>`
+    # from a HEAD that was already detached. A checkout from a BRANCH is the
+    # first install's pin, which is no update at all.
+    re.compile(r"checkout: moving from [0-9a-f]{40} to [0-9a-f]{40}"),
+)
+
+
+def _an_update(subject: str) -> bool:
+    return any(pattern.fullmatch(subject) for pattern in _UPDATE_SUBJECTS)
+
+
+def failed_build_put_back(
+    applier: Applier, load: Callable[[ManifestType, str], Manifest]
+) -> Callable[[tuple[str, ...]], str]:
+    """The Rebuild's put-back (`install_wiring.rebuild_for_app(put_back=)`), over the tab's applier.
+
+    The SAME applier the Modules tab updates with, so the put-back runs through
+    the same git seam (`ContainerGit` where there is no git) and the same
+    server folder. `load` is the tab's manifest store's `load`; a module it
+    cannot load is not put back.
+    """
+
+    def manifest(item_id: str) -> Manifest | None:
+        try:
+            return load("module", item_id)
+        except Exception as exc:  # noqa: BLE001 - a module with no manifest is just not put back
+            logger.info(f"no manifest for {item_id} to put it back with: {exc}")
+            return None
+
+    return lambda named: applier.after_failed_build(named, manifest)
+
+
+def reflog_update(entries: Sequence[ReflogEntry], head: str) -> str | None:
+    """The commit HEAD was on before the update that moved it to `head`, from git's reflog.
+
+    Newest first: every entry still at `head` must be an update's own move (a
+    second Update with nothing new leaves one more of them), and the first entry
+    at another commit is where HEAD was before. Anything else in between -- a
+    hand `reset HEAD@{1}`, a commit, a pull, a rebase -- or no such entry at
+    all (an empty or expired reflog, a clone never updated) is None: Yu'lon
+    cannot tell what that move was, so it offers nothing.
+    """
+    walked = False
+    for entry in entries:
+        if entry.sha == head:
+            if not _an_update(entry.subject):
+                return None
+            walked = True
+            continue
+        return entry.sha if walked else None
+    return None
 
 
 @dataclass(frozen=True)
@@ -3079,6 +3176,7 @@ class Applier:
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
     ) -> ApplyReport:
         """`_install()`, saying so when it stops with a database it started still up (T476).
 
@@ -3101,6 +3199,7 @@ class Applier:
                 first_configure_sql=first_configure_sql,
                 release=release,
                 expect_head=expect_head,
+                record_move=record_move,
             )
 
     def _install(
@@ -3115,8 +3214,19 @@ class Applier:
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
+        restore: LastUpdate | None = None,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+
+        `restore` is `put_back()`'s (T557): the clone step is `restore_rev()` onto
+        `restore.from_sha` -- no fetch, so it works offline -- and no SQL step of
+        either pass runs (D5). Every other step is Update's own.
+
+        `record_move` is True from `update()` only (T557): a compiled module's
+        clone is about to move onto a commit nobody has built yet, so the commit
+        it leaves is written down first (`_record_move_start()`), and where it
+        landed right after the clone step, whether that step returned or raised.
 
         `first_configure_sql` is False from `update()` only: a fresh deploy
         just replaced the script, so its configure-time PATCHES are re-run,
@@ -3175,6 +3285,8 @@ class Applier:
         # had this app's handwriting on the folder, and for the second the
         # report has already said the folder will not be recognised next time.
         claimed = False
+        # T557: whether this run wrote where the clone was before it moved.
+        moving = False
         url = ""
         # T126: the release this run checked out, for the claim to carry. Empty
         # for a module that follows its branch, and for a folder or no source.
@@ -3223,21 +3335,32 @@ class Applier:
         else:
             # `update()` hands over the release it has just proved is not a
             # step back (T150), so the reset goes to THAT commit and not to
-            # whichever one GitHub names a second later.
-            release = release if release is not None else self._release_for(manifest)
+            # whichever one GitHub names a second later. A put-back asks GitHub
+            # nothing: it goes back to a commit the clone already holds.
+            if restore is None:
+                release = release if release is not None else self._release_for(manifest)
             self._require_own_clone(manifest, clone, "install")
-            self._costly_reset(manifest, clone, replacing)
+            if restore is None:
+                # A put-back asked its own questions without the fetch
+                # (`put_back()`): `no_local_commits()` fetches.
+                self._costly_reset(manifest, clone, replacing)
             self._refuse_a_moved_head(manifest, clone, expect_head)
+            # After every guard, so a refused Update writes nothing, and right
+            # before the one call that moves HEAD.
+            moving = record_move and self._record_move_start(manifest, clone, log)
             try:
-                self.git.clone(
-                    CloneSpec(
-                        url=manifest.source.url,
-                        dest=clone,
-                        branch=manifest.source.branch,
-                        sparse_path=manifest.source.sparse_path,
-                        rev=release.sha if release is not None else manifest.source.rev,
+                if restore is not None:
+                    self._reader("restore_rev", RevRestorer)(clone, restore.from_sha)
+                else:
+                    self.git.clone(
+                        CloneSpec(
+                            url=manifest.source.url,
+                            dest=clone,
+                            branch=manifest.source.branch,
+                            sparse_path=manifest.source.sparse_path,
+                            rev=release.sha if release is not None else manifest.source.rev,
+                        )
                     )
-                )
             except FileNotFoundError as exc:
                 # ONLY a missing executable, and only this exception type. The
                 # first version caught every OSError around the whole clone --
@@ -3254,11 +3377,24 @@ class Applier:
                 ) from exc
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
-            log.done.append(
-                f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}"
-                + (f" at release {release.tag}" if release is not None else "")
-            )
-            release_tag = release.tag if release is not None else ""
+            finally:
+                # Returned or raised: a clone step that failed before it moved
+                # HEAD must not leave `{from, to: null}` behind, which a later
+                # hand reset would turn into a move nobody made.
+                if moving:
+                    self._record_move_end(manifest, clone, release, log)
+            if restore is not None:
+                log.done.append(
+                    f"put {_rel(self.server_dir, clone)} back on {restore.from_sha[:7]}"
+                    + (f" (release {restore.from_release})" if restore.from_release else "")
+                )
+                release_tag = restore.from_release
+            else:
+                log.done.append(
+                    f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}"
+                    + (f" at release {release.tag}" if release is not None else "")
+                )
+                release_tag = release.tag if release is not None else ""
         if folder is not None or manifest.source is not None:
             # This app filled the folder, by either route, so both of the files
             # it writes INTO a checkout go in — and they are written here rather
@@ -3330,9 +3466,16 @@ class Applier:
         if first_configure_sql:
             self._refuse_direct_sql_into_a_running_world(manifest, "configure")
         sent = log.sql_sent
-        self._sql(manifest, clone, vals, "install", log, undo=undo)
+        if restore is None:
+            self._sql(manifest, clone, vals, "install", log, undo=undo)
+        elif restore.sql:
+            # D5: nothing is undone in the database, and the report says so.
+            log.skipped.append(PUT_BACK_KEPT_SQL)
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "install", log)
+            if moving:
+                # D5: a put-back runs no SQL, and its report says these were kept.
+                module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -3340,7 +3483,7 @@ class Applier:
         # patch may target the conf that step activates (`mod-ale`'s does),
         # which is the state a later `configure()` always finds.
         self._patches(manifest, clone, vals, "configure", log)
-        if first_configure_sql:
+        if first_configure_sql and restore is None:
             self._sql(manifest, clone, vals, "configure", log)
         try:
             self._client(manifest, clone, log)
@@ -3505,6 +3648,64 @@ class Applier:
                 f"{_rel(self.server_dir, clone)} will keep offering Install"
             )
 
+    def _record_move_start(self, manifest: Manifest, clone: Path, log: _Log) -> bool:
+        """Write where a compiled module's clone is BEFORE an Update moves it (T557).
+
+        Only `module`: the other families' clones are never compiled, so no
+        build can fail on them and nothing may ever put them back. False, with
+        the reason in the report, when HEAD cannot be read or the record cannot
+        be written: the Update goes ahead, and a build that fails on it can only
+        be put back by hand.
+        """
+        if manifest.type != "module":
+            return False
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        problem = (
+            module_moves.record_start(
+                self.server_dir,
+                module_moves.key(manifest.type, manifest.id),
+                head=head,
+                release=clone_release(clone, item_id=manifest.id),
+            )
+            if head is not None
+            else "git could not say which commit it is on"
+        )
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not note which version {manifest.id} "
+                f"was on before this update ({problem}), so a build that fails on it will not "
+                f"be put back by itself"
+            )
+            return False
+        return True
+
+    def _record_move_end(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        release: upstream.Release | None,
+        log: _Log,
+    ) -> None:
+        """Write where the clone landed, or drop the entry when it did not move (T557).
+
+        A HEAD git cannot read leaves the entry as the write-ahead left it:
+        `Move.unbuilt_at()` reads `to` as "wherever HEAD is, if not `from`".
+        """
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        if head is None:
+            return
+        problem = module_moves.record_end(
+            self.server_dir,
+            module_moves.key(manifest.type, manifest.id),
+            head=head,
+            release=release.tag if release is not None else "",
+        )
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not note where {manifest.id}'s update "
+                f"landed ({problem})"
+            )
+
     def update(
         self,
         manifest: Manifest,
@@ -3589,8 +3790,290 @@ class Applier:
             else None
         )
         return self.install(
-            manifest, values, first_configure_sql=False, release=release, expect_head=checked
+            manifest,
+            values,
+            first_configure_sql=False,
+            release=release,
+            expect_head=checked,
+            record_move=True,
         )
+
+    def last_update(self, manifest: Manifest) -> LastUpdate | None:
+        """The commit `manifest`'s clone was on before its last update, or None (T557).
+
+        Two sources, in this order:
+
+        1. **This app's record** (`module_moves`), while the clone's HEAD is
+           still the update's recorded `to`: an update nobody has built since.
+           A record with no `to` (the app died between the reset and the second
+           write, or the write was lost) is NOT this: without a destination
+           "any HEAD but `from`" would take a commit the player made by hand for
+           the update, and a failed build would put the clone back over it. It
+           falls through to the reflog, which refuses a hand commit.
+        2. **git's reflog** (D4), for an update this app made before it kept the
+           record: `reflog_update()`. Offered, never acted on by itself -- the
+           record of whether that update was ever built is not there. Not when
+           the commit it names is the tip a put-back left (`skipped`): after a
+           put-back, the reflog's newest move is the put-back itself.
+
+        Only `module`: no other family is compiled, so no build fails on it and
+        a put-back would mean nothing. None when git cannot say where HEAD is.
+        Reads git (`docker run` on a `ContainerGit` machine), so never on the
+        GUI thread.
+        """
+        if manifest.type != "module":
+            return None
+        clone = self.clone_dir(manifest)
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        if head is None:
+            return None
+        item = module_moves.key(manifest.type, manifest.id)
+        ledger = module_moves.read(self.server_dir)
+        move = ledger.moves.get(item) if ledger is not None else None
+        if move is not None and move.to_sha is not None and move.to_sha == head:
+            return LastUpdate(
+                item_id=manifest.id,
+                from_sha=move.from_sha,
+                to_sha=head,
+                source="ledger",
+                from_release=move.from_release,
+                sql=move.sql,
+            )
+        entries: tuple[ReflogEntry, ...] | None = self._reader("reflog", ReflogReader)(clone)
+        old = reflog_update(entries or (), head)
+        if old is None:
+            return None
+        skipped = ledger.skipped.get(item) if ledger is not None else None
+        if skipped is not None and skipped.tip == old:
+            return None
+        return LastUpdate(item_id=manifest.id, from_sha=old, to_sha=head, source="reflog")
+
+    def put_back(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        last: LastUpdate,
+        automatic: bool = False,
+    ) -> ApplyReport:
+        """Put `manifest`'s clone back on `last.from_sha` and re-apply it there (T557).
+
+        `automatic` is the put-back a failed Rebuild makes by itself, as against the
+        press on the row. Nothing here differs; a subclass's guard may (the Tortoise
+        updater guard is for a press, and the next Rebuild restarts the world anyway).
+
+        Update's own install over the folder (`_install(restore=...)`), with two
+        differences: the clone step is `restore_rev()` -- `checkout --detach
+        --force`, NO fetch, so a network fault that may be why the player is here
+        cannot stop it -- and no SQL runs (D5). Deploy, patches, conf, client
+        files and the claim (with `last.from_release` as its release) are the
+        same steps.
+
+        Refused, before anything changes, in this order:
+
+        - HEAD is not `last.to_sha`: the clone moved since the update;
+        - Update's own questions without the fetch (`_reset_cost(history=False)`):
+          a different repository, or files changed in the folder. `--force`
+          would throw such changes away, and there is no override: Remove is the
+          way out (`PutBackRefused`).
+
+        Once HEAD is on `from`, the update's tip is recorded as put back
+        (`module_moves.skip()`): Check for updates does not offer it again
+        (D2), and the record has no unbuilt move for this module any more.
+        """
+        clone = self.clone_dir(manifest)
+        rel = _rel(self.server_dir, clone)
+        if manifest.source is None or not (clone / ".git").is_dir():
+            raise PutBackRefused(
+                f"{manifest.id} is not installed here as a git checkout ({rel}), so there is "
+                f"nothing to put back. Nothing was changed.",
+                edited=False,
+            )
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        if head != last.to_sha:
+            raise PutBackRefused(
+                f"{manifest.id} moved since its last update (it is on "
+                f"{head[:7] if head else 'a commit git could not read'}, not "
+                f"{last.to_sha[:7]}), so Yu'lon did not put it back. Nothing was changed.",
+                edited=False,
+            )
+        # `last` may have been read before the player committed on top, or from a
+        # record that never knew where the update landed. HEAD is the update's
+        # `to` only if the clone's own answer says so now: the record's `to`, or a
+        # reflog whose every move at HEAD is an update's (a hand commit is not).
+        # This is the local-commits question `Update` asks of a fetched tip, put
+        # to the history git already has, because there is no fetch here.
+        now = self.last_update(manifest)
+        if now is None or (now.from_sha, now.to_sha) != (last.from_sha, last.to_sha):
+            raise PutBackRefused(
+                f"{manifest.id} has been changed since its last update (git no longer shows "
+                f"that update as the latest thing that happened to it), so Yu'lon did not put "
+                f"it back: that could throw away work done in the folder. Nothing was changed.",
+                edited=False,
+            )
+        found = self._reset_cost(manifest, clone, history=False)
+        if found is not None:
+            raise PutBackRefused(
+                _destroys_message(found, rel, manifest.id, manifest.source.url, "Putting back"),
+                edited=found.fact is _Destroys.EDITED,
+            )
+        log = _Log()
+        try:
+            with self._says_the_database_is_up(log):
+                return self._install(
+                    manifest,
+                    values,
+                    log,
+                    first_configure_sql=False,
+                    expect_head=last.to_sha,
+                    restore=last,
+                )
+        finally:
+            if self._reader("head_sha", HeadReader)(clone) == last.from_sha:
+                problem = module_moves.skip(
+                    self.server_dir,
+                    module_moves.key(manifest.type, manifest.id),
+                    tip=last.to_sha,
+                )
+                if problem:
+                    logger.warning(f"{manifest.id} was put back, but not recorded: {problem}")
+
+    def allow_put_back_tip(self, manifest: Manifest) -> str:
+        """Offer `manifest`'s put-back version again: the player said update to it anyway (D2).
+
+        "" when done, else why not. A record that cannot be written leaves the
+        tip hidden; the Update that follows still runs.
+        """
+        return module_moves.clear_skip(
+            self.server_dir, module_moves.key(manifest.type, manifest.id)
+        )
+
+    def unbuilt_updates(self) -> tuple[str, ...]:
+        """The modules whose recorded update nobody has built yet, in the record's order (T557).
+
+        Each read against its clone's HEAD (`Move.unbuilt_at()`), so a stale
+        entry is not one. An unreadable record has none: fail closed.
+        """
+        ledger = module_moves.read(self.server_dir)
+        if ledger is None:
+            return ()
+        waiting = []
+        reader = self._reader("head_sha", HeadReader)
+        for item, move in ledger.moves.items():
+            family, _slash, item_id = item.partition("/")
+            if family != "module" or not item_id:
+                continue
+            if move.unbuilt_at(reader(self.server_dir / CLONE_DIRS["module"] / item_id)):
+                waiting.append(item_id)
+        return tuple(waiting)
+
+    def after_failed_build(
+        self, named: Sequence[str], load: Callable[[str], Manifest | None]
+    ) -> str:
+        """Put back each module a failed build's errors name, and say what was done (T557 §1.3).
+
+        Only the modules `named` (D6), and of those only one whose update this
+        app recorded and nobody has built (`last_update()`'s "ledger"): an
+        update known only from git's reflog is offered, never put back by itself
+        (D4). Nothing is rebuilt (D1): the sentences end by naming the press.
+        `load` gives the module's manifest by id, or None. Never raises: what it
+        returns is added to a failure that is already being reported.
+        """
+        put: list[str] = []
+        other: list[str] = []
+        moved: set[str] = set()
+        handled: set[str] = set()  # modules `other` already says something about
+        for item_id in named:
+            manifest = load(item_id)
+            last = self.last_update(manifest) if manifest is not None else None
+            if manifest is None or last is None:
+                other.append(
+                    f"The build stopped on an error in {item_id}. {item_id} was not updated since "
+                    f"your last build that worked, so Yu'lon did not change it. Your server is "
+                    f"still running the build it had."
+                )
+                continue
+            if last.source != "ledger":
+                handled.add(item_id)
+                other.append(
+                    f"The build stopped on an error in {item_id}. Its last update was made before "
+                    f"Yu'lon kept track of updates, so Yu'lon did not put it back by itself. To "
+                    f"build without that update, right-click {item_id} on the Modules tab, choose "
+                    f"Put back the last update, then press {_REBUILD}."
+                )
+                continue
+            try:
+                self.put_back(manifest, last=last, automatic=True)
+            except PutBackRefused as exc:
+                handled.add(item_id)
+                other.append(
+                    f"The build stopped on an error in {item_id}. Yu'lon did not put it back, "
+                    f"because files in its folder were changed after the update and putting it "
+                    f"back would throw those changes away. Undo your changes, or press Remove on "
+                    f"its row, then press {_REBUILD}."
+                    if exc.edited
+                    else f"The build stopped on an error in {item_id}. Yu'lon did not put it "
+                    f"back: {exc}"
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - every failure here is one sentence
+                logger.warning(f"could not put {item_id} back after a failed build: {exc}")
+                handled.add(item_id)
+                if self._reader("head_sha", HeadReader)(self.clone_dir(manifest)) == last.from_sha:
+                    # git did move: the checkout is on the old version and a later step
+                    # of putting it back (deploy, config, client files) failed.
+                    other.append(
+                        f"The build stopped on an error in {item_id}. {item_id} is back on "
+                        f"{last.from_sha[:7]}, but the steps after that failed ({exc}), so its "
+                        f"installed files may not match that version. To build without it, press "
+                        f"Remove on its row, then press {_REBUILD}."
+                    )
+                else:
+                    other.append(
+                        f"The build stopped on an error in {item_id}. Yu'lon tried to put it back "
+                        f"on {last.from_sha[:7]} and could not ({exc}). To build without it, press "
+                        f"Remove on its row, then press {_REBUILD}."
+                    )
+                continue
+            moved.add(item_id)
+            put.append(
+                f"The build stopped on an error in {item_id}, which was updated after your last "
+                f"build that worked. Yu'lon put {item_id} back on the version it had before that "
+                f"update ({last.from_sha[:7]})." + (f" {PUT_BACK_KEPT_SQL}" if last.sql else "")
+            )
+        waiting = [
+            item_id
+            for item_id in self.unbuilt_updates()
+            if item_id not in moved and item_id not in handled
+        ]
+        said = list(put)
+        if put and waiting:
+            said.append(
+                f"Your server is still running the build it had. Press {_REBUILD} to build your "
+                f"other updates without {'it' if len(put) == 1 else 'them'}."
+            )
+        elif put:
+            said.append(
+                "Your server is still running the build it had, and nothing else is waiting to "
+                "be built."
+            )
+        said.extend(other)
+        if not put and waiting:
+            # Nothing was put back, so the player is told which updates are still
+            # waiting and how to take one out: when the error names no module at all,
+            # and also when it names only modules that were not updated (the broken
+            # one may be an update whose path the stream did not carry).
+            lead = (
+                "The build stopped, and the error does not say which module caused it."
+                if not named
+                else "Other modules are waiting to be built."
+            )
+            said.append(
+                f"{lead} These modules were updated since your last build that worked: "
+                f"{', '.join(waiting)}. To build without one of them, right-click it on the "
+                f"Modules tab, choose Put back the last update, then press {_REBUILD}."
+            )
+        return " ".join(said)
 
     def _refuse_a_moved_head(self, manifest: Manifest, clone: Path, expected: str | None) -> None:
         """No reset of a checkout that moved after `update()` checked it (T150).
@@ -3945,6 +4428,14 @@ class Applier:
             # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
+        # T557, after the remove: an update or a skipped version of a module
+        # that is gone says nothing about the next install of it.
+        problem = module_moves.drop(self.server_dir, module_moves.key(manifest.type, manifest.id))
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not forget {manifest.id}'s last update "
+                f"({problem})"
+            )
         return self._report("remove", manifest, log)
 
     # -- filling the clone from somewhere that is not git ------------------
@@ -6533,6 +7024,21 @@ class ModuleUpdate:
     checked_unix: int = 0
     """When this row was counted, for `cached_module_updates()`."""
 
+    fetched: str = ""
+    """The commit the count was taken against: what a fresh fetch named (T557).
+
+    What a put-back tip is compared with. Never `head`: HEAD is where the clone
+    is, the fetched commit is where the author is.
+    """
+
+    put_back_tip: str = ""
+    """The newest version, when it is the one that was put back after it failed to build (T557, D2).
+
+    Set by `_without_put_back_tips()` and never cached: the record decides it
+    on every read. The row is then not behind (no chip, no update to offer), and
+    its line says why.
+    """
+
     release: str = ""
     """For a module that follows its releases (T126): the newest release's tag.
 
@@ -6565,6 +7071,8 @@ class ModuleUpdate:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
             return f"{self.key}: could not ask (no answer from git)"
+        if self.put_back_tip:
+            return PUT_BACK_TIP_LINE.format(id=self.key, new=self.put_back_tip[:7])
         placed = _NOT_UNDER_RELEASE.get(self.behind) if isinstance(self.behind, Behind) else None
         if placed is not None:
             return f"{self.key}: {placed.format(release=self.release or 'the release it follows')}"
@@ -6579,6 +7087,13 @@ class ModuleUpdate:
             )
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
+
+
+PUT_BACK_TIP_LINE = (
+    "{id}: the newest version ({new}) did not build on this server and was put back, so it "
+    "is not offered. Yu'lon will offer the next one when its author publishes it."
+)
+"""Check for updates, on a row whose newest version was put back (T557, D2)."""
 
 
 _NOT_UNDER_RELEASE: dict[Behind, str] = {
@@ -6671,7 +7186,28 @@ def module_updates(
         )
         for path in entries
     ]
-    return tuple(github.settle(rows))
+    return tuple(_without_put_back_tips(server_dir, github.settle(rows)))
+
+
+def _without_put_back_tips(server_dir: Path, rows: Sequence[ModuleUpdate]) -> list[ModuleUpdate]:
+    """`rows`, with a newest version that was put back no longer offered (T557, D2).
+
+    A row is changed only when the commit its count was taken against
+    (`fetched`) IS the tip the record says was put back. The author pushing past
+    it makes `fetched` differ, and the row is offered as normal. A record that
+    cannot be read hides nothing: an update offered twice is better than one
+    that is never offered.
+    """
+    ledger = module_moves.read(server_dir)
+    if ledger is None or not ledger.skipped:
+        return list(rows)
+    kept: list[ModuleUpdate] = []
+    for row in rows:
+        skip = ledger.skipped.get(module_moves.key(row.family, row.key))
+        if skip is not None and row.fetched and row.fetched == skip.tip and is_behind(row.behind):
+            row = replace(row, behind=0, put_back_tip=skip.tip)
+        kept.append(row)
+    return kept
 
 
 def _module_update(
@@ -6697,7 +7233,12 @@ def _module_update(
         if question is not None:
             github.pose(question)
         return ModuleUpdate(
-            key=path.name, path=path, is_checkout=True, behind=counted.behind, family=kind
+            key=path.name,
+            path=path,
+            is_checkout=True,
+            behind=counted.behind,
+            family=kind,
+            fetched=counted.fetched or "",
         )
     release = resolve(slug)
     counted = (
@@ -6712,6 +7253,7 @@ def _module_update(
         is_checkout=True,
         behind=counted.behind,
         family=kind,
+        fetched=counted.fetched or "",
         release=release.tag if release is not None else "",
         installed_release=clone_release(path, item_id=path.name),
     )
@@ -6785,7 +7327,7 @@ def cached_module_updates(
     rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
-    return tuple(rows)
+    return tuple(_without_put_back_tips(server_dir, rows))
 
 
 def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:
@@ -6818,6 +7360,7 @@ def _write_module_updates(
                 "release": row.release,
                 "installed_release": row.installed_release,
                 "checked_unix": row.checked_unix,
+                "fetched": row.fetched,
             }
             for row in [*others, *rows]
         ],
@@ -7201,6 +7744,7 @@ def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], Modu
                 installed_release=str(row.get("installed_release", "")),
                 head=str(row["head"]),
                 checked_unix=int(row["checked_unix"]),
+                fetched=str(row.get("fetched", "")),
             )
             for row in payload["rows"]
         }

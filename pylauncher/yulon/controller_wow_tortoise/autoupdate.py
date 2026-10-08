@@ -64,7 +64,15 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import docker
-from yulon.apply import Applier, ApplyError, ApplyReport, Completer, FolderSource, SqlRunner
+from yulon.apply import (
+    Applier,
+    ApplyError,
+    ApplyReport,
+    Completer,
+    FolderSource,
+    LastUpdate,
+    SqlRunner,
+)
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
 from yulon.git import Git
@@ -501,6 +509,7 @@ class GuardedApplier(Applier):
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -514,6 +523,7 @@ class GuardedApplier(Applier):
         # commit it proved that from. The one addon on this game that follows
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
+        # `record_move` (T557) is `update()`'s too, passed through for the same rule.
         note = self._guard(manifest, "install")
         return _with_note(
             super().install(
@@ -525,9 +535,36 @@ class GuardedApplier(Applier):
                 first_configure_sql=first_configure_sql,
                 release=release,
                 expect_head=expect_head,
+                record_move=record_move,
             ),
             note,
         )
+
+    def put_back(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        last: LastUpdate,
+        automatic: bool = False,
+    ) -> ApplyReport:
+        """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
+
+        `install()` is the override that runs the guard, and `put_back()` does not
+        go through it: without this the restart a C++ module asks for would be
+        let past the updater guard on this game only by way of the put-back press.
+
+        **The press, not the put-back a failed Rebuild makes by itself.** After a
+        failed build the old world is usually still up, so the guard would refuse the
+        automatic put-back ("Stop the world first") and take D1 away on this game,
+        while the next press, Rebuild, restarts the world with no such guard. The
+        automatic one skips it and says so in the report's note.
+        """
+        if automatic:
+            note = "auto-update guard: not asked, this put-back follows a failed build"
+        else:
+            note = self._guard(manifest, "install")
+        return _with_note(super().put_back(manifest, values, last=last, automatic=automatic), note)
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")
