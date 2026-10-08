@@ -126,7 +126,15 @@ def _publish(target: Path, data: bytes) -> None:
     """Write `data` at `target` whole: a temp sibling, then a rename over the name."""
     tmp = target.with_name(f".{target.name}.yulon-new")
     try:
-        tmp.write_bytes(data)
+        # Whatever sits at the temp name is removed, not written through: a link
+        # planted there (T563) would send the bytes, and the chmod, to its target.
+        # `O_EXCL` then refuses a name that reappeared, and `O_NOFOLLOW` a link
+        # even where `O_EXCL` alone would not (Windows has no `O_NOFOLLOW`).
+        tmp.unlink(missing_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags | getattr(os, "O_BINARY", 0), SCRIPT_MODE)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
         os.chmod(tmp, SCRIPT_MODE)
         os.replace(tmp, target)
     finally:

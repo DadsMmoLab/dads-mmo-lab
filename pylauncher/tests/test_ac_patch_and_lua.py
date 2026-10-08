@@ -997,3 +997,36 @@ def test_a_rollback_that_cannot_save_the_script_record_says_that_not_the_patch(
     back = next(line for line in said if "back on their old commits, but" in line)
     assert scriptdeploy.RECORD_FILE in back and "delete" in back, back
     assert "source patch" not in back and "again: it writes" not in back, back
+
+
+@pytest.mark.parametrize("dangling", [False, True], ids=("to-a-file", "to-nothing"))
+def test_a_link_planted_at_the_temp_name_is_not_written_through(
+    tmp_path: Path, dangling: bool
+) -> None:
+    """`_publish` writes a temp sibling, then renames it; a link at that name leads elsewhere."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("shipped\n", encoding="utf-8")
+    dest = server_dir / LUA_SCRIPTS_DIR / "m"
+    dest.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    if not dangling:
+        victim.write_text("keep me\n", encoding="utf-8")
+    try:
+        (dest / ".a.lua.yulon-new").symlink_to(victim)
+    except OSError:  # pragma: no cover - a Windows account without the link privilege
+        pytest.skip("cannot make a symlink here")
+
+    list(
+        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")])
+    )
+
+    assert (dest / "a.lua").read_text(encoding="utf-8") == "shipped\n"
+    assert not (dest / "a.lua").is_symlink()
+    assert (victim.read_text(encoding="utf-8") if victim.exists() else None) == (
+        None if dangling else "keep me\n"
+    )
+    assert not (dest / ".a.lua.yulon-new").is_symlink() and not (dest / ".a.lua.yulon-new").exists()
