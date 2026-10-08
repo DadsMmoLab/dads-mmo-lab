@@ -186,10 +186,7 @@ def _run(
 # -- T581: the dashboard tick keeps the row honest while this app is open ------------------
 
 _HOLD_LOCK = threading.Lock()
-"""Taken by a deliberate hold's start and end, and by the tick's check-and-clear (T581).
-
-So a Stop that begins while the tick is clearing waits for that clear and marks after it,
-and a clear never lands between a Stop's mark and its end."""
+"""Guards the hold counts and epochs (T581); never held across a Docker call."""
 
 _holds: dict[str, int] = {}
 _epochs: dict[str, int] = {}
@@ -228,6 +225,22 @@ def held(spec: docker.ContainerSpec) -> bool:
 def _epoch(spec: docker.ContainerSpec) -> int:
     with _HOLD_LOCK:
         return _epochs.get(spec.db, 0)
+
+
+def _held_or_moved(spec: docker.ContainerSpec, begun: int) -> bool:
+    """A hold in force now, or one that began or ended since epoch `begun` was read."""
+    with _HOLD_LOCK:
+        return bool(_holds.get(spec.db)) or _epochs.get(spec.db, 0) != begun
+
+
+def _gone(since: datetime, now: datetime) -> timedelta:
+    """How long since `since`; a clock that went back counts as the whole wait gone by.
+
+    Otherwise a clock set back an hour would put off a retry or a read for that hour
+    (cold review; `dashboard.Dashboard._with_wrong_client` guards its own the same way).
+    """
+    gone = now - since
+    return gone if gone >= timedelta(0) else timedelta.max
 
 
 MARK_RETRY = timedelta(seconds=30)
@@ -347,7 +360,7 @@ class Keeper:
         stopped = status not in ("running", "restarting")
         tried = self._tried
         wait = STOPPED_RETRY if stopped else MARK_RETRY
-        if tried is not None and tried[0] == key and now - tried[1] < wait:
+        if tried is not None and tried[0] == key and _gone(tried[1], now) < wait:
             return
         self._tried = (key, now)
         ok = self._mark(
@@ -383,12 +396,14 @@ class Keeper:
 
     def _unstick(self, run: str, begun: int) -> None:
         now = self._now()
-        if self._ready_run != run or self._ready_at is None:
+        if self._ready_run != run or self._ready_at is None or now < self._ready_at:
+            # A new run, or a clock that went back: the grace starts again from now, the
+            # safe way for it to go wrong (cold review).
             self._ready_run, self._ready_at, self._read_at = run, now, None
             return
         if now - self._ready_at < CLEAR_AFTER:
             return
-        if self._read_at is not None and now - self._read_at < FLAGS_READ_EVERY:
+        if self._read_at is not None and _gone(self._read_at, now) < FLAGS_READ_EVERY:
             return
         statement = flags_statement(self.entry)
         if statement is None:
@@ -420,7 +435,7 @@ class Keeper:
             return False
         now = self._now()
         last = self._unconfirmed
-        if last is not None and last[0] == run and now - last[1] < UNCONFIRMED_RETRY:
+        if last is not None and last[0] == run and _gone(last[1], now) < UNCONFIRMED_RETRY:
             return False
         if self.said_ready(run):
             self._unconfirmed = None
@@ -437,15 +452,27 @@ class Keeper:
     def _clear_unless_held(self, begun: int) -> bool:
         """Take the bit off, unless a deliberate hold is in force or moved since `begun`.
 
-        Checked under the lock a Stop's hold takes, right before the write, so a Stop that
-        begins now waits for this clear and marks after it.
+        The lock is never held across the Docker calls (cold review: a wedged Docker would
+        then block every Stop). So a Stop may begin while the clear is in Docker, and its
+        mark may land before the clear's UPDATE: the hold is looked at again afterwards, and
+        if one began, the bit is set again (database already up, never started).
         """
-        with _HOLD_LOCK:
-            if _holds.get(self.spec.db) or _epochs.get(self.spec.db, 0) != begun:
-                return False
-            return self._clear(
-                self.entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, quiet=True
+        if _held_or_moved(self.spec, begun):
+            return False
+        ok = self._clear(
+            self.entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, quiet=True
+        )
+        if _held_or_moved(self.spec, begun):
+            self._mark(
+                self.entry,
+                self.spec,
+                self.server_dir,
+                wsl_distro=self.wsl_distro,
+                start_database=False,
+                quiet=True,
             )
+            return False
+        return ok
 
 
 def keeper_for(

@@ -12,6 +12,7 @@ replaces holds the realm offline on purpose, and never before the world said rea
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -455,32 +456,161 @@ def test_a_stop_that_begins_while_the_flags_are_read_is_not_undone(rig: Rig) -> 
     assert writes.names == []
 
 
-def test_the_clear_and_a_stops_hold_never_cross(rig: Rig) -> None:
-    """A Stop that starts while the tick is clearing waits for the clear, then marks."""
+def test_a_stop_that_marks_while_the_clear_runs_gets_its_mark_back(rig: Rig) -> None:
+    """The Stop's hold began and its mark landed while the clear was in Docker (cold review)."""
     watch, _world, sql, writes, clock = rig
     watch.tick()
     clock.advance(61)
     sql.flags = 2
-    entered = threading.Event()
-    order: list[str] = []
+    hold = realm_flag.deliberately_offline(SPEC)
 
-    def stop() -> None:
-        with realm_flag.deliberately_offline(SPEC):
-            order.append("stop holds")
+    def stop_marks_during_the_clear() -> None:
+        hold.__enter__()
+        sql.flags |= 2  # the Stop's own mark, before the clear's UPDATE lands
 
-    stopper = threading.Thread(target=stop)
+    writes.during_clear = stop_marks_during_the_clear
+    try:
+        watch.tick()
+    finally:
+        hold.__exit__(None, None, None)
+    assert writes.names == ["clear", "mark"]
+    assert writes.calls[1][1]["start_database"] is False
+    assert sql.flags & 2
 
-    def during_clear() -> None:
-        stopper.start()
-        entered.set()
-        stopper.join(timeout=0.3)
-        order.append("clear ran")
 
-    writes.during_clear = during_clear
+def test_a_stops_hold_never_waits_for_a_clear_stuck_in_docker(rig: Rig) -> None:
+    """The hold's lock is never held across a Docker call: a wedged Docker blocks no Stop."""
+    watch, _world, sql, writes, clock = rig
     watch.tick()
-    stopper.join(timeout=5)
-    assert entered.is_set()
-    assert order == ["clear ran", "stop holds"]
+    clock.advance(61)
+    sql.flags = 2
+    took: list[float] = []
+
+    def stop_during_the_clear() -> None:
+        def stop() -> None:
+            started = time.monotonic()
+            with realm_flag.deliberately_offline(SPEC):
+                took.append(time.monotonic() - started)
+
+        stopper = threading.Thread(target=stop)
+        stopper.start()
+        stopper.join(timeout=2)
+
+    writes.during_clear = stop_during_the_clear
+    watch.tick()
+    assert took and took[0] < 1.0
+
+
+def test_a_mark_recheck_does_not_clear_under_a_stops_hold(rig: Rig) -> None:
+    """The world says ready right after the mark, but a Stop holds the realm offline."""
+    watch, world, sql, writes, clock = rig
+    world.run, world.log = RUN_B, "Loading maps..."
+    real_mark = writes.mark
+    hold = realm_flag.deliberately_offline(SPEC)
+
+    def ready_and_held(*a: Any, **k: Any) -> bool:
+        world.log = READY_LINE
+        hold.__enter__()
+        return real_mark(*a, **k)
+
+    watch._realm._mark = ready_and_held  # type: ignore[union-attr]
+    try:
+        watch.tick()
+    finally:
+        hold.__exit__(None, None, None)
+    assert writes.names == ["mark"]
+    assert sql.flags & 2
+
+
+# -- a clock that goes backwards (cold review) --------------------------------------------
+
+
+def test_a_failed_mark_is_retried_after_the_clock_went_back(rig: Rig) -> None:
+    watch, world, _sql, writes, clock = rig
+    writes.mark_ok = False
+    world.status = "restarting"
+    watch.tick()
+    clock.advance(-3600)
+    watch.tick()
+    assert writes.names == ["mark", "mark"]
+
+
+def test_a_stuck_bit_is_still_cleared_after_the_clock_went_back(rig: Rig) -> None:
+    watch, _world, sql, writes, clock = rig
+    sql.flags = 2
+    watch.tick()  # ready seen
+    clock.advance(30)
+    watch.tick()
+    clock.advance(-3600)
+    for _ in range(30):  # two and a half minutes on the new clock
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["clear"]
+
+
+def test_a_read_after_the_clock_went_back_is_not_put_off(rig: Rig) -> None:
+    watch, _world, sql, writes, clock = rig
+    watch.tick()
+    clock.advance(61)
+    watch.tick()  # read: clear
+    assert len(sql.reads) == 1
+    sql.flags = 2
+    clock.advance(-3600)
+    for _ in range(14):  # 70 s on the new clock
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["clear"]
+
+
+def test_an_unconfirmed_run_is_asked_again_after_the_clock_went_back(rig: Rig) -> None:
+    watch, world, sql, writes, clock = rig
+    world.log = "Loading maps..."
+    sql.flags = 2
+    for _ in range(14):  # asked at ~65 s: no
+        watch.tick()
+        clock.advance(5)
+    assert world.log_reads == 1
+    world.log = READY_LINE
+    clock.advance(-3600)
+    for _ in range(30):
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["clear"]
+
+
+# -- the keeper's log read is bounded (cold review) ---------------------------------------
+
+
+def test_the_keepers_ready_read_is_bounded_to_the_runs_first_half_hour(tmp_path: Path) -> None:
+    world, sql, clock = World(), Sql(flags=2), Clock()
+    writes = Writes(sql)
+    windows: list[tuple[str, str]] = []
+
+    def bounded(_container: str, since: str, until: str) -> str:
+        windows.append((since, until))
+        return READY_LINE
+
+    keeper = realm_flag.Keeper(
+        TORTOISE, SPEC, tmp_path, sql, now=clock, mark=writes.mark, clear=writes.clear
+    )
+    watch = dashboard.Dashboard(
+        SPEC,
+        TORTOISE,
+        tmp_path,
+        sql=sql,
+        state_of=world.state,
+        daemon_of=lambda: "daemon",
+        log_of=lambda _c, _s: "",  # the tab's own read: an hour-old run is not read at all
+        login_log_of=lambda _c, _s: "",
+        ready_log_of=bounded,
+        now=clock,
+        realm=keeper,
+    )
+    for _ in range(14):
+        watch.tick()
+        clock.advance(5)
+    assert windows == [(RUN_A, "2026-10-08T11:30:00+00:00")]
+    assert writes.names == ["clear"]
 
 
 def test_the_tortoise_stop_holds_the_realm_offline_while_it_runs(
@@ -564,3 +694,20 @@ def test_the_keeper_logs_once_per_spell_not_per_tick(
     assert writes.names[-2:] == ["mark", "mark"]
     said = [r for r in caplog.records if r.levelno >= 20]
     assert len(said) == 1, [r.getMessage() for r in said]
+
+
+def test_a_bounded_log_read_asks_docker_for_until(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_docker(argv: list[str], *_a: Any, **_k: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=READY_LINE, stderr="")
+
+    monkeypatch.setattr(docker, "_docker", fake_docker)
+    out = docker._logs(
+        SPEC.world, this_run_only=True, since=RUN_A, until="2026-10-08T11:30:00+00:00"
+    )
+    assert out == READY_LINE
+    assert seen == [["logs", "--since", RUN_A, "--until", "2026-10-08T11:30:00+00:00", SPEC.world]]

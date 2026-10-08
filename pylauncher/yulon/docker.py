@@ -4720,7 +4720,12 @@ def started_at(container: str, *, wsl_distro: str | None = None) -> str:
 
 
 def _logs(
-    container: str, *, this_run_only: bool = False, since: str = "", wsl_distro: str | None = None
+    container: str,
+    *,
+    this_run_only: bool = False,
+    since: str = "",
+    until: str = "",
+    wsl_distro: str | None = None,
 ) -> str:
     """Return a container's logs, or `""` if they can't be read.
 
@@ -4736,8 +4741,9 @@ def _logs(
     it was mid-startup, and the stop that followed killed it there (exit 137).
 
     `this_run_only` scopes the read to the current run by asking when that run
-    started. `--tail` is not an alternative: the marker is printed once, so a
-    tail window either misses it or slides past it.
+    started; `until` ends it there (`docker logs --until`). `--tail` is not an
+    alternative: the marker is printed once, so a tail window either misses it or
+    slides past it.
     """
     argv = ["logs"]
     if this_run_only:
@@ -4746,6 +4752,9 @@ def _logs(
         since = since or started_at(container, wsl_distro=wsl_distro)
         if since:
             argv += ["--since", since]
+    if until:
+        # T581: a bounded read, for a marker printed early in a run that may be days long.
+        argv += ["--until", until]
     proc = _docker([*argv, container], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
