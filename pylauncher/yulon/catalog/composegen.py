@@ -1851,32 +1851,6 @@ def dotenv_value(server_dir: Path, key: str) -> str | None:
     return found
 
 
-WORLD_PORT_VAR = "DOCKER_WORLD_EXTERNAL_PORT"
-"""The `.env` key the AzerothCore base file publishes the world port through (T565)."""
-
-
-def published_world_port(entry: CatalogEntry, server_dir: Path) -> int:
-    """The host port the world server is published on: `.env`'s override, else the catalog's.
-
-    The base file binds `${DOCKER_WORLD_EXTERNAL_PORT:-<catalog port>}:8085`, so a
-    value a player put in `.env` is the port a client must be handed. A value
-    compose could not bind (empty, not a number, outside 1-65535) is ignored
-    here as it would be refused there; `ip:port` is read as its port, and a trailing
-    ` # comment` is not part of the value, as compose reads it.
-    """
-    said = dotenv_value(server_dir, WORLD_PORT_VAR)
-    if said:
-        if said[0] in "\"'":
-            quote = said[0]
-            said = said[1:].split(quote, 1)[0]  # what is inside the quotes; a comment after is out
-        else:
-            said = re.split(r"\s#", said, maxsplit=1)[0]  # an unquoted ` # comment` is not value
-        digits = said.rsplit(":", 1)[-1].strip()
-        if digits.isascii() and digits.isdigit() and 0 < int(digits) < 65536:
-            return int(digits)
-    return entry.ports.world
-
-
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:
     """Merge `additions` into `<server_dir>/.env`, atomically.
 

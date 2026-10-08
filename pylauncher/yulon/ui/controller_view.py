@@ -3025,21 +3025,14 @@ def _realm_port_keeper(
     The authserver hands clients the row's port, and prints it once at its
     start in the line the ready wait reads. An entry on 8085 gets no step, so
     WotLK starts exactly as it did.
-
-    The port is the one the server is published on at THIS start: a
-    `DOCKER_WORLD_EXTERNAL_PORT` in the server's `.env` outranks the catalog's
-    in compose, so it is what the row must say (T565).
     """
     port = entry.ports.world
     if port == azerothcore.SEEDED_WORLD_PORT:
         return None
+    statement = networking.realm_port_sql(entry)
     read_back = networking.realm_port_query(entry)
 
     def keep() -> str | None:
-        # Every start, for a `.env` edited since the last: compose publishes the
-        # override, so the row must hand clients the same number (T565).
-        port = composegen.published_world_port(entry, server_dir)
-        statement = networking.realm_port_sql(entry, port)
         try:
             docker.start_database(
                 spec,
