@@ -160,7 +160,62 @@ def test_a_refused_stop_starts_nothing_and_says_why_as_stop_does(
     view.restart_from_server_tab()
 
     assert "up" not in _compose_verbs(ps.calls)
-    assert failures and view.problem_label.text()
+    assert "stop" not in _compose_verbs(ps.calls)
+    # Stop's own words (the ownership refusal), not a Start's, and no Start offer.
+    with pytest.raises(Exception) as stop_refusal:  # noqa: PT011 - any StartRefused-like refusal
+        view.services.controller.stop()
+    said = str(stop_refusal.value)
+    assert "someone-elses-project" in said
+    assert view.problem_label.text() == said
+    assert failures and said in failures[0]
+    assert not view.stop_other_button.isVisibleTo(view)
+    assert not view.repair_database_button.isVisibleTo(view)
+    assert view.realm_badge.status not in ("stopping", "starting")
+
+
+def test_a_stop_that_breaks_says_the_server_did_not_stop(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Stop half's failure is said in Stop's words, not "The server did not start"."""
+    from yulon.controller import Controller
+    from yulon.ui.controller_view import STOP_FAILED_BROKE
+
+    def broke(_self: Controller) -> bool:
+        raise RuntimeError("compose exploded")
+
+    monkeypatch.setattr(Controller, "stop", broke)
+    view = _view(ps, tmp_path)
+    ps.names = ALL_UP
+    view.refresh_status()
+
+    view.restart_from_server_tab()
+
+    assert view.problem_label.text() == STOP_FAILED_BROKE
+    assert "compose exploded" in view.problem_details.text()
+    assert "up" not in _compose_verbs(ps.calls)
+
+
+def test_a_missing_database_refuses_before_the_stop_and_offers_the_repair(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T377: refused before the Stop, so the world stays up; Start's own repair offer shows."""
+    from yulon import database_presence
+    from yulon.controller import Controller, DatabaseMissing
+
+    def missing(_self: Controller) -> None:
+        raise DatabaseMissing(database_presence.MISSING)
+
+    monkeypatch.setattr(Controller, "refuse_a_missing_database", missing)
+    view = _view(ps, tmp_path)
+    view.services.repair_database = lambda _cancel=None: iter(())
+    ps.names = ALL_UP
+    view.refresh_status()
+
+    view.restart_from_server_tab()
+
+    assert "stop" not in _compose_verbs(ps.calls), "the world was stopped before the refusal"
+    assert view.problem_label.text().startswith(database_presence.MISSING)
+    assert view.repair_database_button.isVisibleTo(view)
     assert view.realm_badge.status not in ("stopping", "starting")
 
 
