@@ -1901,7 +1901,7 @@ class SqlBackup(Protocol):
     nothing sent.
 
     `named()` is asked by Remove, which keeps an item's database changes: the
-    sentence naming the backup that undoes them, or None.
+    sentence naming the backup taken before them, or None.
     """
 
     def before(self, manifest: Manifest, dbs: tuple[Db, ...]) -> str | None: ...
@@ -2397,7 +2397,7 @@ class _Log:
     kept_folders: list[str] = field(default_factory=list)
     """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
     kept_database: list[str] = field(default_factory=list)
-    """A Remove's line naming the backup that undoes the database changes it kept (T596)."""
+    """A Remove's line naming the backup taken before the database changes it kept (T596)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -5818,7 +5818,10 @@ class Applier:
                     return set()
                 rows = reader.query(
                     db,
-                    f"SELECT Hash FROM `{MIGRATIONS_TABLE}` WHERE Module = {_sql_string(module)}",
+                    # BINARY: the column is `utf8_general_ci`, and the updater's
+                    # `Module:Hash` key is compared case-sensitively (Codex review).
+                    f"SELECT Hash FROM `{MIGRATIONS_TABLE}` "
+                    f"WHERE BINARY Module = {_sql_string(module)}",
                 )
                 return {line.strip() for line in rows.splitlines() if line.strip()}
             except Exception as exc:  # noqa: BLE001 - every failure is "could not read"

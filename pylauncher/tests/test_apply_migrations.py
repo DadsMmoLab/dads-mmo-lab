@@ -64,8 +64,12 @@ class _Ledger:
             return "1\n" if db in self.tables else "0\n"
         found = re.search(r"Module = '([^']*)'", statement)
         assert found, statement
+        # The real column is `utf8_general_ci`: case-blind unless the query says BINARY.
+        exact = "BINARY Module" in statement
         return "".join(
-            f"{digest}\n" for module, digest in self.applied.get(db, set()) if module == found[1]
+            f"{digest}\n"
+            for module, digest in self.applied.get(db, set())
+            if (module == found[1] if exact else module.lower() == found[1].lower())
         )
 
     def run_file(self, db: Db, path: Path) -> None:
@@ -174,6 +178,7 @@ def test_a_file_the_ledger_already_holds_is_not_sent_again(tmp_path: Path) -> No
         pytest.param({("", "HASH")}, id="same-hash-under-no-module"),
         pytest.param({(ITEM, "lower")}, id="lower-case-hash"),
         pytest.param({("other-package", "HASH")}, id="another-module"),
+        pytest.param({(ITEM.upper(), "HASH")}, id="the-module-in-another-case"),
     ],
 )
 def test_only_this_modules_exact_upper_case_hash_counts_as_applied(

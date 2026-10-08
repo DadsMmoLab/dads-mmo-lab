@@ -364,7 +364,10 @@ def test_an_outside_package_installs_records_backs_up_and_is_listed(tmp_path: Pa
 
     removed = applier.remove(listed["bot-gear-pack"])
     assert any(
-        "20261009_210000_before-bot-gear-pack_tw_char.sql" in line and "restoring it" in line
+        "20261009_210000_before-bot-gear-pack_tw_char.sql" in line
+        and "restoring it" in line
+        and "undo" not in line
+        and "a table the item added is not in it and stays" in line
         for line in removed.left_behind
     ), removed.left_behind
     assert tortoise_modules.forget(listed["bot-gear-pack"]) is True

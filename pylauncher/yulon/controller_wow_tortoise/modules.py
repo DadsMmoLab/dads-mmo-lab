@@ -242,16 +242,19 @@ class OutsideSqlBackup:
         if not found:
             return (
                 f"no backup taken before its database changes was found in {self._rel(folder)}, "
-                "so Yu'lon cannot name one that undoes them"
+                "so Yu'lon cannot name one taken before them"
             )
         stamp = found[0].name[: len("YYYYmmdd_HHMMSS")]
         first = [p for p in found if p.name.startswith(stamp)]
         later = len({p.name[: len(stamp)] for p in found}) - 1
         more = f" ({later} later backup(s) were taken before later installs of it)" if later else ""
+        # Not "undoes": a restore replaces the tables a dump holds and leaves the
+        # rest (`maintenance.restore()`, a merge), so a table the item added stays.
         return (
             f"the backup taken before its first database change, "
-            f"{', '.join(self._rel(p) for p in first)}: restoring it undoes those changes, "
-            f"and everything played since{more}"
+            f"{', '.join(self._rel(p) for p in first)}: restoring it puts the tables in it back "
+            f"as they were then, losing what was played since; a table the item added is not "
+            f"in it and stays{more}"
         )
 
     def _rel(self, path: Path) -> str:
