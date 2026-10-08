@@ -1514,7 +1514,8 @@ def _unbound_watch(
 ) -> dashboard.Dashboard:
     """An Unbound dashboard on a run `age` old; each tick reads the next of `runs`.
 
-    `log_box[0]`, when given, is the log and can be changed between ticks.
+    `log_box[0]`, when given, is the log and can be changed between ticks; with more than one
+    entry each read of the log takes the next, the last one staying.
     """
     server = _install(tmp_path)
     if conf is not None:
@@ -1529,7 +1530,9 @@ def _unbound_watch(
         sql=sql,
         state_of=lambda _c: _running(stamps[0] if len(stamps) == 1 else stamps.pop(0)),
         daemon_of=lambda: "bridge-before",
-        log_of=lambda _c, _since: log_box[0] if log_box else log,
+        log_of=lambda _c, _since: (
+            (log_box.pop(0) if len(log_box) > 1 else log_box[0]) if log_box else log
+        ),
         now=lambda: NOW,
     )
 
@@ -1710,3 +1713,22 @@ def test_a_bad_reading_is_kept_once_the_world_has_said_ready(tmp_path: Path) -> 
     assert first.module_line == second.module_line
     assert first.module_line.startswith("Unbound tables missing:")
     assert sql.tables_asked == 1
+
+
+def test_readiness_is_judged_from_the_log_that_the_reading_was_made_from(tmp_path: Path) -> None:
+    """Codex: a second log read for readiness let a later snapshot vouch for an earlier one.
+
+    The first read has no module lines and no ready line; a read made right after has both.
+    The bad reading came from the first, which says nothing about readiness, so it is not kept.
+    """
+    sql = _UnboundSql()
+    early = FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")
+    watch = _unbound_watch(
+        tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=[early, UNBOUND_LOG]
+    )
+
+    first = watch.tick()
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound did not load:")
+    assert second.module_line == GOOD_LINE

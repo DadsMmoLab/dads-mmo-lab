@@ -457,8 +457,9 @@ class Dashboard:
             # "Ready" can come from uptime alone (SETTLED_AFTER), before the module's lines or
             # tables are all there, and a verdict kept from then would never heal. A good one
             # holds the module's own lines, so it cannot be early. No ready marker to look for
-            # at all (`_banner is None`) leaves nothing to wait for.
-            if got.good or self._banner is None or self._saw_ready(run):
+            # at all (`_banner is None`) leaves nothing to wait for. Readiness is judged from the
+            # very log the reading was made from, never from a second read of it.
+            if got.good or self._banner is None or self._banner.search(log):
                 self._health_run, self._health_got, self._health_running = run, got, running
             else:
                 return module_health.sentence(got)  # a bad one never says a switch
