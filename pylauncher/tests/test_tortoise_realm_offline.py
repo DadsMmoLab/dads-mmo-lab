@@ -19,11 +19,19 @@ from tests.test_families_cmangos import context as cm_context
 from tests.test_families_cmangos import engine as cm_engine
 from yulon import docker, realm_flag
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.installer import InstallStopped
 from yulon.controller_wow_tortoise import botdash, game
 from yulon.controller_wow_tortoise.controller import TortoiseController
 
 TORTOISE = load_catalog().get("wow-tortoise")
 STATEMENT = "UPDATE tw_logon.realmlist SET realmflags = realmflags | 2 WHERE id=1;"
+
+
+ONLINE_STATEMENT = "UPDATE tw_logon.realmlist SET realmflags = realmflags & ~2 WHERE id=1;"
+
+
+def test_the_tortoise_online_statement_clears_only_the_offline_bit() -> None:
+    assert realm_flag.online_statement(TORTOISE) == ONLINE_STATEMENT
 
 
 def test_the_tortoise_statement_sets_the_offline_bit_on_its_realm_row() -> None:
@@ -54,12 +62,21 @@ class Docker:
     def __init__(self, *, db_up: bool = True, sql_fails: bool = False) -> None:
         self.events: list[str] = []
         self.db_up = db_up
+        self.world_up = True
         self.sql_fails = sql_fails
+        self.stop_fails = False
         self.statements: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         spec = game.entry().container_spec()
-        monkeypatch.setattr(docker, "status", lambda **_k: [spec.db] if self.db_up else [])
+        monkeypatch.setattr(
+            docker,
+            "status",
+            lambda **_k: [
+                *([spec.db] if self.db_up else []),
+                *([spec.world] if self.world_up else []),
+            ],
+        )
 
         def start_database(*_a: Any, **_k: Any) -> bool:
             self.events.append("database")
@@ -81,6 +98,8 @@ class Docker:
 
         def stop_staged(*_a: Any, **_k: Any) -> bool:
             self.events.append("stop")
+            if self.stop_fails:
+                raise docker.StopAbandoned("the Stop was given up")
             return True
 
         monkeypatch.setattr(docker, "start_database", start_database)
@@ -152,6 +171,28 @@ def test_a_stop_with_the_database_down_does_not_start_it_to_mark_the_realm(
     assert fake.events == ["stop"]
 
 
+def test_a_stop_given_up_with_the_world_still_running_takes_the_offline_bit_off_again(
+    tortoise: tuple[TortoiseController, Docker],
+) -> None:
+    controller, fake = tortoise
+    fake.stop_fails = True
+    with pytest.raises(docker.StopAbandoned):
+        controller.stop()
+    assert fake.statements == [STATEMENT, ONLINE_STATEMENT]
+    assert fake.events == ["sql", "stop", "sql"]
+
+
+def test_a_stop_that_failed_with_the_world_gone_leaves_the_bit_set(
+    tortoise: tuple[TortoiseController, Docker],
+) -> None:
+    controller, fake = tortoise
+    fake.stop_fails = True
+    fake.world_up = False
+    with pytest.raises(docker.StopAbandoned):
+        controller.stop()
+    assert fake.statements == [STATEMENT]
+
+
 # -- the install's own start and a rebuild's recreate ---------------------------------
 
 
@@ -185,6 +226,33 @@ def test_a_rebuilds_recreate_marks_the_realm_offline_before_the_recreate(tmp_pat
         entry=TORTOISE,
         docker_ready=lambda: True,
         mark_realm_offline=marks.mark,
+        recreate=marks.recreate,
+    )
+    list(eng.stage_recreate(cm_context(tmp_path)))
+    assert marks.events == ["mark", "recreate"]
+
+
+def test_a_rebuilds_replace_that_gave_up_takes_the_offline_bit_off_again(tmp_path: Path) -> None:
+    rec = Recorder()
+
+    def given_up(spec: docker.ContainerSpec, server_dir: Path, **_k: Any) -> bool:
+        raise docker.StopAbandoned("cancelled while the world was loading")
+
+    eng = cm_engine(rec, entry=TORTOISE, docker_ready=lambda: True, recreate=given_up)
+    with pytest.raises(InstallStopped):
+        list(eng.stage_recreate(cm_context(tmp_path)))
+    assert rec.realm_marks == [TORTOISE.id]
+    assert rec.realm_clears == [TORTOISE.id]
+
+
+def test_a_rebuilds_replace_that_worked_does_not_clear_it(tmp_path: Path) -> None:
+    marks = Marks()
+    eng = cm_engine(
+        Recorder(),
+        entry=TORTOISE,
+        docker_ready=lambda: True,
+        mark_realm_offline=marks.mark,
+        clear_realm_offline=lambda *_a: marks.events.append("clear"),
         recreate=marks.recreate,
     )
     list(eng.stage_recreate(cm_context(tmp_path)))

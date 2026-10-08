@@ -67,15 +67,32 @@ class TortoiseController(Controller):
             start_database=start_database,
         )
 
+    def _put_the_realm_back(self) -> None:
+        """Take the offline bit off a realm whose world is still running; never raises."""
+        try:
+            entry = game.entry()
+        except game.CatalogFactsError:
+            return
+        realm_flag.clear_offline_if_world_up(
+            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro
+        )
+
     def stop(self) -> bool:
         """Mark the realm offline while the database is still up, then stop (T577).
 
         Only when the database is already running: a Stop must not start one to say the
         realm is closing, and the Start that follows marks it again before its world starts.
         """
-        if self.wsl_distro is None or not wsl.known_stopped(self.wsl_distro):
-            self._mark_the_realm_offline(start_database=False)
-        return super().stop()
+        if self.wsl_distro is not None and wsl.known_stopped(self.wsl_distro):
+            return super().stop()
+        self._mark_the_realm_offline(start_database=False)
+        try:
+            return super().stop()
+        except Exception:
+            # A Stop given up (a Cancel while the world loads or saves) or refused leaves the
+            # world running, and only a start clears the bit: take it off again.
+            self._put_the_realm_back()
+            raise
 
     def _before_the_servers_start(self) -> None:
         """Mark the realm offline (T577), then bring the bot dashboard up when it is on (T127).
