@@ -2520,7 +2520,8 @@
               "name": "Unbound",
               "log_markers": [
                 "[UNBOUND] Prereq map built.",
-                "[UNBOUND] Character cleanup covers:"
+                "[UNBOUND] free reagents:",
+                "[UNBOUND] instant summons:"
               ],
               "count_label": "Mentor",
               "count_table": "creature"

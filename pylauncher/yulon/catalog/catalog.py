@@ -313,7 +313,10 @@ class ModuleHealth(_Strict):
     name: str = Field(min_length=1, description="The module as the sentence names it.")
     log_markers: tuple[str, ...] = Field(
         min_length=1,
-        description="Lines the module prints to the world's log when it loads, matched as text.",
+        description=(
+            "Lines the module prints to the world's log at EVERY start (not only when some "
+            "table has rows), matched as text."
+        ),
     )
     count_label: str = Field(default="", description="What `count_table` counts: `Mentor`.")
     count_table: str = Field(

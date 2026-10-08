@@ -21,7 +21,9 @@ BLOCK = UNBOUND.install.native.azerothcore  # type: ignore[union-attr]
 HEALTH = BLOCK.health
 CHECKS = BLOCK.sql_checks
 SCHEMAS = UNBOUND.databases.schema_map()
-MARKERS = "[UNBOUND] Prereq map built.\n[UNBOUND] Character cleanup covers: characters.\n"
+MARKERS = (
+    "[UNBOUND] free reagents: off\n[UNBOUND] instant summons: off\n[UNBOUND] Prereq map built.\n"
+)
 OFF = (
     Switch("free reagents", running=False, conf=False),
     Switch("instant summons", running=False, conf=False),
@@ -75,7 +77,8 @@ def test_the_unbound_entry_carries_its_health_block_and_wotlk_has_none() -> None
     assert HEALTH.name == "Unbound"
     assert HEALTH.log_markers == (
         "[UNBOUND] Prereq map built.",
-        "[UNBOUND] Character cleanup covers:",
+        "[UNBOUND] free reagents:",
+        "[UNBOUND] instant summons:",
     )
     assert (HEALTH.count_label, HEALTH.count_table) == ("Mentor", "creature")
     assert load_catalog().get("wow-wotlk").install.native.azerothcore.health is None  # type: ignore[union-attr]
@@ -160,8 +163,42 @@ def test_a_short_mentor_count_says_how_many_of_how_many() -> None:
     )
 
 
+# What e8022b44 prints on the very first start of a fresh install: the characters table is
+# empty, so UnboundSystem.cpp:270 skips the orphan sweep and PresentGuidKeyedTables() (the
+# "Character cleanup covers" line, :89-101) is never called.
+FIRST_START_LOG = (
+    "[UNBOUND] free reagents: off\n"
+    "[UNBOUND] instant summons: off\n"
+    "[UNBOUND] Orphan sweep skipped: the characters table is empty, so every Unbound row "
+    "would look orphaned.\n"
+    "[UNBOUND] Prereq map built.\n"
+    "[dml_autobuff] off (Unbound.AutoBuff = 0)\n"
+    "AzerothCore rev. 1 ready...\n"
+)
+
+
+def test_a_first_start_with_an_empty_characters_table_still_reads_loaded() -> None:
+    """Cold review: the cleanup line is not printed on every start, so it is no proof of load."""
+    assert _line(log=FIRST_START_LOG, switches=OFF).startswith("Unbound loaded:")
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_the_markers_are_lines_the_module_prints_at_every_start(on: bool) -> None:
+    """Each marker is in a log whether the switches are on or off, and none is the cleanup line."""
+    log = FIRST_START_LOG
+    if on:
+        log = log.replace(
+            "free reagents: off", "free reagents: on (stripped casting reagents from 41 spells)"
+        )
+        log = log.replace(
+            "instant summons: off", "instant summons: on (12 summon spells now instant)"
+        )
+    assert all(marker in log for marker in HEALTH.log_markers)
+    assert not any("cleanup" in marker.lower() for marker in HEALTH.log_markers)
+
+
 def test_a_marker_missing_from_this_runs_log_says_unbound_did_not_load() -> None:
-    text = _line(log="[UNBOUND] Character cleanup covers: characters.\nready...\n")
+    text = _line(log="[UNBOUND] free reagents: off\n[UNBOUND] instant summons: off\nready...\n")
     assert text == (
         'Unbound did not load: the world log has no "[UNBOUND] Prereq map built." line '
         "this run. Open the console log"

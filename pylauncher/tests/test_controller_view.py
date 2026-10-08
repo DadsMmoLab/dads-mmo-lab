@@ -26214,12 +26214,15 @@ def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dr
     old_res = addons / "multiclass-resources" / "multiclass-resources.lua"
     old_art = addons / "multiclass-talents-ui" / "Art" / "UI-Frame.blp"
     old_art.write_bytes(b"BLP2 the player's edit")  # a dropped file the player changed
+    old_res.write_bytes(b"return 'mine'\r\n")  # a file the new pack still ships, edited (§1.3.5)
+    old_toc = addons / "multiclass-resources" / "multiclass-resources.toc"  # dropped, untouched
     own = addons / "Questie" / "Questie.toc"
     own.parent.mkdir()
     own.write_bytes(b"## Title: Questie\n")
     shutil.rmtree(tmp_path / UNBOUND_MODULE)  # the module moves: one file changed, one dropped
     newer = dict(FOLDER_ADDONS)
     del newer["multiclass-talents-ui/Art/UI-Frame.blp"]
+    del newer["multiclass-resources/multiclass-resources.toc"]
     newer["multiclass-resources/multiclass-resources.lua"] = b"return 2\r\n"
     _lay_folder_module(tmp_path, newer, module=UNBOUND_MODULE)
     steps.clear()
@@ -26227,12 +26230,20 @@ def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dr
     view.play()
 
     assert steps == ["install unbound-addons", "config", "launch"]
-    assert old_res.read_bytes() == b"return 2\r\n", "the changed file was not replaced"
+    assert old_res.read_bytes() == b"return 2\r\n", "the edited file the pack still ships stays"
+    assert not old_toc.exists(), "a dropped file the player never touched was kept"
     assert old_art.read_bytes() == b"BLP2 the player's edit", "an edited file was removed"
     assert own.read_bytes() == b"## Title: Questie\n"
     assert installed[-1]["left_behind"] == [
         "Interface/AddOns/multiclass-talents-ui/Art/UI-Frame.blp"
     ]
+    # The player is told, in the note Play ends with: only the edited dropped file is named.
+    said = view.play_label.text()
+    assert (
+        "Unbound addons: left alone because you changed them: "
+        "Interface/AddOns/multiclass-talents-ui/Art/UI-Frame.blp." in said
+    )
+    assert "multiclass-resources.toc" not in said, "a file that was removed is not 'left alone'"
 
 
 def test_a_folder_pack_is_no_download_in_the_make_dialog(

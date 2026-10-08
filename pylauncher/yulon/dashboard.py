@@ -448,12 +448,20 @@ class Dashboard:
             )
             if got.unreadable:
                 return module_health.sentence(got)
-            self._health_run, self._health_got = run, got
-            self._health_running = (
+            running = (
                 unbound_settings.running_state(log)
                 if unbound_settings.shown_for(self.entry)
                 else None
             )
+            # A bad reading is kept only once the world's own ready line is in this run's log.
+            # "Ready" can come from uptime alone (SETTLED_AFTER), before the module's lines or
+            # tables are all there, and a verdict kept from then would never heal. A good one
+            # holds the module's own lines, so it cannot be early. No ready marker to look for
+            # at all (`_banner is None`) leaves nothing to wait for.
+            if got.good or self._banner is None or self._saw_ready(run):
+                self._health_run, self._health_got, self._health_running = run, got, running
+            else:
+                return module_health.sentence(got)  # a bad one never says a switch
         got = self._health_got
         if self._health_running is not None:
             got = replace(

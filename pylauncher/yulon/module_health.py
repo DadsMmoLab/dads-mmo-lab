@@ -54,6 +54,14 @@ class HealthReading:
     """`(label, found, wanted)` for the counted table, if the block counts one."""
     switches: tuple[Switch, ...] = ()
 
+    @property
+    def good(self) -> bool:
+        """Nothing is missing, short or unprinted: the reading says the module loaded."""
+        placed_short = self.placed is not None and self.placed[1] < self.placed[2]
+        return not (
+            self.unreadable or self.missing or self.short or self.absent_marker or placed_short
+        )
+
 
 def _asker(sql: dbreads.SqlReader, schemas: dict[Db, str]) -> scriptdeploy.SqlAsk:
     """`read_checks`'s `(schema, statement)` question, over the dashboard's `(db role, ...)` one.

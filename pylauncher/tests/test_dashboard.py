@@ -1468,7 +1468,8 @@ UNBOUND = catalog_module.load_catalog().get("wow-unbound")
 UNBOUND_LOG = (
     "[UNBOUND] free reagents: off\n"
     "[UNBOUND] instant summons: off\n"
-    "[UNBOUND] Character cleanup covers: characters.\n"
+    "[UNBOUND] Orphan sweep skipped: the characters table is empty, so every Unbound row "
+    "would look orphaned.\n"
     "[UNBOUND] Prereq map built.\n"
     "[dml_autobuff] off (Unbound.AutoBuff = 0)\n"
     "AzerothCore rev. 1 ready...\n"
@@ -1508,14 +1509,19 @@ def _unbound_watch(
     runs: list[str] | None = None,
     log: str = UNBOUND_LOG,
     conf: str | None = CONF_OFF,
+    age: timedelta = timedelta(minutes=3),
+    log_box: list[str] | None = None,
 ) -> dashboard.Dashboard:
-    """An Unbound dashboard on a run three minutes old; each tick reads the next of `runs`."""
+    """An Unbound dashboard on a run `age` old; each tick reads the next of `runs`.
+
+    `log_box[0]`, when given, is the log and can be changed between ticks.
+    """
     server = _install(tmp_path)
     if conf is not None:
         file = server / "env/dist/etc/modules/mod_unbound.conf"
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(conf, encoding="utf-8")
-    stamps = list(runs or [_stamp(NOW - timedelta(minutes=3))])
+    stamps = list(runs or [_stamp(NOW - age)])
     return dashboard.Dashboard(
         UNBOUND.container_spec(),
         UNBOUND,
@@ -1523,7 +1529,7 @@ def _unbound_watch(
         sql=sql,
         state_of=lambda _c: _running(stamps[0] if len(stamps) == 1 else stamps.pop(0)),
         daemon_of=lambda: "bridge-before",
-        log_of=lambda _c, _since: log,
+        log_of=lambda _c, _since: log_box[0] if log_box else log,
         now=lambda: NOW,
     )
 
@@ -1586,13 +1592,13 @@ def test_a_world_that_has_not_said_ready_is_not_asked_about_its_module(tmp_path:
 def test_a_switch_the_log_never_said_reads_not_said_and_a_changed_file_says_when(
     tmp_path: Path,
 ) -> None:
-    log = UNBOUND_LOG.replace("[UNBOUND] instant summons: off\n", "")
+    log = UNBOUND_LOG.replace("[dml_autobuff] off (Unbound.AutoBuff = 0)\n", "")
     conf = CONF_OFF.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1")
 
     line = _unbound_watch(tmp_path, _UnboundSql(), log=log, conf=conf).tick().module_line
 
     assert "free reagents off (on at the next start)" in line
-    assert "instant summons not said" in line and "instant summons off" not in line
+    assert "#buffs not said" in line and "#buffs off" not in line
 
 
 def test_missing_tables_reach_the_line_with_no_traceback(tmp_path: Path) -> None:
@@ -1662,3 +1668,45 @@ def test_a_log_that_stays_unreadable_never_asks_the_database(tmp_path: Path) -> 
 
     assert all(line.startswith("Unbound could not be checked:") for line in lines)
     assert "log" in lines[0] and sql.tables_asked == 0
+
+
+FIRST_LOG_LINES = UNBOUND_LOG.replace("AzerothCore rev. 1 ready...\n", "")
+
+
+def test_a_first_start_with_an_empty_characters_table_reads_loaded_on_the_server_tab(
+    tmp_path: Path,
+) -> None:
+    """Cold review: no 'Character cleanup covers' line is printed there, and it was required."""
+    assert "Character cleanup" not in UNBOUND_LOG
+    assert _unbound_watch(tmp_path, _UnboundSql()).tick().module_line == GOOD_LINE
+
+
+def test_a_bad_reading_is_not_kept_while_ready_came_from_uptime_alone(tmp_path: Path) -> None:
+    """Cold review: past SETTLED_AFTER the header says ready with no 'ready...' line yet.
+
+    The module's own lines can still be on their way, so a 'did not load' read then must be
+    asked again, and the sentence heals when the log catches up.
+    """
+    sql = _UnboundSql()
+    box = [FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")]
+    watch = _unbound_watch(tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=box)
+
+    early = watch.tick()
+    box[0] = UNBOUND_LOG
+    healed = watch.tick()
+
+    assert early.ready and early.module_line.startswith("Unbound did not load:")
+    assert healed.module_line == GOOD_LINE
+
+
+def test_a_bad_reading_is_kept_once_the_world_has_said_ready(tmp_path: Path) -> None:
+    """The world's own ready line is in the log: the module's state is fixed, ask once."""
+    sql = _UnboundSql()
+    del sql.counts["unbound_milestones"]
+    watch = _unbound_watch(tmp_path, sql)
+
+    first, second = watch.tick(), watch.tick()
+
+    assert first.module_line == second.module_line
+    assert first.module_line.startswith("Unbound tables missing:")
+    assert sql.tables_asked == 1
