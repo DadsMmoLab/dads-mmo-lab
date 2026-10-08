@@ -361,26 +361,37 @@ end
 -- Individual spell purchase helpers
 -- ============================================================
 
+-- The ONE place that decides whether a catalog spell is buyable right now.
+-- Both the browse menu (GetBuyableSpells) and the purchase handler (sender=25)
+-- call it, so a gossip selection forged outside the menu is refused for exactly
+-- the reasons the menu hides the entry.
+-- Returns nil when the player may buy it, else a refusal:
+--   "known"            the player already has the spell
+--   "level", reqLevel  the character is below the catalog req_level
+--   "prereq", prereqId the previous rank has not been learned
+local function SpellRefusal(player, classId, spellId, reqLevel)
+    if player:HasSpell(spellId) then return "known" end
+    if player:GetLevel() < reqLevel then return "level", reqLevel end
+    local prereq = PREREQ_MAP[classId] and PREREQ_MAP[classId][spellId] or 0
+    if prereq > 0 and not player:HasSpell(prereq) then return "prereq", prereq end
+    return nil
+end
+
 -- Returns an ordered list of {id, cost} for spells the player can buy
 -- right now: level met, prereq met (or none), not already known.
 local function GetBuyableSpells(player, classId)
-    local level = player:GetLevel()
     local Q = WorldDBQuery(string.format(
-        "SELECT spell_id, gold_cost_copper FROM unbound_class_catalog " ..
-        "WHERE class_id = %d AND req_level <= %d ORDER BY req_level, spell_id",
-        classId, level))
+        "SELECT spell_id, gold_cost_copper, req_level FROM unbound_class_catalog " ..
+        "WHERE class_id = %d ORDER BY req_level, spell_id", classId))
     if not Q then return {} end
 
-    local classPrereqs = PREREQ_MAP[classId] or {}
     local list = {}
     repeat
         local spellId = Q:GetUInt32(0)
         local cost    = Q:GetUInt32(1)
-        if not player:HasSpell(spellId) then
-            local prereq = classPrereqs[spellId] or 0
-            if prereq == 0 or player:HasSpell(prereq) then
-                table.insert(list, { id=spellId, cost=cost })
-            end
+        local reqLvl  = Q:GetUInt32(2)
+        if not SpellRefusal(player, classId, spellId, reqLvl) then
+            table.insert(list, { id=spellId, cost=cost })
         end
     until not Q:NextRow()
     return list
@@ -666,29 +677,35 @@ local function OnGossipSelect(event, player, creature, sender, intid, code, menu
     if sender == 25 then
         local classId, spellId = DecodeClassSpell(intid)
         local Q = WorldDBQuery(string.format(
-            "SELECT gold_cost_copper FROM unbound_class_catalog WHERE class_id = %d AND spell_id = %d",
+            "SELECT gold_cost_copper, req_level FROM unbound_class_catalog WHERE class_id = %d AND spell_id = %d",
             classId, spellId))
         if not Q then
             player:SendBroadcastMessage("Spell not found in catalog.")
             player:GossipComplete()
             return
         end
-        local cost = Q:GetUInt32(0)
+        local cost     = Q:GetUInt32(0)
+        local reqLevel = Q:GetUInt32(1)
 
         if not unlocked[classId] then
             player:SendBroadcastMessage("You have not unlocked that class.")
             player:GossipComplete()
             return
         end
-        if player:HasSpell(spellId) then
+        -- Same check the browse menu filters on (see SpellRefusal).
+        local refusal, detail = SpellRefusal(player, classId, spellId, reqLevel)
+        if refusal == "known" then
             player:SendBroadcastMessage("You already know that ability.")
             ShowBrowsePage(player, creature, classId, 0)
             return
-        end
-        local prereq = PREREQ_MAP[classId] and PREREQ_MAP[classId][spellId] or 0
-        if prereq > 0 and not player:HasSpell(prereq) then
+        elseif refusal == "level" then
             player:SendBroadcastMessage(string.format(
-                "You must learn %s first.", GetSpellDisplayName(prereq)))
+                "You must reach level %d to learn that ability.", detail))
+            ShowBrowsePage(player, creature, classId, 0)
+            return
+        elseif refusal == "prereq" then
+            player:SendBroadcastMessage(string.format(
+                "You must learn %s first.", GetSpellDisplayName(detail)))
             ShowBrowsePage(player, creature, classId, 0)
             return
         end
