@@ -14,10 +14,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
+- Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
 - Updating a TBC or Vanilla server stops before building when the new code needs database changes it cannot apply.
 - Updating a TBC or Vanilla server reloads changed bot tables, replacing what the bots had generated in them.
@@ -41,6 +43,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 
 ### Changed
+- Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 - A stopped install or rebuild says what the Stop left, after **Stopped:**.
 

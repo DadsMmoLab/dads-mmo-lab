@@ -3001,13 +3001,81 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+def _realm_port_keeper(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> Callable[[], str | None] | None:
+    """Before the servers start, the realm row gets this server's world port; None for 8085 (T552).
+
+    The install sets the row before its first `up` (`AzerothCoreInstaller.
+    _realm_port()`), but AzerothCore's importer seeds it with 8085, WotLK's
+    world port, and a repair import runs that importer again; a statement that
+    failed once must be tried again at the next start, not left behind a repair
+    that now refuses (Codex adversarial review, rounds 1 and 2). So the
+    controller asks this once every refusal has passed (`Controller.
+    before_servers`): the port check and the missing-database check (T377) come
+    first, so it never brings up a database Docker lost (Codex review, round
+    2). It starts the database the presence check found, runs the guarded
+    UPDATE, and reads the row back: the start goes ahead only when the row says
+    this server's port (round 3: an UPDATE that matched nothing also exits 0).
+    The authserver hands clients the row's port, and prints it once at its
+    start in the line the ready wait reads. An entry on 8085 gets no step, so
+    WotLK starts exactly as it did.
+    """
+    port = entry.ports.world
+    if port == azerothcore.SEEDED_WORLD_PORT:
+        return None
+    statement = networking.realm_port_sql(entry)
+    read_back = networking.realm_port_query(entry)
+
+    def keep() -> str | None:
+        try:
+            docker.start_database(
+                spec,
+                server_dir,
+                because="the realm could not be given this server's world port",
+                wsl_distro=wsl_distro,
+            )
+            sql.run_statement("auth", statement)
+            said = sql.query("auth", read_back).split()
+        except Exception as exc:  # noqa: BLE001 - any failure refuses the start, worded once
+            why = str(exc)
+        else:
+            if said == [str(port)]:
+                return None
+            why = f"the realm row reads {' '.join(said) or 'nothing'}"
+        return (
+            f"The realm could not be given this server's world port {port} ({why}), so the "
+            "server was not started: its players would be sent to another server's world. "
+            "Press Start again."
+        )
+
+    return keep
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
     client_dir: Path | None,
     wsl_distro: str | None,
 ) -> ControllerServices:
-    """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
+    """AzerothCore: the base `Controller`, the only import gate, the only manifest store.
+
+    Every seam is bound to `entry`'s own containers, never to WotLK's
+    `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
+    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
+    entry that names another tree is refused rather than handed WotLK's.
+    """
+    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
+            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
+            "Nothing was opened."
+        )
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
     settings_mods = _settings_mods(wotlk_modules.store())
@@ -3139,6 +3207,7 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            db_container=spec.db,
         )
         if entry.has_manifests
         else None
@@ -3213,6 +3282,7 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
+            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -3260,7 +3330,7 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
                 )
             )
             if spec.import_service
@@ -4682,6 +4752,30 @@ ARMED_LAST_LINE = "Press it again to go ahead, or Cancel."
 
 SERVER_NOT_RUNNING = "The server is not running."
 SERVER_ALL_RUNNING = "The server is already running."
+
+RESTART_LABEL = "Restart"
+RESTART_TIP = (
+    "Stop the server, saving every character, and start it again in one go. "
+    "Everybody online is disconnected."
+)
+RESTART_STOPPING = "Restarting: stopping…"
+RESTART_STARTING = "Restarting: starting…"
+"""T559: the Server tab's Restart, a player's suggestion, and what the status line
+says while it runs. The badge says the same: STOPPING, then STARTING."""
+
+
+class _StartHalfFailed(Exception):
+    """A Server tab Restart whose Stop was done and whose Start then failed (T559).
+
+    Carries the Start's own exception, so the failure is said as a failed Start
+    (with Start's offers: stop the other server, repair the database) and not as
+    a failed Stop.
+    """
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
 
 NETWORK_NEEDS_PLAN = "Press Show plan first, so you can read what Apply will change."
 NETWORK_PLAN_NOT_READY = "Apply needs an address this plan could not find; the plan says which."
@@ -7421,6 +7515,9 @@ class ControllerView(QWidget):
         # load and never signals one.
         self._stop_anyway = threading.Event()
         self._stop_abandon = threading.Event()
+        # T559: the Server tab Restart's word, from its worker, that the Stop is done.
+        self._restart_relay = LineRelay(self)
+        self._restart_relay.line.connect(self._restart_now_starting)
         self._stop_relay = LineRelay(self)
         self._stop_relay.line.connect(self._stop_notice)
         self.services.controller.stop_control = docker.StopControl(
@@ -7723,6 +7820,10 @@ class ControllerView(QWidget):
         self.stop_button = QPushButton("Stop", tab)
         self.stop_button.setIcon(dadcraft_icon("stop", "#FFB8B8", 14))
         self.stop_button.setProperty("danger", True)
+        # T559: Stop then Start in one press, for a player tinkering with confs.
+        self.restart_button = QPushButton(RESTART_LABEL, tab)
+        self.restart_button.setIcon(dadcraft_icon("restart", COLOR_GOLD_LIGHT, 14))
+        self.restart_button.setToolTip(RESTART_TIP)
         self.refresh_button = QPushButton("Refresh", tab)
         self.refresh_button.setIcon(dadcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
         # Deliberate, per checklist 6.5: nothing removes a container today, and
@@ -7879,6 +7980,7 @@ class ControllerView(QWidget):
             self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
+        self.restart_button.clicked.connect(self.restart_from_server_tab)
         self.refresh_button.clicked.connect(self.recheck)
         self.remove_button.clicked.connect(self.remove_containers)
         self.repair_button.clicked.connect(self.repair_import)
@@ -7929,7 +8031,9 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.world_upkeep_label)
         realm_column.addWidget(_bar(realm, self.reextract_button, self.finish_world_button))
         realm_column.addWidget(
-            _bar(realm, self.start_button, self.stop_button, self.refresh_button)
+            _bar(
+                realm, self.start_button, self.stop_button, self.restart_button, self.refresh_button
+            )
         )
         realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
@@ -8038,6 +8142,7 @@ class ControllerView(QWidget):
             for press in (
                 self.start_button,
                 self.stop_button,
+                self.restart_button,
                 self.refresh_button,
                 self.reinstall_docker_button,
                 self.play_button,
@@ -8926,6 +9031,10 @@ class ControllerView(QWidget):
         set_enabled_why(
             self.stop_button, waiting or (None if status.any_running else SERVER_NOT_RUNNING)
         )
+        # T559: a Restart is a Stop first, so it is live exactly when Stop is.
+        set_enabled_why(
+            self.restart_button, waiting or (None if status.any_running else SERVER_NOT_RUNNING)
+        )
         if self._badge_held is not None and ends_the_hold:
             # Asked after our job ended, so this is the job's own follow-up
             # reading: the hold ends HERE and not when the job does. Falling back
@@ -9320,7 +9429,7 @@ class ControllerView(QWidget):
         # greyed one: a running server's Stop stayed live under that sentence,
         # and pressing it ran a stop that could only fail (PR 291 Linux live test).
         if not self._busy:
-            for press in (self.start_button, self.stop_button):
+            for press in (self.start_button, self.stop_button, self.restart_button):
                 set_enabled_why(press, advice.greyed)
         # The reinstall lives in the banner, so it is offered with it and
         # never switched on inside a banner the hold keeps down.
@@ -9469,7 +9578,7 @@ class ControllerView(QWidget):
             # Start and Stop stay greyed until the next reading says which one
             # the server's state allows; the job they waited for is over. A
             # reason a reading gave them is kept.
-            for press in (self.start_button, self.stop_button):
+            for press in (self.start_button, self.stop_button, self.restart_button):
                 if waited is not None and reason_of(press) == waited:
                     drop_reason(press)
             self.compose_banner_button.setEnabled(True)
@@ -9583,6 +9692,55 @@ class ControllerView(QWidget):
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+
+    @Slot()
+    def restart_from_server_tab(self) -> None:
+        """Stop the server, saving every character, and start it again: one press (T559).
+
+        The Tuning tab's restart (`_do_restart()`), so one job and one lifecycle
+        command; without its question, as Stop has none. Live only while Stop is
+        (the tray's menu can call this after its row was built).
+        """
+        if self._busy or not self.restart_button.isEnabled():
+            return
+        self._disarm_actions()
+        self.problem_label.setText("")
+        self._stop_forced = ""
+        self._stop_forced_details = ""
+        self._set_busy(True, RESTART_LABEL)
+        self.status_label.setText(RESTART_STOPPING)
+        self._hold_badge("stopping")
+        self._run(self._restart_job, self._restart_done, self._restart_failed)
+
+    def _restart_job(self) -> bool:
+        """The worker half: `_do_restart()`, saying when the Stop is done and the Start begins."""
+        return self._do_restart(stopped=lambda: self._restart_relay.emit_line(""))
+
+    @Slot(str)
+    def _restart_now_starting(self, _line: str) -> None:
+        if self._busy_job != RESTART_LABEL:
+            return  # a late word from a job that is over
+        self.status_label.setText(RESTART_STARTING)
+        self._hold_badge("starting")
+
+    @Slot(object)
+    def _restart_done(self, result: object) -> None:
+        # Whatever the Tuning tab was owed a restart for, this restart covered.
+        self._tuning_owed.pop("restart", None)
+        self._refresh_tuning_owed()
+        # `_set_busy(False)` in there leaves a forced stop's warning on the line;
+        # it is said, so it is not carried to the next Stop.
+        self._server_action_done(result)
+        self._stop_forced = self._stop_forced_details = ""
+
+    @Slot(object)
+    def _restart_failed(self, exc: object) -> None:
+        if isinstance(exc, _StartHalfFailed):
+            self._start_failed(exc.cause)
+        elif isinstance(exc, DatabaseMissing):
+            self._start_failed(exc)  # refused before the Stop; Start's offer is the repair
+        else:
+            self._stop_failed(exc)
 
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
@@ -11122,7 +11280,10 @@ class ControllerView(QWidget):
         problem: str | None = None
         try:
             networking.write_ready_to_play_realmlists(
-                choice.target, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                choice.target,
+                PLAY_CLIENT_ADDRESS,
+                self.entry.client.realmlist_file,
+                auth_port=self.entry.ports.auth,
             )
         except OSError as exc:
             problem = str(exc)
@@ -11637,7 +11798,10 @@ class ControllerView(QWidget):
             else:
                 try:
                     networking.write_ready_to_play_realmlists(
-                        play, _realm_address(record), client.realmlist_file
+                        play,
+                        _realm_address(record),
+                        client.realmlist_file,
+                        auth_port=self.entry.ports.auth,
                     )
                 except OSError as exc:
                     raise play_client.PlayClientError(
@@ -11804,6 +11968,7 @@ class ControllerView(QWidget):
                     play,
                     _realm_address(client_packs.read_record(play)),
                     self.entry.client.realmlist_file,
+                    auth_port=self.entry.ports.auth,
                 )
             except OSError as exc:
                 raise play_launch.LaunchRefusal(
@@ -18514,19 +18679,30 @@ class ControllerView(QWidget):
             self._tuning_job_failed,
         )
 
-    def _do_restart(self) -> bool:
+    def _do_restart(self, stopped: Callable[[], None] | None = None) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
         start by hand is a server left down by a control that promised a restart.
 
         And one lifecycle command (`docker.lifecycle()`, T216 review round 3), so a
-        restore cannot take its hold between the two and leave the server stopped."""
+        restore cannot take its hold between the two and leave the server stopped.
+
+        T559: `stopped` is called between the two, on the worker, and the Start's
+        failure comes back as `_StartHalfFailed` when it is given, so the Server
+        tab can say which half failed."""
         controller = self.services.controller
         # T179, T377: before the stop, so a refusal leaves it running.
         controller.refuse_before_a_stop()
         with docker.lifecycle(controller.server_dir):
-            stopped = controller.stop()
-            controller.start()
-        return stopped
+            was_up = controller.stop()
+            if stopped is None:
+                controller.start()
+                return was_up
+            stopped()
+            try:
+                controller.start()
+            except Exception as exc:
+                raise _StartHalfFailed(exc) from exc
+        return was_up
 
     def _do_recreate(self) -> bool:
         """Delete the containers, then start. `remove()` keeps the volumes, so the

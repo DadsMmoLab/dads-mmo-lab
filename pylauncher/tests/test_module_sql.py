@@ -33,7 +33,9 @@ def test_the_module_route_runs_this_games_own_importer(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(docker, "apply_module_sql", fake)
     sink: list[str] = []
-    run = modules.apply_module_sql(Path("/tmp/wow"), output=sink.append, ledger=None)
+    run = modules.apply_module_sql(
+        Path("/tmp/wow"), spec=docker_ctl.SPEC, output=sink.append, ledger=None
+    )
     assert seen["spec"] is docker_ctl.SPEC
     assert seen["spec"].import_service == "ac-db-import"
     assert seen["server_dir"] == Path("/tmp/wow")

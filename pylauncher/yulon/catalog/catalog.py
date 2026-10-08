@@ -202,9 +202,125 @@ class ReadyMarkers(_Strict):
     )
 
 
+LUA_SCRIPTS_DIR = "env/dist/etc/modules/lua_scripts"
+"""mod-ale's script folder in an AzerothCore server dir, where the ALE manifests deploy too."""
+
+
+class LuaScripts(_Strict):
+    """Lua scripts an AzerothCore entry lays into mod-ale's script folder (T553, `lua-and-sql`).
+
+    The shape of a manifest's `Deploy` (`src`, `dest`), for the same job one level
+    up: the files come from a checkout the install cloned, and land in a folder of
+    their own under `LUA_SCRIPTS_DIR`, never at its top, where the ALE modules the
+    Modules tab installs put theirs.
+    """
+
+    src: str = Field(
+        min_length=1,
+        description="A folder or one file inside the server dir (a cloned source), relative.",
+    )
+    dest: str = Field(
+        min_length=1,
+        description=f"The folder the files land in, strictly below {LUA_SCRIPTS_DIR}/.",
+    )
+
+    @field_validator("src")
+    @classmethod
+    def _src_stays_inside_the_server_dir(cls, value: str) -> str:
+        return _below(value.rstrip("/"), "lua_scripts src", "the server dir")
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_is_a_folder_of_its_own_under_the_script_dir(cls, value: str) -> str:
+        path = PurePosixPath(_below(value.rstrip("/"), "lua_scripts dest", LUA_SCRIPTS_DIR))
+        root = PurePosixPath(LUA_SCRIPTS_DIR)
+        if len(path.parts) <= len(root.parts) or path.parts[: len(root.parts)] != root.parts:
+            raise ValueError(
+                f"lua_scripts dest must be a folder strictly below {LUA_SCRIPTS_DIR}/, so the "
+                f"scripts never mix with the ones the Modules tab installs; got {value!r}"
+            )
+        return value
+
+
+_SQL_COMPARISON = (
+    r"[A-Za-z_][A-Za-z0-9_]*\s*(?:=|<>|!=|>=|<=|>|<)\s*(?:-?[0-9]+|'[A-Za-z0-9 _.:-]*')"
+)
+_SQL_CHECK_WHERE = re.compile(
+    rf"^\s*{_SQL_COMPARISON}(?:\s+AND\s+{_SQL_COMPARISON})*\s*$", re.IGNORECASE
+)
+"""What a `SqlCheck.where` may be: `column op literal`, joined by AND, and nothing else.
+
+A grammar rather than a list of forbidden marks (Codex, adversarial review): any
+free text after `WHERE` can still turn the count into something that is not a read
+(`... INTO OUTFILE '...'`) or that runs for ever (`SLEEP(...)`), so the condition
+is a column name, a comparison, and an integer or a plain quoted word.
+"""
+
+
+class SqlCheck(_Strict):
+    """A read-only count an AzerothCore entry's database must reach after the import (T553).
+
+    `SELECT COUNT(*) FROM <schema>.<table> [WHERE <where>]`, at least `at_least`.
+    For an entry whose modules bring SQL the import applies (`modules/*/data/sql`):
+    the check is what tells a server missing that data from one that has it,
+    before the world starts and reads it.
+    """
+
+    db: Db = Field(description="Which of the entry's databases, by role.")
+    table: str = Field(min_length=1, description="One table name, letters, digits and `_`.")
+    where: str = Field(
+        default="",
+        description="An optional condition: `column op literal`, joined by AND (`entry = 900001`).",
+    )
+    at_least: int = Field(default=1, ge=1)
+    reason: str = Field(
+        min_length=1,
+        description="What is missing when the count falls short, in the player's words.",
+    )
+
+    @field_validator("table")
+    @classmethod
+    def _table_is_one_name(cls, value: str) -> str:
+        if not _SQL_NAME.match(value):
+            raise ValueError(f"sql check table must be one plain table name, got {value!r}")
+        return value
+
+    @field_validator("where")
+    @classmethod
+    def _where_is_comparisons_only(cls, value: str) -> str:
+        if value.strip() and not _SQL_CHECK_WHERE.match(value):
+            raise ValueError(
+                "sql check where must be `column op literal` comparisons joined by AND, with an "
+                f"integer or a plain quoted word as each literal; got {value!r}"
+            )
+        return value
+
+    def statement(self, schema: str) -> str:
+        """The one read-only statement this check sends."""
+        where = f" WHERE {self.where}" if self.where.strip() else ""
+        return f"SELECT COUNT(*) FROM `{schema}`.`{self.table}`{where};"
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
+
+    patches: tuple[SourcePatch, ...] = Field(
+        default=(),
+        description=(
+            "Source patches applied after the clone and before the build (`patch-sources`, "
+            "T553), the CMaNGOS family's shape. Empty for an entry that carries none, and "
+            "then the stage is not in its tuple at all."
+        ),
+    )
+    lua_scripts: tuple[LuaScripts, ...] = Field(
+        default=(),
+        description="Lua scripts the install lays into mod-ale's script folder (T553).",
+    )
+    sql_checks: tuple[SqlCheck, ...] = Field(
+        default=(),
+        description="Read-only counts the databases must reach after the import (T553).",
+    )
 
     confs_from_dist: tuple[str, ...] = Field(
         default=(),
@@ -1759,6 +1875,33 @@ class Install(_Strict):
         return platform_id in self.platforms
 
 
+NATIVE_DEFAULT_DB_PORT = 3306
+"""The host database port a native compose file publishes when `ports.db` is omitted (T552)."""
+
+AZEROTHCORE_CONTAINER_SUFFIXES: dict[str, str] = {
+    "db": "database",
+    "auth": "authserver",
+    "world": "worldserver",
+    "db_import": "db-import",
+    "client_data": "client-data-init",
+}
+"""`containers` field -> the suffix `wow-wotlk/native/*.yml.tmpl` writes after the prefix (T552)."""
+
+
+def _shared_prefix(names: tuple[str, ...]) -> str:
+    """What every name starts with, up to and including its last `-` (`ac-`, `ub-`), or ``.
+
+    Up to a separator and not character-wise: `ac-database`, `ac-authserver` and
+    `ac-worldserver` share `ac-`, and a character-wise prefix of `ab-x`/`ab-y`
+    would agree, but one of `db`/`dbauth` would answer `db` and render `dbdatabase`.
+    """
+    first = names[0]
+    cut = first.rfind("-") + 1
+    while cut and not all(name.startswith(first[:cut]) for name in names):
+        cut = first.rfind("-", 0, cut - 1) + 1
+    return first[:cut]
+
+
 class Containers(_Strict):
     """The three container names the controller manages, their services, and the import job."""
 
@@ -1774,8 +1917,9 @@ class Containers(_Strict):
             "`composegen._container_prefix()`, whatever the value, for any entry with an "
             "`install.native` block — and every shipped entry has one (bug-checklist §30): the "
             "generated compose file takes its service keys from the templates "
-            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, the "
-            "literal ac-database and friends in wow-wotlk/native/base.yml.tmpl), so the entry "
+            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, "
+            "{{CONTAINER_PREFIX}}database and friends in wow-wotlk/native/base.yml.tmpl), so the "
+            "entry "
             "has nothing to declare and the only correct state of this field is absent. The "
             "entry still loads; `composegen.render()` refuses it, so `write_plan()` never gets "
             "a plan to write. "
@@ -2921,6 +3065,13 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+    manifests_from: Slug | None = Field(
+        default=None,
+        description=(
+            "The entry whose manifests/<id>/ tree this one reads, when it shares another's "
+            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id."
+        ),
+    )
     help_places: tuple[HelpPlace, ...] = Field(
         default=(),
         description=(
@@ -2968,15 +3119,35 @@ class CatalogEntry(_Strict):
         with "no such file" over a folder that was never meant to exist.
         """
         native = self.install.native
-        block = native.cmangos if native is not None else None
-        if block is None:
+        if native is None:
             return self
+        # T553: the AzerothCore block carries the same `SourcePatch`es.
+        patches = (
+            *(native.cmangos.patches if native.cmangos is not None else ()),
+            *(native.azerothcore.patches if native.azerothcore is not None else ()),
+        )
         dests = {source.dest for source in self.emulator.sources}
-        for spec in block.patches:
+        for spec in patches:
             if spec.source not in dests:
                 raise ValueError(
                     f"patch {spec.file!r} applies inside {spec.source!r}, which is not a dest "
                     f"of any of this entry's sources {sorted(dests)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_sql_check_names_a_database_this_entry_has(self) -> CatalogEntry:
+        """A `SqlCheck.db` is a role `databases` names, or the check could never be asked (T553)."""
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None:
+            return self
+        roles = self.databases.schema_map()
+        for check in block.sql_checks:
+            if check.db not in roles:
+                raise ValueError(
+                    f"sql check on {check.table!r} reads the {check.db!r} database, which this "
+                    f"entry does not name (it has {sorted(roles)})"
                 )
         return self
 
@@ -3037,6 +3208,76 @@ class CatalogEntry(_Strict):
                     )
         return self
 
+    @model_validator(mode="after")
+    def _azerothcore_containers_are_the_templates_names(self) -> CatalogEntry:
+        """An AzerothCore entry's five names are its prefix and the template's suffixes (T552).
+
+        `wow-wotlk/native/*.yml.tmpl` spells every service and container as
+        `{{CONTAINER_PREFIX}}<suffix>`, the prefix being what the three server
+        names share. The engine then selects services by the names this block
+        gives — `db_import` for the import, `client_data` for the data fetch,
+        the three servers for every start — and a name the rendered file does
+        not define is `no such service` after a build that took hours. So the
+        names are checked here against what the template writes, and the SOAP
+        port the base file publishes (`install.native.soap_port`) against the
+        one the command channel dials (`operations.port`): two fields saying
+        one thing, and a second server needs both moved.
+        """
+        native = self.install.native
+        if native is None or native.family != "azerothcore":
+            return self
+        c = self.containers
+        prefix = _shared_prefix((c.db, c.auth, c.world))
+        if not prefix:
+            raise ValueError(
+                f"{self.id}: the containers {c.db!r}, {c.auth!r} and {c.world!r} share no prefix "
+                "ending in '-', and the AzerothCore templates name every service "
+                "<prefix><suffix>; give them one, as in ub-database, ub-authserver, ub-worldserver"
+            )
+        given = {
+            "db": c.db,
+            "auth": c.auth,
+            "world": c.world,
+            "db_import": c.db_import,
+            "client_data": c.client_data,
+        }
+        for field, suffix in AZEROTHCORE_CONTAINER_SUFFIXES.items():
+            want = prefix + suffix
+            if given[field] != want:
+                raise ValueError(
+                    f"{self.id}: containers.{field} is {given[field]!r}, but the AzerothCore "
+                    f"templates name that service {want!r} (the prefix {prefix!r} the three "
+                    f"server containers share, then {suffix!r}); name it {want!r}"
+                )
+        ops = self.operations
+        if ops is not None and ops.channel == "soap" and ops.port != native.soap_port:
+            raise ValueError(
+                f"{self.id}: operations.port {ops.port} is not install.native.soap_port "
+                f"{native.soap_port}; the base file publishes the second and the command "
+                "channel dials the first, so they must be one number"
+            )
+        return self
+
+    def _published_host_ports(self) -> dict[int, str]:
+        """Every host port this entry binds, each with what it is for (T552)."""
+        found: dict[int, str] = {}
+        native = self.install.native
+        candidates = (
+            (self.ports.auth, "auth port"),
+            (self.ports.world, "world port"),
+            (native.soap_port if native else None, "SOAP port"),
+            (self.ports.db or (NATIVE_DEFAULT_DB_PORT if native else None), "database port"),
+            (self.operations.port if self.operations else None, "command-channel port"),
+        )
+        for number, what in candidates:
+            if number is not None and number not in found:
+                found[number] = what
+        return found
+
+    def manifest_game(self) -> str:
+        """The `manifests/<game>/` tree this entry's modules come from (T552)."""
+        return self.manifests_from or self.id
+
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""
         return self.databases.schema_map()
@@ -3089,6 +3330,61 @@ class Catalog(_Strict):
 
     schema_version: Literal[1] = 1
     games: tuple[CatalogEntry, ...] = ()
+
+    @model_validator(mode="after")
+    def _every_container_name_is_handed_out_once(self) -> Catalog:
+        """No two entries name one container (T552).
+
+        A container name is global to a Docker daemon, unlike the compose
+        project's networks and volumes, so two entries naming `ac-database` are
+        two servers that cannot both be installed on one machine: the second
+        `compose up` answers "container name is already in use", even with the
+        first one stopped.
+        """
+        owner: dict[str, str] = {}
+        for entry in self.games:
+            c = entry.containers
+            for name in dict.fromkeys((c.db, c.auth, c.world, c.db_import, c.client_data)):
+                if name is None:
+                    continue
+                if name in owner:
+                    raise ValueError(
+                        f"{entry.id} names the container {name!r}, which {owner[name]} already "
+                        "names; container names are global to Docker, so each entry needs its own"
+                    )
+                owner[name] = entry.id
+        return self
+
+    @model_validator(mode="after")
+    def _entries_that_run_together_share_no_host_port(self) -> Catalog:
+        """Two entries with no auth or world port in common share no host port at all (T552).
+
+        `Controller.port_conflicts()` looks at auth and world only, so two entries
+        that share one of those are the "stop the other one first" pair (WotLK and
+        TBC share all of theirs, on purpose). Two that share neither are meant to
+        run at once, and any other overlap would then fail late, at a Docker bind
+        error after the first server's containers were up (Codex adversarial
+        reviews). Docker binds the number whatever the entry calls it, so every
+        port an entry publishes is compared with every port of the other: its
+        database against the other's world port counts as much as database
+        against database. The SOAP port is the one the base file publishes
+        (`install.native.soap_port`) for an AzerothCore entry, whether or not an
+        `operations` block dials it, plus the one a channel dials.
+        """
+        for i, first in enumerate(self.games):
+            for second in self.games[i + 1 :]:
+                if {first.ports.auth, first.ports.world} & {second.ports.auth, second.ports.world}:
+                    continue
+                taken = first._published_host_ports()
+                for number, what in second._published_host_ports().items():
+                    if number in taken:
+                        raise ValueError(
+                            f"{first.id} and {second.id} can run at the same time (their auth "
+                            f"and world ports differ) but both publish port {number}: "
+                            f"{first.id}'s {taken[number]} and {second.id}'s {what}; "
+                            "each needs its own"
+                        )
+        return self
 
     def get(self, game_id: str) -> CatalogEntry:
         """Look an entry up by id; `KeyError` if unknown."""

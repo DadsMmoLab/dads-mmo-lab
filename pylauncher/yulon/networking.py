@@ -3419,6 +3419,45 @@ def realmlist_sql(entry: CatalogEntry, address: str, local_address: str | None) 
     return f"UPDATE {entry.databases.auth}.{rl.table} SET {', '.join(sets)} WHERE id={rl.realm_id};"
 
 
+STANDARD_AUTH_PORT = 3724
+"""The port a WoW client dials when its realmlist names none (T552)."""
+
+
+def realmlist_value(address: str, auth_port: int) -> str:
+    """What a client's `set realmlist` must say to reach `address` on `auth_port` (T552).
+
+    The bare address on the standard port, which is every realmlist this app
+    wrote before T552, so a server on 3724 is told exactly what it was told.
+    Anything else carries the port, `host:port`, which the client reads as the
+    auth server's port: a second server on 3725 beside WotLK on 3724. An address
+    that already names a port (a typed launcher address) is left as it is.
+    """
+    if ":" in address:
+        return address  # a typed `host:port` is the whole endpoint already
+    return address if auth_port == STANDARD_AUTH_PORT else f"{address}:{auth_port}"
+
+
+def realm_port_sql(entry: CatalogEntry) -> str:
+    """The UPDATE that makes the realm row's port the entry's published world port (T552).
+
+    The authserver hands each client the row's address AND port, and the
+    install's import seeds AzerothCore's 8085. Guarded by `port<>`, so a row
+    that already says it is left untouched.
+    """
+    rl = entry.realmlist
+    port = entry.ports.world
+    return (
+        f"UPDATE {entry.databases.auth}.{rl.table} SET port={port} "
+        f"WHERE id={rl.realm_id} AND port<>{port};"
+    )
+
+
+def realm_port_query(entry: CatalogEntry) -> str:
+    """The SELECT that reads back what `realm_port_sql()` was to establish (T552)."""
+    rl = entry.realmlist
+    return f"SELECT port FROM {entry.databases.auth}.{rl.table} WHERE id={rl.realm_id};"
+
+
 def _sql_literal(ip: str) -> str:
     # IPs/hostnames only: refuse anything that is not a plain address token.
     if not all(ch.isalnum() or ch in ".-:" for ch in ip):
@@ -4032,13 +4071,13 @@ def plan(
         # — it is the guard on the DETECTED addresses and it refuses exactly
         # this value (§35).
         sql = realmlist_sql(entry, LOOPBACK_ADDRESS, LOOPBACK_ADDRESS)
-        client_realmlist = LOOPBACK_ADDRESS
+        client_realmlist = realmlist_value(LOOPBACK_ADDRESS, entry.ports.auth)
         warnings.append(ONLY_THIS_COMPUTER)
     elif lan is None:
         warnings.append("could not determine this machine's LAN IP — is it on a network?")
     elif mode == "lan":
         sql = realmlist_sql(entry, lan, lan)
-        client_realmlist = lan
+        client_realmlist = realmlist_value(lan, entry.ports.auth)
     elif public is None and probe is not None and probe.verification_failed:
         # Not "offline?": the lookup reached a server and refused to trust it, so
         # nothing was learned about this connection. Saying "offline" here sends
@@ -4054,7 +4093,7 @@ def plan(
         )
     else:
         sql = realmlist_sql(entry, public, lan)
-        client_realmlist = public
+        client_realmlist = realmlist_value(public, entry.ports.auth)
         if platform.is_cgnat(public):
             warnings.append(
                 f"public address {public} is carrier-grade NAT / private: this ISP connection "
@@ -4348,7 +4387,10 @@ def _fresh_realmlist(client_dir: Path, realmlist_file: str) -> Path:
 
 
 def _set_realmlist(target: Path, address: str) -> None:
-    """Put `set realmlist <address>` first in `target`, keeping its other lines."""
+    """Put `set realmlist <address>` first in `target`, keeping its other lines.
+
+    `address` is already `realmlist_value()`'s answer: a port is part of it.
+    """
     lines = (
         target.read_text(encoding="utf-8", errors="replace").splitlines()
         if target.is_file()
@@ -4363,9 +4405,12 @@ def _set_realmlist(target: Path, address: str) -> None:
 
 
 def write_client_realmlist(
-    client_dir: Path, address: str, realmlist_file: str = "realmlist.wtf"
+    client_dir: Path, address: str, realmlist_file: str = "realmlist.wtf", *, auth_port: int
 ) -> Path:
     """Set `set realmlist <address>` in the user's own client (README §13 LAN step 3).
+
+    `auth_port` is the server's own (`entry.ports.auth`), required so no caller
+    can forget a second server's port: off 3724 it is written as `address:port`.
 
     Finds the file under `Data/<locale>/` (retail layout) or at the top level
     (repack layout); writes the first one found, creating `Data/enUS/` if none.
@@ -4375,14 +4420,17 @@ def write_client_realmlist(
         _fresh_realmlist(client_dir, realmlist_file),
     )
     target.parent.mkdir(parents=True, exist_ok=True)
-    _set_realmlist(target, address)
+    _set_realmlist(target, realmlist_value(address, auth_port))
     return target
 
 
 def write_ready_to_play_realmlists(
-    play_dir: Path, address: str, realmlist_file: str = "realmlist.wtf"
+    play_dir: Path, address: str, realmlist_file: str = "realmlist.wtf", *, auth_port: int
 ) -> tuple[Path, ...]:
     """Set `set realmlist <address>` in EVERY realmlist of a ready-to-play client (T181a).
+
+    `auth_port` as in `write_client_realmlist()`: off 3724 the line says
+    `address:port` (T552).
 
     For the ready-to-play client only, never the player's own client. Every
     candidate, not the first: a client with two locales (`Data/enGB/`,
@@ -4397,6 +4445,7 @@ def write_ready_to_play_realmlists(
     link to another file, is not written at all: writing it would change
     another folder. That refusal is a PermissionError whose text says what to do.
     """
+    address = realmlist_value(address, auth_port)
     found = [c for c in _realmlist_candidates(play_dir, realmlist_file) if c.is_file()]
     if not found:
         fresh = _fresh_realmlist(play_dir, realmlist_file)

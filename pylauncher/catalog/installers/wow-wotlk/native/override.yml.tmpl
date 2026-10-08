@@ -11,7 +11,7 @@
 # across files, so it would publish a SECOND binding rather than replacing the
 # base one — and `test_composegen.py` fails the build if one appears.
 services:
-  ac-worldserver:
+  {{CONTAINER_PREFIX}}worldserver:
     volumes:
       # LOAD-BEARING. The playerbots DB updater scans /azerothcore/modules at
       # boot and shuts the worldserver down when it is missing — found live

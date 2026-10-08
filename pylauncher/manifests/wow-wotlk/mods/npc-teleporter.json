@@ -25,8 +25,9 @@
     },
     {
       "db": "world",
-      "statement": "DELETE FROM creature WHERE id1 IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001);",
-      "when": "remove"
+      "statement": "DELETE FROM creature WHERE id IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001);",
+      "when": "remove",
+      "note": "T558: `creature.id`, not `id1`: AzerothCore's 2026_06_16_00.sql renamed id1 to id and dropped id2/id3, and every WotLK pin Yu'lon has shipped carries it (tests/test_wotlk_world_columns.py)"
     }
   ],
   "prompts": [

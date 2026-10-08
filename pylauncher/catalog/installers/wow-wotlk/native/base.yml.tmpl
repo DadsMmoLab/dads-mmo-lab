@@ -49,8 +49,8 @@
 name: {{PROJECT_NAME}}
 
 services:
-  ac-database:
-    container_name: ac-database
+  {{CONTAINER_PREFIX}}database:
+    container_name: {{CONTAINER_PREFIX}}database
     image: mysql:8.4
     networks: [ac-network]
     ports:
@@ -171,26 +171,26 @@ services:
       # `MYSQL_ROOT_HOST: localhost` here — a plausible hardening — deletes
       # `root@%`, and this healthcheck then never passes, so every waiter hangs
       # on a database that is running and fine.
-      test: "/usr/bin/mysql -h ac-database --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      test: "/usr/bin/mysql -h {{DB_HOST}} --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
       retries: 40
 
-  ac-db-import:
-    container_name: ac-db-import
+  {{CONTAINER_PREFIX}}db-import:
+    container_name: {{CONTAINER_PREFIX}}db-import
     image: {{IMAGE_PREFIX}}db-import:{{IMAGE_TAG}}
     networks: [ac-network]
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
-      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
-      AC_WORLD_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
-      AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
+      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
+      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
       # The playerbots schema. Its absence is the gap this file was written to
       # close: the one-shot creates only the databases it is told about, and an
       # import that never heard of acore_playerbots leaves a worldserver that
       # cannot start its bots.
-      AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
+      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
       # WHICH modules' SQL this import may apply, and it is not the ones in the
       # folder next to this file. Upstream's default is "all", and "all" means
       # AC_MODULES_LIST - a macro modules/CMakeLists.txt:371 bakes from a glob
@@ -224,11 +224,11 @@ services:
       # data/sql/db-auth and db-characters updates as well as AzerothCore's.
       - ./modules:/azerothcore/modules{{BIND_LABEL}}
     depends_on:
-      ac-database:
+      {{CONTAINER_PREFIX}}database:
         condition: service_healthy
 
-  ac-client-data-init:
-    container_name: ac-client-data-init
+  {{CONTAINER_PREFIX}}client-data-init:
+    container_name: {{CONTAINER_PREFIX}}client-data-init
     image: {{IMAGE_PREFIX}}client-data:{{IMAGE_TAG}}
     volumes:
       - client-data:/azerothcore/env/dist/data
@@ -289,8 +289,8 @@ services:
         echo "INSTALLED_VERSION=$$ver" > "$$data/data-version"
         echo "yulon: client data $$ver installed"
 
-  ac-authserver:
-    container_name: ac-authserver
+  {{CONTAINER_PREFIX}}authserver:
+    container_name: {{CONTAINER_PREFIX}}authserver
     image: {{IMAGE_PREFIX}}authserver:{{IMAGE_TAG}}
     networks: [ac-network]
     tty: true
@@ -298,7 +298,7 @@ services:
     environment:
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
       AC_TEMP_DIR: "/azerothcore/env/dist/temp"
-      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
     {{CONTAINER_USER}}
     volumes:
       - ./env/dist/etc:/azerothcore/env/dist/etc{{BIND_LABEL}}
@@ -308,13 +308,13 @@ services:
       # NOT loopback-pinned (unlike the DB and SOAP admin ports).
       - "${DOCKER_AUTH_EXTERNAL_PORT:-{{AUTH_PORT}}}:3724"
     depends_on:
-      ac-database:
+      {{CONTAINER_PREFIX}}database:
         condition: service_healthy
-      ac-db-import:
+      {{CONTAINER_PREFIX}}db-import:
         condition: service_completed_successfully
 
-  ac-worldserver:
-    container_name: ac-worldserver
+  {{CONTAINER_PREFIX}}worldserver:
+    container_name: {{CONTAINER_PREFIX}}worldserver
     image: {{IMAGE_PREFIX}}worldserver:{{IMAGE_TAG}}
     networks: [ac-network]
     # stdin + tty keep the worldserver CONSOLE attachable: the Console tab
@@ -333,10 +333,10 @@ services:
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
-      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
-      AC_WORLD_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
-      AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
-      AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
+      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
+      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
+      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
       # Runtime settings live in docker-compose.override.yml.
     ports:
       - "${DOCKER_WORLD_EXTERNAL_PORT:-{{WORLD_PORT}}}:8085"
@@ -356,11 +356,11 @@ services:
       - client-data:/azerothcore/env/dist/data/:ro
       # The ./modules source mount lives in docker-compose.override.yml.
     depends_on:
-      ac-database:
+      {{CONTAINER_PREFIX}}database:
         condition: service_healthy
-      ac-db-import:
+      {{CONTAINER_PREFIX}}db-import:
         condition: service_completed_successfully
-      ac-client-data-init:
+      {{CONTAINER_PREFIX}}client-data-init:
         condition: service_completed_successfully
 
 networks:
