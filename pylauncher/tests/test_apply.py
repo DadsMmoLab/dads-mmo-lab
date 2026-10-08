@@ -5288,6 +5288,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     step after the file, so the question it always asked finally does something.
     50 after T394: WotLK's `all-stackables` gained the backup table's two install
     steps and its three remove steps, around the repository's own files.
+    51 after T560: `npc-teleporter`'s Remove puts back, in a step of its own after the
+    DELETEs, the 19 base-game gossip rows the install deletes.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5308,7 +5310,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        50,
+        51,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
