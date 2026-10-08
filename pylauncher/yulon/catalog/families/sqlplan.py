@@ -1639,7 +1639,9 @@ def _code_only(text: str, *, backslash_escapes: bool = True) -> tuple[str, bool]
     return "".join(parts), executable
 
 
-def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
+def foreign_schemas(
+    path: Path, others: Collection[str], *, executable_comments_ok: bool = False
+) -> tuple[str, ...]:
     """What in a world update's text could reach past the world schema; empty when nothing.
 
     The update runs with `into` as the client's DEFAULT schema only -- the account
@@ -1654,16 +1656,49 @@ def foreign_schemas(path: Path, others: Collection[str]) -> tuple[str, ...]:
     whitespace after it, as in MySQL (`a--1` is arithmetic). Measured
     2026-10-07: none of tbc-db 86672361's 44 or classic-db ec4f5961's 357
     Updates/*.sql files trips it.
+
+    `executable_comments_ok` is the bot reload's reading (T534 cold review): the
+    bots' mysqldump files carry `/*!40101 … */` lines, so an executable comment is not
+    by itself a reason there -- its body is still read for schema names, and both
+    quote readings are still taken. Of sql_mode changes, only mysqldump's own pair
+    (`_DUMP_SQL_MODE`) is accepted; any other one is refused as in a world update.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     found: list[str] = []
     # Both readings of `\'`: with backslash escapes, and as NO_BACKSLASH_ESCAPES (set
     # globally or by a client) reads it -- whatever either one exposes counts (Codex, T531).
+    paired = True
+    if executable_comments_ok:
+        # mysqldump's own pair, and nothing else, may set sql_mode in a bot file: a switch
+        # part-way (NO_BACKSLASH_ESCAPES) changes what is a string from there on and can
+        # hide a statement from both readings (re-review of T534). The pair is one header
+        # then one footer, and the saved mode is named nowhere else -- a footer alone
+        # would restore whatever a file put in @OLD_SQL_MODE itself (Codex).
+        kinds = [m.group(1) is not None for m in _DUMP_SQL_MODE.finditer(raw)]
+        paired = kinds in ([], [True], [True, False])
+        raw = _DUMP_SQL_MODE.sub(" ", raw)
+        paired = paired and not re.search(r"(?i)OLD_SQL_MODE", raw)
     for escapes in (True, False):
-        for reason in _foreign_in(*_code_only(raw, backslash_escapes=escapes), others):
+        text, executable = _code_only(raw, backslash_escapes=escapes)
+        for reason in _foreign_in(text, executable and not executable_comments_ok, others):
             if reason not in found:
                 found.append(reason)
+    if not paired and "a change of sql_mode" not in found:
+        found.append("a change of sql_mode")
     return tuple(found)
+
+
+_DUMP_SQL_MODE = re.compile(
+    r"/\*!40101\s+SET\s+(?:(@OLD_SQL_MODE\s*=\s*@@SQL_MODE\s*,\s*SQL_MODE\s*=\s*"
+    r"'NO_AUTO_VALUE_ON_ZERO')|SQL_MODE\s*=\s*IFNULL\(\s*@OLD_SQL_MODE\s*,\s*''\s*\))\s*\*/",
+    re.I,
+)
+"""mysqldump's header and footer SQL_MODE lines, exactly: the only sql_mode a bot file may set."""
+
+_CLIENT_COMMAND = re.compile(r"(?im)^[ \t]*(?:\\[a-z.!#?]|(?:connect|source|system)\b)")
+"""A mysql/mariadb CLIENT command at the start of a line (T548): `\\u db` and `connect`
+switch schema, `\\.`/`source` read another file, `\\!`/`system` run a shell. The client
+acts on them itself, so no SQL reading sees them; on a line of their own they are refused."""
 
 
 def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[str]:
@@ -1677,6 +1712,8 @@ def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[st
         found.append("USE")
     if executable:
         found.append("an executable comment")
+    if _CLIENT_COMMAND.search(text):
+        found.append("a mysql client command")
     if re.search(r"(?i)\bsql_mode\b", text):
         # ANSI_QUOTES or NO_BACKSLASH_ESCAPES would change what is a string from that
         # point on, which this reading cannot follow (Codex, T531): refused, not guessed.
@@ -1684,6 +1721,153 @@ def _foreign_in(text: str, executable: bool, others: Collection[str]) -> list[st
     if re.search(r"(?i)\b(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b", text):
         found.append("a whole-database statement")
     return found
+
+
+_TOKENS = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'"
+    r'|"(?:[^"\\]|\\.)*"'
+    r"|`[^`]*`"
+    r"|--[^\n]*|#[^\n]*"
+    r"|/\*![0-9]*|\*/"
+    r"|/\*.*?\*/"
+    r"|;"
+    r"|[^'\"`;#/*-]+"
+    r"|.",
+    re.S,
+)
+_TABLE = r"`?(?:\w+`?\.`?)?(\w+)`?"
+
+
+def _statements(text: str) -> Iterator[str]:
+    """Each statement's text with comments and string bodies gone; quote-aware. An
+    executable comment (`/*!40101 … */`) is read as the SQL MySQL runs from it."""
+    parts: list[str] = []
+    for match in _TOKENS.finditer(text):
+        token = match.group(0)
+        if token == ";":
+            yield "".join(parts).strip()
+            parts = []
+        elif token.startswith("/*!") or token == "*/":
+            # An executable comment's body IS SQL the server runs: kept, markers dropped.
+            parts.append(" ")
+        elif token.startswith(("--", "#", "/*")):
+            parts.append(" ")
+        elif token[0] in "'\"":
+            parts.append("''")
+        else:
+            parts.append(token)
+    tail = "".join(parts).strip()
+    if tail:
+        yield tail
+
+
+def whole_table_problem(path: Path) -> str | None:
+    """Why re-running this file whole could leave something a single run would not; None if
+    it cannot (T534).
+
+    Whole-table means: every table the file INSERTs into or UPDATEs is dropped
+    (`DROP TABLE IF EXISTS`) or emptied (`DELETE FROM t` / `TRUNCATE t`, no WHERE)
+    earlier in the same file -- `REPLACE` and `INSERT IGNORE` included. `CREATE
+    TABLE`/`INDEX`, `DELETE … WHERE`, `SET`, `SELECT`, `LOCK`/`UNLOCK TABLES` and mysqldump's
+    `ALTER TABLE … DISABLE/ENABLE KEYS` are idempotent as statements; an executable
+    comment's body is read as the statement it is. Anything else (`ALTER`, `RENAME`,
+    `USE`, a procedure) is a reason.
+    Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
+    world/classic file passes.
+    """
+    if only_creates_indexes(path):
+        return None  # run one index at a time by the reload, each made fresh
+    emptied: set[str] = set()
+    dropped: set[str] = set()
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        if not raw:
+            continue
+        sql = " ".join(raw.split())
+        head = sql.upper()
+        if head.startswith(("SET ", "SELECT ", "LOCK TABLES", "UNLOCK TABLES")):
+            continue
+        if re.fullmatch(rf"(?i)ALTER TABLE {_TABLE} (DISABLE|ENABLE) KEYS", sql):
+            continue
+        match = re.match(rf"(?i)CREATE TABLE (?:IF NOT EXISTS )?{_TABLE}", sql)
+        if match:
+            # Dropped first, or the second run fails (plain) or keeps the OLD table's
+            # definition (IF NOT EXISTS) -- not what a fresh install has (Codex, T534 r4-5).
+            if match.group(1).lower() not in dropped:
+                return f"it creates {match.group(1)} without dropping it first"
+            continue
+        match = re.match(rf"(?i)CREATE (?:UNIQUE )?INDEX \S+ ON {_TABLE}", sql)
+        if match:
+            # In a mixed file an index that is already there stops the script part-way;
+            # only on a table this file dropped is it new for certain (index-only files
+            # are run one index at a time instead, and never reach here).
+            if match.group(1).lower() not in dropped:
+                return f"it adds an index to {match.group(1)}, which it did not drop first"
+            continue
+        match = re.match(rf"(?i)DROP TABLE IF EXISTS {_TABLE}", sql)
+        if match:
+            emptied.add(match.group(1).lower())
+            dropped.add(match.group(1).lower())
+            continue
+        match = re.match(rf"(?i)(?:DELETE FROM|TRUNCATE(?: TABLE)?) {_TABLE}(.*)$", sql)
+        if match:
+            rest = match.group(2).strip().upper()
+            if not rest:
+                # Only the plain whole-table form empties it (Codex, T534).
+                emptied.add(match.group(1).lower())
+                continue
+            if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
+                continue  # deletes the same rows however often it runs
+            return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+        # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
+        # the table emptied first like a plain INSERT does (Codex, T534 round 2).
+        if re.match(r"(?i)UPDATE ", sql) and not re.match(rf"(?i)UPDATE {_TABLE} SET ", sql):
+            # A join, a list or an alias can write a table other than the first one
+            # named (Codex, T534): only the single-table form is read.
+            return f"it runs an UPDATE of more than one table ({sql[:40]}…)"
+        match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
+        if match:
+            if match.group(1).lower() not in emptied:
+                return f"it writes {match.group(1)} without emptying it first"
+            continue
+        return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+    return None
+
+
+def only_creates_indexes(path: Path) -> bool:
+    """Is this file nothing but `CREATE [UNIQUE] INDEX` statements (and `SET`s)?
+
+    The bots' `ai_playerbot_indexes.sql`: on a server that has the indexes the
+    client refuses the first one, which says they are there, not that a table
+    was harmed (T534).
+    """
+    seen = False
+    for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
+        head = " ".join(raw.split()).upper()
+        if not head or head.startswith("SET "):
+            continue
+        if not head.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")):
+            return False
+        seen = True
+    return seen
+
+
+def index_statements(path: Path) -> list[str]:
+    """Each `CREATE [UNIQUE] INDEX` statement of an index-only file, as written (T534)."""
+    return [
+        " ".join(raw.split())
+        for raw in _statements(path.read_text(encoding="utf-8", errors="replace"))
+        if " ".join(raw.split()).upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))
+    ]
+
+
+def recreate_index_statement(statement: str) -> str | None:
+    """`DROP INDEX` + the same `CREATE INDEX`, for an index that is already there (T534)."""
+    match = re.match(
+        r"(?is)\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(`?\w+`?)\s+ON\s+(`?\w+`?)", statement
+    )
+    if match is None:
+        return None
+    return f"DROP INDEX {match.group(1)} ON {match.group(2)};\n{statement}"
 
 
 def seed_rows(runs: Sequence[PhaseRun], ledger: FileLedger) -> tuple[FileRow, ...]:

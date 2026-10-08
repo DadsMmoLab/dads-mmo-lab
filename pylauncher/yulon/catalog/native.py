@@ -1151,13 +1151,22 @@ def world_updates_note(entry: CatalogEntry) -> str:
     """
     block = entry.install.native
     data = block.cmangos if block is not None else None
-    if data is None or not any(phase.on_update == "apply_new" for phase in data.sql.phases):
-        return ""
-    return (
-        f" It also applies the world content fixes this Yu'lon was tested with that your "
-        f"{entry.databases.world} database does not have yet, each once, with the servers "
-        "stopped; they stay applied even if the new build is put back."
-    )
+    modes = {phase.on_update for phase in data.sql.phases} if data is not None else set()
+    said = ""
+    if "apply_new" in modes:
+        said += (
+            f" It also applies the world content fixes this Yu'lon was tested with that your "
+            f"{entry.databases.world} database does not have yet, each once, with the servers "
+            "stopped; they stay applied even if the new build is put back."
+        )
+    if "replace_changed" in modes:
+        # T534, on the lead's word of 2026-10-07: say what the reload discards.
+        said += (
+            " The first update loads every bot table fresh from its file, and later ones only "
+            "those whose files changed, which replaces what the bots generated in them (travel "
+            "routes, zone levels, named places)."
+        )
+    return said
 
 
 def return_to_pin_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:

@@ -623,7 +623,7 @@ class SqlPhase(_Strict):
         ),
     )
 
-    on_update: Literal["leave", "apply_new", "report"] = Field(
+    on_update: Literal["leave", "apply_new", "report", "replace_changed", "refuse_new"] = Field(
         default="leave",
         description=(
             "What the server update route (to the newest code, and back to the tested pin) "
@@ -636,7 +636,14 @@ class SqlPhase(_Strict):
             "nothing moves but this route, to its pin -- so what the install applied is "
             "knowable; the family refuses anything else as a catalog error before the compile. "
             "`report`: the files this press's move added or changed are named, never applied. "
-            "Not in `digest()`: it does not change what an import applies."
+            "`replace_changed` (T534): each file whose bytes the ledger does not hold is run "
+            "again WHOLE, in the same window -- only for whole-table files (every table they "
+            "write is dropped or emptied first in the same file, `sqlplan.whole_table_problem`), "
+            "so a re-run leaves what a fresh install leaves; a file of any other shape is named "
+            "and not run. `refuse_new` (T533): a move that adds or changes a file under its globs "
+            "refuses the whole press before the compile -- for a chain the route cannot apply "
+            "safely to an existing server. Not in `digest()`: it does not change what an import "
+            "applies."
         ),
     )
 
@@ -716,7 +723,9 @@ class SqlPhase(_Strict):
                 f"phase {self.name!r}: `same_columns` is asked by the corrections press only, "
                 "and `rerun_on_marked` is not that press"
             )
-        if self.on_update != "leave" and (self.statements or self.into is None):
+        if self.on_update == "refuse_new" and self.statements:
+            raise ValueError(f"phase {self.name!r}: `refuse_new` watches files, not `statements`")
+        if self.on_update not in ("leave", "refuse_new") and (self.statements or self.into is None):
             # The ledger keys a FILE, and the route checks the one schema it writes;
             # a statement has no file and `into_each` names more than one schema.
             raise ValueError(
