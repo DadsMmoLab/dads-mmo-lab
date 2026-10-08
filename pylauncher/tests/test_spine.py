@@ -2773,6 +2773,36 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`except OSError` answers the EMPTY tuple, and the caller says `there is no backup "
         "of this file to revert to` rather than restoring something it could not see"
     ),
+    ("controller_wow_tortoise/custom.py", "_first_cpp"): (
+        "T596. Walks a Tortoise add-on or database package (a folder the player chose, or a "
+        "fresh clone), `.git` aside, for C/C++ source; decides a REFUSAL (a server module is a "
+        "later Yu'lon) raised before the copy or, after a clone, before any step reads it, "
+        "never a write"
+    ),
+    ("controller_wow_tortoise/custom.py", "_sql_files"): (
+        "T596. Lists data/sql/<auth|character|char|world> of a package to name the .sql files "
+        "the derived manifest runs; decides no write by itself - every file it names then goes "
+        "through the applier's running-world guard, ledger read and backup - and an empty "
+        "answer only means the package brings no database changes"
+    ),
+    ("controller_wow_tortoise/custom.py", "_addons"): (
+        "T596. Lists a package's top for .toc files and its add-on folders for `<X>/<X>.toc` to "
+        "name the client steps; decides no write by itself (the applier's `_client()` copies "
+        "and receipts) and a refusal (several top .toc files, a later client's Interface)"
+    ),
+    ("controller_wow_tortoise/custom.py", "_addon_parents"): (
+        "T596. Finds `addon/`, `addons/` and `Interface/AddOns/` in a package case-blind, for "
+        "`_addons()`; decides nothing on its own"
+    ),
+    ("controller_wow_tortoise/custom.py", "_unused"): (
+        "T596. Walks a package for .sql files it does not run, to NAME them in the report's "
+        "skipped lines; decides no write"
+    ),
+    ("controller_wow_tortoise/modules.py", "named"): (
+        "T596. Lists the server's backups folder for the files an outside item's automatic "
+        "backup wrote (`*_before-<id>_*.sql`) so Remove can name the first; decides no write, "
+        "and an empty answer is said as `no backup taken before its database changes was found`"
+    ),
     ("module_source.py", "_rewrite_index"): (
         "lists the user manifest directory to REBUILD its index from the files that are "
         "actually there, never appending to it - which is why a crash between the item write "
