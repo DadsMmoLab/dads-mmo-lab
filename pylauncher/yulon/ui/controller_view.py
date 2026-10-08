@@ -13630,7 +13630,7 @@ class ControllerView(QWidget):
             return
         self._character_action(
             "Setting the level of",
-            lambda: play.set_level(name, level),  # type: ignore[attr-defined]
+            lambda: play.set_level_and_save(name, level),  # type: ignore[attr-defined]
             level=level,
         )
 
@@ -18020,11 +18020,16 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             show_warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not ask_yes_no(
-            self,
-            f"Apply database corrections to {self.entry.name}?",
-            text,
-        ):
+        title = f"Apply database corrections to {self.entry.name}?"
+        if any(one.missing for one in check.stuck):
+            # A stuck update whose file is gone cannot be run: the one way on is to skip it
+            # (T566), so that is the Yes, and Cancel the default. A press that is not asked
+            # this way carries no skip, and stops at the file as before.
+            if _ask_with(self, title, text, native.SKIP_STUCK_LABEL) != "yes":
+                logger.info(f"database corrections for {self.entry.id} declined at the skip")
+                return False
+            check = replace(check, skip_missing=True)
+        elif not ask_yes_no(self, title, text):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
         # The panel's Cancel, with its "Stop now anyway" riding on it: the press

@@ -22,6 +22,7 @@ naming what it would look like:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,17 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
+
+SAVE_COMMAND = "saveall"
+"""The server's own "write every online character's row now" (`cs_misc.cpp` ->
+`ObjectAccessor::SaveAllPlayers`). `party.SAVE_COMMAND` is the same word for the
+same reason and cannot be imported here: `party` imports this module."""
+
+LEVEL_SAVE_TRIES = 15
+LEVEL_SAVE_PAUSE = 1.0
+"""How long a saved level gets to show in `characters.level`: fifteen reads a
+second apart. Measured on Unbound with 500 bots online, the row agreed 2.5 to 4.7 s
+after the save (T584); `party.LEVEL_TRIES` saw up to 8.2 s on a bigger roster."""
 
 VERBS: tuple[str, ...] = ("teleport", "set_level", "rename", "revive", "mail_gold", "send_gear")
 """The Characters tab's writes, by name, in the order the tab draws them.
@@ -458,6 +470,101 @@ class InstallPlay:
         return self._one(
             character, lambda name: commands.set_character_level(name, level, verb=verb)
         )
+
+    def set_level_and_save(
+        self,
+        character: str,
+        level: int,
+        *,
+        tries: int = LEVEL_SAVE_TRIES,
+        pause: float = LEVEL_SAVE_PAUSE,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> Outcome:
+        """`set_level`, then, for a character in the world, a save and a bounded readback.
+
+        **Why the tab needs this** (T584, measured on Unbound at 500 bots online,
+        `.notes/gates/live-t584-m910q-2026-10-08/`). `.character level` on an
+        online character changes the live player and writes no row, so
+        `characters.level` kept the old level for the whole 125 s the control
+        trial watched, and the tab's list re-read showed it. The same press
+        followed by one `.saveall` made the row agree 2.5 to 4.7 s later. The
+        core's save is a transaction queued to the database's one writer thread,
+        so it takes seconds under load and not microseconds, and this polls.
+
+        An offline character is not saved or polled: the offline arm of the
+        command writes the row itself. The wait is a ceiling and not a delay --
+        it returns on the first read that agrees -- and it runs in the tab's
+        job, off the GUI thread. A row that has still not agreed is not an
+        error: the server did take the level, so the answer stays a success and
+        says what the list will show until the character next saves.
+        """
+        taken = self.set_level(character, level)
+        if not taken.done:
+            return taken
+        try:
+            stored = self._stored(character)
+        except Exception as exc:  # noqa: BLE001 -- any failed read; the level was already taken
+            logger.info(
+                "could not tell whether %s is online after the level press: %s", character, exc
+            )
+            return Outcome(
+                True,
+                text=(
+                    f"{taken.text.strip()} The database could not be read to confirm the new "
+                    "level, so the list may keep showing the old level for a while."
+                ),
+            )
+        if stored is None or not stored.online:
+            return taken
+        stays = (
+            f"the list may keep showing the old level until {stored.name} next saves or logs out"
+        )
+        channel = self._channel_for_saved()
+        if channel is None:
+            return Outcome(
+                True,
+                text=f"{taken.text.strip()} The server could not be asked to save, so {stays}.",
+            )
+        saved = send(channel, SAVE_COMMAND)
+        if not saved.done and not saved.indeterminate:
+            said = (saved.problem or saved.text).strip()
+            return Outcome(
+                True,
+                text=f"{taken.text.strip()} The server would not save now ({said}), so {stays}.",
+            )
+        # An indeterminate save may well have run, so it is read back like a good one.
+        row: int | None = None
+        for attempt in range(tries):
+            if attempt:
+                sleep(pause)
+            row = self._level_of(stored.name)
+            if row == level:
+                return taken
+        seen = "could not be read" if row is None else f"still reads {row}"
+        return Outcome(
+            True,
+            text=(
+                f"{taken.text.strip()} The new level has not been confirmed in the database "
+                f"(it {seen}), so {stays}."
+            ),
+        )
+
+    def _level_of(self, name: str) -> int | None:
+        """The row's level, or None when it could not be read (no row, no number, a failed read).
+
+        Never raises: this runs after the server took the level, and `SqlReader.query` raises on a
+        failed read, which would have made a taken level look like a failed press.
+        """
+        characters = self.entry.schema_map()["characters"]
+        try:
+            found = self._sql.query(
+                "characters",
+                f"SELECT level FROM {characters}.characters WHERE name = {literal(name)} LIMIT 1;",
+            ).strip()
+        except Exception as exc:  # noqa: BLE001 -- a failed read is a row that was not read
+            logger.info("could not read %s's level back: %s", name, exc)
+            return None
+        return int(found.split("\t")[0]) if found.split("\t")[0].isdigit() else None
 
     def rename(self, character: str) -> Outcome:
         """Not sent at all where this tree measured the offline arm destroying

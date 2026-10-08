@@ -756,6 +756,8 @@ class LatestRoute:
 
 
 CORRECTIONS_BUTTON_LABEL = "Apply database corrections…"
+SKIP_STUCK_LABEL = "Skip the missing file and continue"
+"""The dialog's Yes when a stuck world update's file is gone from the checkout (T566)."""
 """T129's press, here for `UPDATES_BUTTON_LABEL`'s reason: the engine's refusals name it."""
 
 CORRECTIONS_OPENING_NOTE = (
@@ -801,6 +803,13 @@ class StuckWorldUpdate:
     heads: str = ""
     """Where the world-database checkouts stood when the dialog was built (T545): the press runs
     what is on disk then, so a checkout that moved since is a different press and is refused."""
+    missing: bool = False
+    """Its file is gone from the checkout and no other file holds its exact bytes (T566): it
+    cannot be run again, and the dialog offers to skip it."""
+    renamed_from: str = ""
+    """Upstream renamed this file (T566): the ledger row is under this old name, and `file` is
+    the one file now holding its exact bytes. The press moves the record to `file` and retries
+    it there; nothing is asked."""
 
 
 @dataclass(frozen=True)
@@ -834,6 +843,9 @@ class CorrectionCheck:
     """World updates an update to latest left `started` or `failed` (T545): the press runs
     each again, then the ones held back behind it. Part of the provenance: the press
     refuses whole unless the ledger still lists exactly these."""
+    skip_missing: bool = field(default=False, compare=False)
+    """The player chose "Skip" for the stuck updates whose file is gone (T566). The choice, not
+    the reading: left out of `==`, so a press handed it still matches a fresh reading."""
 
 
 @dataclass(frozen=True)
@@ -1539,6 +1551,17 @@ def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
         what = (
             "the database refused it" if one.state == "failed" else "an update stopped while it ran"
         )
+        after = (
+            f" {one.behind} newer world update(s) waiting behind it run after it, in order."
+            if one.behind
+            else ""
+        )
+        if one.missing:
+            lines.append(
+                f"    {one.file} -- {what}. Its file is no longer in the sources, so it cannot be "
+                f"run again.{after}"
+            )
+            continue
         safe = (
             "It empties every table it writes first, so running it again is safe."
             if one.repeatable
@@ -1550,16 +1573,24 @@ def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
                 " The file has also changed since the update tried it, so the database may hold "
                 "what the older version did."
             )
-        after = (
-            f" {one.behind} newer world update(s) waiting behind it run after it, in order."
-            if one.behind
-            else ""
-        )
+        if one.renamed_from:
+            safe = (
+                f"It is the same file as {one.renamed_from}, under a new name: Yu'lon moves its "
+                f"record to the new name and runs it there. {safe}"
+            )
         lines.append(f"    {one.file} -- {what}. {safe}{after}")
-    return (
+    text = (
         "World updates an update to latest did not finish, which this runs again (each one, "
         "then the ones held back behind it):\n\n" + "\n".join(lines)
     )
+    if any(one.missing for one in stuck):
+        text += (
+            f'\n\n"{SKIP_STUCK_LABEL}" records each file that is no longer in the sources as '
+            "skipped, so it is never run, and then runs the world updates behind it. Whatever "
+            "such a file already changed in your world database stays as it is: Yu'lon does "
+            "not undo it. Cancel changes nothing."
+        )
+    return text
 
 
 def corrections_banner_text(check: CorrectionCheck) -> str:
