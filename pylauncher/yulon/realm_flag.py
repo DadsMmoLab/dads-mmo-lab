@@ -236,6 +236,9 @@ MARK_RETRY = timedelta(seconds=30)
 FLAGS_READ_EVERY = timedelta(seconds=60)
 """How often the tick reads the realm's flags over a world that is up."""
 
+UNCONFIRMED_RETRY = timedelta(minutes=10)
+"""How long a run whose log did not show the ready marker waits before it is searched again."""
+
 CLEAR_AFTER = timedelta(seconds=60)
 """How long a run must have been seen ready before a bit still set on it is called stuck.
 
@@ -292,7 +295,8 @@ class Keeper:
         self._ready_run: str | None = None
         self._ready_at: datetime | None = None
         self._read_at: datetime | None = None
-        self._unconfirmed_run: str | None = None
+        self._unconfirmed: tuple[str, datetime] | None = None
+        self._unconfirmed_said: str | None = None
         self.said_ready: Callable[[str], bool] | None = None
         """Whether the world is still running run `run` and its log shows the ready marker.
 
@@ -391,16 +395,27 @@ class Keeper:
             )
 
     def _confirmed(self, run: str) -> bool:
-        """Whether run `run` said ready, asked once per run: a no is not asked again."""
-        if self._unconfirmed_run == run or self.said_ready is None:
+        """Whether run `run` said ready; a no is asked again only `UNCONFIRMED_RETRY` later.
+
+        Each ask reads the run's log, so not every minute; but a load longer than the tab's
+        ten-minute fallback says ready late, and is not written off for its whole run (Codex).
+        """
+        if self.said_ready is None:
+            return False
+        now = self._now()
+        last = self._unconfirmed
+        if last is not None and last[0] == run and now - last[1] < UNCONFIRMED_RETRY:
             return False
         if self.said_ready(run):
+            self._unconfirmed = None
             return True
-        self._unconfirmed_run = run
-        logger.info(
-            f"{self.entry.id}: the realm is listed Offline over a running world whose log does "
-            "not show it ready; left as it is"
-        )
+        self._unconfirmed = (run, now)
+        if self._unconfirmed_said != run:
+            self._unconfirmed_said = run
+            logger.info(
+                f"{self.entry.id}: the realm is listed Offline over a running world whose log "
+                "does not show it ready yet; left as it is"
+            )
         return False
 
     def _clear_unless_held(self, begun: int) -> bool:

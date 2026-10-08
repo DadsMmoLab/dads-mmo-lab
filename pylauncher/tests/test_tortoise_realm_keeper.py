@@ -232,6 +232,27 @@ def test_an_old_run_that_never_said_ready_is_never_cleared(rig: Rig) -> None:
     assert world.log_reads == 1, "a run's log is searched once for the keeper, not every minute"
 
 
+def test_a_run_that_says_ready_late_is_asked_again(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A load longer than the tab's ten-minute fallback is not written off for its whole run."""
+    watch, world, sql, writes, clock = rig
+    caplog.set_level("INFO", logger="yulon.realm_flag")
+    world.log = "Loading maps..."
+    sql.flags = 2
+    for _ in range(140):  # 700 s: asked at ~65 s (no) and again ten minutes on (no)
+        watch.tick()
+        clock.advance(5)
+    assert world.log_reads == 2
+    assert len([r for r in caplog.records if "does not show it ready" in r.getMessage()]) == 1
+    world.log = READY_LINE
+    for _ in range(130):  # the next ask, ten minutes on, finds the marker
+        watch.tick()
+        clock.advance(5)
+    assert writes.names == ["clear"]
+    assert world.log_reads == 3
+
+
 def test_a_mark_that_lands_after_the_core_cleared_is_taken_off_at_once(rig: Rig) -> None:
     """The world said ready and cleared the bit between the tick's read and its mark (Codex)."""
     watch, world, sql, writes, clock = rig
