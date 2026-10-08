@@ -1626,12 +1626,15 @@
             },
             "mmaps": {
               "argv": [
+                "stdbuf",
+                "-oL",
                 "/opt/trinitycore/bin/mmaps_generator",
                 "--threads",
                 "{{THREADS}}"
               ],
               "min_files": 500,
               "background": true,
+              "generation": 2,
               "tile_header": {
                 "length": 20,
                 "magic": 1296908624,

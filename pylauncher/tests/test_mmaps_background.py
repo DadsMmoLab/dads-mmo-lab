@@ -47,6 +47,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
 from tests.test_purge import Recorder as PurgeRecorder
 from yulon import docker, platform, purge
 from yulon.catalog import composegen
+from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import extract, mmaps
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -1300,6 +1301,148 @@ def test_an_update_of_a_failed_run_after_a_real_crash_clears_the_tiles(box: Mach
     assert output(box.server_dir) == [] and said
     rebuilt = list(eng.before_rebuild(box.server_dir, "the rebuild"))
     assert rebuilt == []
+
+
+def test_a_return_to_the_tested_pin_clears_the_tiles_of_a_failed_run(box: Machine) -> None:
+    """T244: tiles a generator that crashed made are not continued by the one the pin brings.
+
+    The Centurion pin of 2026-10-08 carries a generator that no longer crashes on a four-digit
+    map id and finds map 0, 1 and 30's tiles by their own file names, so the origin of their
+    navmesh moves: the old tiles would be misplaced. The press that brings that code (Update to
+    latest or Return to the tested pin; never a Rebuild, which keeps the checkout) already throws
+    them away, and the next start begins at 0 %.
+    """
+    install(box)
+    box.mmaps.write_tiles(30)
+    box.mmaps.finish(139)
+    eng = engine(box)
+    assert eng.mmaps_status(box.server_dir).kept == 30
+    said = list(
+        eng.before_rebuild(
+            box.server_dir, "the return to the tested commit", "Return to the tested pin…"
+        )
+    )
+    assert output(box.server_dir) == [] and said
+    assert not (box.server_dir / mmaps.RECORD_FILE).exists()
+    mmaps.start_mmaps(
+        box.server_dir, ENTRY, runner=box.mmaps, platform_id=lambda: "linux", install_id=INSTALL_ID
+    )
+    assert box.mmaps.mmaps_at_run[-1] == []
+
+
+def with_generation(generation: int) -> CatalogEntry:
+    """`ENTRY` whose generator is `generation` (the catalog's `mmaps.generation`)."""
+    raw = ENTRY.model_dump(mode="json")
+    raw["install"]["native"]["trinitycore"]["mmaps"]["generation"] = generation
+    return CatalogEntry.model_validate(raw)
+
+
+def finish_a_run(server_dir: Path, entry: CatalogEntry, fake: FakeMmapsDocker) -> None:
+    """A complete run under `entry`'s generator: started, finished with every tile, switched on."""
+    mmaps.start_mmaps(
+        server_dir,
+        entry,
+        runner=fake,
+        clock=Clock(),
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=("--user", "1000:1000"),
+    )
+    fake.finish(0, tiles=MIN_FILES)
+    now = mmaps.mmaps_status(server_dir, entry, runner=fake, clock=Clock(), install_id=INSTALL_ID)
+    assert now.state == "done" and now.pathfinding_on
+
+
+def route(
+    server_dir: Path, entry: CatalogEntry, fake: FakeMmapsDocker, *, clear: bool
+) -> str | None:
+    return mmaps.stop_for_route(
+        server_dir,
+        entry,
+        "the update to the newest code",
+        clear=clear,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+
+
+def test_a_complete_set_from_an_older_generator_is_thrown_away_by_the_updating_routes(
+    server: Path,
+) -> None:
+    """T244: a finished set the crashing Centurion generator made is not kept by an update.
+
+    A `done` record is left alone by every route as a complete set; one whose generator the
+    catalog has since replaced (`mmaps.generation`) is not: pathfinding is switched off, the
+    tiles and the record go, and the next start makes the set again from nothing.
+    """
+    fake = FakeMmapsDocker()
+    finish_a_run(server, ENTRY, fake)
+    assert len(output(server)) == MIN_FILES
+    said = route(server, with_generation(2), fake, clear=True)
+    assert said is not None and "removed" in said
+    assert output(server) == [] and not (server / mmaps.RECORD_FILE).exists()
+    assert "mmap.enablePathFinding = 0\n" in conf_text(server)
+    mmaps.start_mmaps(
+        server,
+        with_generation(2),
+        runner=fake,
+        clock=Clock(),
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=("--user", "1000:1000"),
+    )
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_rebuild_keeps_a_complete_set_whatever_its_generation(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    finish_a_run(server, ENTRY, fake)
+    assert route(server, with_generation(2), fake, clear=False) is None
+    assert len(output(server)) == MIN_FILES and record(server)["state"] == "done"
+    assert "mmap.enablePathFinding = 1\n" in conf_text(server)
+
+
+def test_a_complete_set_from_the_current_generator_survives_the_updating_routes(
+    server: Path,
+) -> None:
+    fake = FakeMmapsDocker()
+    current = with_generation(2)
+    finish_a_run(server, current, fake)
+    assert record(server)["generation"] == 2
+    assert route(server, current, fake, clear=True) is None
+    assert len(output(server)) == MIN_FILES and record(server)["state"] == "done"
+    assert "mmap.enablePathFinding = 1\n" in conf_text(server)
+
+
+def test_a_run_that_finishes_while_an_updating_route_waits_is_thrown_away_too(
+    server: Path,
+) -> None:
+    """The route reconciles first: a job that ended since the last poll is `done` by then."""
+    fake = FakeMmapsDocker()
+    mmaps.start_mmaps(
+        server,
+        ENTRY,
+        runner=fake,
+        clock=Clock(),
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=("--user", "1000:1000"),
+    )
+    fake.finish(0, tiles=MIN_FILES)
+    said = route(server, with_generation(2), fake, clear=True)
+    assert said is not None
+    assert output(server) == [] and not (server / mmaps.RECORD_FILE).exists()
+    assert "mmap.enablePathFinding = 0\n" in conf_text(server)
+
+
+def test_a_record_written_before_generations_reads_as_the_first(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    finish_a_run(server, ENTRY, fake)
+    raw = record(server)
+    raw.pop("generation", None)
+    (server / mmaps.RECORD_FILE).write_text(json.dumps(raw), encoding="utf-8")
+    loaded = mmaps.read_record(server)
+    assert loaded is not None and loaded.generation == 1
 
 
 def test_a_rebuild_through_the_engine_keeps_the_tiles_of_a_failed_run(box: Machine) -> None:

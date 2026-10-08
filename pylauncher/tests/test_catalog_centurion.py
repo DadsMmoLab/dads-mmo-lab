@@ -137,9 +137,20 @@ def test_the_map_data_takes_maps_cameras_and_vmaps_and_the_trees_own_dbcs() -> N
     assert assemble.argv == (f"{CORE}/bin/vmap4assembler", "Buildings", "vmaps")
     assert TC.extract.dbc_overlay_from == "centurion/dbc"
     assert TC.required_maps == (0, 1, 530)
-    assert TC.mmaps.argv == (f"{CORE}/bin/mmaps_generator", "--threads", "{{THREADS}}")
+    # `stdbuf -oL` (T244): stdout into Docker's log is block-buffered, and an abort does not flush
+    # it, so the "last lines" after a crash were up to 4 KB stale and the progress lagged.
+    assert TC.mmaps.argv == (
+        "stdbuf",
+        "-oL",
+        f"{CORE}/bin/mmaps_generator",
+        "--threads",
+        "{{THREADS}}",
+    )
     assert TC.mmaps.background is True
     assert TC.mmaps.min_files == 500
+    # T244: raised with the pin that fixed the generator, so a complete set an older one made
+    # (wrong tiles for maps 0, 1 and 30) is thrown away by Update / Return to the pin.
+    assert TC.mmaps.generation == 2
 
 
 def test_the_world_conf_keeps_the_updater_off_and_plays_like_the_live_realm() -> None:
