@@ -309,7 +309,9 @@ def test_no_shipped_sql_step_check_carries_a_template_field() -> None:
                 if "{" in check["query"] or "{" in check["missing"]:
                     offenders.append(f"{path.relative_to(MANIFESTS_DIR)}: {check['query']!r}")
     assert offenders == [], offenders
-    assert len(seen) == 3, seen  # mod-city-bots' precondition and its two verify entries
+    # mod-city-bots' precondition and its two verify entries, and npc-teleporter's two verify
+    # entries (T564: the menus were moved off the base game's ids)
+    assert len(seen) == 5, seen
 
 
 def test_prompt_choice_rules() -> None:
