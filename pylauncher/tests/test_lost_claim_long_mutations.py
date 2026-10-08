@@ -106,3 +106,15 @@ def test_a_set_aside_stopped_part_way_is_put_back_by_the_next_press(tmp_path: Pa
     assert moved == ["maps"], moved
     extract.put_back(data)
     assert sorted(path.name for path in data.iterdir()) == ["dbc", "maps", "vmaps"]
+
+
+def test_a_put_back_stopped_between_names_is_finished_by_the_next_call(tmp_path: Path) -> None:
+    """Mutation this catches: `put_back()` not asking `stop` before each name."""
+    data = tmp_path / "data"
+    for name in ("maps", "vmaps", "dbc"):  # nothing of the new output in the way
+        (data / extract.PREVIOUS_DIR / name).mkdir(parents=True)
+    with pytest.raises(rmtree.StoppedPartWay):
+        extract.put_back(data, stop=_stop_after(1))
+    assert len(list((data / extract.PREVIOUS_DIR).iterdir())) == 2, "one name was put back"
+    extract.put_back(data)
+    assert sorted(path.name for path in data.iterdir()) == ["dbc", "maps", "vmaps"]
