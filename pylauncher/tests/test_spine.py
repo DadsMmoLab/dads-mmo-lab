@@ -2984,9 +2984,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("tuning.py", "module_conf_files"): (
         "T569. Lists `env/dist/etc/modules` for the `.conf` files the Tuning tab's file buttons "
-        "offer. Read-only: it opens and writes nothing, and takes no part in whether the app may "
-        "write anywhere. A folder that cannot be listed answers no files, so the tab shows the "
-        "cards' own files and the server's, as before"
+        "offer. The listing itself only reads, but its answer IS the set of files Save file may "
+        "overwrite: these are the user's own confs in the server's own bind-mounted folder, "
+        "reached through the same backup-then-write path as a conf that has a card, and chosen "
+        "by the user pressing a button. It does not decide whether the app may write somewhere "
+        "it does not own, so it is not `native._listing()`. A folder that cannot be listed "
+        "answers no files, so the tab shows the cards' own files and the server's, as before"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "

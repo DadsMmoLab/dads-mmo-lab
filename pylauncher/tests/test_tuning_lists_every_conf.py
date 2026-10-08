@@ -116,13 +116,23 @@ def test_a_dist_file_a_folder_and_a_vanished_conf_are_not_offered(
 def test_a_conf_the_catalog_does_not_know_opens_in_the_editor_and_saves(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Opening is the same path as any listed conf: read-only only for the server's own."""
+    """Opening and saving are the same path as any listed conf: backup, then the file."""
+    from yulon import tuning
+
     view = _players_view(ps, tmp_path)
     target = f"{MODULES}/MultiBotBridge.conf"
+    path = tmp_path / target
+    original = path.read_bytes()
     assert target in view._tuning_files()
-    view.open_tuning_file(target)
+    next(b for b in view.tuning_panel.file_buttons() if b.toolTip() == target).click()
+    assert view.tuning_panel.current_file() == target
     assert view.tuning_panel.editor.toPlainText().startswith("# MultiBotBridge")
     assert not view.tuning_panel.editor.isReadOnly()
+
+    view.save_tuning_file("# MultiBotBridge\nKey = 2\n")
+    assert path.read_bytes() == b"# MultiBotBridge\nKey = 2\n"
+    backups = tuning.backups_of(path)
+    assert len(backups) == 1 and backups[0].read_bytes() == original
 
 
 # -- fifty buttons must not push the editor off the screen ------------------------
@@ -253,3 +263,36 @@ def test_a_conf_the_file_system_calls_the_same_file_gets_one_button(
     assert [f for f in files if f.lower().endswith("/mod_npc_beastmaster.conf")] == [
         f"{MODULES}/mod_npc_beastmaster.conf"
     ]
+
+
+def test_the_scroll_box_restates_its_height_when_the_bar_wraps_without_the_box_resizing(
+    qapp: object,
+) -> None:
+    """`FlowBar.height_needed_changed`: a wrap that moves while the box keeps its size.
+
+    Wider buttons at the same width make a third line. The box is not resized,
+    so only the bar's own signal can tell it.
+
+    Mutation: drop the `emit()` in `FlowBar.resizeEvent` and the height stays two lines.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.widgets.flow_layout import FlowScroll, flow_bar
+
+    bar = flow_bar()
+    area = FlowScroll(bar, 4)
+    buttons = [QPushButton(f"b{i}", bar) for i in range(6)]
+    for button in buttons:
+        button.setFixedSize(100, 30)
+        bar.flow().addWidget(button)
+    area.resize(320, 50)
+    area.show()
+    process_events()
+    two_lines = area.height()
+    assert two_lines == 2 * 30 + bar.flow().spacing(), f"control: two lines, {two_lines}px"
+    for button in buttons:
+        button.setFixedSize(150, 30)
+    process_events()
+    assert area.width() == 320
+    assert area.height() == 3 * 30 + 2 * bar.flow().spacing(), f"{area.height()}px"
+    area.close()
