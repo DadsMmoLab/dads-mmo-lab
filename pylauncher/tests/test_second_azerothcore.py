@@ -161,6 +161,29 @@ def test_two_azerothcore_entries_with_their_own_names_load_together() -> None:
     assert [g.id for g in both.games] == ["wow-wotlk", "wow-second-ac"]
 
 
+def test_two_entries_that_can_run_together_may_not_share_a_database_port() -> None:
+    """Their auth and world ports differ, so both may run; a shared DB port would fail late."""
+    clash = second_ac_json(ports={**SECOND_PORTS, "db": 3306})
+    with pytest.raises(ValidationError, match="3306"):
+        parse_catalog({"games": [wotlk_json(), clash]})
+
+
+def test_two_entries_that_can_run_together_may_not_share_a_soap_port() -> None:
+    clash = second_ac_json()
+    clash["install"]["native"]["soap_port"] = 7878
+    clash["operations"]["port"] = 7878
+    with pytest.raises(ValidationError, match="7878"):
+        parse_catalog({"games": [wotlk_json(), clash]})
+
+
+def test_two_entries_that_share_an_auth_port_may_share_the_rest() -> None:
+    """They conflict on purpose (Start offers to stop the other), so one DB/SOAP port is fine."""
+    sibling = second_ac_json(ports={**SECOND_PORTS, "auth": 3724, "db": 3306})
+    sibling["install"]["native"]["soap_port"] = 7878
+    sibling["operations"]["port"] = 7878
+    parse_catalog({"games": [wotlk_json(), sibling]})
+
+
 def test_the_shipped_catalog_names_every_container_once() -> None:
     seen: dict[str, str] = {}
     for entry in load_catalog().games:

@@ -3162,6 +3162,34 @@ class Catalog(_Strict):
                 owner[name] = entry.id
         return self
 
+    @model_validator(mode="after")
+    def _entries_that_run_together_share_no_host_port(self) -> Catalog:
+        """Two entries with no auth or world port in common get no other port in common (T552).
+
+        `Controller.port_conflicts()` looks at auth and world only, so two entries
+        that share one of those are the "stop the other one first" pair (WotLK and
+        TBC share all of theirs, on purpose). Two that share neither are meant to
+        run at once, and a shared database or SOAP port would then fail late, at
+        a Docker bind error, after the first server's containers were up (Codex
+        adversarial review).
+        """
+        for i, first in enumerate(self.games):
+            for second in self.games[i + 1 :]:
+                if {first.ports.auth, first.ports.world} & {second.ports.auth, second.ports.world}:
+                    continue
+                pairs = {
+                    "database": (first.ports.db, second.ports.db),
+                    "SOAP": (first.operations.port, second.operations.port),
+                }
+                for what, (a, b) in pairs.items():
+                    if a is not None and a == b:
+                        raise ValueError(
+                            f"{first.id} and {second.id} can run at the same time (their auth "
+                            f"and world ports differ) but both publish {what} port {a}; each "
+                            "needs its own"
+                        )
+        return self
+
     def get(self, game_id: str) -> CatalogEntry:
         """Look an entry up by id; `KeyError` if unknown."""
         for entry in self.games:
