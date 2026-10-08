@@ -35,6 +35,8 @@ number, and the installs that warned at 51 GB free went on to succeed.
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -101,6 +103,17 @@ before asking.
 
 
 @dataclass(frozen=True)
+class PortBlock:
+    """A host port the install publishes that the OS would not let us bind (T574)."""
+
+    port: int
+    what: str
+    kind: Literal["reserved", "in_use", "invalid"]
+    text: str = ""
+    """For `invalid`: the whole sentence, since there is no port to build one around."""
+
+
+@dataclass(frozen=True)
 class Facts:
     """What could be established about this machine. `None` means "not established".
 
@@ -148,6 +161,8 @@ class Facts:
     bind_mount: bool | None = None
     port_conflicts: tuple[str, ...] = ()
     ports_in_use: tuple[int, ...] = ()
+    port_blocks: tuple[PortBlock, ...] = ()
+    """Ports a BIND was refused on, a definite fact (T574); `ports_in_use` is only a connect."""
     selinux_enforcing: bool | None = None
     server_fs_type: str | None = None
     client_checks: tuple[Check, ...] = ()
@@ -322,6 +337,8 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
+    bind_port: Callable[[str, int], platform.PortBind] | None = None,
+    port_holders: Callable[[tuple[int, ...]], docker.PortHolders] | None = None,
     selinux: Callable[[], bool | None] | None = None,
     fs_type: Callable[[Path], str | None] | None = None,
     in_wsl: Callable[[], bool] | None = None,
@@ -372,6 +389,17 @@ def gather(
         # would have started that `rust-prior-art.md` §4 warns about.
         if probe_port("127.0.0.1", port).status == "open":
             listening.append(port)
+    targets, port_problems = bind_targets(entry, server_dir)
+    holders = docker.PortHolders()
+    if ready:
+        ask_holders = (
+            port_holders
+            if port_holders is not None
+            else _default_holders(entry, server_dir, platform_id)
+        )
+        holders = ask_holders(tuple(port for _host, port, _what in targets))
+    blocks = _bind_blocks(targets, holders, bind_port, here == "windows") if ready else ()
+    blocks += tuple(PortBlock(0, "port setting", "invalid", text) for text in port_problems)
     # SELinux is a Linux fact. Off Linux the questions are not asked, so the
     # check below can tell "not applicable" from "could not read it".
     #
@@ -453,8 +481,9 @@ def gather(
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
         bind_mount=bind,
-        port_conflicts=tuple(conflicts()) if ready else (),
+        port_conflicts=_with_foreign_holders(conflicts() if ready else (), holders),
         ports_in_use=tuple(listening),
+        port_blocks=blocks,
         selinux_enforcing=enforcing,
         server_fs_type=server_fs,
         client_checks=client_checks,
@@ -515,6 +544,162 @@ def _default_conflicts(
     spec = entry.container_spec()
     project = composegen.project_name(entry.id, server_dir, platform_id=platform_id)
     return lambda: docker.foreign_port_conflicts(spec, project)
+
+
+_LOOPBACK = "127.0.0.1"
+_ALL_INTERFACES = "0.0.0.0"
+_PORT_OVERRIDES = {
+    "auth port": "DOCKER_AUTH_EXTERNAL_PORT",
+    "world port": "DOCKER_WORLD_EXTERNAL_PORT",
+    "database port": "DOCKER_DB_EXTERNAL_PORT",
+}
+
+
+def _dotenv_literal(raw: str) -> str | None:
+    """What compose reads from the right-hand side of a `.env` line; None when it cannot be known.
+
+    A quoted value is what is inside the quotes (anything after them is a
+    comment); an unquoted one ends at the first space-then-`#` (a tab does not
+    count: compose-go cuts only at a space). A `$` anywhere means compose will
+    interpolate it (`${DB_PORT:-13306}`), which only compose can resolve, so the
+    answer is "unknown" and the caller probes and refuses nothing for that port
+    (T574).
+    """
+    text = raw.strip()
+    if text[:1] in ("'", '"'):
+        end = text.find(text[0], 1)
+        text = text[1:] if end == -1 else text[1:end]
+    else:
+        match = re.search(r"(?:^| )#", text)
+        if match is not None:
+            text = text[: match.start()]
+    return None if "$" in text else text.strip()
+
+
+def _port_setting(
+    server_dir: Path, var: str, *, own_environment: bool
+) -> tuple[str | None, str, bool]:
+    """`(value, where it came from, known)` for a port variable, the way compose resolves it (T574).
+
+    Compose gives the process environment precedence over `.env`, and an
+    environment variable that is present but EMPTY still counts as set: it
+    stops `.env` from filling the key, and `${VAR:-default}` then takes the
+    default. So an empty value returns no override at all. Yu'lon's own
+    environment is what its `docker compose` runs inherit, except for a server
+    inside a WSL distro (`own_environment` False): `wsl.exe` does not forward
+    it, so only that distro's `.env` counts. `known` is False for a `.env`
+    value only compose can resolve.
+    """
+    if own_environment and var in os.environ:
+        given = os.environ[var].strip()
+        return (given or None), f"the environment variable {var}", True
+    where = f"{var} in {server_dir / composegen.DOTENV_FILE}"
+    raw = composegen.dotenv_value(server_dir, var)
+    if raw is None:
+        return None, where, True
+    literal = _dotenv_literal(raw)
+    return (literal or None), where, literal is not None
+
+
+def _not_a_port(where: str, given: str) -> str:
+    return (
+        f"{where} is {given!r}, which is not a port number (1 to 65535), so the server cannot "
+        "publish it. Correct it or remove it, then try again."
+    )
+
+
+def bind_targets(
+    entry: CatalogEntry, server_dir: Path
+) -> tuple[list[tuple[str, int, str]], list[str]]:
+    """`([(address, port, what)], [problems])` for every host port compose will publish (T574).
+
+    The set is `CatalogEntry.published_host_ports()`, the one T552's collision
+    rule uses, so the database port counts when the entry omits it. The address
+    is the one the base file gives each mapping: the game's own auth and world
+    ports on every interface, the database and the SOAP/command channel on
+    loopback. A setting that overrides a port moves the bind with it (the
+    port-conflict remedy writes `DOCKER_DB_EXTERNAL_PORT` to `.env`; the
+    process environment beats it, as in compose), and a released channel
+    (`127.0.0.1:0`) publishes nothing. A setting that is not a port number is
+    a problem to refuse with, not a number to bind; one that compose has to
+    interpolate is left alone (`_dotenv_literal()`).
+    """
+    found: list[tuple[str, int, str]] = []
+    problems: list[str] = []
+    for number, what in entry.published_host_ports().items():
+        host = _ALL_INTERFACES if what in ("auth port", "world port") else _LOOPBACK
+        var = _PORT_OVERRIDES.get(what)
+        channel = what in ("SOAP port", "command-channel port")
+        if var is not None or channel:
+            given, where, known = _port_setting(
+                server_dir,
+                var or composegen.CHANNEL_PORT_VAR,
+                own_environment=platform.wsl_location(server_dir) is None,
+            )
+            if not known:
+                logger.info(f"preflight: {where} is for compose to resolve; not probing {what}")
+                continue
+            if given is not None:
+                port_text = given
+                if channel:
+                    address, _, port_text = given.rpartition(":")
+                    host = address or host
+                if port_text.isascii() and port_text.isdigit() and int(port_text) <= 65535:
+                    number = int(port_text)
+                else:
+                    problems.append(_not_a_port(where, given))
+                    continue
+        if number > 0 and not any(port == number and at == host for at, port, _ in found):
+            found.append((host, number, what))
+    return found, problems
+
+
+def _bind_blocks(
+    targets: Sequence[tuple[str, int, str]],
+    holders: docker.PortHolders,
+    bind_port: Callable[[str, int], platform.PortBind] | None,
+    windows: bool,
+) -> tuple[PortBlock, ...]:
+    """Bind each target no container holds; a definite refusal becomes a `PortBlock`.
+
+    Ports a container publishes are skipped: ours would answer "in use" to our
+    own resume, and a stranger's is reported as a conflict by name instead.
+    `unknown` (any other error) is dropped, like a refused connect. `windows`
+    is the platform seam `gather()` was given, not a fresh `platform.detect()`.
+    """
+    bind = (
+        bind_port
+        if bind_port is not None
+        else lambda host, port: platform.bind_tcp(host, port, windows=windows)
+    )
+    skip = holders.ours | holders.foreign.keys()
+    blocks: list[PortBlock] = []
+    for host, port, what in targets:
+        if port in skip:
+            continue
+        got = bind(host, port)
+        if got.status in ("reserved", "in_use"):
+            blocks.append(PortBlock(port, what, got.status))
+            logger.info(f"preflight: binding {host}:{port} ({what}) answered {got.status}")
+        else:
+            logger.debug(f"preflight: binding {host}:{port} answered {got.status}")
+    return tuple(blocks)
+
+
+def _default_holders(
+    entry: CatalogEntry, server_dir: Path, platform_id: Callable[[], str]
+) -> Callable[[tuple[int, ...]], docker.PortHolders]:
+    """`docker.port_holders` for this install's compose project (the ownership proof)."""
+    project = composegen.project_name(entry.id, server_dir, platform_id=platform_id)
+    return lambda ports: docker.port_holders(ports, project)
+
+
+def _with_foreign_holders(conflicts: Sequence[str], holders: docker.PortHolders) -> tuple[str, ...]:
+    """The auth/world conflicts, plus any stranger on the database or SOAP port."""
+    names = list(conflicts)
+    for held in holders.foreign.values():
+        names += [name for name in held if name not in names]
+    return tuple(names)
 
 
 def free_bytes(path: Path) -> int | None:
@@ -1638,16 +1823,45 @@ def _port_check(facts: Facts) -> Check:
     containers by compose project before the list gets here, or a resume would
     be refused because its own half-started server is still up. A raw socket
     probe is not proof: Hyper-V and WSL reserve ranges, and a permission error
-    looks exactly like a listener — so the socket half only ever warns, because
-    hard-refusing on it would refuse a server that would have started
-    (`rust-prior-art.md` §4).
+    looks exactly like a listener — so a refused or timed-out CONNECT only ever
+    warns, because hard-refusing on it would refuse a server that would have
+    started (`rust-prior-art.md` §4).
+
+    A BIND is different (T574) and does refuse: a player lost a 3 h build to
+    exactly the reserved range that note feared, found only by `up`. A bind that
+    is refused for permission or because the address is in use is a definite
+    fact about the very address compose will publish, so that report overrides
+    the old note for this half. Any other bind error stays `unknown` and refuses
+    nothing.
     """
-    if facts.port_conflicts:
+    if facts.port_conflicts or facts.port_blocks:
+        windows = facts.platform_id == "windows"
+        said = [
+            " ".join(
+                (
+                    block.text
+                    if block.kind == "invalid"
+                    else docker.blocked_port_sentence(
+                        block.port, block.kind, windows=windows, what=block.what
+                    )
+                )
+                for block in facts.port_blocks
+            )
+        ]
+        if facts.port_conflicts:
+            said.insert(
+                0,
+                f"{', '.join(facts.port_conflicts)} already publish the ports this server needs",
+            )
         return Check(
             "the server's ports",
             "refuse",
-            f"{', '.join(facts.port_conflicts)} already publish the ports this server needs",
-            "Stop that server first (or remove its containers), then try again.",
+            ". ".join(part for part in said if part) if facts.port_conflicts else said[0],
+            (
+                "Stop that server first (or remove its containers), then try again."
+                if facts.port_conflicts
+                else ""
+            ),
         )
     if facts.ports_in_use:
         ports = ", ".join(str(port) for port in facts.ports_in_use)

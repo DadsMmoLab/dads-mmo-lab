@@ -20,6 +20,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
+- A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
+- An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
@@ -28,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.
+- Installing NPC Teleporter on WotLK no longer breaks Mountaineer Pebblebitty's and Maggran Earthbinder's menus; Install again to mend.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
 - Updating a TBC or Vanilla server stops before building when the new code needs database changes it cannot apply.
 - Updating a TBC or Vanilla server reloads changed bot tables, replacing what the bots had generated in them.
@@ -50,6 +53,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 - **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
+- Install now checks every port the server needs before the build, and says if Windows has reserved the database port.
+- A port the server cannot use is said in plain words, and a failed start shows Docker's error first.
 - A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
 
 ### Changed

@@ -430,11 +430,68 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerRefusal(problem)
-        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        refusal = _port_refusal(proc.stderr)
+        if refusal is not None:
+            # The sentence is Yu'lon's; the daemon's own text rides beside it as the detail,
+            # because the channel's rollback reads WHICH port from it (`blames_the_host_port`).
+            raise DockerRefusal(refusal, detail=proc.stderr.strip())
+        headline = _daemon_lines(proc.stderr) if argv[:1] == ["compose"] else ""
+        if headline:
+            # Compose's pull and create progress is dropped from the sentence, not
+            # from the record: whatever else it printed stays in the log.
+            logger.info(f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
+        said = (
+            f"docker {' '.join(argv)} exited {proc.returncode}: {headline or proc.stderr.strip()}"
+        )
         if timeout is not None and runner.timed_out(proc):
             raise DockerTimedOutError(said)
         raise DockerCommandError(said)
     return proc
+
+
+_DAEMON_LINE = re.compile(r"^[ \t]*(Error response from daemon:.*?)[ \t]*$", re.MULTILINE)
+_PORT_NOT_AVAILABLE = re.compile(
+    r"ports are not available: exposing port TCP \S*?:(\d+) -> \S+: listen tcp\d*"
+    r" \S+: bind: (?P<why>[^\r\n]*)"
+)
+
+
+def _daemon_lines(stderr: str) -> str:
+    """The daemon's own `Error response from daemon:` lines in compose's output, else "" (T574).
+
+    `docker compose up` prints its pull and create progress first and the reason
+    it failed last, so the head of stderr names an image layer, not the
+    failure. Several lines are joined; the same line twice is kept once. Only
+    a compose command's headline is cut down to these lines (see `_run()`).
+    """
+    found: list[str] = []
+    for match in _DAEMON_LINE.finditer(stderr):
+        if match.group(1) not in found:
+            found.append(match.group(1))
+    return " / ".join(found)
+
+
+def _port_refusal(stderr: str) -> str | None:
+    """The plain sentence for the daemon's `ports are not available` error, or None (T574).
+
+    The preflight bind check covers a port blocked when the install starts; this
+    covers one that became blocked afterwards (a range Windows reserved at the
+    next boot). Only the daemon's own wording is read, so no host is asked:
+    Windows' "forbidden by its access permissions" (WSAEACCES) and a Linux
+    "permission denied" are `reserved`, everything else the bind said is `in_use`.
+    A message without the port number in the shape Docker prints it is left alone.
+    """
+    for line in _daemon_lines(stderr).split(" / "):
+        match = _PORT_NOT_AVAILABLE.search(line)
+        if match is None:
+            continue
+        why = match.group("why").lower()
+        windows = "forbidden by its access permissions" in why
+        kind: Literal["reserved", "in_use"] = (
+            "reserved" if windows or "permission denied" in why else "in_use"
+        )
+        return blocked_port_sentence(int(match.group(1)), kind, windows=windows)
+    return None
 
 
 def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
@@ -5100,6 +5157,92 @@ def foreign_port_conflicts(
     if not conflicts:
         return []
     return [name for name in conflicts if container_project(name, wsl_distro=wsl_distro) != project]
+
+
+NETSH_RESERVED_RANGES = "netsh interface ipv4 show excludedportrange protocol=tcp"
+"""What shows the port ranges Windows has set aside (Hyper-V, WinNAT, Docker Desktop)."""
+
+
+def blocked_port_sentence(
+    port: int, kind: Literal["reserved", "in_use"], *, windows: bool, what: str = ""
+) -> str:
+    """Plain words for a host port that cannot be bound: the reason, then what to do (T574).
+
+    One sentence builder for the two places that learn it: the preflight bind
+    probe, before the build, and the daemon's own `ports are not available`
+    error from `up`, which covers a range reserved between the two (a reboot).
+    `kind` is a definite fact in both; a refused or timed-out connect is not.
+    """
+    named = f"port {port} ({what})" if what else f"port {port}"
+    if kind == "in_use":
+        return (
+            f"Another program on this computer already uses {named}, so the server cannot "
+            "start. Close that program or stop its service, then try again."
+        )
+    if windows:
+        return (
+            f"Windows has reserved {named}, so no program can use it and the server cannot "
+            f"start. To see the reserved ranges, run this in a Command Prompt: "
+            f"{NETSH_RESERVED_RANGES}. To free the port, open a Command Prompt as "
+            "administrator, run net stop winnat and then net start winnat, and try again. "
+            "A Windows service that holds the port for itself gives the same message; "
+            "stop that service if there is one."
+        )
+    return (
+        f"This computer will not let a program use {named} (permission denied), so the "
+        "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
+@dataclass(frozen=True)
+class PortHolders:
+    """Who publishes the host ports asked about, split by ownership (T574).
+
+    `ours`: ports published by a container of the asked-for compose project.
+    `foreign`: port -> the other containers publishing it (an unreadable owner
+    counts as foreign, for `foreign_port_conflicts()`'s reason).
+    """
+
+    ours: frozenset[int] = frozenset()
+    foreign: dict[int, tuple[str, ...]] = field(default_factory=dict)
+
+
+def port_holders(
+    ports: Sequence[int], project: str, *, wsl_distro: str | None = None
+) -> PortHolders:
+    """Which running containers publish any of `ports`, and which of them are `project`'s.
+
+    The bind probe's partner: a socket bind cannot tell a port our own database
+    holds (a resume, with `restart: unless-stopped` containers up) from a port a
+    stranger holds, so preflight asks this first and binds only the rest. Same
+    ownership proof as `foreign_port_conflicts()`: the compose project label.
+    Containers publishing none of `ports` are not asked about at all.
+    """
+    wanted = set(ports)
+    if not wanted:
+        return PortHolders()
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
+    ours: set[int] = set()
+    foreign: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_field = line.split("\t", 1)
+        published: set[int] = set()
+        for part in ports_field.split(","):
+            if "->" not in part:
+                continue
+            _, _, port_text = part.split("->", 1)[0].rpartition(":")
+            if port_text.strip().isdigit() and int(port_text) in wanted:
+                published.add(int(port_text))
+        if not published:
+            continue
+        if container_project(name, wsl_distro=wsl_distro) == project:
+            ours |= published
+        else:
+            for port in sorted(published):
+                foreign.setdefault(port, []).append(name)
+    return PortHolders(frozenset(ours), {port: tuple(names) for port, names in foreign.items()})
 
 
 def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:

@@ -5290,6 +5290,9 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     steps and its three remove steps, around the repository's own files.
     51 after T560: `npc-teleporter`'s Remove puts back, in a step of its own after the
     DELETEs, the 19 base-game gossip rows the install deletes.
+    55 after T564: four more `npc-teleporter` install steps: one before the files (clears the
+    menus an earlier Install made), one after each `.dist` that moves its gossip menus off the
+    base game's ids, and the put-back of the 19 base rows between them.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5310,7 +5313,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        51,
+        55,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
