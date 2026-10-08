@@ -13630,7 +13630,7 @@ class ControllerView(QWidget):
             return
         self._character_action(
             "Setting the level of",
-            lambda: play.set_level(name, level),  # type: ignore[attr-defined]
+            lambda: play.set_level_and_save(name, level),  # type: ignore[attr-defined]
             level=level,
         )
 
