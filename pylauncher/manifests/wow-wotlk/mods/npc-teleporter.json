@@ -25,9 +25,9 @@
     },
     {
       "db": "world",
-      "statement": "DELETE FROM creature WHERE id IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001);",
+      "statement": "DELETE FROM creature WHERE id IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001); DELETE FROM creature_template_model WHERE CreatureID IN (190000,190001); DELETE FROM creature_template_addon WHERE entry IN (190000,190001); DELETE FROM gossip_menu WHERE MenuID BETWEEN 50000 AND 50017; DELETE FROM gossip_menu_option WHERE MenuID BETWEEN 50000 AND 50017; DELETE FROM npc_text WHERE ID BETWEEN 300000 AND 300009; DELETE FROM smart_scripts WHERE entryorguid IN (190000,190001) AND source_type = 0; DELETE FROM conditions WHERE SourceTypeOrReferenceId IN (14,15) AND SourceGroup BETWEEN 50000 AND 50017; DELETE FROM gameobject WHERE id = 194394 AND guid >= 200000;",
       "when": "remove",
-      "note": "T558: `creature.id`, not `id1`: AzerothCore's 2026_06_16_00.sql renamed id1 to id and dropped id2/id3, and every WotLK pin Yu'lon has shipped carries it (tests/test_wotlk_world_columns.py)"
+      "note": "T558: `creature.id`, not `id1`: AzerothCore's 2026_06_16_00.sql renamed id1 to id and dropped id2/id3, and every WotLK pin Yu'lon has shipped carries it (tests/test_wotlk_world_columns.py); T560: also the rows the two .dist files DELETE before they INSERT (their @GOSSIP_MENU 50000..50009 and 50009..50017, @TEXT_ID 300000..300005 and 300005..300009, the capital file's rune gameobject 194394 from guid 200000), so Remove leaves the world as it was"
     }
   ],
   "prompts": [

@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
+- Removing NPC Teleporter on WotLK also clears its menus, texts and scripts, leaving the world as before the install.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
 - Updating a TBC or Vanilla server stops before building when the new code needs database changes it cannot apply.
 - Updating a TBC or Vanilla server reloads changed bot tables, replacing what the bots had generated in them.
