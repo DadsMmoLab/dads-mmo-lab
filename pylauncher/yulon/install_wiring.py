@@ -30,7 +30,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from yulon import docker, platform, wsl
+from yulon import docker, module_moves, platform, wsl
+from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
@@ -45,6 +46,7 @@ from yulon.catalog.installer import (
     InstallEngine,
     InstallerError,
     InstallOptions,
+    WorldStoppedAfterReadyError,
     installer_for,
 )
 from yulon.catalog.native import (
@@ -413,6 +415,80 @@ def _distro_down(wsl_distro: str | None) -> bool:
     return not wsl.may_read(wsl_distro)
 
 
+ModulePutBack = Callable[[tuple[str, ...]], str]
+"""Put back the modules a failed build named; the sentences that say what was done (T557).
+
+`apply.failed_build_put_back()`: over the Modules tab's own applier, so the
+put-back goes through the same git seam the tab's Update did. This module
+builds no Applier.
+"""
+
+
+def _settle(server_dir: Path) -> None:
+    problem = module_moves.settle(server_dir)
+    if problem:
+        logger.warning(f"the build worked, but the module-update record was not settled: {problem}")
+
+
+def with_module_moves(
+    lines: Iterator[str],
+    server_dir: Path,
+    *,
+    cancel: threading.Event | None,
+    put_back: ModulePutBack | None,
+    kept_settles: bool = True,
+) -> Iterator[str]:
+    """A build press's lines, passed through, with the module-update record kept true (T557).
+
+    Every line goes to a `module_moves.BuildErrorScanner` on its way out: the
+    stream, not the error's last words, which are 400 characters and often lose
+    the path. Then, by how the press ended:
+
+    - **it returned**: every clone on disk was just compiled, so no update is
+      unbuilt any more (`module_moves.settle()`); so does a build that was KEPT
+      after its world came up (`WorldStoppedAfterReadyError`), when
+      `kept_settles`;
+    - **Stop** (`StopSaid`, or the cancel event set): nothing changes;
+    - **a failure the old build is not back from** (`TrueAfterStop`: a
+      rollback that stopped half-way, the new build running): nothing
+      changes either -- the sources must stay with the build the tags name;
+    - **any other failure**: `put_back(named)` puts back the modules the
+      errors named, and its sentences go after the failure's own words. The
+      engine has already put the old images back, so the old build and the
+      put-back sources agree again. Same exception, same type and detail.
+
+    `put_back` None is the server's "Update to latest" route (T64): a module
+    that fails there fails against a core that just moved, and that route puts
+    the core back, so it only settles.
+    """
+    scanner = module_moves.BuildErrorScanner()
+    try:
+        for line in lines:
+            scanner.feed(line)
+            yield line
+    except WorldStoppedAfterReadyError:
+        if kept_settles:
+            _settle(server_dir)
+        raise
+    except InstallerError as exc:
+        stopped = isinstance(exc, StopSaid) or (cancel is not None and cancel.is_set())
+        if stopped or isinstance(exc, TrueAfterStop) or put_back is None:
+            raise
+        try:
+            said = put_back(scanner.named)
+        except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
+            logger.warning(f"could not put the named modules back after a failed build: {failure}")
+            said = ""
+        if said:
+            exc.args = (f"{exc} {said}",)
+        raise
+    finally:
+        close = getattr(lines, "close", None)
+        if close is not None:
+            close()
+    _settle(server_dir)
+
+
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]
 """What a controller tab drives to rebuild its install: cancel in, lines out.
 
@@ -428,8 +504,12 @@ def rebuild_for_app(
     server_dir: Path,
     *,
     wsl_distro: str | None = None,
+    put_back: ModulePutBack | None = None,
 ) -> RebuildSource:
     """The rebuild a controller tab presses, wired for the install at `server_dir`.
+
+    `put_back` (T557) is what a failed build does with the modules its errors
+    name (`with_module_moves()`); None puts nothing back and only settles.
 
     The engine is built PER PRESS, inside the generator, not here. Building it
     eagerly would run `import_gate_for()` and construct four seams for every tab
@@ -454,8 +534,13 @@ def rebuild_for_app(
         engine = installer_for_app(entry, wsl_distro=wsl_distro)
         # T170: this press compiles a server whose images are gone, without a
         # rollback -- its confirmation says so (`native.no_rollback_confirmation()`).
-        yield from engine.rebuild(
-            InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
+        yield from with_module_moves(
+            engine.rebuild(
+                InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
+            ),
+            server_dir,
+            cancel=cancel,
+            put_back=put_back,
         )
 
     return rebuild
@@ -606,8 +691,16 @@ def update_to_latest_for_app(
 
     def press(cancel: threading.Event | None = None) -> Iterator[str]:
         try:
-            yield from engine().update_to_latest(
-                options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
+            # T557: a finished update compiled every module clone, so the record
+            # settles; a failure here never puts a module back (`with_module_moves()`).
+            yield from with_module_moves(
+                engine().update_to_latest(
+                    options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
+                ),
+                server_dir,
+                cancel=cancel,
+                put_back=None,
+                kept_settles=False,
             )
         except RewrittenHistory as exc:
             met[exc.repo] = exc.line
@@ -615,7 +708,13 @@ def update_to_latest_for_app(
         met.clear()
 
     def to_pin(cancel: threading.Event | None = None) -> Iterator[str]:
-        yield from engine().update_to_latest(options, to_pin=True, cancel=cancel)
+        yield from with_module_moves(
+            engine().update_to_latest(options, to_pin=True, cancel=cancel),
+            server_dir,
+            cancel=cancel,
+            put_back=None,
+            kept_settles=False,
+        )
 
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):

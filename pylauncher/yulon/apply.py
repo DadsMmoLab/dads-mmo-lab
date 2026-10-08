@@ -752,6 +752,27 @@ def _an_update(subject: str) -> bool:
     return any(pattern.fullmatch(subject) for pattern in _UPDATE_SUBJECTS)
 
 
+def failed_build_put_back(
+    applier: Applier, load: Callable[[ManifestType, str], Manifest]
+) -> Callable[[tuple[str, ...]], str]:
+    """The Rebuild's put-back (`install_wiring.rebuild_for_app(put_back=)`), over the tab's applier.
+
+    The SAME applier the Modules tab updates with, so the put-back runs through
+    the same git seam (`ContainerGit` where there is no git) and the same
+    server folder. `load` is the tab's manifest store's `load`; a module it
+    cannot load is not put back.
+    """
+
+    def manifest(item_id: str) -> Manifest | None:
+        try:
+            return load("module", item_id)
+        except Exception as exc:  # noqa: BLE001 - a module with no manifest is just not put back
+            logger.info(f"no manifest for {item_id} to put it back with: {exc}")
+            return None
+
+    return lambda named: applier.after_failed_build(named, manifest)
+
+
 def reflog_update(entries: Sequence[ReflogEntry], head: str) -> str | None:
     """The commit HEAD was on before the update that moved it to `head`, from git's reflog.
 
@@ -3856,6 +3877,107 @@ class Applier:
                 )
                 if problem:
                     logger.warning(f"{manifest.id} was put back, but not recorded: {problem}")
+
+    def unbuilt_updates(self) -> tuple[str, ...]:
+        """The modules whose recorded update nobody has built yet, in the record's order (T557).
+
+        Each read against its clone's HEAD (`Move.unbuilt_at()`), so a stale
+        entry is not one. An unreadable record has none: fail closed.
+        """
+        ledger = module_moves.read(self.server_dir)
+        if ledger is None:
+            return ()
+        waiting = []
+        reader = self._reader("head_sha", HeadReader)
+        for item, move in ledger.moves.items():
+            family, _slash, item_id = item.partition("/")
+            if family != "module" or not item_id:
+                continue
+            if move.unbuilt_at(reader(self.server_dir / CLONE_DIRS["module"] / item_id)):
+                waiting.append(item_id)
+        return tuple(waiting)
+
+    def after_failed_build(
+        self, named: Sequence[str], load: Callable[[str], Manifest | None]
+    ) -> str:
+        """Put back each module a failed build's errors name, and say what was done (T557 §1.3).
+
+        Only the modules `named` (D6), and of those only one whose update this
+        app recorded and nobody has built (`last_update()`'s "ledger"): an
+        update known only from git's reflog is offered, never put back by itself
+        (D4). Nothing is rebuilt (D1): the sentences end by naming the press.
+        `load` gives the module's manifest by id, or None. Never raises: what it
+        returns is added to a failure that is already being reported.
+        """
+        put: list[str] = []
+        other: list[str] = []
+        moved: set[str] = set()
+        for item_id in named:
+            manifest = load(item_id)
+            last = self.last_update(manifest) if manifest is not None else None
+            if manifest is None or last is None:
+                other.append(
+                    f"The build stopped on an error in {item_id}. {item_id} was not updated since "
+                    f"your last build that worked, so Yu'lon did not change it. Your server is "
+                    f"still running the build it had."
+                )
+                continue
+            if last.source != "ledger":
+                other.append(
+                    f"The build stopped on an error in {item_id}. Its last update was made before "
+                    f"Yu'lon kept track of updates, so Yu'lon did not put it back by itself. To "
+                    f"build without that update, right-click {item_id} on the Modules tab, choose "
+                    f"Put back the last update, then press Rebuild."
+                )
+                continue
+            try:
+                self.put_back(manifest, last=last)
+            except PutBackRefused as exc:
+                other.append(
+                    f"The build stopped on an error in {item_id}. Yu'lon did not put it back, "
+                    f"because files in its folder were changed after the update and putting it "
+                    f"back would throw those changes away. Undo your changes, or press Remove on "
+                    f"its row, then press Rebuild."
+                    if exc.edited
+                    else f"The build stopped on an error in {item_id}. Yu'lon did not put it "
+                    f"back: {exc}"
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - every failure here is one sentence
+                logger.warning(f"could not put {item_id} back after a failed build: {exc}")
+                other.append(
+                    f"The build stopped on an error in {item_id}. Yu'lon tried to put it back on "
+                    f"{last.from_sha[:7]} and could not ({exc}). To build without it, press "
+                    f"Remove on its row, then press Rebuild."
+                )
+                continue
+            moved.add(item_id)
+            put.append(
+                f"The build stopped on an error in {item_id}, which was updated after your last "
+                f"build that worked. Yu'lon put {item_id} back on the version it had before that "
+                f"update ({last.from_sha[:7]})." + (f" {PUT_BACK_KEPT_SQL}" if last.sql else "")
+            )
+        waiting = [item_id for item_id in self.unbuilt_updates() if item_id not in moved]
+        said = list(put)
+        if put and waiting:
+            said.append(
+                "Your server is still running the build it had. Press Rebuild to build your "
+                f"other updates without {'it' if len(put) == 1 else 'them'}."
+            )
+        elif put:
+            said.append(
+                "Your server is still running the build it had, and nothing else is waiting to "
+                "be built."
+            )
+        said.extend(other)
+        if not named and waiting:
+            said.append(
+                "The build stopped, and the error does not say which module caused it. These "
+                f"modules were updated since your last build that worked: {', '.join(waiting)}. "
+                "To build without one of them, right-click it on the Modules tab, choose Put "
+                "back the last update, then press Rebuild."
+            )
+        return " ".join(said)
 
     def _refuse_a_moved_head(self, manifest: Manifest, clone: Path, expected: str | None) -> None:
         """No reset of a checkout that moved after `update()` checked it (T150).

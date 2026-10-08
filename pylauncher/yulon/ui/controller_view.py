@@ -2824,7 +2824,18 @@ def _assemble(
         # construction rather than by remembering it four times. Only WotLK ever
         # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
         # the same kind of checkout and its users patch it the same way.
-        rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T557: a failed build puts back the modules its errors name, through the
+        # Modules tab's own applier and manifests; a game with neither has none.
+        rebuild=install_wiring.rebuild_for_app(
+            entry,
+            server_dir,
+            wsl_distro=wsl_distro,
+            put_back=(
+                apply_module.failed_build_put_back(applier, store.load)
+                if applier is not None and store is not None
+                else None
+            ),
+        ),
         rebuild_refusal=install_wiring.rebuild_refusal_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
