@@ -806,3 +806,17 @@ def test_the_marker_of_another_command_is_not_ours(_no_settle: None) -> None:
     ]
     _, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
     assert 1.1 < took < 3.2, took
+
+
+@needs_pty
+def test_a_log_line_that_merely_contains_the_marker_does_not_prime_the_end(
+    _no_settle: None,
+) -> None:
+    script = [
+        (0.0, b"saveall\r\n"),
+        (0.05, b"[chat] a player typed: All players saved. lol\r\n"),
+        (0.1, b"mangos> "),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    _, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    assert 1.1 < took < 3.2, took

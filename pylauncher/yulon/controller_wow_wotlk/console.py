@@ -450,7 +450,7 @@ def _wait_for_answer(
 
 
 def _answer_closed(raw: list[str], command: str, prompt: str, marker: str) -> bool:
-    """Has the console printed our echo, then a line with `marker`, then its prompt?
+    """Has the console printed our echo, then a line that is exactly `marker`, then its prompt?
 
     Counted from the echo, as `_parse_reply()` does: a prompt before it belongs to an earlier
     command. A prompt after it counts only once the marker has gone by, because any other
@@ -468,7 +468,7 @@ def _answer_closed(raw: list[str], command: str, prompt: str, marker: str) -> bo
             text = text[len(prompt) :].lstrip()
         if text == sent:
             anchored = True
-        elif anchored and marker in text:
+        elif anchored and text == marker:
             answered = True
     return False
 
