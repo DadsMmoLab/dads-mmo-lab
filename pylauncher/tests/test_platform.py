@@ -1976,3 +1976,22 @@ def test_bind_tcp_asks_for_address_reuse_everywhere_but_windows(
     assert bool(options) is sets_reuse
     if sets_reuse:
         assert options == [(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_bind_tcp_always_lets_the_probe_socket_go(raises: bool) -> None:
+    """A probe that kept the port bound would be the next thing to hold it."""
+    closed: list[bool] = []
+
+    class Probe:
+        def setsockopt(self, *_a: object) -> None: ...
+
+        def bind(self, _addr: object) -> None:
+            if raises:
+                raise _wsa(10013)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    platform.bind_tcp("127.0.0.1", 3306, make_socket=lambda *_a: Probe(), windows=True)
+    assert closed == [True]

@@ -889,6 +889,67 @@ def test_the_dotenv_port_overrides_are_the_ports_that_get_bound(tmp_path: Path) 
     assert 13306 in asked and 3306 not in asked
 
 
+def test_a_process_environment_port_beats_the_dotenv_one_as_it_does_in_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DOCKER_DB_EXTERNAL_PORT=13306\nDOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:17878\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "23306")
+    monkeypatch.setenv("DOCKER_SOAP_EXTERNAL_PORT", "127.0.0.1:27878")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert {23306, 27878} <= set(asked)
+    assert not {13306, 17878, 3306} & set(asked)
+
+
+@pytest.mark.parametrize("given", ["99999", "65536", "abc", "33 06", "-1"])
+def test_a_port_setting_that_is_not_a_port_is_refused_by_name_not_crashed_on(
+    tmp_path: Path, given: str
+) -> None:
+    """99999 reached `socket.bind()` and escaped as an OverflowError."""
+    (tmp_path / ".env").write_text(f"DOCKER_DB_EXTERNAL_PORT={given}\n", encoding="utf-8")
+    facts_ = _gather_with(tmp_path)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert "DOCKER_DB_EXTERNAL_PORT" in said and repr(given) in said
+    assert "not a port number" in said
+
+
+def test_a_quoted_port_in_the_dotenv_is_the_port_it_quotes(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text('DOCKER_DB_EXTERNAL_PORT="13306"\n', encoding="utf-8")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    assert 13306 in asked and facts_.port_blocks == ()
+
+
+@pytest.mark.parametrize("platform_name", ["windows", "linux"])
+def test_the_default_bind_is_told_the_platform_gather_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str
+) -> None:
+    told: list[object] = []
+
+    def bind(host: str, port: int, **kwargs: object) -> platform_module.PortBind:
+        told.append(kwargs.get("windows"))
+        return _free(host, port)
+
+    monkeypatch.setattr(platform_module, "bind_tcp", bind)
+    _gather_with(tmp_path, bind_port=None, platform_id=lambda: platform_name)
+    assert told and set(told) == {platform_name == "windows"}
+
+
 def test_the_windows_volume_branch_is_reachable_without_running_on_windows() -> None:
     """The injected platform has to reach `_same_volume()`, not just `gather()`.
 

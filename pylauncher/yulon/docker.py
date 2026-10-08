@@ -432,7 +432,9 @@ def _run(
             raise DockerRefusal(problem)
         refusal = _port_refusal(proc.stderr)
         if refusal is not None:
-            raise DockerRefusal(refusal)
+            # The sentence is Yu'lon's; the daemon's own text rides beside it as the detail,
+            # because the channel's rollback reads WHICH port from it (`blames_the_host_port`).
+            raise DockerRefusal(refusal, detail=proc.stderr.strip())
         headline = _daemon_lines(proc.stderr) if argv[:1] == ["compose"] else ""
         if headline:
             # Compose's pull and create progress is dropped from the sentence, not

@@ -10091,7 +10091,10 @@ class ControllerView(QWidget):
             # log command -- under Details rather than on the line.
             why = _detail_of(exc)
         # Asked of the raw text: Docker's port-in-use words are what it reads.
-        rolled = self._roll_the_channel_back_if_it_took_the_port(raw)
+        # T574: and of the detail beside a sentence of ours, which keeps the daemon's text.
+        rolled = self._roll_the_channel_back_if_it_took_the_port(
+            f"{raw}\n{_detail_of(exc)}" if _detail_of(exc) else raw
+        )
         self.problem_label.setText(rolled or msg)
         self.problem_details.set_text("" if rolled else why)
         self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
