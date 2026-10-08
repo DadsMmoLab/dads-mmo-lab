@@ -19395,7 +19395,7 @@ class ControllerView(QWidget):
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
         for name in self._tuning_core_files():
-            if name not in found and (server_dir / name).is_file():
+            if not tuning.is_one_of(name, found) and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
 
@@ -19605,7 +19605,7 @@ class ControllerView(QWidget):
         """Show one conf in the raw editor, read-only when it is the server's own."""
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        core = file in self._tuning_core_files()
+        core = tuning.is_one_of(file, self._tuning_core_files())
         try:
             # A conf that is a link out of the install is another file's text
             # and another file's Save (T573): shown empty and read-only.
@@ -19668,7 +19668,7 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(file, self._tuning_core_files()):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -19704,7 +19704,7 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(file, self._tuning_core_files()):
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is None:

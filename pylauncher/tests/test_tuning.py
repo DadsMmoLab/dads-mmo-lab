@@ -1121,3 +1121,17 @@ def test_a_file_with_no_bom_gets_none_and_a_pasted_cr_is_an_lf_edit() -> None:
 
 def test_an_emptied_editor_writes_an_empty_file() -> None:
     assert tuning.save_text("A = 1\r\n", "") == ""
+
+
+# -- T573 item 3: one file under two spellings is one file on Windows and on macOS -------------
+
+
+@pytest.mark.parametrize("platform, same", [("win32", True), ("darwin", True), ("linux", False)])
+def test_two_spellings_of_a_file_name_are_one_file_where_the_disk_ignores_case(
+    monkeypatch: pytest.MonkeyPatch, platform: str, same: bool
+) -> None:
+    """Mutation: key on `normcase` alone and macOS sees `Playerbots.conf` as a second file."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: platform in ("win32", "darwin"))
+    a = tuning.file_key("env/dist/etc/modules/Playerbots.conf")
+    b = tuning.file_key("env/dist/etc/modules/playerbots.conf")
+    assert (a == b) is same

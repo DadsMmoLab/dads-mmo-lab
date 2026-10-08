@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -577,6 +578,32 @@ def _newline_of(raw: str) -> str:
     user may also edit with a Windows editor.
     """
     return "\r\n" if "\r\n" in raw else "\n"
+
+
+def _disk_ignores_case() -> bool:
+    """Whether this platform's usual disk treats `Foo.conf` and `foo.conf` as one file.
+
+    Windows (NTFS) and macOS (APFS, by default) do; Linux does not. A seam for
+    tests, which cannot run another platform's disk.
+    """
+    return sys.platform in ("win32", "darwin")
+
+
+def file_key(name: str) -> str:
+    """`name` spelled as this platform's disk compares file names (T573 item 3).
+
+    `os.path.normcase` is the identity on POSIX, so on a case-insensitive macOS
+    volume it called the server's `playerbots.conf` and a folder file
+    `Playerbots.conf` two files: an editable second button beside the read-only
+    one, and a Save that wrote the server's own file. Compare names by this key.
+    """
+    return name.replace("\\", "/").casefold() if _disk_ignores_case() else name
+
+
+def is_one_of(name: str, names: Iterable[str]) -> bool:
+    """Whether `name` is one of `names`, by `file_key`."""
+    key = file_key(name)
+    return any(file_key(other) == key for other in names)
 
 
 BOM = "\ufeff"

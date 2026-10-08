@@ -13679,6 +13679,78 @@ def test_a_raw_save_keeps_the_bom_and_every_untouched_lines_own_ending(
     assert path.read_bytes() == "\ufeffA = 1\r\nBeastMaster.Enable = 0\nC = 3\rD = 4\r\n".encode()
 
 
+def test_a_second_spelling_of_a_core_conf_is_read_only_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. On macOS `Worldserver.conf` IS `worldserver.conf`: a Save writes the core's.
+
+    Mutation: compare `file in core` exactly again and the second spelling is saved.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    # On this (case-sensitive) test disk it is a file of its own; on the Mac it is the core's.
+    other = "env/dist/etc/Worldserver.conf"
+    core = _deploy(tmp_path, other, "[worldserver]\n")
+    view.tuning_panel.set_files((other,), read_only=())
+    view.open_tuning_file(other)
+    assert view.tuning_panel.editor.isReadOnly()
+
+    view.save_tuning_file("[worldserver]\nMotd = hi\n")
+
+    assert core.read_text(encoding="utf-8") == "[worldserver]\n"
+
+
+def test_revert_leaves_a_second_spelling_of_a_core_conf_alone_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: compare `file in core` exactly in Revert and it restores over it."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    other = "env/dist/etc/Worldserver.conf"
+    path = _deploy(tmp_path, other, "[worldserver]\nMotd = old\n")
+    tuning.backup(path)
+    path.write_text("[worldserver]\nMotd = new\n", encoding="utf-8")
+    view.tuning_panel.set_files((other,), read_only=())
+
+    view.revert_tuning_file()
+
+    assert path.read_text(encoding="utf-8") == "[worldserver]\nMotd = new\n"
+
+
+def test_the_picker_lists_a_core_conf_once_whatever_the_case_of_a_module_rows_spelling(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: test `name not in found` exactly and the Mac gets two buttons."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    core = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\n")
+    assert core.is_file()
+    row = tuning.TuningRow(
+        module_id="m",
+        module_name="M",
+        family="module",
+        file="env/dist/etc/Worldserver.conf",
+        key="K",
+        label="K",
+        explain=None,
+        type=None,
+        min=None,
+        max=None,
+        default=None,
+        current=None,
+        installed=True,
+        backend="conf",
+        read_only_reason=None,
+    )
+    view._tuning_rows = (row,)
+    # The folder holds one file, spelled as the module spells it.
+    monkeypatch.setattr(Path, "is_file", lambda self: self.name.lower() == "worldserver.conf")
+
+    files = view._tuning_files()
+
+    assert [f.lower() for f in files] == ["env/dist/etc/worldserver.conf"], files
+
+
 def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
 
