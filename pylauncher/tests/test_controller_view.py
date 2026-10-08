@@ -12475,7 +12475,12 @@ def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
     installed = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-aoe-loot"}))
     menu = _row_menu(installed, "mod-aoe-loot")
     labels = [action.text() for action in menu.actions() if action.text()]
-    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    assert labels == [
+        "Install Selected Module",
+        "Remove Selected Module",
+        "Put back the last update…",
+        "Copy Module ID",
+    ]
     next(a for a in menu.actions() if a.text() == "Remove Selected Module").trigger()
     applier = installed.services.applier
     assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-aoe-loot"]
@@ -28636,3 +28641,436 @@ def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
     assert said not in view.server_reasons.text()
     assert view.start_button.isEnabled()
     assert view.stop_button.toolTip() == "The server is not running."
+
+
+# -------------------------------------------------- T557: the put-back tip (D2)
+
+
+class _PutBackTipApplier(_FakeApplier):
+    """Records the updates that reach the applier; the skip record is the real one."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.updates: list[str] = []
+
+    def update(  # type: ignore[override]
+        self,
+        manifest: object,
+        values: object = None,
+        *,
+        approved: apply_module.UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        self.updates.append(str(manifest.id))  # type: ignore[attr-defined]
+        return self.install(manifest, values)
+
+
+@pytest.mark.parametrize("yes", [False, True], ids=["no-runs-nothing", "yes-clears-and-updates"])
+def test_update_on_the_put_back_tip_asks_first_and_only_a_yes_runs_it(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: bool,
+) -> None:
+    """T557 D2: the newest version failed to build and was put back; updating to it asks.
+
+    The question is the design's sentence, under `Try <id>'s update again?`, and
+    the dialog defaults to No (`_confirm()`). A No changes nothing, record
+    included. A Yes clears the skipped tip and runs the Update.
+
+    Mutation: drop the question and a No still updates; drop `clear_skip` and the
+    tip is hidden again after a Yes.
+    """
+    from yulon import module_moves
+
+    tip = "b" * 40
+    key = module_moves.key("module", "mod-transmog")
+    assert module_moves.skip(tmp_path, key, tip=tip) == ""
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    row = apply_module.ModuleUpdate(
+        "mod-transmog", tmp_path, True, 0, fetched=tip, put_back_tip=tip
+    )
+    view._module_updates_done((row,))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+
+    assert asked == [
+        (
+            "Try mod-transmog's update again?",
+            "The newest version of mod-transmog (bbbbbbb) did not build on this server last "
+            "time and was put back. It will probably fail again unless the server itself has "
+            "been updated since. Update anyway?",
+        )
+    ]
+    ledger = module_moves.read(tmp_path)
+    assert ledger is not None
+    if yes:
+        assert applier.updates == ["mod-transmog"]
+        assert key not in ledger.skipped
+    else:
+        assert applier.updates == []
+        assert ledger.skipped[key].tip == tip
+        assert view.module_report.toPlainText() == (
+            "update mod-transmog: cancelled — nothing on this machine was changed."
+        )
+
+
+def test_update_on_a_tip_that_was_not_put_back_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[str] = []
+    monkeypatch.setattr(view, "_confirm", lambda title, question: asked.append(title) or False)
+    view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+    assert asked == []
+    assert applier.updates == ["mod-transmog"]
+
+
+# ------------------------------------ T557: "Put back the last update…" on a module row
+
+PUT_BACK_ACTION = "Put back the last update…"
+_OLD = "a" * 40
+_NEW = "b" * 40
+
+
+class _PutBackApplier(_FakeApplier):
+    """Answers `last_update()`, records `put_back()`, and notes whether either ran on a worker.
+
+    `on_worker` is switched on by the wrapped `_run()` around exactly the work it
+    is handed, so a call made straight from a slot (the GUI thread, in the app)
+    finds it off. `ContainerGit`'s reads are a `docker run`.
+    """
+
+    def __init__(self, server_dir: Path, last: apply_module.LastUpdate | None) -> None:
+        super().__init__(server_dir)
+        self.last = last
+        self.on_worker = False
+        self.asked_on_gui: list[str] = []
+        self.put_back_calls: list[apply_module.LastUpdate] = []
+        self.refuse: Exception | None = None
+        self.skipped_lines: tuple[str, ...] = ()
+
+    def last_update(self, manifest: Manifest) -> apply_module.LastUpdate | None:
+        if not self.on_worker:
+            self.asked_on_gui.append("last_update")
+        return self.last
+
+    def put_back(  # type: ignore[override]
+        self, manifest: Manifest, values: object = None, *, last: apply_module.LastUpdate
+    ) -> ApplyReport:
+        if not self.on_worker:
+            self.asked_on_gui.append("put_back")
+        self.put_back_calls.append(last)
+        if self.refuse is not None:
+            raise self.refuse
+        return ApplyReport(
+            "install",
+            manifest.id,
+            family=manifest.type,
+            done=("clone",),
+            skipped=self.skipped_lines,
+            rebuild_required=True,
+        )
+
+
+def _put_back_view(
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    last: apply_module.LastUpdate | None,
+    *,
+    yes: bool = True,
+) -> tuple[ControllerView, _PutBackApplier, list[tuple[str, str]]]:
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackApplier(tmp_path, last)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    real_run = view._run
+
+    def run(work: Any, on_done: Any, on_error: Any) -> None:
+        def on_the_worker() -> object:
+            applier.on_worker = True
+            try:
+                return work()
+            finally:
+                applier.on_worker = False
+
+        real_run(on_the_worker, on_done, on_error)
+
+    monkeypatch.setattr(view, "_run", run)
+    _select_module(view, "mod-transmog")
+    return view, applier, asked
+
+
+def _last(source: str = "ledger") -> apply_module.LastUpdate:
+    return apply_module.LastUpdate(
+        item_id="mod-transmog",
+        from_sha=_OLD,
+        to_sha=_NEW,
+        source=source,  # type: ignore[arg-type]
+    )
+
+
+def test_an_installed_module_row_menu_offers_to_put_back_the_last_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    labels = [a.text() for a in _row_menu(view, "mod-transmog").actions() if a.text()]  # type: ignore[attr-defined]
+    assert PUT_BACK_ACTION in labels
+    absent = _wotlk_modules_view(ps, tmp_path)
+    labels = [a.text() for a in _row_menu(absent, "mod-aoe-loot").actions() if a.text()]  # type: ignore[attr-defined]
+    assert PUT_BACK_ACTION not in labels, "offered on a module that is not installed"
+
+
+def test_put_back_with_nothing_to_put_back_says_so_and_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    view._put_back_last_update()
+    assert view.module_report.toPlainText() == (
+        "Yu'lon cannot tell which version mod-transmog was on before its last update, so "
+        "there is nothing to put back."
+    )
+    assert asked == [] and applier.put_back_calls == []
+    assert applier.asked_on_gui == []
+
+
+def test_put_back_asks_first_with_no_by_default_and_a_no_changes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, _last(), yes=False)
+    view._put_back_last_update()
+    assert asked == [
+        (
+            "Put back mod-transmog?",
+            "This puts mod-transmog back on the version it had before its last update "
+            "(aaaaaaa). The newer version (bbbbbbb) is not offered again until its author "
+            "publishes a newer one. Your server keeps running. Press “Rebuild the server…” "
+            "afterwards to build without the update.\n\nPut it back?",
+        )
+    ]
+    assert applier.put_back_calls == []
+    assert view.module_report.toPlainText() == (
+        "put back mod-transmog: cancelled — nothing on this machine was changed."
+    )
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["plain", "direct-sql-was-kept"])
+def test_put_back_yes_puts_it_back_on_a_worker_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept: bool
+) -> None:
+    """Mutation: call `applier.last_update()` or `put_back()` from the slot, off `_run()`."""
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    if kept:
+        applier.skipped_lines = (apply_module.PUT_BACK_KEPT_SQL,)
+    view._behind[("module", "mod-transmog")] = 3
+    view._put_back_last_update()
+    assert [last.from_sha for last in applier.put_back_calls] == [_OLD]
+    assert applier.asked_on_gui == [], "git was asked on the GUI thread"
+    said = view.module_report.toPlainText()
+    assert said.startswith(
+        "mod-transmog is back on aaaaaaa, the version it had before its last update. Press "
+        "“Rebuild the server…” to build your server without that update."
+    )
+    assert (apply_module.PUT_BACK_KEPT_SQL in said) is kept
+    assert ("module", "mod-transmog") not in view._behind, "a count about the old commit stayed"
+    assert ("module", "mod-transmog") in view._rebuild_owed
+
+
+def test_a_refused_put_back_is_reported_in_the_refusals_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    applier.refuse = apply_module.PutBackRefused(
+        "mod-transmog has files changed. Nothing was changed.", edited=True
+    )
+    view._put_back_last_update()
+    assert view.module_report.toPlainText() == (
+        "Put back mod-transmog did not finish: mod-transmog has files changed. "
+        "Nothing was changed."
+    )
+
+
+def test_a_failed_rebuild_reloads_the_modules_and_drops_what_a_put_back_made_stale(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The automatic put-back runs inside the Rebuild, so the tab learns of it from the record.
+
+    Mutation: reload only on success (the old shape) and the row keeps its count and
+    its version about a commit the clone has left.
+    """
+    from yulon import module_moves
+
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    assert module_moves.skip(tmp_path, module_moves.key("module", "mod-transmog"), tip=_NEW) == ""
+    view._behind[("module", "mod-transmog")] = 3
+    view._behind[("module", "mod-other")] = 2
+    reloads: list[int] = []
+    monkeypatch.setattr(view, "reload_modules", lambda: reloads.append(1))
+    cleared: list[int] = []
+    monkeypatch.setattr(view._versions, "clear", lambda: cleared.append(1))
+
+    view._rebuild_finished(False, "The build stopped on an error in mod-transmog…")
+
+    assert reloads and cleared
+    assert ("module", "mod-transmog") not in view._behind
+    assert view._behind[("module", "mod-other")] == 2
+
+
+# ----------------------------- T557 review: the Rebuild and the Modules jobs do not overlap
+
+
+def test_rebuild_is_refused_while_a_modules_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both write the record of module updates; two writers at once lose an entry's destination.
+
+    Mutation: drop the `_module_pending` check from `rebuild_server()`.
+    """
+    view, _applier, asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    started: list[int] = []
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: started.append(1))
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "show_information",
+        lambda _p, title, text: shown.append((title, text)),
+    )
+    view._module_pending = "update mod-transmog"
+
+    assert view.rebuild_server() is False
+
+    assert shown == [
+        (
+            "Something else is running",
+            "A Modules tab action (update mod-transmog) is still running. Wait for it to finish, "
+            "then press “Rebuild the server…” again. Nothing was started.",
+        )
+    ]
+    assert started == [] and asked == []
+
+
+@pytest.mark.parametrize("which", ["update", "remove", "put back"])
+def test_a_modules_job_is_refused_while_a_server_build_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    """The context menu is not greyed by `_set_busy()`, so the handlers say no themselves.
+
+    Mutation: drop `_build_is_running()` from the handler.
+    """
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._busy = True
+
+    if which == "put back":
+        view._put_back_last_update()
+    else:
+        view._module_action(which)
+
+    assert view.module_report.toPlainText() == (
+        f"{which.capitalize()} mod-transmog was not started. Wait: the server build is running. "
+        "Try again when it has finished. Nothing was changed."
+    )
+    assert applier.put_back_calls == [] and applier.installed == [] and applier.removed == []
+    assert asked == [] and view._module_pending is None
+
+
+def test_the_reload_after_a_failed_build_waits_for_a_stopped_distro(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reads the record (a file read under `\\\\wsl.localhost`), which starts a stopped distro.
+
+    Mutation: drop the `_waits_for_the_distro()` line.
+    """
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    reads: list[int] = []
+    monkeypatch.setattr(controller_view_module.module_moves, "read", lambda _dir: reads.append(1))
+    view._distro = "stopped"
+
+    view._reload_after_a_failed_build()
+
+    assert reads == [], "the record was read while the distro was stopped"
+    assert "modules after a failed build" in view._waiting_on_distro
+
+
+def test_a_modules_job_during_another_server_job_names_that_job(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start, Stop or Check for updates also set `_busy`; none of them is a server build.
+
+    Mutation: say "the server build" whatever is busy.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._set_busy(True, "Start")
+
+    view._module_action("update")
+
+    assert view.module_report.toPlainText() == (
+        "Update mod-transmog was not started. Wait: Start is running. Try again when it has "
+        "finished. Nothing was changed."
+    )
+
+
+def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_ends(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_module_pending` is one slot: the first job to finish cleared it under the second.
+
+    Jobs are held here and finished by hand, in the order the test chooses.
+
+    Mutation: guard on `_module_pending` alone, or let the count go below zero.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    held: list[tuple[Any, Any, Any]] = []
+    view._jobs = lambda work, on_done, on_error: held.append((work, on_done, on_error))  # type: ignore[assignment]
+    monkeypatch.setattr(view, "_run", lambda w, d, e: held.append((w, d, e)))
+    shown: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_information", lambda _p, _t, text: shown.append(text)
+    )
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: iter(()))
+    view._module_action("update")
+    view._module_action("remove")
+    assert len(held) == 2 and view._module_jobs == 2
+
+    _work, done, _error = held[0]
+    done(None)  # the first finishes and clears the single slot
+    assert view._module_pending is None
+    assert view.rebuild_server() is False and len(shown) == 1, "Rebuild opened under a running job"
+
+    _work, done, _error = held[1]
+    done(None)
+    assert view._module_jobs == 0
+    view._module_job_ended()
+    assert view._module_jobs == 0, "the count went below zero"
+    assert not view._module_job_running()
