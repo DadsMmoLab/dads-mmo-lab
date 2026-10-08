@@ -22,7 +22,7 @@ import types
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -2644,3 +2644,305 @@ def test_a_stop_after_the_last_file_is_staged_still_installs_nothing(
 
     assert staged == [True], "the ground: the one file was staged before the Stop"
     assert _snapshot(rig.play) == before
+
+
+# --- A pack that is a folder of the checkout (T555 T1) -------------------------------------------
+#
+# mod-unbound ships its three addons as 43 loose files under `client/Interface/AddOns`, with a
+# `sha256sum` list (`MANIFEST.sha256`) at the module's root. Each file is proved against its line
+# and packed, in the same pass, into a zip in the cache; from there the pack is installed the way
+# every zip pack is.
+
+MODULE = "modules/mod-unbound"
+FOLDER = f"{MODULE}/client/Interface/AddOns"
+LIST = f"{MODULE}/MANIFEST.sha256"
+BLP = b"BLP2" + bytes(range(256)) * 4
+FOLDER_FILES: dict[str, bytes] = {
+    "multiclass-talents-ui/multiclass-talents-ui.toc": b"## Interface: 30300\r\n## Title: MC\r\n",
+    "multiclass-talents-ui/Art/!UI-Frame.blp": BLP,
+    "multiclass-talents-ui/Core.lua": b"local x = 1\r\nprint(x)\r\n",
+    "multiclass-resources/multiclass-resources.toc": b"## Interface: 30300\n",
+    "UnboundSpellbook/UnboundSpellbook.toc": b"## Interface: 30300\n## Title: Book\n",
+    "UnboundSpellbook/UI.lua": b"-- lf only\nreturn {}\n",
+}
+OUTSIDE_FILES: dict[str, bytes] = {
+    "README.md": b"# mod-unbound\n",
+    "client/README-PLAYERS.txt": b"Install the addons.\n",
+    "data/sql/db-world/00_npc_setup.sql": b"SELECT 1;\n",
+}
+
+
+def _folder_pack(**extra: Any) -> ClientPack:
+    return ClientPack.model_validate(
+        {
+            "id": "unbound-addons",
+            "label": "Unbound addons",
+            "source": {"kind": "checkout_folder", "path": FOLDER},
+            "sha256_file": LIST,
+            "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+            **extra,
+        }
+    )
+
+
+def _list_lines(files: Mapping[str, bytes], prefix: str = "client/Interface/AddOns/") -> bytes:
+    """`sha256sum` output for `files`, named the way the module's list names them."""
+    return b"".join(
+        f"{_sha(data)}  {prefix}{name}\n".encode() for name, data in sorted(files.items())
+    )
+
+
+def _lay_module(
+    server: Path,
+    files: Mapping[str, bytes] | None = None,
+    *,
+    listed: Mapping[str, bytes] | None = None,
+) -> Path:
+    """A checkout of the module: the addon files, a few others, and the sha256sum list."""
+    files = FOLDER_FILES if files is None else files
+    listed = files if listed is None else listed
+    root = server / MODULE
+    for name, data in files.items():
+        path = server / FOLDER / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    for name, data in OUTSIDE_FILES.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    (root / "MANIFEST.sha256").write_bytes(
+        _list_lines(OUTSIDE_FILES, prefix="") + _list_lines(listed)
+    )
+    return server / FOLDER
+
+
+def _fetch_folder(server: Path, **kw: Any) -> client_packs.Fetched:
+    return client_packs.fetch_checkout_folder(_folder_pack(), server, entry_id="wow-unbound", **kw)
+
+
+def _cache_files(cache: Path) -> list[str]:
+    if not cache.exists():
+        return []
+    return sorted(p.relative_to(cache).as_posix() for p in cache.rglob("*") if p.is_file())
+
+
+def test_a_folder_pack_is_proved_and_packed_into_the_same_zip_every_time(
+    tmp_path: Path, _cache_in_tmp: Path
+) -> None:
+    server = tmp_path / "srv"
+    folder = _lay_module(server)
+
+    first = _fetch_folder(server)
+    # A checkout that was touched (a fresh clone, a git checkout) has new times, same bytes.
+    for path in folder.rglob("*"):
+        os.utime(path, (1_900_000_000, 1_900_000_000))
+    second = _fetch_folder(server)
+
+    assert first == second, "the same folder must make the same zip, whatever its file times"
+    assert first.version is None
+    assert first.sha256 == _sha(first.path.read_bytes())
+    digest = first.path.parent.name
+    assert first.path == _cache_in_tmp / "wow-unbound" / "unbound-addons" / digest / (
+        "unbound-addons.zip"
+    )
+    with zipfile.ZipFile(first.path) as archive:
+        infos = archive.infolist()
+        assert [info.filename for info in infos] == sorted(FOLDER_FILES)
+        assert {name: archive.read(name) for name in archive.namelist()} == FOLDER_FILES
+        assert {info.compress_type for info in infos} == {zipfile.ZIP_STORED}
+        assert {info.date_time for info in infos} == {(1980, 1, 1, 0, 0, 0)}
+    assert _cache_files(_cache_in_tmp) == [
+        f"wow-unbound/unbound-addons/{digest}/unbound-addons.zip"
+    ], "no .part left, and nothing else"
+
+
+def test_a_folder_pack_installs_byte_for_byte_and_keeps_the_players_own_addons(
+    rig: _Rig, _cache_in_tmp: Path
+) -> None:
+    _lay_module(rig.server)
+    own = rig.play / "Interface" / "AddOns" / "Questie" / "Questie.toc"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"## Title: Questie\n")
+
+    fetched = _fetch_folder(rig.server)
+    entry = rig.install(_folder_pack(), fetched)
+
+    addons = rig.play / "Interface" / "AddOns"
+    for name, data in FOLDER_FILES.items():
+        assert (addons / name).read_bytes() == data, name
+    assert (addons / "multiclass-talents-ui" / "Art" / "!UI-Frame.blp").read_bytes()[:4] == b"BLP2"
+    assert entry == {
+        "version": None,
+        "sha256": fetched.sha256,
+        "files": {f"Interface/AddOns/{name}": _sha(data) for name, data in FOLDER_FILES.items()},
+    }
+    assert own.read_bytes() == b"## Title: Questie\n", "the player's own addon was touched"
+    assert (addons / "Blizzard_Own" / "x.toc").exists()
+    rig.untouched()
+
+
+FOLDER_REFUSALS: dict[str, tuple[Callable[[Path], None], str]] = {}
+
+
+def _refusal(
+    name: str, fragment: str
+) -> Callable[[Callable[[Path], None]], Callable[[Path], None]]:
+    def register(spoil: Callable[[Path], None]) -> Callable[[Path], None]:
+        FOLDER_REFUSALS[name] = (spoil, fragment)
+        return spoil
+
+    return register
+
+
+@_refusal("a file the list does not name", "UnboundSpellbook/Extra.lua")
+def _extra_file(server: Path) -> None:
+    (server / FOLDER / "UnboundSpellbook" / "Extra.lua").write_bytes(b"-- not listed\n")
+
+
+@_refusal("a listed file that is not there", "multiclass-resources/multiclass-resources.toc")
+def _missing_file(server: Path) -> None:
+    (server / FOLDER / "multiclass-resources" / "multiclass-resources.toc").unlink()
+
+
+@_refusal("a file whose bytes changed", "multiclass-talents-ui/Core.lua")
+def _changed_file(server: Path) -> None:
+    path = server / FOLDER / "multiclass-talents-ui" / "Core.lua"
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))  # an EOL "fix" is a change
+
+
+@_refusal("two lines for one file that disagree", "UnboundSpellbook/UI.lua")
+def _two_lines(server: Path) -> None:
+    listing = server / LIST
+    other = f"{'0' * 64}  client/Interface/AddOns/UnboundSpellbook/UI.lua\n".encode()
+    listing.write_bytes(listing.read_bytes() + other)
+
+
+@_refusal("a file that is a link", "UnboundSpellbook/Link.lua")
+def _linked_file(server: Path) -> None:
+    target = server / FOLDER / "UnboundSpellbook" / "UI.lua"
+    (server / FOLDER / "UnboundSpellbook" / "Link.lua").symlink_to(target)
+
+
+@_refusal("a folder that is a link", "Linked")
+def _linked_folder(server: Path) -> None:
+    (server / FOLDER / "Linked").symlink_to(server / FOLDER / "UnboundSpellbook")
+
+
+@_refusal("no sha256sum list", "MANIFEST.sha256")
+def _no_list(server: Path) -> None:
+    (server / LIST).unlink()
+
+
+@_refusal("no folder", FOLDER)
+def _no_folder(server: Path) -> None:
+    shutil.rmtree(server / FOLDER)
+
+
+@pytest.mark.parametrize("name", sorted(FOLDER_REFUSALS))
+def test_a_folder_that_does_not_match_its_list_is_refused_naming_the_file_and_nothing_is_kept(
+    tmp_path: Path, _cache_in_tmp: Path, name: str
+) -> None:
+    spoil, fragment = FOLDER_REFUSALS[name]
+    server = tmp_path / "srv"
+    _lay_module(server)
+    _fetch_folder(server)  # the ground: the unspoilt folder is accepted
+    shutil.rmtree(_cache_in_tmp)
+    spoil(server)
+
+    with pytest.raises(PackError) as caught:
+        _fetch_folder(server)
+
+    message = str(caught.value)
+    assert fragment in message
+    assert message.startswith("Unbound addons")
+    assert LATEST in message, "points at the Server build menu"
+    assert _cache_files(_cache_in_tmp) == [], "a refused folder left a zip or a part behind"
+
+
+def test_a_folder_pack_refusal_names_every_odd_file_up_to_a_few(tmp_path: Path) -> None:
+    server = tmp_path / "srv"
+    _lay_module(server)
+    for n in range(7):
+        (server / FOLDER / "UnboundSpellbook" / f"New{n}.lua").write_bytes(b"x")
+
+    with pytest.raises(PackError, match=r"UnboundSpellbook/New0\.lua.*and 2 more") as caught:
+        _fetch_folder(server)
+
+    assert "New5.lua" not in str(caught.value)
+
+
+def test_a_list_line_with_a_star_and_windows_slashes_names_the_same_file(tmp_path: Path) -> None:
+    """`sha256sum -b` marks binary mode with `*`; a list made on Windows may use backslashes."""
+    server = tmp_path / "srv"
+    _lay_module(server)
+    lines = [
+        f"{_sha(data)} *client\\Interface\\AddOns\\{name.replace('/', chr(92))}\r\n"
+        for name, data in sorted(FOLDER_FILES.items())
+    ]
+    (server / LIST).write_bytes("".join(lines).encode())
+
+    fetched = _fetch_folder(server)
+
+    with zipfile.ZipFile(fetched.path) as archive:
+        assert sorted(archive.namelist()) == sorted(FOLDER_FILES)
+
+
+def test_a_stop_while_a_folder_is_proved_keeps_nothing(tmp_path: Path, _cache_in_tmp: Path) -> None:
+    server = tmp_path / "srv"
+    _lay_module(server)
+    asked: list[bool] = []
+
+    def cancelled() -> bool:
+        asked.append(True)
+        return len(asked) > 2  # part-way through the files
+
+    with pytest.raises(Cancelled):
+        _fetch_folder(server, cancelled=cancelled)
+
+    assert _cache_files(_cache_in_tmp) == []
+
+
+def test_a_folder_packs_checksum_follows_its_list_without_reading_the_files(tmp_path: Path) -> None:
+    """For the map data's salt (`trinitycore._packs_salt`): a changed list is a changed pack."""
+    server = tmp_path / "srv"
+    _lay_module(server)
+    before = client_packs.checkout_checksum(_folder_pack(), server)
+    (server / FOLDER / "UnboundSpellbook" / "UI.lua").write_bytes(b"changed, list not")
+    assert client_packs.checkout_checksum(_folder_pack(), server) == before
+    changed = {**FOLDER_FILES, "UnboundSpellbook/UI.lua": b"changed, list too"}
+    _lay_module(server, changed)
+
+    after = client_packs.checkout_checksum(_folder_pack(), server)
+
+    assert after != before and len(after) == 64
+
+
+def test_a_zip_fetcher_refuses_a_folder_pack_and_the_folder_fetcher_a_zip_pack(
+    tmp_path: Path,
+) -> None:
+    """Neither fetcher guesses at the other's kind: the caller must say which it means."""
+    with pytest.raises(PackError, match="is a folder"):
+        fetch_checkout(_folder_pack(), tmp_path)
+    with pytest.raises(PackError, match="not a folder"):
+        client_packs.fetch_checkout_folder(
+            _checkout_pack("p.zip", md5="0" * 32), tmp_path, entry_id="wow-unbound"
+        )
+
+
+def test_a_recorded_file_missing_from_the_client_is_reported(rig: _Rig) -> None:
+    """The Play pipeline installs a pack again when one of its files was deleted (T555 T1)."""
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+    assert client_packs.recorded_files_missing(rig.play, entry) == ()
+
+    (rig.play / "Interface" / "AddOns" / "Nova" / "Nova.lua").unlink()
+
+    assert client_packs.recorded_files_missing(rig.play, entry) == (
+        "Interface/AddOns/Nova/Nova.lua",
+    )
+    edited = rig.play / "Interface" / "AddOns" / "Nova" / "Nova.toc"
+    edited.write_bytes(b"the player's edit")
+    assert client_packs.recorded_files_missing(rig.play, entry) == (
+        "Interface/AddOns/Nova/Nova.lua",
+    ), "an edited file is there: only a missing one asks for a new install"
+    junk = {**entry, "files": {"../outside": "0" * 64}}
+    assert client_packs.recorded_files_missing(rig.play, junk) == (), "a bad name is not a file"

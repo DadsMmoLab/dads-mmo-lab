@@ -1094,6 +1094,29 @@ def test_a_required_pack_from_a_download_is_a_catalog_refusal(machine: Machine) 
     assert machine.tools.seen == {}
 
 
+def test_a_required_folder_pack_laying_archives_is_a_catalog_refusal(machine: Machine) -> None:
+    """T555 T1: a checkout folder is a pack for the client, never an input of the map data.
+
+    It is not a download either, so the refusal says what it is: the map data is
+    made from zip packs only, and nothing reaches the extractors.
+    """
+    folder = {
+        "id": "folder-archives",
+        "label": "Folder archives",
+        "source": {"kind": "checkout_folder", "path": f"{CHECKOUT}/client/Data"},
+        "sha256_file": f"{CHECKOUT}/MANIFEST.sha256",
+        "install": [{"member": "*", "to_dir": "Data"}],
+    }
+    entry = centurion_like(packs=[*REQUIRED_PACKS, folder], rev=REV)
+    lay_for_client_data(machine)
+    with pytest.raises(
+        InstallerError, match="makes Folder archives a required client pack from a folder"
+    ) as raised:
+        list(engine(machine, entry=entry).stage_named("client-data").run(context(machine)))
+    assert "from a download" not in str(raised.value)
+    assert machine.tools.seen == {}
+
+
 # -- client-data: the DBC overlay and the start check ------------------------------------------
 
 

@@ -494,6 +494,8 @@ def checkout_checksum(pack: ClientPack, server_dir: Path) -> str:
     the catalog alone no longer says, the checkout does. Raises `PackError`.
     """
     try:
+        if pack.source.kind == "checkout_folder":
+            return _tree_digest(_folder_list(pack, server_dir))
         return _expected_checkout(pack, server_dir)[1]
     except OSError as exc:
         raise _os_refusal(pack, exc) from exc
@@ -516,6 +518,11 @@ def _fetch_checkout(
     as an `md5_file` with no line for it.
     """
     source = pack.source
+    if source.kind == "checkout_folder":
+        raise PackError(
+            f"{pack.label} is a folder of the server's checkout, not a zip: Yu'lon packs it "
+            "with fetch_checkout_folder."
+        )
     if source.kind != "checkout" or source.path is None:
         raise PackError(f"{pack.label} does not come from the server's checkout.")
     path = server_dir / source.path
@@ -579,6 +586,222 @@ def fetch_checkout(
     """
     try:
         return _fetch_checkout(pack, server_dir, cancelled)
+    except OSError as exc:
+        raise _os_refusal(pack, exc) from exc
+
+
+# --- From a folder of the server's own checkout (T555 T1) ----------------------------------
+#
+# mod-unbound ships its addons as loose files with a `sha256sum` list at the module's root
+# (`MANIFEST.sha256`), not as a zip. Each file is read once: its bytes are checked against its
+# line and, in the same pass, written into a zip in the cache, so what is installed is exactly
+# what was proved. The zip is made the same way every time (stored, one fixed date, names in
+# order, fixed attributes), so the same folder always gives the same zip and the same SHA-256,
+# and an unchanged folder is never installed again. From the zip on, the pack takes the path
+# every other pack takes: `install()`, its swap, its record and its removal, unchanged.
+
+_SHA256_LINE = re.compile(r"^([0-9A-Fa-f]{64}) [ *](.+)$")
+"""One `sha256sum` line: the digest, a space, ` ` (text mode) or `*` (binary), then the name."""
+
+_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+"""Every member's date in a folder pack's zip: the earliest a zip can hold, and never the clock."""
+
+_ZIP_FILE_MODE = (stat.S_IFREG | 0o644) << 16
+"""Every member's attributes in a folder pack's zip: a plain file, readable by all."""
+
+_NAMED_AT_MOST = 5
+"""How many odd files a folder refusal names before it says "and N more"."""
+
+
+def _named(names: Collection[str]) -> str:
+    shown = sorted(names)[:_NAMED_AT_MOST]
+    more = len(names) - len(shown)
+    return ", ".join(shown) + (f" and {more} more" if more else "")
+
+
+def _folder_refusal(pack: ClientPack, what: str) -> PackError:
+    return PackError(
+        f"{pack.label}: {what}, so Yu'lon did not use it and your client was not changed. "
+        f"{_FROM_SOURCES}"
+    )
+
+
+def _folder_list(pack: ClientPack, server_dir: Path) -> dict[str, str]:
+    """`{name under the folder: sha256}` from the pack's `sha256_file`, at the commit it is on.
+
+    The list names files relative to its own folder (`sha256sum` run there); only the lines
+    under the pack's folder count, named relative to it. Refused, naming the file, when the
+    list is missing or too large, or names one file twice with two different digests.
+    """
+    assert pack.sha256_file is not None and pack.source.path is not None  # catalog validation
+    listing = server_dir / pack.sha256_file
+    try:
+        with listing.open("rb") as handle:
+            raw = handle.read(MD5_FILE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        raise _folder_refusal(
+            pack,
+            f"this server's checkout has no {pack.sha256_file} at the commit it is on, and that "
+            "file lists the checksum of each of its files",
+        ) from None
+    if len(raw) > MD5_FILE_MAX_BYTES:
+        raise _folder_refusal(pack, f"{pack.sha256_file} is larger than a list of checksums can be")
+    prefix = PurePosixPath(pack.source.path).relative_to(PurePosixPath(pack.sha256_file).parent)
+    found: dict[str, set[str]] = {}
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        match = _SHA256_LINE.match(line.strip())
+        if match is None:
+            continue
+        listed = match.group(2).replace("\\", "/")
+        if listed.startswith("./"):
+            listed = listed[2:]
+        name = PurePosixPath(listed)
+        if name == prefix or not name.is_relative_to(prefix):
+            continue
+        found.setdefault(name.relative_to(prefix).as_posix(), set()).add(match.group(1).lower())
+    doubled = [name for name, digests in found.items() if len(digests) > 1]
+    if doubled:
+        raise _folder_refusal(
+            pack,
+            f"{pack.sha256_file} gives two different checksums for {_named(doubled)}",
+        )
+    return {name: digests.pop() for name, digests in found.items()}
+
+
+def _tree_digest(listed: Mapping[str, str]) -> str:
+    """One SHA-256 for a whole folder list: its names and their digests, in order."""
+    digest = hashlib.sha256()
+    for name in sorted(listed):
+        digest.update(f"{listed[name]}  {name}\n".encode())
+    return digest.hexdigest()
+
+
+def _folder_files(pack: ClientPack, folder: Path) -> dict[str, Path]:
+    """Every file under `folder`, by its POSIX name relative to it, never through a link.
+
+    A link (a symlink, or a Windows junction) anywhere inside is refused, naming it: the
+    folder's list proves files, and a link could put any file of the computer in the pack.
+    So is anything that is neither a file nor a folder.
+    """
+    found: dict[str, Path] = {}
+    links: list[str] = []
+    odd: list[str] = []
+    pending = [folder]
+    while pending:
+        here = pending.pop()
+        with os.scandir(here) as entries:
+            children = sorted(entries, key=lambda entry: entry.name)
+        for child in children:
+            path = Path(child.path)
+            name = path.relative_to(folder).as_posix()
+            if child.is_symlink() or play_client._is_link(path):
+                links.append(name)
+            elif child.is_dir(follow_symlinks=False):
+                pending.append(path)
+            elif child.is_file(follow_symlinks=False):
+                found[name] = path
+            else:
+                odd.append(name)
+    if links:
+        raise _folder_refusal(
+            pack, f"in this server's checkout {_named(links)} is a link, not a file or folder"
+        )
+    if odd:
+        raise _folder_refusal(
+            pack, f"in this server's checkout {_named(odd)} is not a file or a folder"
+        )
+    return found
+
+
+def _folder_zip_info(name: str, size: int) -> zipfile.ZipInfo:
+    """A member header that depends on the name alone: no clock, no platform, no file mode."""
+    info = zipfile.ZipInfo(name, date_time=_ZIP_DATE)
+    info.compress_type = zipfile.ZIP_STORED
+    info.create_system = 3  # ZipInfo picks 0 on Windows and 3 elsewhere; one zip everywhere
+    info.external_attr = _ZIP_FILE_MODE
+    info.file_size = size
+    return info
+
+
+def _fetch_checkout_folder(
+    pack: ClientPack, server_dir: Path, entry_id: str, cancelled: Callable[[], bool]
+) -> Fetched:
+    source = pack.source
+    if source.kind != "checkout_folder" or source.path is None:
+        raise PackError(f"{pack.label} is not a folder of the server's checkout.")
+    for name in (entry_id, pack.id):
+        if not _SAFE_NAME.match(name):
+            raise PackError(f"{pack.label}: {name!r} cannot name a cache folder.")
+    folder = server_dir / source.path
+    if play_client._is_link(folder) or not folder.is_dir():
+        raise _folder_refusal(
+            pack,
+            f"this server's checkout has no folder {source.path} at the commit it is on",
+        )
+    listed = _folder_list(pack, server_dir)
+    files = _folder_files(pack, folder)
+    unlisted = set(files) - set(listed)
+    if unlisted:
+        raise _folder_refusal(
+            pack,
+            f"{pack.sha256_file} has no checksum for {_named(unlisted)} in this server's "
+            "checkout",
+        )
+    absent = set(listed) - set(files)
+    if absent:
+        raise _folder_refusal(
+            pack,
+            f"this server's checkout has no {_named(absent)} although {pack.sha256_file} "
+            "lists it",
+        )
+    dest = cache_dir() / entry_id / pack.id / _tree_digest(listed)[:16] / f"{pack.id}.zip"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _refuse_without_room(
+        pack, dest.parent, sum(path.stat().st_size for path in files.values()) + 1024 * len(files)
+    )
+    part = dest.with_name(dest.name + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        with open(part, "xb") as out, zipfile.ZipFile(out, "w") as archive:
+            for name in sorted(files):
+                _stop_if_asked(pack, cancelled)
+                data = files[name].read_bytes()
+                if hashlib.sha256(data).hexdigest() != listed[name]:
+                    raise _folder_refusal(
+                        pack,
+                        f"{name} in this server's checkout does not match its checksum in "
+                        f"{pack.sha256_file}",
+                    )
+                archive.writestr(_folder_zip_info(name, len(data)), data)
+        _stop_if_asked(pack, cancelled)
+        sha256 = _file_sha256(part)
+        os.replace(part, dest)
+    except BaseException:
+        _unlink_quietly(part)
+        raise
+    logger.info(f"client-packs: packed {len(files)} files of {source.path} into {dest}")
+    return Fetched(dest, None, sha256)
+
+
+def fetch_checkout_folder(
+    pack: ClientPack,
+    server_dir: Path,
+    *,
+    entry_id: str,
+    cancelled: Callable[[], bool] = _never,
+) -> Fetched:
+    """A checkout-folder pack, proved file by file and packed into a zip in the cache.
+
+    Every file under `source.path` must have exactly one line in the pack's
+    `sha256_file`, and every line under it a file; no link anywhere inside. A
+    missing, extra, changed or linked file refuses, naming it, before anything
+    is kept: the zip is written as `<pack>.zip.part` and renamed to
+    `cache_dir()/<entry>/<pack>/<list digest[:16]>/<pack>.zip` only once every
+    file in it was proved. `version` is None; `sha256` is the zip's own, the
+    same for the same folder every time. `cancelled` is asked between files.
+    """
+    try:
+        return _fetch_checkout_folder(pack, server_dir, entry_id, cancelled)
     except OSError as exc:
         raise _os_refusal(pack, exc) from exc
 
@@ -1182,6 +1405,25 @@ def pack_files(play_dir: Path) -> frozenset[Path]:
             if clean is not None:
                 found.add(Path(*clean.parts))
     return frozenset(found)
+
+
+def recorded_files_missing(play_dir: Path, entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The files a pack's record entry lists that are no longer in `play_dir`, sorted.
+
+    One `lstat` per file, no reading: Play installs the pack again when this is
+    not empty (T555 T1), so an addon folder the player deleted comes back. A file
+    the player edited is still there and is not listed. A name that could leave
+    the folder is not a file of the client and is skipped (`pack_files`' rule).
+    """
+    files = entry.get("files")
+    if not isinstance(files, dict):
+        return ()
+    missing: list[str] = []
+    for rel in files:
+        clean = _clean_rel(rel)
+        if clean is not None and not os.path.lexists(play_dir / Path(*clean.parts)):
+            missing.append(clean.as_posix())
+    return tuple(sorted(missing))
 
 
 def wanted(client: Any, choices: Mapping[str, Any]) -> tuple[ClientPack, ...]:
