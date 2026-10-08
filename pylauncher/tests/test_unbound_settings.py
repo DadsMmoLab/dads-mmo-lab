@@ -205,3 +205,55 @@ def test_the_instant_summons_text_never_says_free_and_says_reagents_are_still_us
     assert "free" not in (spec.explain or "").lower().replace("free casting reagents", "")
     assert "no mana" in (spec.explain or "")
     assert "reagents" in (spec.explain or "")
+
+
+# -- T555 T5: how the switches started in this run, from its log ---------------------------
+
+ALL_OFF_LOG = (
+    "[UNBOUND] free reagents: off\n"
+    "[UNBOUND] instant summons: off\n"
+    "[dml_autobuff] off (Unbound.AutoBuff = 0)\n"
+)
+ALL_ON_LOG = (
+    "[UNBOUND] free reagents: on (stripped casting reagents from 41 spells)\n"
+    "[UNBOUND] instant summons: on (12 summon spells now instant, no mana cost and no cooldown;"
+    " reagents follow Unbound.ReagentFree)\n"
+    "[dml_autobuff] v3 loaded — opt in with #buffs on\n"
+)
+
+
+def test_the_log_lines_say_how_each_switch_started() -> None:
+    assert unbound_settings.running_state(ALL_OFF_LOG) == dict.fromkeys(KEYS, False)
+    assert unbound_settings.running_state(ALL_ON_LOG) == dict.fromkeys(KEYS, True)
+
+
+def test_a_switch_the_log_does_not_mention_is_none_never_off() -> None:
+    state = unbound_settings.running_state("[UNBOUND] free reagents: on (stripped 3)\n")
+    assert state == {
+        "Unbound.ReagentFree": True,
+        "Unbound.InstantSummons": None,
+        "Unbound.AutoBuff": None,
+    }
+    assert set(unbound_settings.running_state("").values()) == {None}
+
+
+def test_a_later_line_wins_when_a_script_said_it_twice() -> None:
+    log = "[dml_autobuff] off (Unbound.AutoBuff = 0)\n[dml_autobuff] v3 loaded — opt in\n"
+    assert unbound_settings.running_state(log)["Unbound.AutoBuff"] is True
+
+
+def test_the_switches_pair_the_run_with_the_file(tmp_path: Path) -> None:
+    put(tmp_path, DIST.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1"))
+
+    got = unbound_settings.switches(tmp_path, ALL_OFF_LOG)
+
+    assert [(s.label, s.running, s.conf) for s in got] == [
+        ("free reagents", False, True),
+        ("instant summons", False, False),
+        ("#buffs", False, False),
+    ]
+
+
+def test_without_a_conf_every_file_side_is_off(tmp_path: Path) -> None:
+    got = unbound_settings.switches(tmp_path, "")
+    assert [(s.running, s.conf) for s in got] == [(None, False)] * 3

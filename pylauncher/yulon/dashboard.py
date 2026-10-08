@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker
+from yulon import dbreads, docker, module_health, unbound_settings
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
@@ -179,6 +179,10 @@ class Verdict:
     badge follows it. True when the install has no marker to look for, since
     nothing could ever say otherwise.
     """
+    module_line: str = ""
+    """A module's own health sentence (`module_health`), once this run is ready; empty before
+    that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
+    """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
 
@@ -260,6 +264,8 @@ def line(verdict: Verdict) -> str:
         parts.append(verdict.warning)
     if verdict.problem and verdict.players is not None:
         parts.append(verdict.problem)
+    if verdict.module_line:
+        parts.append(verdict.module_line)
     return " · ".join(parts)
 
 
@@ -337,6 +343,9 @@ class Dashboard:
         self._restarting_run: str | None = None
         self._ready_run: str | None = None
         self._ready_seen_at: datetime | None = None
+        # T555 T5: the module's health sentence for the run it was last read for.
+        self._health_run: str | None = None
+        self._health_line = ""
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -406,7 +415,43 @@ class Dashboard:
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
+        if verdict.ready:
+            line = self._module_line(state.started_at)
+            if line:
+                verdict = replace(verdict, module_line=line)
         return verdict
+
+    def _module_line(self, run: str) -> str:
+        """The module's health sentence for run `run`, asked once per run (T555 T5).
+
+        Empty for an entry without a `health` block. Asked only after the world said ready, so
+        the module has printed its lines and made its tables. The answer is kept by `run`; one
+        that could not be read is not kept, so the next tick asks again.
+        """
+        native_block = self.entry.install.native
+        block = native_block.azerothcore if native_block is not None else None
+        health = block.health if block is not None else None
+        if block is None or health is None:
+            return ""
+        if self._health_run == run:
+            return self._health_line
+        try:
+            log = self._log_of(self.spec.world, run)
+        except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+            logger.warning(f"could not read {self.entry.id}'s world log for its health: {exc}")
+            log = ""
+        switches = (
+            unbound_settings.switches(self.server_dir, log)
+            if unbound_settings.shown_for(self.entry)
+            else ()
+        )
+        got = module_health.reading(
+            health, block.sql_checks, self.entry.databases.schema_map(), self.sql, log, switches
+        )
+        line = module_health.sentence(got)
+        if not got.unreadable:
+            self._health_run, self._health_line = run, line
+        return line
 
     def _said_ready_and_stayed_up(self, run: str) -> bool:
         """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).

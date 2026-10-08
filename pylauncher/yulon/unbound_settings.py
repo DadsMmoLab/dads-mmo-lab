@@ -38,6 +38,7 @@ Nothing here imports Qt. The rows are `tuning.TuningRow`s, drawn by the same
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,7 @@ from pathlib import Path
 from yulon import tuning
 from yulon.catalog.catalog import CatalogEntry
 from yulon.manifest import ConfKey
+from yulon.module_health import Switch
 
 FILE = "env/dist/etc/modules/mod_unbound.conf"
 """The module's conf, server-relative (`confs_from_dist` lays it from the `.conf.dist`)."""
@@ -119,6 +121,41 @@ def rows(server_dir: Path) -> tuple[tuning.TuningRow, ...]:
             read_only_reason=None,
         )
         for key, spec in conf_keys().items()
+    )
+
+
+_RUNNING_LINES: dict[str, tuple[str, re.Pattern[str]]] = {
+    "Unbound.ReagentFree": ("free reagents", re.compile(r"\[UNBOUND\] free reagents: (on|off)\b")),
+    "Unbound.InstantSummons": (
+        "instant summons",
+        re.compile(r"\[UNBOUND\] instant summons: (on|off)\b"),
+    ),
+    # `dml_autobuff.lua` prints `off (Unbound.AutoBuff = 0)` or `v3 loaded` and nothing else.
+    "Unbound.AutoBuff": ("#buffs", re.compile(r"\[dml_autobuff\] (off|v\d+ loaded)")),
+}
+"""Per switch: its short name, and the line the module prints at world start saying how it started
+(`UnboundReagentFree.cpp` OnStartup, `dml_autobuff.lua`, at the mod-unbound pin)."""
+
+
+def running_state(log_text: str) -> dict[str, bool | None]:
+    """How each switch started in the run `log_text` belongs to; `None` where the log is silent.
+
+    The conf only says what the NEXT start will use. This run's own lines say what it used, and a
+    switch whose line is not in the log is `None` (not said), never `False`: a log that did not say
+    is not a switch that is off. The last line wins, in case a script reloaded.
+    """
+    state: dict[str, bool | None] = {}
+    for key, (_label, pattern) in _RUNNING_LINES.items():
+        found = pattern.findall(log_text)
+        state[key] = None if not found else found[-1] != "off"
+    return state
+
+
+def switches(server_dir: Path, log_text: str) -> tuple[Switch, ...]:
+    """The switches as this run started them (its log) beside the conf, in the card's order."""
+    running = running_state(log_text)
+    return tuple(
+        Switch(_RUNNING_LINES[row.key][0], running[row.key], is_on(row)) for row in rows(server_dir)
     )
 
 

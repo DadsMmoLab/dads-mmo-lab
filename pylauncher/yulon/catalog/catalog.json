@@ -2515,7 +2515,16 @@
                 "where": "ID >= 10000",
                 "reason": "The rows that let every class use every skill are missing."
               }
-            ]
+            ],
+            "health": {
+              "name": "Unbound",
+              "log_markers": [
+                "[UNBOUND] Prereq map built.",
+                "[UNBOUND] Character cleanup covers:"
+              ],
+              "count_label": "Mentor",
+              "count_table": "creature"
+            }
           },
           "soap_port": 7879
         }

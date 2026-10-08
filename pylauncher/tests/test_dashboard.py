@@ -1460,3 +1460,164 @@ def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_fiv
         for _ in range(2):
             dash.tick()
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+# ------------------------------------------- T555 T5: "Unbound loaded" on the Server tab
+
+UNBOUND = catalog_module.load_catalog().get("wow-unbound")
+UNBOUND_LOG = (
+    "[UNBOUND] free reagents: off\n"
+    "[UNBOUND] instant summons: off\n"
+    "[UNBOUND] Character cleanup covers: characters.\n"
+    "[UNBOUND] Prereq map built.\n"
+    "[dml_autobuff] off (Unbound.AutoBuff = 0)\n"
+    "AzerothCore rev. 1 ready...\n"
+)
+GOOD_LINE = "Unbound loaded: Mentor in 9 places; free reagents off, instant summons off, #buffs off"
+CONF_OFF = "Unbound.ReagentFree = 0\nUnbound.InstantSummons = 0\nUnbound.AutoBuff = 0\n"
+
+
+class _UnboundSql(_FakeSql):
+    """The population answer, the tables question and the counts of an Unbound world database."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        checks = UNBOUND.install.native.azerothcore.sql_checks  # type: ignore[union-attr]
+        self.counts = {c.table: c.at_least for c in checks}
+        self.tables_asked = 0
+        self.down: str | None = None
+
+    def query(self, db: str, statement: str) -> str:
+        if db == "characters":
+            return super().query(db, statement)
+        if self.down is not None:
+            raise RuntimeError(self.down)
+        if "information_schema.tables" in statement:
+            self.tables_asked += 1
+            return "".join(f"acore_world\t{table}\n" for table in self.counts)
+        for table, count in self.counts.items():
+            if f".`{table}`" in statement:
+                return f"{count}\n"
+        raise AssertionError(statement)
+
+
+def _unbound_watch(
+    tmp_path: Path,
+    sql: _UnboundSql,
+    *,
+    runs: list[str] | None = None,
+    log: str = UNBOUND_LOG,
+    conf: str | None = CONF_OFF,
+) -> dashboard.Dashboard:
+    """An Unbound dashboard on a run three minutes old; each tick reads the next of `runs`."""
+    server = _install(tmp_path)
+    if conf is not None:
+        file = server / "env/dist/etc/modules/mod_unbound.conf"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(conf, encoding="utf-8")
+    stamps = list(runs or [_stamp(NOW - timedelta(minutes=3))])
+    return dashboard.Dashboard(
+        UNBOUND.container_spec(),
+        UNBOUND,
+        server,
+        sql=sql,
+        state_of=lambda _c: _running(stamps[0] if len(stamps) == 1 else stamps.pop(0)),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: log,
+        now=lambda: NOW,
+    )
+
+
+def test_an_unbound_server_that_loaded_says_so_after_its_up_line(tmp_path: Path) -> None:
+    verdict = _unbound_watch(tmp_path, _UnboundSql()).tick()
+
+    assert verdict.module_line == GOOD_LINE
+    assert dashboard.line(verdict).endswith(f" · {GOOD_LINE}")
+    assert dashboard.line(verdict).startswith("up — 3 players, 497 bots")
+
+
+def test_a_server_with_no_health_block_has_no_module_line_and_asks_nothing_more(
+    tmp_path: Path,
+) -> None:
+    sql = _FakeSql()
+
+    verdict = _watch(tmp_path, [_running()], sql).tick()
+
+    assert verdict.module_line == ""
+    assert all("information_schema" not in s for s in sql.statements)
+
+
+def test_the_module_is_asked_once_per_run_and_again_after_a_restart(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    first, second = _stamp(NOW - timedelta(minutes=3)), _stamp(NOW - timedelta(minutes=1))
+    watch = _unbound_watch(tmp_path, sql, runs=[first, first, first, second, second])
+
+    lines = [watch.tick().module_line for _ in range(5)]
+
+    assert lines == [GOOD_LINE] * 5
+    assert sql.tables_asked == 2, "once for each run"
+
+
+def test_a_read_that_failed_is_not_kept_so_the_next_tick_asks_again(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    watch = _unbound_watch(tmp_path, sql)
+    sql.down = "connection refused"
+
+    failed = watch.tick()
+    sql.down = None
+    healed = watch.tick()
+
+    assert failed.module_line.startswith("Unbound could not be checked:")
+    assert not any(ch.isdigit() for ch in failed.module_line), "a number from nowhere"
+    assert healed.module_line == GOOD_LINE
+
+
+def test_a_world_that_has_not_said_ready_is_not_asked_about_its_module(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    run = _stamp(NOW - timedelta(seconds=20))  # younger than the settle time, no ready line yet
+    watch = _unbound_watch(tmp_path, sql, runs=[run], log="[UNBOUND] Prereq map built.\n")
+
+    verdict = watch.tick()
+
+    assert verdict.ready is False and verdict.module_line == ""
+    assert sql.tables_asked == 0
+
+
+def test_a_switch_the_log_never_said_reads_not_said_and_a_changed_file_says_when(
+    tmp_path: Path,
+) -> None:
+    log = UNBOUND_LOG.replace("[UNBOUND] instant summons: off\n", "")
+    conf = CONF_OFF.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1")
+
+    line = _unbound_watch(tmp_path, _UnboundSql(), log=log, conf=conf).tick().module_line
+
+    assert "free reagents off (on at the next start)" in line
+    assert "instant summons not said" in line and "instant summons off" not in line
+
+
+def test_missing_tables_reach_the_line_with_no_traceback(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    del sql.counts["unbound_milestones"]
+
+    verdict = _unbound_watch(tmp_path, sql).tick()
+
+    assert verdict.module_line.startswith("Unbound tables missing: unbound_milestones.")
+    assert dashboard.line(verdict).count("Unbound") == 1
+
+
+def test_the_health_comes_from_the_catalog_block_not_from_the_entrys_id(tmp_path: Path) -> None:
+    """A second server that carries the module and the block gets the sentence under any id."""
+    scratch = UNBOUND.model_copy(update={"id": "wow-unbound-scratch"})
+    server = _install(tmp_path)
+    watch = dashboard.Dashboard(
+        scratch.container_spec(),
+        scratch,
+        server,
+        sql=_UnboundSql(),
+        state_of=lambda _c: _running(_stamp(NOW - timedelta(minutes=3))),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: UNBOUND_LOG,
+        now=lambda: NOW,
+    )
+
+    assert watch.tick().module_line.startswith("Unbound loaded: Mentor in 9 places")
