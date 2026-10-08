@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.

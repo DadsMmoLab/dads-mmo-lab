@@ -26,7 +26,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal, SignalInstance
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QRegularExpression,
+    Qt,
+    QTimer,
+    Signal,
+    SignalInstance,
+)
 from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -59,7 +67,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
 )
-from yulon.ui.widgets.flow_layout import flow_bar
+from yulon.ui.widgets.flow_layout import FlowScroll, flow_bar
 from yulon.ui.widgets.panel_style import panel_qss
 
 ControlKind = Literal["switch", "spinner", "box", "none"]
@@ -218,6 +226,15 @@ EDITOR_MIN_WIDTH = 360
 
 FILE_AREA_NAME = "tuning-file-scroll"
 """The file side's scroll area, named so its own sheet reaches it and nothing else."""
+
+FILE_BUTTONS_AREA_NAME = "tuning-file-buttons-scroll"
+"""The file buttons' own scroll area (T569), named for the same reason."""
+
+FILE_BUTTON_LINES = 3
+"""How many lines of file buttons the Tuning tab shows before the rest scrolls (T569).
+
+Three lines is what leaves the editor its four lines at the 1280x800 the app
+opens at, with the restart banner and the open report over the tab."""
 
 SIDE_SETTINGS = "Settings"
 SIDE_EDIT_FILE = "Edit file"
@@ -1084,8 +1101,18 @@ class TuningPanel(QWidget):
         # which ones they are is half the answer to "what can I tune here?".
         # A `FlowBar` (T190), so the buttons wrap to a second line rather than
         # each being cut to fit one -- T83's defect, on this row of five.
-        self.files = flow_bar(right)
+        # In a `FlowScroll` (T569): a server with fifty confs wraps the buttons
+        # onto a dozen lines, which pushed the editor off the screen. The bar
+        # keeps `FILE_BUTTON_LINES` lines and the rest scrolls inside it.
+        self.files = flow_bar()
         self.files.setStyleSheet(CHECKED_QSS)
+        self.file_buttons_area = FlowScroll(self.files, FILE_BUTTON_LINES, right)
+        self.file_buttons_area.setObjectName(FILE_BUTTONS_AREA_NAME)
+        scroll = f"QScrollArea#{FILE_BUTTONS_AREA_NAME}"
+        self.file_buttons_area.setStyleSheet(
+            f"{scroll} {{ background-color: transparent; border: none; }}"
+            f"{scroll} > QWidget > QWidget {{ background-color: transparent; }}"
+        )
         self._file_buttons: list[QPushButton] = []
         self._current_file = ""
         self._read_only_files: frozenset[str] = frozenset()
@@ -1110,7 +1137,7 @@ class TuningPanel(QWidget):
         """The note `set_file_text` was handed; `file_note` adds `EDITOR_STALE` to it."""
         self._reverting = False
         """Set while Revert file is handled: the file it puts back replaces the typing."""
-        right_box.addWidget(self.files)
+        right_box.addWidget(self.file_buttons_area)
         # Which file this is, said rather than left to the checked button
         # (T190): its name, its path, and whether it is the server's own.
         self.file_title = QLabel("", right)
@@ -1416,6 +1443,17 @@ class TuningPanel(QWidget):
         for button in self._file_buttons:
             button.setChecked(button.toolTip() == file)
         self._draw_file_title()
+        # The open file's button may be on a line the area has scrolled past
+        # (T569), and a Reload or a card's save redraws every button. After the
+        # layout pass: a button just made has no place until then.
+        QTimer.singleShot(0, self, self._show_current_button)
+
+    def _show_current_button(self) -> None:
+        """Scroll the file buttons so the checked one shows."""
+        for button in self._file_buttons:
+            if button.isChecked():
+                self.file_buttons_area.ensureWidgetVisible(button, 0, 0)
+                return
 
     def _draw_file_title(self) -> None:
         """The open file's name in bold, its path muted, and whether it is the server's own."""
