@@ -79,6 +79,7 @@ from yulon import (
     client_names,
     client_packs,
     commands,
+    conf_dist,
     database_presence,
     dbreads,
     docker,
@@ -18511,6 +18512,8 @@ class ControllerView(QWidget):
         # The raw editor's file exactly as read (T573 item 2); see `tuning.save_text`.
         self._tuning_raw = ""
         self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
+        # T590: cards for installed modules whose conf declares no keys, read off the `.conf.dist`.
+        self._outside_rows: tuple[tuning.TuningRow, ...] = ()
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
         # and forgotten on restart for the same reason: a persisted marker is
@@ -18549,6 +18552,20 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
+        # T590: a module whose conf declares no keys (one added by link or folder) gets a
+        # card from its `.conf.dist`; the server's own confs and any file a card already
+        # declares keys for are left out.
+        server_dir = self.services.controller.server_dir
+        self._outside_rows = conf_dist.rows_for(
+            manifests,
+            self._installed_clones() or {},
+            server_dir,
+            core_files=self._tuning_core_files(),
+            declared_files=tuple(dict.fromkeys(row.file for row in rows)),
+            clone_dir=lambda manifest: (
+                server_dir / apply_module.CLONE_DIRS[manifest.type] / manifest.id
+            ),
+        )
         # T302: the world conf's rates, read in the same pass -- one file, no job.
         self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         # T554: WoW Unbound's three switches, from the same pass over its own conf.
@@ -18584,7 +18601,7 @@ class ControllerView(QWidget):
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
         rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
-        return rates + self._unbound_rows + modules + self._bot_rows
+        return rates + self._unbound_rows + modules + self._outside_rows + self._bot_rows
 
     def _read_unbound_rows(self) -> tuple[tuning.TuningRow, ...]:
         """The Unbound card's rows: only for an entry that makes `mod_unbound.conf`, and only
@@ -19596,7 +19613,11 @@ class ControllerView(QWidget):
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
-        return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
+        declared = {
+            key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys
+        }
+        # T590: a conf the manifest declares no keys for is a card made from its `.conf.dist`.
+        return declared or conf_dist.conf_keys(self._outside_rows, family, module_id, file)
 
     def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
         """Every key any catalog manifest declares for this file, first declaration winning."""
