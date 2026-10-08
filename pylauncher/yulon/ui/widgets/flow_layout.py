@@ -35,7 +35,7 @@ and `ui.gamepad` hands an open menu its own keys so the pad can walk it.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import QFrame, QLayout, QLayoutItem, QScrollArea, QSizePolicy, QWidget
 
@@ -247,6 +247,13 @@ class FlowBar(QWidget):
     under the bar, which on the Modules tab is the module list (T73).
     """
 
+    height_needed_changed = Signal()
+    """Said when the height this bar needs at its width has changed (T569).
+
+    For a holder that limits the bar's height (`FlowScroll`) and must restate
+    its limit when a wrap moves. Nothing else listens.
+    """
+
     def __init__(self, parent: QWidget | None = None, spacing: int = FLOW_SPACING) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -259,6 +266,7 @@ class FlowBar(QWidget):
         if needed != self._needed:
             self._needed = needed
             self.updateGeometry()
+            self.height_needed_changed.emit()
 
     def flow(self) -> FlowLayout:
         """This bar's layout, typed -- `layout()` answers a bare `QLayout`."""
@@ -294,10 +302,9 @@ class FlowScroll(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setWidget(bar)
-        # The bar's resize and layout requests are what say its height changed:
-        # a button added or a width given. Filtered here so the bar stays a
-        # plain `FlowBar` that the Modules tab uses unchanged.
-        bar.installEventFilter(self)
+        # The bar says when a wrap moved its height (a width given, a restyle);
+        # `refit()` is also called by whoever adds buttons to it.
+        bar.height_needed_changed.connect(self.refit)
         self.refit()
 
     def bar(self) -> FlowBar:
@@ -326,8 +333,3 @@ class FlowScroll(QScrollArea):
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
         super().resizeEvent(event)
         self.refit()
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
-        if watched is self._bar and event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
-            self.refit()
-        return False

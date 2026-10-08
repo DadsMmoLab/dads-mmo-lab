@@ -1381,6 +1381,7 @@ class TuningPanel(QWidget):
             button.clicked.connect(lambda _checked=False, name=file: self._file_clicked(name))
             self._file_buttons.append(button)
             self.files.flow().addWidget(button)
+        self.file_buttons_area.refit()
         if keep in files:
             # Read again (T190 A28): the tab's Reload and every save hand the
             # same list back, and an editor kept as it was went stale under a
