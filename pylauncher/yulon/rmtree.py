@@ -61,9 +61,9 @@ def remove_tree_stoppably(path: Path, stop: Callable[[], bool]) -> bool:
             os.unlink(os.path.join(root, name))
         for name in dirs:
             full = os.path.join(root, name)
+            if stop():
+                raise StoppedPartWay(f"the removal of {path} was stopped part way")
             if os.path.islink(full):
-                if stop():
-                    raise StoppedPartWay(f"the removal of {path} was stopped part way")
                 os.unlink(full)
             else:
                 os.rmdir(full)

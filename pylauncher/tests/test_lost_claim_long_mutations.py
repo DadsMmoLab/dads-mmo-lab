@@ -118,3 +118,17 @@ def test_a_put_back_stopped_between_names_is_finished_by_the_next_call(tmp_path:
     assert len(list((data / extract.PREVIOUS_DIR).iterdir())) == 2, "one name was put back"
     extract.put_back(data)
     assert sorted(path.name for path in data.iterdir()) == ["dbc", "maps", "vmaps"]
+
+
+def test_a_stoppable_removal_asks_before_every_directory_it_removes(tmp_path: Path) -> None:
+    """Codex normal and adversarial reviews, round 5: a tree of empty folders went unchecked.
+
+    Mutation this catches: `rmdir` without a look at `stop`.
+    """
+    tree = tmp_path / "old"
+    for i in range(6):
+        (tree / f"d{i}").mkdir(parents=True)
+    with pytest.raises(rmtree.StoppedPartWay):
+        rmtree.remove_tree_stoppably(tree, _stop_after(2))
+    left = [path for path in tree.iterdir()]
+    assert len(left) == 4, left  # two removed, then it stopped
