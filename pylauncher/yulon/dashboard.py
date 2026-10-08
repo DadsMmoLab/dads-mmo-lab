@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -134,6 +134,33 @@ until `SETTLED_AFTER`, as after any loop.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
+
+WRONG_CLIENT_EVERY = timedelta(seconds=60)
+"""How often the world log is read for a client that was turned away (T576)."""
+
+WRONG_CLIENT_OVERLAP = timedelta(seconds=10)
+"""Each read starts this far before the last one: the two reads' edges are not exact."""
+
+WRONG_CLIENT_STAYS = timedelta(minutes=15)
+"""How long the sentence stays after the last such line: the line only comes with an attempt."""
+
+WRONG_CLIENT_LINE = re.compile(
+    r"requested connecting with realm id (\d+) but this realm has id \d+ set in config"
+)
+"""The world server's refusal of a client whose login packet is not 3.3.5a's (T576).
+
+AzerothCore reads the realm id out of CMSG_AUTH_SESSION at a fixed place; an older build
+puts other bytes there, so the number differs on every attempt. The authserver had
+already accepted the password, so the player sees a login that loads and drops.
+"""
+
+WRONG_CLIENT_MAX_REALM_ID = 255
+"""The largest realm id a real realm list holds (the realm id is one byte in the list).
+
+A correct client sends its realm list's id, so a line asking for a small id means the realm
+row and the world server's `RealmID` disagree (a hand edit, a second row), not a wrong client.
+Only an id above this, the random value of a packet that is not 3.3.5a's, blames the client.
+"""
 
 
 @dataclass(frozen=True)
@@ -306,6 +333,7 @@ class Dashboard:
         state_of: Callable[[str], docker.ContainerState] | None = None,
         daemon_of: Callable[[], str] | None = None,
         log_of: Callable[[str, str], str] | None = None,
+        login_log_of: Callable[[str, str], str] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.spec = spec
@@ -321,6 +349,20 @@ class Dashboard:
                 container, this_run_only=True, since=since, wsl_distro=wsl_distro
             )
         )
+        # T576: the log read for a refused client. An injected `log_of` stands in for Docker,
+        # so a test that gave only that one asked nothing of this read; it names its own.
+        self._login_log_of: Callable[[str, str], str] | None
+        if login_log_of is not None:
+            self._login_log_of = login_log_of
+        elif log_of is None:
+            self._login_log_of = lambda container, since: docker._logs(
+                container, this_run_only=True, since=since, wsl_distro=wsl_distro
+            )
+        else:
+            self._login_log_of = None
+        self._login_run: str | None = None
+        self._login_read_at: datetime | None = None
+        self._wrong_client_at: datetime | None = None
         self._banner = _ready_banner(entry)
         self._now = now or (lambda: datetime.now(UTC))
         self._missing_table_said = dbreads.MissingTableSaid()
@@ -406,7 +448,64 @@ class Dashboard:
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
-        return verdict
+        return self._with_wrong_client(verdict, state.started_at)
+
+    def _first_since(self, run: str) -> str:
+        """Where a run's first read starts: the run, but not further back than the sentence lives.
+
+        A server up for days has old refused logins in its log; read whole they would show as
+        fresh for `WRONG_CLIENT_STAYS`, and a large log would be read in one go.
+        """
+        uptime = self._uptime(run)
+        if uptime is None or uptime <= WRONG_CLIENT_STAYS:
+            return run
+        return f"{int(WRONG_CLIENT_STAYS.total_seconds())}s"
+
+    def _with_wrong_client(self, verdict: Verdict, run: str) -> Verdict:
+        """`verdict`, saying so when the world log shows a client turned away (T576).
+
+        Only for a server whose catalog names the build its players' clients must be
+        (`client.required_build`). The log is read once a minute and only from the last
+        read on, never every tick; the sentence stays `WRONG_CLIENT_STAYS` after the
+        last such line and goes with the run.
+        """
+        required = self.entry.client.required_build
+        if required is None or self._login_log_of is None:
+            return verdict
+        now = self._now()
+        if self._login_run != run:
+            self._login_run, self._login_read_at, self._wrong_client_at = run, None, None
+        elapsed = None if self._login_read_at is None else now - self._login_read_at
+        if elapsed is not None and elapsed < timedelta(0):
+            # This watcher's clock went backwards: what was read and seen is on a timeline
+            # that no longer exists, so read the run again and let the sentence age from now.
+            self._login_read_at, elapsed = None, None
+            if self._wrong_client_at is not None:
+                self._wrong_client_at = now
+        if elapsed is None or elapsed >= WRONG_CLIENT_EVERY:
+            # `--since` is told how long ago, not when: Docker works that out on ITS clock, which
+            # a Docker Desktop VM lets drift from this machine's, and an absolute stamp from
+            # here would then skip lines or repeat them.
+            since = (
+                self._first_since(run)
+                if elapsed is None
+                else f"{int((elapsed + WRONG_CLIENT_OVERLAP).total_seconds()) + 1}s"
+            )
+            self._login_read_at = now
+            if any(
+                int(asked) > WRONG_CLIENT_MAX_REALM_ID
+                for asked in WRONG_CLIENT_LINE.findall(self._login_log_of(self.spec.world, since))
+            ):
+                self._wrong_client_at = now
+        if self._wrong_client_at is None or now - self._wrong_client_at > WRONG_CLIENT_STAYS:
+            return verdict
+        version = self.entry.client.version
+        sentence = (
+            f"a game client that is not {version} (build {required}) logged in and was "
+            "dropped by the world server: every player must use a stock "
+            f"{version} client"
+        )
+        return replace(verdict, warning=" · ".join(w for w in (verdict.warning, sentence) if w))
 
     def _said_ready_and_stayed_up(self, run: str) -> bool:
         """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).
