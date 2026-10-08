@@ -626,6 +626,30 @@ def _folder_refusal(pack: ClientPack, what: str) -> PackError:
     )
 
 
+def _link_on_the_way(server_dir: Path, rel: str) -> str | None:
+    """The first folder or file of `rel` below `server_dir` that is a link, or None.
+
+    Every step is asked, not only the last (Codex adversarial review, T555 T1): a
+    link half way down leaves the checkout as surely as one at the end. The
+    server folder itself is not asked: where it lives is the player's choice.
+    """
+    here = server_dir
+    parts = PurePosixPath(rel).parts
+    for depth, part in enumerate(parts, start=1):
+        here = here / part
+        if play_client._is_link(here):
+            return PurePosixPath(*parts[:depth]).as_posix()
+    return None
+
+
+def _refuse_a_link_on_the_way(pack: ClientPack, server_dir: Path, rel: str) -> None:
+    link = _link_on_the_way(server_dir, rel)
+    if link is not None:
+        raise _folder_refusal(
+            pack, f"in this server's checkout {link} is a link, so Yu'lon did not read through it"
+        )
+
+
 def _folder_list(pack: ClientPack, server_dir: Path) -> dict[str, str]:
     """`{name under the folder: sha256}` from the pack's `sha256_file`, at the commit it is on.
 
@@ -634,6 +658,7 @@ def _folder_list(pack: ClientPack, server_dir: Path) -> dict[str, str]:
     list is missing or too large, or names one file twice with two different digests.
     """
     assert pack.sha256_file is not None and pack.source.path is not None  # catalog validation
+    _refuse_a_link_on_the_way(pack, server_dir, pack.sha256_file)
     listing = server_dir / pack.sha256_file
     try:
         with listing.open("rb") as handle:
@@ -732,8 +757,9 @@ def _fetch_checkout_folder(
     for name in (entry_id, pack.id):
         if not _SAFE_NAME.match(name):
             raise PackError(f"{pack.label}: {name!r} cannot name a cache folder.")
+    _refuse_a_link_on_the_way(pack, server_dir, source.path)
     folder = server_dir / source.path
-    if play_client._is_link(folder) or not folder.is_dir():
+    if not folder.is_dir():
         raise _folder_refusal(
             pack,
             f"this server's checkout has no folder {source.path} at the commit it is on",
@@ -792,8 +818,9 @@ def fetch_checkout_folder(
 ) -> Fetched:
     """A checkout-folder pack, proved file by file and packed into a zip in the cache.
 
-    Every file under `source.path` must have exactly one line in the pack's
-    `sha256_file`, and every line under it a file; no link anywhere inside. A
+    Every file under `source.path` must have a line in the pack's `sha256_file`
+    (two lines for one file must agree, as `sha256sum -c` reads them), and every
+    line under it a file; no link anywhere inside it or on the way to it. A
     missing, extra, changed or linked file refuses, naming it, before anything
     is kept: the zip is written as `<pack>.zip.part` and renamed to
     `cache_dir()/<entry>/<pack>/<list digest[:16]>/<pack>.zip` only once every
@@ -1745,6 +1772,7 @@ def install(
     previous: Mapping[str, Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     cancelled: Callable[[], bool] = _never,
+    only_missing: bool = False,
 ) -> dict[str, Any]:
     """Unpack `pack`'s mapped members into `play_dir`; the record entry for what was written.
 
@@ -1773,6 +1801,12 @@ def install(
     renamed in; once it answers True this raises `Cancelled` and the folder is as
     it was (T303).
 
+    `only_missing` puts back the same version of a pack whose files went missing
+    from the client (T555 T1): only the members whose target is not there are
+    written, nothing is removed, and the returned entry keeps `previous`'s hash
+    for every file left in place. A file the player edited stays as it is, as on
+    every Play the pack did not change (Codex adversarial review).
+
     The caller records the returned entry (`write_record`). Raises only
     `PackError`; `PartialInstall` (a subclass) when the rollback itself failed.
     """
@@ -1786,6 +1820,7 @@ def install(
             previous=previous,
             sleep=sleep,
             cancelled=cancelled,
+            only_missing=only_missing,
         )
     except OSError as exc:
         raise _write_refusal(pack.label, exc) from exc
@@ -1973,6 +2008,7 @@ def _install(
     previous: Mapping[str, Any] | None,
     sleep: Callable[[float], None],
     cancelled: Callable[[], bool] = _never,
+    only_missing: bool = False,
 ) -> dict[str, Any]:
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the pack {pack.label}")
     with zipfile.ZipFile(fetched.path) as archive:
@@ -1987,11 +2023,13 @@ def _install(
         for item in items:
             _check_path(play_dir, item.rel)
         _recover_asides([play_dir / Path(*item.rel.parts) for item in items], sleep)
+        new = {item.rel.as_posix().casefold() for item in items}
+        if only_missing:
+            items = [i for i in items if not os.path.lexists(play_dir / Path(*i.rel.parts))]
         plain = sum(i.info.file_size for i in items if i.rel.suffix.lower() != ".mpq")
         if plain:
             _refuse_without_room(pack, play_dir, plain)
-        new = {item.rel.as_posix().casefold() for item in items}
-        drops = _drops(play_dir, previous, new)
+        drops = [] if only_missing else _drops(play_dir, previous, new)
         staged: list[tuple[Path, Path, str]] = []
         made: list[Path] = []
         try:
@@ -2010,6 +2048,17 @@ def _install(
             raise
     _swap(play_dir, staged, pack, sleep)
     files = {t.relative_to(play_dir).as_posix(): sha256 for _, t, sha256 in staged}
+    if only_missing:
+        written = {rel.casefold() for rel in files}
+        kept = previous.get("files") if previous else None
+        files = {
+            **{
+                rel: sha
+                for rel, sha in (kept if isinstance(kept, dict) else {}).items()
+                if rel.casefold() in new and rel.casefold() not in written
+            },
+            **files,
+        }
     entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
     left = _drop_old(play_dir, drops)
     if left:

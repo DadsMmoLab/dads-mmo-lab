@@ -26014,6 +26014,7 @@ def test_a_pack_whose_recorded_file_was_deleted_is_installed_again_at_the_next_p
     gone = play / "Interface" / "AddOns" / "multiclass-resources"
     shutil.rmtree(gone)
     edited = play / "Interface" / "AddOns" / "multiclass-talents-ui" / "multiclass-talents-ui.toc"
+    edited.write_bytes(b"## Interface: 30300\n## Notes: my own edit\n")
     steps.clear()
 
     view.play()
@@ -26021,7 +26022,11 @@ def test_a_pack_whose_recorded_file_was_deleted_is_installed_again_at_the_next_p
     assert steps == ["install unbound-addons", "launch"]
     for name in ("multiclass-resources.toc", "multiclass-resources.lua"):
         assert (gone / name).read_bytes() == FOLDER_ADDONS[f"multiclass-resources/{name}"]
-    assert edited.read_bytes() == FOLDER_ADDONS["multiclass-talents-ui/multiclass-talents-ui.toc"]
+    # Codex adversarial: putting a deleted file back never reverts an edit beside it.
+    assert edited.read_bytes() == b"## Interface: 30300\n## Notes: my own edit\n"
+    steps.clear()
+    view.play()
+    assert steps == ["launch"], "nothing is missing now: the edit is no reason to install"
 
 
 def test_a_folder_pack_the_checkout_does_not_match_stops_play_naming_the_file(

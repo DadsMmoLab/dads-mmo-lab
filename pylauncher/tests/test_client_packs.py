@@ -2828,6 +2828,21 @@ def _linked_folder(server: Path) -> None:
     (server / FOLDER / "Linked").symlink_to(server / FOLDER / "UnboundSpellbook")
 
 
+@_refusal("a folder of the path that is a link", "modules/mod-unbound/client")
+def _linked_ancestor(server: Path) -> None:
+    """Codex adversarial (T555 T1): a link on the way, not only at the end, leaves the checkout."""
+    real = server.parent / "elsewhere"
+    shutil.move(server / MODULE / "client", real)
+    (server / MODULE / "client").symlink_to(real)
+
+
+@_refusal("a list reached through a link", "modules/mod-unbound")
+def _linked_module(server: Path) -> None:
+    real = server.parent / "another-module"
+    shutil.move(server / MODULE, real)
+    (server / MODULE).symlink_to(real)
+
+
 @_refusal("no sha256sum list", "MANIFEST.sha256")
 def _no_list(server: Path) -> None:
     (server / LIST).unlink()
@@ -2869,6 +2884,35 @@ def test_a_folder_pack_refusal_names_every_odd_file_up_to_a_few(tmp_path: Path) 
         _fetch_folder(server)
 
     assert "New5.lua" not in str(caught.value)
+
+
+def test_a_server_folder_reached_through_a_link_is_still_the_servers(tmp_path: Path) -> None:
+    """Only the path below the server folder is held to "no link": the player's own choice
+    of where the server folder lives (a link to another drive) is theirs."""
+    real = tmp_path / "real-srv"
+    _lay_module(real)
+    (tmp_path / "srv").symlink_to(real)
+
+    fetched = _fetch_folder(tmp_path / "srv")
+
+    with zipfile.ZipFile(fetched.path) as archive:
+        assert sorted(archive.namelist()) == sorted(FOLDER_FILES)
+
+
+def test_two_agreeing_lines_for_one_file_are_one_line(tmp_path: Path) -> None:
+    """`sha256sum -c` checks such a file twice and passes; so does this (the md5_file rule)."""
+    server = tmp_path / "srv"
+    _lay_module(server)
+    listing = server / LIST
+    listing.write_bytes(
+        listing.read_bytes()
+        + _list_lines({"UnboundSpellbook/UI.lua": FOLDER_FILES["UnboundSpellbook/UI.lua"]})
+    )
+
+    fetched = _fetch_folder(server)
+
+    with zipfile.ZipFile(fetched.path) as archive:
+        assert sorted(archive.namelist()) == sorted(FOLDER_FILES)
 
 
 def test_a_list_line_with_a_star_and_windows_slashes_names_the_same_file(tmp_path: Path) -> None:
@@ -2927,6 +2971,36 @@ def test_a_zip_fetcher_refuses_a_folder_pack_and_the_folder_fetcher_a_zip_pack(
         client_packs.fetch_checkout_folder(
             _checkout_pack("p.zip", md5="0" * 32), tmp_path, entry_id="wow-unbound"
         )
+
+
+def test_putting_back_missing_files_writes_only_those_and_keeps_an_edited_sibling(
+    rig: _Rig,
+) -> None:
+    """Codex adversarial (T555 T1): a repair is not an update. The pack is the same version,
+    so only the files gone from the client are written; one the player edited stays, as it
+    does on every Play the pack is not changed."""
+    fetched = rig.fetched(ADDON_FILES)
+    entry = rig.install(ADDONS, fetched)
+    nova = rig.play / "Interface" / "AddOns" / "Nova"
+    (nova / "Nova.lua").unlink()
+    (nova / "Nova.toc").write_bytes(b"## Title: Nova, as I like it\n")
+
+    again = rig.install(ADDONS, fetched, previous=entry, only_missing=True)
+
+    assert (nova / "Nova.lua").read_bytes() == ADDON_FILES["Nova/Nova.lua"]
+    assert (nova / "Nova.toc").read_bytes() == b"## Title: Nova, as I like it\n"
+    assert again == entry, "the record still names every file with the hash Yu'lon wrote"
+    rig.untouched()
+
+
+def test_putting_back_with_nothing_missing_writes_nothing(rig: _Rig) -> None:
+    fetched = rig.fetched(ADDON_FILES)
+    entry = rig.install(ADDONS, fetched)
+    before = _snapshot(rig.play)
+
+    again = rig.install(ADDONS, fetched, previous=entry, only_missing=True)
+
+    assert again == entry and _snapshot(rig.play) == before
 
 
 def test_a_recorded_file_missing_from_the_client_is_reported(rig: _Rig) -> None:

@@ -2491,8 +2491,9 @@ class ClientPack(_Strict):
         description=(
             "Checkout-folder packs only, and required there: a file of `sha256sum` lines, "
             "relative to the server dir (`modules/mod-unbound/MANIFEST.sha256`), naming files "
-            "relative to its own folder. Every file under `source.path` must have exactly one "
-            "line, and every line under it a file, at the commit the checkout is on."
+            "relative to its own folder. Every file under `source.path` must have a line (two "
+            "for one file must agree), and every line under it a file, at the commit the "
+            "checkout is on."
         ),
     )
     install: tuple[InstallRule, ...] = Field(min_length=1)

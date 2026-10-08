@@ -11735,17 +11735,28 @@ class ControllerView(QWidget):
             have = packs.get(pack.id)
             # Installed already, unless a file it recorded is gone from the client (T555
             # T1, lead 2026-10-08): a deleted addon folder comes back at the next Play.
-            if (
+            # Only the missing files are written then; an edit beside them stays.
+            same = (
                 have is not None
                 and have.get("sha256") == fetched.sha256
                 and have.get("version") == fetched.version
-                and not client_packs.recorded_files_missing(play, have)
-            ):
-                continue
-            say(f"Installing {pack.label}…")
+            )
+            if same:
+                assert have is not None
+                if not client_packs.recorded_files_missing(play, have):
+                    continue
+                say(f"Putting back the missing files of {pack.label}…")
+            else:
+                say(f"Installing {pack.label}…")
             try:
                 done = client_packs.install(
-                    play, pack, fetched, game=game, server_dir=server_dir, previous=have
+                    play,
+                    pack,
+                    fetched,
+                    game=game,
+                    server_dir=server_dir,
+                    previous=have,
+                    only_missing=same,
                 )
             except client_packs.PartialInstall as exc:
                 packs[pack.id] = exc.entry
