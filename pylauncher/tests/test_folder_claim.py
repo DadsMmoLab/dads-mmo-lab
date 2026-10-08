@@ -738,8 +738,8 @@ def test_the_two_asks_about_a_held_claim_are_a_moment_apart(
         def only_ours(seconds: float) -> None:
             # `docker.time` is the one `time` module: a sleep on any other thread (the
             # claim's watcher, the fake daemon) must not count as the asks' wait.
-            if threading.current_thread() is asker:
-                events.append(f"sleep {seconds}")
+            if threading.current_thread() is asker and seconds == docker._CLAIM_ASK_GAP:
+                events.append(f"sleep {seconds}")  # the asks' wait, not a poll's back-off
             else:
                 real_sleep(seconds)
 
