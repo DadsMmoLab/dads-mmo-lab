@@ -75,6 +75,7 @@ from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.tuning import core_bool
 
 logger = get_logger(__name__)
 
@@ -496,22 +497,6 @@ def _effective_value(text: str, key: str, env: Mapping[str, str] | None) -> str 
     if from_env is not None:
         return from_env.strip().strip('"')
     return _conf_value(text, key)
-
-
-def core_bool(value: str) -> bool | None:
-    """What AzerothCore's `GetOption<bool>` makes of `value`, or `None`.
-
-    `StringTo<bool>` non-strict (`StringConvert.h:94-122` at 7f12e89e): `1`,
-    `y`, `on`, `yes`, `true` are on and `0`, `n`, `off`, `no`, `false` are off,
-    letters in any case. `None` is a bad value, for which the core logs and
-    uses the option's compiled default.
-    """
-    word = value.strip()
-    if word == "1" or word.lower() in ("y", "on", "yes", "true"):
-        return True
-    if word == "0" or word.lower() in ("n", "off", "no", "false"):
-        return False
-    return None
 
 
 def _conf_value(text: str, key: str) -> str | None:

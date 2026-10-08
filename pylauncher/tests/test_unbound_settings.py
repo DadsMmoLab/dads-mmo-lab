@@ -205,3 +205,29 @@ def test_the_instant_summons_text_never_says_free_and_says_reagents_are_still_us
     assert "free" not in (spec.explain or "").lower().replace("free casting reagents", "")
     assert "no mana" in (spec.explain or "")
     assert "reagents" in (spec.explain or "")
+
+
+@pytest.mark.parametrize(
+    ("key", "current", "on"),
+    [
+        # Read by the C++ `GetOption<bool>`: StringTo<bool> non-strict, any case.
+        ("Unbound.ReagentFree", "yes", True),
+        ("Unbound.ReagentFree", "On", True),
+        ("Unbound.InstantSummons", "y", True),
+        ("Unbound.InstantSummons", "no", False),
+        ("Unbound.InstantSummons", "01", False),
+        # Read only by dml_autobuff.lua through ALE's GetConfigValue: `true` in any
+        # case becomes a boolean, a whole number a number, anything else stays text,
+        # and the script turns on for the text `1` or `true` (GlobalMethods.h:64-97).
+        ("Unbound.AutoBuff", "yes", False),
+        ("Unbound.AutoBuff", "01", True),
+        ("Unbound.AutoBuff", "TRUE", True),
+    ],
+)
+def test_a_switch_is_on_where_the_code_that_reads_that_key_says_so(
+    tmp_path: Path, key: str, current: str, on: bool
+) -> None:
+    put(tmp_path, DIST.replace(f"{key} = 0", f"{key} = {current}"))
+    by_key = {row.key: row for row in unbound_settings.rows(tmp_path)}
+    assert by_key[key].current == current
+    assert unbound_settings.is_on(by_key[key]) is on
