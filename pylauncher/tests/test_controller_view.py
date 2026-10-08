@@ -29646,6 +29646,30 @@ def test_a_failed_rebuild_reloads_the_modules_and_drops_what_a_put_back_made_sta
     assert view._behind[("module", "mod-other")] == 2
 
 
+def test_a_failed_rebuild_after_a_late_stop_reloads_the_modules_too(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T592: a compile error that lands as Stop is pressed is a failure, and it put a module back.
+
+    A Stop that took effect reaches `_rebuild_finished()` as `ok=True`, so `not ok` already
+    tells the two apart; the panel's `cancelled` only says the button was pressed.
+    Mutation: ask `rebuild_log.cancelled` again beside `not ok`.
+    """
+    from yulon import module_moves
+
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    assert module_moves.skip(tmp_path, module_moves.key("module", "mod-transmog"), tip=_NEW) == ""
+    view._behind[("module", "mod-transmog")] = 3
+    reloads: list[int] = []
+    monkeypatch.setattr(view, "reload_modules", lambda: reloads.append(1))
+    view.rebuild_log._stop_requested = True
+
+    view._rebuild_finished(False, "The build stopped on an error in mod-transmog…")
+
+    assert reloads
+    assert ("module", "mod-transmog") not in view._behind
+
+
 # ----------------------------- T557 review: the Rebuild and the Modules jobs do not overlap
 
 
