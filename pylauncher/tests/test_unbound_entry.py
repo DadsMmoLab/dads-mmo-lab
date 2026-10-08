@@ -39,7 +39,7 @@ UNBOUND_PATCHES: dict[str, str] = {
     "04-pet-commands.patch": "7be5aed89bdfff62ac06d086198c41c7c7ea04be194e620ac6b2d83c93e5a4c6",
     # T556's mana regen fix; the module's core-patch/unbound-mana-regen.patch, which AzerothCore
     # never applies by itself, so the entry carries it (U7 cold review).
-    "05-unbound-mana-regen.patch": "4ad56a52013a44fa06718910441b9de0818b37aeea0b699e1d1eb45383926dfa",  # noqa: E501
+    "05-unbound-mana-regen.patch": "069278588dcd2f5d0a5c684fc4924f2bf710889768f31c220e9c06217787f099",  # noqa: E501
 }
 
 
@@ -59,7 +59,7 @@ def test_every_unbound_patch_is_shipped_byte_exact(name: str, digest: str) -> No
 UNBOUND_ID = "wow-unbound"
 UNBOUND_REPO = "DadsMmoLab/dads-mmo-lab"
 UNBOUND_BRANCH = "mod-unbound"
-UNBOUND_REV = "e8022b44eb12a167f294076e00ca257c57b5567d"
+UNBOUND_REV = "fd247bed0ed39796101417d3ca1ef3e52cf3f131"
 """The `mod-unbound` head that carries U1-U7 (the AzerothCore module layout, T556's fixes, the
 mana-regen patch) and M1 (the Mentor spawns), as DadsMmoLab/dads-mmo-lab says it. The five patch
 files here equal that head's `core-patch/` files byte for byte (checked when this was set)."""
