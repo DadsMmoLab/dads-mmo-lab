@@ -281,6 +281,18 @@ def test_a_file_that_is_not_utf8_is_refused_before_anything_is_sent(tmp_path: Pa
     assert "not UTF-8" in str(refused.value)
 
 
+def test_two_files_with_the_same_bytes_are_one_migration(tmp_path: Path) -> None:
+    """The updater keys a file by `Module:Hash`, so the second copy is the same migration."""
+    copy = "data/sql/character/20260916000000_char.sql"
+    server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY, copy: ROWS_ONLY})
+    ledger = _Ledger()
+    report = _applier(server, ledger).install(
+        _manifest(("characters", CHAR_FILE), ("characters", copy))
+    )
+    assert len(ledger.sent) == 1
+    assert any(copy in line and "already applied" in line for line in report.skipped)
+
+
 def test_files_run_in_the_order_the_manifest_lists_them(tmp_path: Path) -> None:
     server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY, WORLD_FILE: ROWS_ONLY.replace("1", "3")})
     ledger = _Ledger()

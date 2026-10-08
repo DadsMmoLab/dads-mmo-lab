@@ -5478,8 +5478,8 @@ class Applier:
             if index in ledgered:
                 log.skipped.append(
                     f"{_step_name(step)}: already applied — the database's own migrations "
-                    f"ledger holds this file under {step.migration_module}, so it was not sent "
-                    "again"
+                    f"ledger holds these exact bytes under {step.migration_module} (or an "
+                    "earlier file of this press has them), so it was not sent again"
                 )
                 continue
             if not self._precondition_met(step, log):
@@ -5833,6 +5833,10 @@ class Applier:
                 held[key] = self._ledger_hashes(manifest, reader, *key)
             if migration.digest in held[key]:
                 done.add(index)
+            # Two files with the same bytes are ONE migration to the updater
+            # (its map is keyed `Module:Hash`): the first is sent, the rest are
+            # done once it is (Codex review). `migrations` is in step order.
+            held[key].add(migration.digest)
         return frozenset(done)
 
     def _ledger_hashes(
