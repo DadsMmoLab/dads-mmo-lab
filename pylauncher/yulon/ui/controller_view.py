@@ -17784,7 +17784,7 @@ class ControllerView(QWidget):
             return False
         if not ask_yes_no(
             self,
-            f"Put {self.entry.name} back on the tested commit?",
+            f"Move {self.entry.name} onto the tested commit?",
             route.pin_confirmation(),
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
