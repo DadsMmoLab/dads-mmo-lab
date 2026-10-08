@@ -29344,3 +29344,31 @@ def test_the_build_a_pick_must_report_comes_from_the_catalog_entry(
     view.change_client_dir()
 
     assert fake.written == []
+
+
+def test_play_with_a_client_picked_before_the_check_is_refused_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 3, 11723)
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert launched == []
+    assert "3.3.3 (11723)" in view.play_label.text() and "12340" in view.play_label.text()
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+    assert view._play_pending is False
+
+
+def test_play_with_a_12340_client_starts_the_game(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 5, 12340)
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1

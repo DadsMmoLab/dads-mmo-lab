@@ -11513,7 +11513,8 @@ class ControllerView(QWidget):
         """Start the game from this server's ready-to-play client (T181 §2).
 
         In order: the folder must still be this server's (else the offer to
-        make it again); the server must run (else "Start it first?"); a patched
+        make it again); the client it was made from must be the build the server
+        needs (T576); the server must run (else "Start it first?"); a patched
         original offers Refresh; then the realmlist is written again and the
         game is started, detached.
 
@@ -11528,7 +11529,14 @@ class ControllerView(QWidget):
             return
         if self._play_client_blocked():
             return
-        if self._usable_play_client() is None:
+        marker = self._usable_play_client()
+        if marker is None:
+            return
+        # T576: a client picked before the build check existed. Read once per exe (cached
+        # by size and mtime), so it costs nothing on the presses after the first.
+        wrong = self._wrong_build_refusal(marker.source_client_dir)
+        if wrong is not None:
+            self._play_refused(f"{wrong} Nothing was started.")
             return
         self._play_pending = True
         self._say_play("Checking that the server is running…")
