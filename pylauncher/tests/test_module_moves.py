@@ -263,3 +263,11 @@ def test_several_modules_are_named_once_each_in_the_order_met() -> None:
         "/azerothcore/modules/mod-a/src/y.cpp:2:2: error: two",
         "/azerothcore/modules/mod-b/src/z.cpp:3:3: error: three",
     ) == ("mod-b", "mod-a")
+
+
+def test_a_write_that_changes_nothing_makes_no_file(tmp_path: Path) -> None:
+    """A Remove of a module that was never updated, on a server that never had a record."""
+    assert module_moves.drop(tmp_path, KEY) == ""
+    assert module_moves.record_end(tmp_path, KEY, head=A, release="") == ""
+    assert module_moves.settle(tmp_path) == ""
+    assert not _file(tmp_path).exists()

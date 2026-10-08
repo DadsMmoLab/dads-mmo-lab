@@ -501,6 +501,7 @@ class GuardedApplier(Applier):
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -514,6 +515,7 @@ class GuardedApplier(Applier):
         # commit it proved that from. The one addon on this game that follows
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
+        # `record_move` (T557) is `update()`'s too, passed through for the same rule.
         note = self._guard(manifest, "install")
         return _with_note(
             super().install(
@@ -525,6 +527,7 @@ class GuardedApplier(Applier):
                 first_configure_sql=first_configure_sql,
                 release=release,
                 expect_head=expect_head,
+                record_move=record_move,
             ),
             note,
         )

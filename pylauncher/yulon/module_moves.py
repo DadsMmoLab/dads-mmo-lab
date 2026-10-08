@@ -209,7 +209,12 @@ def _write(server_dir: Path, change: Callable[[dict[str, Any]], None], what: str
     }
     if raw.get("built_unix") is not None:
         payload["built_unix"] = raw["built_unix"]
+    before = json.dumps(payload, sort_keys=True)
     change(payload)
+    if json.dumps(payload, sort_keys=True) == before:
+        # Nothing to say: a Remove of a module with no entry, an end with no
+        # start. No file appears on a server that never had a record.
+        return ""
     tmp: Path | None = None
     try:
         fd, name = tempfile.mkstemp(dir=server_dir, prefix=MOVES_FILE + ".", suffix=".tmp")
@@ -295,8 +300,14 @@ def mark_sql(server_dir: Path, item: str) -> str:
 
 
 def settle(server_dir: Path, *, now_unix: int | None = None) -> str:
-    """A build worked: every clone on disk was just compiled, so no move is unbuilt any more."""
+    """A build worked: every clone on disk was just compiled, so no move is unbuilt any more.
+
+    A server with no record gets none: there is no move to settle, and every
+    game's Rebuild calls this.
+    """
     stamp = int(time.time()) if now_unix is None else now_unix
+    if not (server_dir / MOVES_FILE).exists():
+        return ""
 
     def change(payload: dict[str, Any]) -> None:
         payload["moves"] = {}

@@ -45,6 +45,7 @@ from yulon import (
     folder_swap,
     links,
     module_answers,
+    module_moves,
     platform,
     play_client,
     rmtree,
@@ -3049,6 +3050,7 @@ class Applier:
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
     ) -> ApplyReport:
         """`_install()`, saying so when it stops with a database it started still up (T476).
 
@@ -3070,6 +3072,7 @@ class Applier:
                 first_configure_sql=first_configure_sql,
                 release=release,
                 expect_head=expect_head,
+                record_move=record_move,
             )
 
     def _install(
@@ -3084,8 +3087,14 @@ class Applier:
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
         expect_head: str | None = None,
+        record_move: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+
+        `record_move` is True from `update()` only (T557): a compiled module's
+        clone is about to move onto a commit nobody has built yet, so the commit
+        it leaves is written down first (`_record_move_start()`), and where it
+        landed right after the clone step, whether that step returned or raised.
 
         `first_configure_sql` is False from `update()` only: a fresh deploy
         just replaced the script, so its configure-time PATCHES are re-run,
@@ -3144,6 +3153,8 @@ class Applier:
         # had this app's handwriting on the folder, and for the second the
         # report has already said the folder will not be recognised next time.
         claimed = False
+        # T557: whether this run wrote where the clone was before it moved.
+        moving = False
         url = ""
         # T126: the release this run checked out, for the claim to carry. Empty
         # for a module that follows its branch, and for a folder or no source.
@@ -3197,6 +3208,9 @@ class Applier:
             self._require_own_clone(manifest, clone, "install")
             self._costly_reset(manifest, clone, replacing)
             self._refuse_a_moved_head(manifest, clone, expect_head)
+            # After every guard, so a refused Update writes nothing, and right
+            # before the one call that moves HEAD.
+            moving = record_move and self._record_move_start(manifest, clone, log)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -3223,6 +3237,12 @@ class Applier:
                 ) from exc
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
+            finally:
+                # Returned or raised: a clone step that failed before it moved
+                # HEAD must not leave `{from, to: null}` behind, which a later
+                # hand reset would turn into a move nobody made.
+                if moving:
+                    self._record_move_end(manifest, clone, release, log)
             log.done.append(
                 f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}"
                 + (f" at release {release.tag}" if release is not None else "")
@@ -3302,6 +3322,9 @@ class Applier:
         self._sql(manifest, clone, vals, "install", log, undo=undo)
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "install", log)
+            if moving:
+                # D5: a put-back runs no SQL, and its report says these were kept.
+                module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -3474,6 +3497,64 @@ class Applier:
                 f"{_rel(self.server_dir, clone)} will keep offering Install"
             )
 
+    def _record_move_start(self, manifest: Manifest, clone: Path, log: _Log) -> bool:
+        """Write where a compiled module's clone is BEFORE an Update moves it (T557).
+
+        Only `module`: the other families' clones are never compiled, so no
+        build can fail on them and nothing may ever put them back. False, with
+        the reason in the report, when HEAD cannot be read or the record cannot
+        be written: the Update goes ahead, and a build that fails on it can only
+        be put back by hand.
+        """
+        if manifest.type != "module":
+            return False
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        problem = (
+            module_moves.record_start(
+                self.server_dir,
+                module_moves.key(manifest.type, manifest.id),
+                head=head,
+                release=clone_release(clone, item_id=manifest.id),
+            )
+            if head is not None
+            else "git could not say which commit it is on"
+        )
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not note which version {manifest.id} "
+                f"was on before this update ({problem}), so a build that fails on it will not "
+                f"be put back by itself"
+            )
+            return False
+        return True
+
+    def _record_move_end(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        release: upstream.Release | None,
+        log: _Log,
+    ) -> None:
+        """Write where the clone landed, or drop the entry when it did not move (T557).
+
+        A HEAD git cannot read leaves the entry as the write-ahead left it:
+        `Move.unbuilt_at()` reads `to` as "wherever HEAD is, if not `from`".
+        """
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        if head is None:
+            return
+        problem = module_moves.record_end(
+            self.server_dir,
+            module_moves.key(manifest.type, manifest.id),
+            head=head,
+            release=release.tag if release is not None else "",
+        )
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not note where {manifest.id}'s update "
+                f"landed ({problem})"
+            )
+
     def update(
         self,
         manifest: Manifest,
@@ -3557,7 +3638,12 @@ class Applier:
             else None
         )
         return self.install(
-            manifest, values, first_configure_sql=False, release=release, expect_head=checked
+            manifest,
+            values,
+            first_configure_sql=False,
+            release=release,
+            expect_head=checked,
+            record_move=True,
         )
 
     def _refuse_a_moved_head(self, manifest: Manifest, clone: Path, expected: str | None) -> None:
@@ -3912,6 +3998,14 @@ class Applier:
             # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
+        # T557, after the remove: an update or a skipped version of a module
+        # that is gone says nothing about the next install of it.
+        problem = module_moves.drop(self.server_dir, module_moves.key(manifest.type, manifest.id))
+        if problem:
+            log.skipped.append(
+                f"{module_moves.MOVES_FILE}: Yu'lon could not forget {manifest.id}'s last update "
+                f"({problem})"
+            )
         return self._report("remove", manifest, log)
 
     # -- filling the clone from somewhere that is not git ------------------
