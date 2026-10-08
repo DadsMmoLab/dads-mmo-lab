@@ -20070,7 +20070,7 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
