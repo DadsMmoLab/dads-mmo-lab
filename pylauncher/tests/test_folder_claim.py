@@ -732,7 +732,18 @@ def test_the_two_asks_about_a_held_claim_are_a_moment_apart(
             return None if asked[0] == 1 else real(name, timeout=timeout)
 
         monkeypatch.setattr(docker, "_claim_facts", transient)
-        monkeypatch.setattr(docker.time, "sleep", lambda seconds: events.append(f"sleep {seconds}"))
+        asker = threading.current_thread()
+        real_sleep = time.sleep
+
+        def only_ours(seconds: float) -> None:
+            # `docker.time` is the one `time` module: a sleep on any other thread (the
+            # claim's watcher, the fake daemon) must not count as the asks' wait.
+            if threading.current_thread() is asker:
+                events.append(f"sleep {seconds}")
+            else:
+                real_sleep(seconds)
+
+        monkeypatch.setattr(docker.time, "sleep", only_ours)
         assert held.held(), "a transient no lost the claim"
         assert events == ["ask", f"sleep {docker._CLAIM_ASK_GAP}", "ask"], events
         events.clear()
