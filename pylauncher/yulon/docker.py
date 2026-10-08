@@ -3591,15 +3591,17 @@ The command saves every player on the world thread before it answers; the answer
 itself is not needed, only that it was typed. A window too short for it reads as
 an unprompted reply and changes nothing: the queue looks that follow see the saves."""
 
-_SAVE_COMMAND_STALLED_WINDOW_SECONDS = 22.0
+_SAVE_COMMAND_STALLED_WINDOW_SECONDS = 30.0
 """The ceiling for `saveall` on a console that says when it has answered (T561).
 
 Measured on Tortoise with 500 bots (2026-10-08): `saveall` answers in 0.07-0.33 s, but in the first
-minutes after a start the world thread stalls for 13-18 s (p95 10.95 s, max 14.14 s), so 10 s
-missed the answer and the stop warned that characters might be missing. Twice the p95. Only for
-a console whose prompt follows its answer (`SaveFirst.prompt_precedes_answer` False): the
-console then ends the wait as soon as the answer is in, so this costs a normal stop nothing. A
-readline console (Centurion) sleeps its whole window, so it keeps the 10 s."""
+minutes after a start the world thread stalls: answers took up to 18.3 s through Yu'lon's console
+(p95 10.95 s, max 14.14 s in the first probe) and a world-thread stall of 21.8 s was measured
+elsewhere, so 10 s missed the answer and the stop warned that characters might be missing. 30 s
+leaves room above the longest of those. Only for a console whose prompt follows its answer
+(`SaveFirst.prompt_precedes_answer` False): the wait then ends at the answer line and prompt, so
+this costs a normal stop nothing. A readline console (Centurion) sleeps its whole window, so it
+keeps the 10 s."""
 
 _SAVE_ANSWER = "All players saved."
 """What `saveall` prints when it is done (`ObjectAccessor::SaveAllPlayers()`, read from a Tortoise

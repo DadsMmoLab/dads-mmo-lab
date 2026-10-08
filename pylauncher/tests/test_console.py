@@ -820,3 +820,17 @@ def test_a_log_line_that_merely_contains_the_marker_does_not_prime_the_end(
     ]
     _, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
     assert 1.1 < took < 3.2, took
+
+
+@needs_pty
+def test_a_late_answer_to_an_earlier_saveall_before_our_echo_does_not_end_the_wait(
+    _no_settle: None,
+) -> None:
+    """The marker and prompt of a timed-out earlier `saveall` can arrive just before our echo."""
+    script = [
+        (0.0, b"All players saved.\r\nmangos> "),
+        (0.05, b"saveall\r\n"),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    _, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    assert 1.1 < took < 3.2, took

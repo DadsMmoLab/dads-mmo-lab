@@ -5,12 +5,15 @@ typed at the worldserver's console. The container keeps that console on its
 stdin, so `docker attach` reaches it; `--sig-proxy=false` makes sure detaching
 never forwards a signal into the worldserver (the guide's "never press Ctrl+C"
 rule, enforced by the transport instead of the user). `send_command()`
-attaches, writes ONE command, listens for a fixed window, detaches, and cuts
-that command's answer out of the window using the console's prompt. It does
-NOT stop early at the prompt — nothing here reads the stream while it is
-arriving, so every command costs the full window (review, 2026-08-23: the
-header used to say "reads until the console prints its prompt again", which
-`send_command()`'s own docstring already contradicted correctly). The app no
+attaches, writes ONE command, listens for a window, detaches, and cuts
+that command's answer out of the window using the console's prompt. By default
+it does NOT stop early at the prompt: every command costs the full window
+(review, 2026-08-23: the header used to say "reads until the console prints its
+prompt again", which `send_command()`'s own docstring already contradicted
+correctly). The one exception (T561) is a caller that names `answer_marker` on
+a console that prompts AFTER its answer: the wait then ends at our echo, a line
+exactly equal to the marker, and the prompt, with the window as the ceiling.
+The app no
 longer creates accounts through here — that is `accounts.py`'s SRP6 path, which
 needs no pty and works on Windows — though `tests/integration/test_accounts_live`
 still drives `account create` this way on purpose, because that gate needs the
@@ -259,7 +262,8 @@ def send_command(
     reply — `_parse_reply()` cuts the answer out of the window using the
     console's own prompt. A command whose output outlives the window is
     truncated; nothing waits for it, because a detached attach client cannot ask
-    the console whether it has finished.
+    the console whether it has finished. The window is also the wait, except with
+    `answer_marker` (above), where it is only the ceiling.
 
     The detach is the part with teeth, and it was the point of the live gate.
     Measured against the real playerbots worldserver on 2026-08-23: ~40

@@ -758,7 +758,7 @@ def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
     [
         # A console that prompts after its answer ends the wait at the answer, so its ceiling
         # can cover the first minutes' world stalls (13-18 s measured) at no cost (T561).
-        ("wow-tortoise", 22.0),
+        ("wow-tortoise", 30.0),
         # A readline console sleeps its whole window: it keeps the 10 s.
         ("wow-centurion", 10.0),
     ],
