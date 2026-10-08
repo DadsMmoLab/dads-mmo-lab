@@ -551,7 +551,9 @@ class Controller:
         if asked:
             self._ask_before_the_servers()
         stopped = self.stop_conflicting()
-        self.start(asked_before_the_servers=asked)
+        # A conflict that appeared between the two looks was stopped just now, and the step
+        # asked before it ran with that server still holding our ports: ask it again.
+        self.start(asked_before_the_servers=asked and not stopped)
         return stopped
 
     def stop(self) -> bool:

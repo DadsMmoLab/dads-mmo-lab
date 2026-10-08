@@ -696,6 +696,32 @@ def test_stop_the_other_and_start_asks_the_step_once_whether_or_not_something_is
     assert calls == ["before_servers", "servers"]
 
 
+def test_a_conflict_that_appears_between_the_two_looks_still_gets_the_step_after_its_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing in the way at the first look, something stopped by the time of the stop (T565).
+
+    The step asked before the stop may then have run with that server still holding
+    our database port, so `start()` asks it again, after the stop.
+    """
+    from yulon import controller, docker
+
+    calls: list[str] = []
+    ctl = controller.Controller(
+        second_ac_entry().container_spec(),
+        tmp_path,
+        before_servers=lambda: calls.append("before_servers") or None,
+    )
+    monkeypatch.setattr(ctl, "refuse_start", lambda: None)
+    monkeypatch.setattr(ctl, "port_conflicts", lambda: [])
+    monkeypatch.setattr(ctl, "refuse_a_missing_database", lambda: None)
+    monkeypatch.setattr(ctl, "stop_conflicting", lambda: calls.append("stop") or ["ac-worldserver"])
+    monkeypatch.setattr(ctl, "_put_back_the_zone_file", lambda: None)
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_k: calls.append("servers"))
+    assert ctl.stop_conflicting_and_start() == ["ac-worldserver"]
+    assert calls == ["before_servers", "stop", "before_servers", "servers"]
+
+
 def test_a_wotlk_start_has_no_port_step() -> None:
     from yulon.ui import controller_view
 
