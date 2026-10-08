@@ -26029,6 +26029,29 @@ def test_a_pack_whose_recorded_file_was_deleted_is_installed_again_at_the_next_p
     assert steps == ["launch"], "nothing is missing now: the edit is no reason to install"
 
 
+def test_a_linked_addons_folder_never_stops_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Cold review note 1: the player made `Interface/AddOns` a link to their own addons after
+    the pack went in. Play goes on as it did before missing files were put back."""
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    addons = play / "Interface" / "AddOns"
+    mine = tmp_path / "my-addons"
+    shutil.move(addons, mine)
+    shutil.rmtree(mine / "multiclass-resources")
+    addons.symlink_to(mine, target_is_directory=True)
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["launch"]
+    assert asks.calls == []
+    assert not (mine / "multiclass-resources").exists(), "wrote through the player's link"
+
+
 def test_a_folder_pack_the_checkout_does_not_match_stops_play_naming_the_file(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
 ) -> None:

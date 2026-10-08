@@ -1459,8 +1459,9 @@ def recorded_files_missing(play_dir: Path, entry: Mapping[str, Any]) -> tuple[st
     file the player edited is still there and is not listed, and neither is one
     still there under another case (`client_names.on_disk`, asked only for a name
     the `lstat` did not find): `install()` writes onto that name, so a case-sensitive
-    disk would otherwise be "repaired" on every Play. A name that could leave the
-    folder is not a file of the client and is skipped (`pack_files`' rule).
+    disk would otherwise be "repaired" on every Play. Nor is one behind a folder the
+    player made a link (`_behind_a_link`). A name that could leave the folder is not
+    a file of the client and is skipped (`pack_files`' rule).
     """
     files = entry.get("files")
     if not isinstance(files, dict):
@@ -1470,9 +1471,27 @@ def recorded_files_missing(play_dir: Path, entry: Mapping[str, Any]) -> tuple[st
         clean = _clean_rel(rel)
         if clean is None or os.path.lexists(play_dir / Path(*clean.parts)):
             continue
-        if not os.path.lexists(play_dir / Path(*client_names.on_disk(play_dir, clean).parts)):
-            missing.append(clean.as_posix())
+        on_disk = client_names.on_disk(play_dir, clean)
+        if os.path.lexists(play_dir / Path(*on_disk.parts)) or _behind_a_link(play_dir, on_disk):
+            continue
+        missing.append(clean.as_posix())
     return tuple(sorted(missing))
+
+
+def _behind_a_link(play_dir: Path, rel: PurePosixPath) -> bool:
+    """Is a folder on the way to `rel` a link? Then what is behind it is the player's.
+
+    T555 cold review: a player who turned `Interface/AddOns` into a link after a
+    pack went in would otherwise have its files "missing" on every Play, and
+    putting them back is refused through a link (`_check_path`), so Play stopped
+    where it used to go on.
+    """
+    here = play_dir
+    for part in rel.parts[:-1]:
+        here = here / part
+        if play_client._is_link(here):
+            return True
+    return False
 
 
 def wanted(client: Any, choices: Mapping[str, Any]) -> tuple[ClientPack, ...]:

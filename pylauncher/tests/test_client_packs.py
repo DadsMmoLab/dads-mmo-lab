@@ -3058,6 +3058,19 @@ def test_putting_back_a_file_whose_old_backup_was_left_writes_the_packs_bytes(
     assert sorted(p.name for p in nova.iterdir()) == ["Nova.lua", "Nova.toc"], "an aside was left"
 
 
+def test_a_linked_addons_folder_is_not_a_missing_pack(rig: _Rig) -> None:
+    """Cold review note 1: the player made `Interface/AddOns` a link after the pack went in.
+    What is behind the link is theirs; Play neither repairs through it nor refuses for it."""
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+    addons = rig.play / "Interface" / "AddOns"
+    elsewhere = rig.root / "my-addons"
+    shutil.move(addons, elsewhere)
+    shutil.rmtree(elsewhere / "Nova")
+    addons.symlink_to(elsewhere, target_is_directory=True)
+
+    assert client_packs.recorded_files_missing(rig.play, entry) == ()
+
+
 def test_putting_back_with_nothing_missing_writes_nothing(rig: _Rig) -> None:
     fetched = rig.fetched(ADDON_FILES)
     entry = rig.install(ADDONS, fetched)
