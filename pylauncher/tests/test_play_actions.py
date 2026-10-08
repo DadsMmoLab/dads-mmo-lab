@@ -773,3 +773,53 @@ def test_a_save_that_timed_out_is_still_read_back_because_it_may_have_run(tmp_pa
 
     assert reader.level_reads == 2
     assert outcome.text == "Level changed."
+
+
+class _FailingReads(_LevelRows):
+    """A reader whose database goes away after the name lookups in front of the level press."""
+
+    def __init__(self, online: str, *, fail_name_after: int | None, fail_levels: bool) -> None:
+        super().__init__(online, ["12"])
+        self.name_reads = 0
+        self.fail_name_after = fail_name_after
+        self.fail_levels = fail_levels
+
+    def query(self, db: str, statement: str) -> str:
+        if "SELECT name, online FROM" in statement:
+            self.name_reads += 1
+            if self.fail_name_after is not None and self.name_reads > self.fail_name_after:
+                raise RuntimeError("docker exec failed")
+        if "SELECT level FROM" in statement and self.fail_levels:
+            self.level_reads += 1
+            raise RuntimeError("docker exec failed")
+        return super().query(db, statement)
+
+
+def test_a_level_read_that_fails_after_the_level_was_taken_is_still_a_success(tmp_path) -> None:
+    """Cold review 2026-10-08: `SqlReader.query` raises on a failed read, and the exception left
+    the job, so the tab said it could not read the characters for a level the server had taken."""
+    reader = _FailingReads("1", fail_name_after=None, fail_levels=True)
+    channel = _Channel(text="Level changed.")
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, tries=3, sleep=lambda _: None)
+
+    assert outcome.done is True
+    assert outcome.text.startswith("Level changed.")
+    assert "could not be read" in outcome.text and "not been confirmed" in outcome.text
+    assert channel.sent == ["character level Guglu 70", "saveall"]
+    assert reader.level_reads == 3, "every read is tried, each failure is a row that was not read"
+
+
+def test_an_online_check_that_fails_after_the_level_was_taken_is_still_a_success(tmp_path) -> None:
+    """The second name lookup (is it online?) runs after the level went out."""
+    reader = _FailingReads("1", fail_name_after=1, fail_levels=False)
+    channel = _Channel(text="Level changed.")
+    install = _install(tmp_path, sql=reader, channel=channel)
+
+    outcome = install.set_level_and_save("guglu", 70, sleep=lambda _: None)
+
+    assert outcome.done is True
+    assert outcome.text.startswith("Level changed.")
+    assert "could not be read" in outcome.text
+    assert channel.sent == ["character level Guglu 70"]

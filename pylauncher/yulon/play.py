@@ -501,7 +501,19 @@ class InstallPlay:
         taken = self.set_level(character, level)
         if not taken.done:
             return taken
-        stored = self._stored(character)
+        try:
+            stored = self._stored(character)
+        except Exception as exc:  # noqa: BLE001 -- any failed read; the level was already taken
+            logger.info(
+                "could not tell whether %s is online after the level press: %s", character, exc
+            )
+            return Outcome(
+                True,
+                text=(
+                    f"{taken.text.strip()} The database could not be read to confirm the new "
+                    "level, so the list may keep showing the old level for a while."
+                ),
+            )
         if stored is None or not stored.online:
             return taken
         stays = (
@@ -538,11 +550,20 @@ class InstallPlay:
         )
 
     def _level_of(self, name: str) -> int | None:
+        """The row's level, or None when it could not be read (no row, no number, a failed read).
+
+        Never raises: this runs after the server took the level, and `SqlReader.query` raises on a
+        failed read, which would have made a taken level look like a failed press.
+        """
         characters = self.entry.schema_map()["characters"]
-        found = self._sql.query(
-            "characters",
-            f"SELECT level FROM {characters}.characters WHERE name = {literal(name)} LIMIT 1;",
-        ).strip()
+        try:
+            found = self._sql.query(
+                "characters",
+                f"SELECT level FROM {characters}.characters WHERE name = {literal(name)} LIMIT 1;",
+            ).strip()
+        except Exception as exc:  # noqa: BLE001 -- a failed read is a row that was not read
+            logger.info("could not read %s's level back: %s", name, exc)
+            return None
         return int(found.split("\t")[0]) if found.split("\t")[0].isdigit() else None
 
     def rename(self, character: str) -> Outcome:
