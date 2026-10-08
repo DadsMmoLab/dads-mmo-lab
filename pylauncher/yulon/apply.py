@@ -3772,7 +3772,12 @@ class Applier:
         Two sources, in this order:
 
         1. **This app's record** (`module_moves`), while the clone's HEAD is
-           still the update's `to`: an update nobody has built since.
+           still the update's recorded `to`: an update nobody has built since.
+           A record with no `to` (the app died between the reset and the second
+           write, or the write was lost) is NOT this: without a destination
+           "any HEAD but `from`" would take a commit the player made by hand for
+           the update, and a failed build would put the clone back over it. It
+           falls through to the reflog, which refuses a hand commit.
         2. **git's reflog** (D4), for an update this app made before it kept the
            record: `reflog_update()`. Offered, never acted on by itself -- the
            record of whether that update was ever built is not there. Not when
@@ -3793,7 +3798,7 @@ class Applier:
         item = module_moves.key(manifest.type, manifest.id)
         ledger = module_moves.read(self.server_dir)
         move = ledger.moves.get(item) if ledger is not None else None
-        if move is not None and move.unbuilt_at(head):
+        if move is not None and move.to_sha is not None and move.to_sha == head:
             return LastUpdate(
                 item_id=manifest.id,
                 from_sha=move.from_sha,
@@ -3853,6 +3858,20 @@ class Applier:
                 f"{manifest.id} moved since its last update (it is on "
                 f"{head[:7] if head else 'a commit git could not read'}, not "
                 f"{last.to_sha[:7]}), so Yu'lon did not put it back. Nothing was changed.",
+                edited=False,
+            )
+        # `last` may have been read before the player committed on top, or from a
+        # record that never knew where the update landed. HEAD is the update's
+        # `to` only if the clone's own answer says so now: the record's `to`, or a
+        # reflog whose every move at HEAD is an update's (a hand commit is not).
+        # This is the local-commits question `Update` asks of a fetched tip, put
+        # to the history git already has, because there is no fetch here.
+        now = self.last_update(manifest)
+        if now is None or (now.from_sha, now.to_sha) != (last.from_sha, last.to_sha):
+            raise PutBackRefused(
+                f"{manifest.id} has been changed since its last update (git no longer shows "
+                f"that update as the latest thing that happened to it), so Yu'lon did not put "
+                f"it back: that could throw away work done in the folder. Nothing was changed.",
                 edited=False,
             )
         found = self._reset_cost(manifest, clone, history=False)

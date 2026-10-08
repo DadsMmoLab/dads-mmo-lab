@@ -10,6 +10,7 @@ as `Applier` built them.
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -579,3 +580,73 @@ def test_a_second_put_back_of_a_detached_clone_offers_nothing_more(tmp_path: Pat
 
     assert rig.head() == a
     assert rig.applier.last_update(rig.manifest) is None
+
+
+# -- review: a record with no destination is never acted on by itself ------------
+
+
+def _forget_where_the_update_landed(rig: _Rig) -> None:
+    """The state a killed app or a lost second write leaves: `{from: A, to: null}`."""
+    path = rig.server / module_moves.MOVES_FILE
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["moves"][KEY]["to"] = None
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _hand_commit(rig: _Rig) -> str:
+    _git(rig.clone, "commit", "--allow-empty", "-qm", "mine")
+    return rig.head()
+
+
+def test_a_move_with_no_destination_is_not_acted_on_after_a_hand_commit(tmp_path: Path) -> None:
+    """`to: null` used to read as "any HEAD but `from`", so the player's own commit was
+    taken for the update and a failed build put the clone back over it.
+
+    Mutation: let `last_update()` answer from a move with no `to`.
+    """
+    rig = _rig(tmp_path)
+    a, _b = _updated_a_to_b(rig)
+    _forget_where_the_update_landed(rig)
+    mine = _hand_commit(rig)
+
+    assert rig.applier.last_update(rig.manifest) is None
+    said = rig.applier.after_failed_build(("mod-x",), lambda _id: rig.manifest)
+
+    assert rig.head() == mine, "the player's commit was left behind"
+    assert a not in said
+    assert _git(rig.clone, "log", "-1", "--format=%s") == "mine"
+
+
+def test_a_move_with_no_destination_is_offered_by_hand_and_never_put_back_by_itself(
+    tmp_path: Path,
+) -> None:
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    _forget_where_the_update_landed(rig)
+
+    last = rig.applier.last_update(rig.manifest)
+    assert last == LastUpdate(item_id=ITEM, from_sha=a, to_sha=b, source="reflog")
+    said = rig.applier.after_failed_build(("mod-x",), lambda _id: rig.manifest)
+
+    assert rig.head() == b
+    assert "right-click mod-x" in said
+
+
+def test_put_back_refuses_when_the_player_committed_on_top(tmp_path: Path) -> None:
+    """The check lives in `put_back()` too: a `last` read before the commit is stale.
+
+    Mutation: drop the re-read of `last_update()` in `put_back()`.
+    """
+    rig = _rig(tmp_path)
+    a, b = _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None
+    (rig.server / module_moves.MOVES_FILE).unlink()
+    mine = _hand_commit(rig)
+
+    with pytest.raises(PutBackRefused):
+        rig.applier.put_back(
+            rig.manifest, last=dataclasses.replace(last, to_sha=mine, source="reflog")
+        )
+
+    assert rig.head() == mine
