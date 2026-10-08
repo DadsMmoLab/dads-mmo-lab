@@ -28,6 +28,21 @@ GIB = preflight.GIB
 SERVER_DIR = Path("/home/user/wow")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_port_questions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`gather()` binds real ports and asks the real daemon who holds them unless told otherwise.
+
+    T574 added both. A test that wants either passes its own seam; the rest must
+    not depend on whether this machine happens to run a MySQL on 3306.
+    """
+    monkeypatch.setattr(
+        platform_module,
+        "bind_tcp",
+        lambda host, port, **_kw: platform_module.PortBind(host, port, "free", ""),
+    )
+    monkeypatch.setattr(docker, "port_holders", lambda *_a, **_kw: docker.PortHolders())
+
+
 def facts(**overrides: object) -> preflight.Facts:
     """A machine that passes everything, minus whatever the test breaks.
 
@@ -715,6 +730,311 @@ def test_a_publisher_docker_will_not_name_an_owner_for_still_refuses(
     monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: ["ac-worldserver"])
     monkeypatch.setattr(docker, "container_project", lambda _name, **_kw: docker.UNREADABLE)
     assert _gather(tmp_path).port_conflicts == ("ac-worldserver",)
+
+
+# --- T574: a port Windows reserved is found by BINDING it, before the build ---------
+
+
+def _free(host: str, port: int) -> platform_module.PortBind:
+    return platform_module.PortBind(host, port, "free", "")
+
+
+def _gather_with(tmp_path: Path, **seams: object) -> preflight.Facts:
+    """`gather()` on a macOS-shaped box with the bind and ownership seams under test."""
+    base: dict[str, object] = dict(
+        platform_id=lambda: "windows",
+        docker_ready=lambda: True,
+        compose_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        bind_port=_free,
+        port_holders=lambda _ports: docker.PortHolders(),
+    )
+    base.update(seams)
+    return preflight.gather(ENTRY, tmp_path, **base)  # type: ignore[arg-type]
+
+
+def test_gather_binds_every_published_port_on_the_address_compose_uses(tmp_path: Path) -> None:
+    """Auth and world only was the gap: 3306 (and the SOAP port) were never asked."""
+    asked: dict[int, str] = {}
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked[port] = host
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert set(asked) == set(ENTRY.published_host_ports())
+    assert asked[3306] == "127.0.0.1"
+    assert asked[ENTRY.ports.auth] == "0.0.0.0"
+    assert asked[ENTRY.ports.world] == "0.0.0.0"
+    assert asked[NATIVE.soap_port] == "127.0.0.1"
+
+
+def test_a_database_port_windows_reserved_is_refused_before_the_build(tmp_path: Path) -> None:
+    """The Discord report: WSAEACCES on 127.0.0.1:3306, found after 3 h 20 min."""
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        if port == 3306:
+            return platform_module.PortBind(host, port, "reserved", "WinError 10013")
+        return _free(host, port)
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert "3306" in said and "database" in said
+    assert "Windows has reserved" in said
+    assert "netsh interface ipv4 show excludedportrange protocol=tcp" in said
+    assert "net stop winnat" in said and "net start winnat" in said
+
+
+def test_a_port_another_program_holds_is_refused_in_plain_words(tmp_path: Path) -> None:
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        if port == ENTRY.ports.world:
+            return platform_module.PortBind(host, port, "in_use", "WinError 10048")
+        return _free(host, port)
+
+    report = preflight.evaluate(ENTRY, tmp_path, _gather_with(tmp_path, bind_port=bind))
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert str(ENTRY.ports.world) in said
+    assert "another program" in said.lower()
+    assert "winnat" not in said
+
+
+def test_a_reserved_port_off_windows_does_not_offer_the_winnat_remedy(tmp_path: Path) -> None:
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        return (
+            platform_module.PortBind(host, port, "reserved", "denied")
+            if port == 3306
+            else _free(host, port)
+        )
+
+    facts_ = _gather_with(tmp_path, bind_port=bind, platform_id=lambda: "linux")
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "3306" in said
+    assert "winnat" not in said and "Windows" not in said
+
+
+def test_a_bind_that_could_not_be_tried_is_not_a_refusal(tmp_path: Path) -> None:
+    """Same discipline as T552's connect: only a DEFINITE answer refuses."""
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        return platform_module.PortBind(host, port, "unknown", "OSError: odd")
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    assert facts_.port_blocks == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_a_refused_connect_is_still_not_proof_a_port_is_in_use(tmp_path: Path) -> None:
+    facts_ = _gather_with(
+        tmp_path,
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", "refused"),
+    )
+    assert facts_.ports_in_use == () and facts_.port_blocks == ()
+
+
+def test_our_own_container_holding_the_port_is_not_bound_and_not_refused(tmp_path: Path) -> None:
+    """A resume re-runs preflight with the database still up on 3306."""
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        # What the OS says when OUR container holds the port.
+        if port in (3306, ENTRY.ports.auth):
+            return platform_module.PortBind(host, port, "in_use", "WinError 10048")
+        return _free(host, port)
+
+    held = docker.PortHolders(ours=frozenset({3306, ENTRY.ports.auth}))
+    facts_ = _gather_with(tmp_path, bind_port=bind, port_holders=lambda _ports: held)
+    assert 3306 not in asked and ENTRY.ports.auth not in asked
+    assert facts_.port_blocks == () and facts_.port_conflicts == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_someone_elses_container_on_the_database_port_is_a_conflict_not_a_bind_probe(
+    tmp_path: Path,
+) -> None:
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    held = docker.PortHolders(foreign={3306: ("old-mysql",)})
+    facts_ = _gather_with(tmp_path, bind_port=bind, port_holders=lambda _ports: held)
+    assert 3306 not in asked
+    assert facts_.port_conflicts == ("old-mysql",)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    assert "old-mysql" in report.message()
+
+
+def test_the_dotenv_port_overrides_are_the_ports_that_get_bound(tmp_path: Path) -> None:
+    """The port-conflict remedy writes DOCKER_DB_EXTERNAL_PORT; compose then binds THAT."""
+    (tmp_path / ".env").write_text("DOCKER_DB_EXTERNAL_PORT=13306\n", encoding="utf-8")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert 13306 in asked and 3306 not in asked
+
+
+def test_a_process_environment_port_beats_the_dotenv_one_as_it_does_in_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DOCKER_DB_EXTERNAL_PORT=13306\nDOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:17878\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "23306")
+    monkeypatch.setenv("DOCKER_SOAP_EXTERNAL_PORT", "127.0.0.1:27878")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert {23306, 27878} <= set(asked)
+    assert not {13306, 17878, 3306} & set(asked)
+
+
+@pytest.mark.parametrize("given", ["99999", "65536", "abc", "33 06", "-1"])
+def test_a_port_setting_that_is_not_a_port_is_refused_by_name_not_crashed_on(
+    tmp_path: Path, given: str
+) -> None:
+    """99999 reached `socket.bind()` and escaped as an OverflowError."""
+    (tmp_path / ".env").write_text(f"DOCKER_DB_EXTERNAL_PORT={given}\n", encoding="utf-8")
+    facts_ = _gather_with(tmp_path)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert "DOCKER_DB_EXTERNAL_PORT" in said and repr(given) in said
+    assert "not a port number" in said
+
+
+def test_a_quoted_port_in_the_dotenv_is_the_port_it_quotes(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text('DOCKER_DB_EXTERNAL_PORT="13306"\n', encoding="utf-8")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    assert 13306 in asked and facts_.port_blocks == ()
+
+
+@pytest.mark.parametrize("platform_name", ["windows", "linux"])
+def test_the_default_bind_is_told_the_platform_gather_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str
+) -> None:
+    told: list[object] = []
+
+    def bind(host: str, port: int, **kwargs: object) -> platform_module.PortBind:
+        told.append(kwargs.get("windows"))
+        return _free(host, port)
+
+    monkeypatch.setattr(platform_module, "bind_tcp", bind)
+    _gather_with(tmp_path, bind_port=None, platform_id=lambda: platform_name)
+    assert told and set(told) == {platform_name == "windows"}
+
+
+def _db_ports_bound(
+    tmp_path: Path, dotenv_line: str, *, bom: bool = False
+) -> tuple[set[int], preflight.Facts]:
+    (tmp_path / ".env").write_bytes(
+        ("\ufeff" if bom else "").encode() + (dotenv_line + "\n").encode()
+    )
+    asked: set[int] = set()
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.add(port)
+        return _free(host, port)
+
+    return asked, _gather_with(tmp_path, bind_port=bind)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "DOCKER_DB_EXTERNAL_PORT=13306 # moved off 3306",
+        'DOCKER_DB_EXTERNAL_PORT="13306" # moved',
+        "DOCKER_DB_EXTERNAL_PORT='13306'",
+        "export\tDOCKER_DB_EXTERNAL_PORT=13306",
+        "DOCKER_DB_EXTERNAL_PORT: 13306",
+        "DOCKER_DB_EXTERNAL_PORT:13306 # moved",
+    ],
+)
+def test_a_dotenv_port_with_a_comment_or_quotes_is_the_port_compose_reads(
+    tmp_path: Path, line: str
+) -> None:
+    asked, facts_ = _db_ports_bound(tmp_path, line)
+    assert 13306 in asked and 3306 not in asked
+    assert facts_.port_blocks == ()
+
+
+def test_a_dotenv_that_starts_with_a_byte_order_mark_is_read_from_its_first_line(
+    tmp_path: Path,
+) -> None:
+    """PowerShell 5.1's `-Encoding UTF8` and old Notepad write one; compose strips it."""
+    asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306", bom=True)
+    assert 13306 in asked and 3306 not in asked
+    assert facts_.port_blocks == ()
+
+
+def test_a_tab_before_a_hash_is_not_a_comment_to_compose(tmp_path: Path) -> None:
+    """compose-go cuts an unquoted value at a SPACE then `#`; a tab keeps the whole text."""
+    _asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306\t#moved")
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "not a port number" in said and "13306" in said
+
+
+def test_a_dotenv_port_only_compose_can_resolve_is_neither_probed_nor_refused(
+    tmp_path: Path,
+) -> None:
+    asked, facts_ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=${DB_PORT:-13306}")
+    assert not {3306, 13306} & asked
+    assert facts_.port_blocks == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_an_empty_environment_port_is_set_and_gives_compose_its_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compose only fills keys from `.env` that the environment lacks; empty is not lacking."""
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "")
+    asked, _ = _db_ports_bound(tmp_path, "DOCKER_DB_EXTERNAL_PORT=13306")
+    assert 3306 in asked and 13306 not in asked
+
+
+def test_a_server_inside_a_wsl_distro_ignores_the_windows_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`wsl.exe` does not forward it, so the distro's compose never sees it."""
+    monkeypatch.setenv("DOCKER_DB_EXTERNAL_PORT", "23306")
+    inside, _ = preflight.bind_targets(ENTRY, Path(r"\\wsl.localhost\Ubuntu\home\me\srv"))
+    here, _ = preflight.bind_targets(ENTRY, Path("/home/me/srv"))
+    assert 3306 in {port for _h, port, _w in inside}
+    assert 23306 in {port for _h, port, _w in here}
+
+
+def test_a_foreign_container_and_a_bad_port_setting_are_both_said(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("DOCKER_DB_EXTERNAL_PORT=99999\n", encoding="utf-8")
+    held = docker.PortHolders(foreign={ENTRY.ports.world: ("old-mangosd",)})
+    facts_ = _gather_with(tmp_path, port_holders=lambda _ports: held)
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "old-mangosd" in said and "99999" in said
 
 
 def test_the_windows_volume_branch_is_reachable_without_running_on_windows() -> None:

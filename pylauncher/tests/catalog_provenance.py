@@ -325,6 +325,14 @@ PROVENANCE: dict[str, Provenance] = {
         "gates/8.3d-tortoise-m910q-2026-09-07/README.md",
         note="asked: `... SHAPROBE 4` accepted, `5` answered `Incorrect values.`",
     ),
+    "wow-tortoise:accounts.level.world_caches_rank": Provenance(
+        "measured-on",
+        "gates/live-t577-fix-yulon-ubuntu-2026-10-08/README.md",
+        note=(
+            "an account made at GM 3 by Create while the world ran logged out on the 20 s player "
+            "timer (rank 0) until a restart, and instantly after one"
+        ),
+    ),
     # -- wow-centurion (TrinityCore 3.3.5 fork) — read at CENTURION @ faac5fc9, T179 Task 7 --
     # Read from source, not measured. T208's live check (2026-10-04) confirmed five of
     # the Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`); the
