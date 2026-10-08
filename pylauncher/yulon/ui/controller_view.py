@@ -13805,7 +13805,10 @@ class ControllerView(QWidget):
             # T579: the row is written, but a running world that caches ranks still treats the
             # account as rank 0. Told here, on the worker, and only after the row is there.
             told = getattr(admin, "after_create", None)
-            note = told(made.username, made.gm_level) if told is not None and made.gm_level else ""
+            # Only for a level the person asked for: an existing account held at a higher
+            # level by the floor rule is not something this press changed.
+            asked = told is not None and gm_level > 0 and made.gm_level
+            note = told(made.username, made.gm_level) if asked else ""
             return _CreatedAccount(made, note)
 
         self._run(create, self._account_done, self._account_failed)

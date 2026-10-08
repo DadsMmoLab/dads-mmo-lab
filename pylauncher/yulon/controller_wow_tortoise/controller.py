@@ -46,7 +46,9 @@ class TortoiseController(Controller):
     ) -> None:
         super().__init__(docker_ctl.SPEC, server_dir, wsl_distro=wsl_distro, pre_stop=pre_stop)
 
-    def _mark_the_realm_offline(self, *, start_database: bool) -> None:
+    def _mark_the_realm_offline(
+        self, *, start_database: bool, unless_world_up: bool = False
+    ) -> None:
         """Set the realm row's offline bit, so the realm list says Offline while the world is down.
 
         T577: this core's world server never sets the bit, only clears it when it starts
@@ -65,6 +67,7 @@ class TortoiseController(Controller):
             self.server_dir,
             wsl_distro=self.wsl_distro,
             start_database=start_database,
+            unless_world_up=unless_world_up,
         )
 
     def _put_the_realm_back(self) -> None:
@@ -109,7 +112,7 @@ class TortoiseController(Controller):
         running on its own. `botdash.start_if_on()` never raises: the dashboard
         is never the reason a server does not start.
         """
-        self._mark_the_realm_offline(start_database=True)
+        self._mark_the_realm_offline(start_database=True, unless_world_up=True)
         try:
             entry = game.entry()
         except game.CatalogFactsError as exc:

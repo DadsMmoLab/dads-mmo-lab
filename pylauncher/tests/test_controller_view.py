@@ -29296,3 +29296,23 @@ def test_creating_an_account_with_no_level_does_not_ask_the_world(
     view.create_account()
 
     assert admin.after == []
+
+
+def test_creating_with_no_level_over_an_account_held_at_gm_3_does_not_claim_a_level_change(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The result carries the floor-held level; this press asked for none (T579 review)."""
+    admin = _AdminWithCreateNote()
+    made = _FakeMaintenance()
+    made.create = lambda name, password, gm: AccountResult(  # type: ignore[method-assign]
+        username=name, account_id=9, created=False, gm_level=3
+    )
+    services = replace(_services(ps, tmp_path, [], made), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.account_gm.setValue(0)
+    view.create_account()
+
+    assert admin.after == []
+    assert "live now" not in view.account_report.text()

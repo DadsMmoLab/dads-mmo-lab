@@ -61,12 +61,21 @@ def mark_offline(
     *,
     wsl_distro: str | None = None,
     start_database: bool = True,
+    unless_world_up: bool = False,
 ) -> bool:
     """Set the realm's offline bit; True when the statement ran, False when not run or failed.
 
     `start_database` is True before a start (the database is about to be needed anyway, and
     compose would wait for it) and False before a stop, which must not start a database to
-    tell it the realm is closing. Never raises: a database that cannot be reached, a password
+    tell it the realm is closing.
+
+    `unless_world_up` is for a start: a world container that is already running will not
+    clear the bit again (only a world that starts does), so marking it would leave a healthy
+    realm offline. That is reachable, since Start stays live while only the authserver is
+    down, and `compose up` then starts nothing but the authserver. Not asked of a Stop or a
+    replace, which mark a world that is up on purpose.
+
+    Never raises: a database that cannot be reached, a password
     that cannot be read or a statement that fails is logged and the caller carries on.
     """
     return _run(
@@ -77,6 +86,7 @@ def mark_offline(
         wsl_distro=wsl_distro,
         start_database=start_database,
         only_with_world_up=False,
+        skip_if_world_up=unless_world_up,
     )
 
 
@@ -102,6 +112,7 @@ def clear_offline_if_world_up(
         wsl_distro=wsl_distro,
         start_database=False,
         only_with_world_up=True,
+        skip_if_world_up=False,
     )
 
 
@@ -114,6 +125,7 @@ def _run(
     wsl_distro: str | None,
     start_database: bool,
     only_with_world_up: bool,
+    skip_if_world_up: bool,
 ) -> bool:
     if statement is None:
         return False
@@ -124,6 +136,9 @@ def _run(
     native = entry.install.native
     client = native.db.client if native is not None else "mysql"
     try:
+        if skip_if_world_up and spec.world in set(docker.status(wsl_distro=wsl_distro)):
+            logger.info(f"{entry.id}: the world is already running; realm row left as it is")
+            return False
         if start_database:
             docker.start_database(
                 spec,

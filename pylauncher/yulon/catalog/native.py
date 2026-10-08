@@ -12743,7 +12743,9 @@ class StagedInstaller:
             yield warned
         # T577: a core whose world never marks its realm offline while it loads is marked
         # here, before the world exists to be logged in to. Best effort, never raising.
-        self._seams.mark_realm_offline(self.entry, self.entry.container_spec(), ctx.server_dir)
+        self._seams.mark_realm_offline(
+            self.entry, self.entry.container_spec(), ctx.server_dir, unless_world_up=True
+        )
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:

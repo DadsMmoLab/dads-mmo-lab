@@ -870,7 +870,9 @@ class Recorder:
             start=self.start,
             recreate=self.recreate,
             # T577: bound like T64's six -- the default sets the realm flag through docker.
-            mark_realm_offline=lambda entry, spec, server_dir: self.realm_marks.append(entry.id),
+            mark_realm_offline=lambda entry, spec, server_dir, **_k: self.realm_marks.append(
+                entry.id
+            ),
             clear_realm_offline=lambda entry, spec, server_dir: self.realm_clears.append(entry.id),
             # T158: the rollback's stop of the failed build. Bound like T64's six:
             # its default asks `docker exec`, and a world that loads on a script is

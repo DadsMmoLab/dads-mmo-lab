@@ -94,12 +94,14 @@ class Docker:
 
         def start_staged(*_a: Any, **_k: Any) -> bool:
             self.events.append("start")
+            self.world_up = True
             return True
 
         def stop_staged(*_a: Any, **_k: Any) -> bool:
             self.events.append("stop")
             if self.stop_fails:
                 raise docker.StopAbandoned("the Stop was given up")
+            self.world_up = False
             return True
 
         monkeypatch.setattr(docker, "start_database", start_database)
@@ -129,6 +131,7 @@ def test_a_start_marks_the_realm_offline_before_the_world_container_starts(
     tortoise: tuple[TortoiseController, Docker],
 ) -> None:
     controller, fake = tortoise
+    fake.world_up = False
     controller.start()
     assert fake.statements == [STATEMENT]
     assert fake.events.index("sql") < fake.events.index("start")
@@ -139,6 +142,7 @@ def test_a_start_with_the_database_down_brings_it_up_first(
 ) -> None:
     controller, fake = tortoise
     fake.db_up = False
+    fake.world_up = False
     controller.start()
     assert fake.events[:2] == ["database", "sql"]
     assert fake.events[-1] == "start"
@@ -149,7 +153,20 @@ def test_a_start_goes_on_when_the_statement_could_not_be_run(
 ) -> None:
     controller, fake = tortoise
     fake.sql_fails = True
+    fake.world_up = False
     controller.start()
+    assert "start" in fake.events
+
+
+def test_a_start_with_the_world_already_running_leaves_the_realm_row_alone(
+    tortoise: tuple[TortoiseController, Docker],
+) -> None:
+    """Start stays live with only the authserver down; the world would never clear the bit."""
+    controller, fake = tortoise
+    assert fake.world_up
+    controller.start()
+    assert fake.statements == []
+    assert "database" not in fake.events
     assert "start" in fake.events
 
 
@@ -199,9 +216,17 @@ def test_a_stop_that_failed_with_the_world_gone_leaves_the_bit_set(
 class Marks:
     def __init__(self) -> None:
         self.events: list[str] = []
+        self.kwargs: list[dict[str, Any]] = []
 
-    def mark(self, entry: CatalogEntry, spec: docker.ContainerSpec, server_dir: Path) -> None:
+    def mark(
+        self,
+        entry: CatalogEntry,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        **kwargs: Any,
+    ) -> None:
         self.events.append("mark")
+        self.kwargs.append(kwargs)
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.events.append("start")
@@ -217,6 +242,7 @@ def test_the_installs_up_marks_the_realm_offline_before_the_start(tmp_path: Path
     eng = cm_engine(Recorder(), entry=TORTOISE, mark_realm_offline=marks.mark, start=marks.start)
     list(eng.stage_up(cm_context(tmp_path)))
     assert marks.events == ["mark", "start"]
+    assert marks.kwargs == [{"unless_world_up": True}], "the install's up re-runs on a resume"
 
 
 def test_a_rebuilds_recreate_marks_the_realm_offline_before_the_recreate(tmp_path: Path) -> None:
@@ -230,6 +256,7 @@ def test_a_rebuilds_recreate_marks_the_realm_offline_before_the_recreate(tmp_pat
     )
     list(eng.stage_recreate(cm_context(tmp_path)))
     assert marks.events == ["mark", "recreate"]
+    assert marks.kwargs == [{}], "a replace marks a world that is up on purpose"
 
 
 def test_a_rebuilds_replace_that_gave_up_takes_the_offline_bit_off_again(tmp_path: Path) -> None:
