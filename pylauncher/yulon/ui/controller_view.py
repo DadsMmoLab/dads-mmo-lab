@@ -7068,8 +7068,9 @@ CUSTOM_MODULE_NO_ROUTE_NOTE = (
 """The card's sentence on a game with no custom-module route at all (T596).
 
 Said instead of two buttons that are greyed with no reason on them. Only the
-WotLK tree has the install seam behind them; the sentence is true of every other
-game because it claims nothing but "not yet" and "the list above is what works".
+WotLK-built games (WoW WotLK and WoW Unbound) have the install seam behind them;
+the sentence is true of every other game because it claims nothing but "not yet"
+and "the list above is what works".
 """
 
 CUSTOM_MODULE_NO_ROUTE_LINE = "not available on this server yet"
@@ -7101,14 +7102,13 @@ MODULE_FOLDER_TIP = (
 the user points at is read, never moved and never written into."""
 
 MODULE_CUSTOM_NO_ROUTE = (
-    "Only WoW WotLK takes modules you add yourself. On this game a module is a setting or a "
-    "database change, and the ones that work here are listed above."
+    "This game cannot take a module of this kind from outside yet. The modules that work "
+    "here are the ones listed above."
 )
-"""Why the two buttons are dead on the three CMaNGOS games.
+"""Why one of the card's two buttons is greyed on a game that has a route for the other.
 
-Measured per tree, not inherited: 8.7b and 8.7c gated that on those cores a
-module is a conf activation or a SQL mod and never a directory, so there is no
-`modules/` folder for a clone or a copy to land in.
+Only reachable with a partly wired route: a game with none at all shows the
+card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 """
 
 MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
