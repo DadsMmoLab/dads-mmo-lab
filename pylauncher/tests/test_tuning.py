@@ -1079,3 +1079,45 @@ def test_a_link_out_of_the_server_folder_is_refused_before_the_file_is_even_read
 
     with pytest.raises(tuning.TuningError, match="outside the server folder"):
         tuning.write(link, {"Key": "2"}, root=server)
+
+
+# -- T573 item 2: a raw save keeps every line the player did not touch, byte for byte ---------
+
+
+def test_the_editor_is_given_no_bom_and_only_lf() -> None:
+    assert tuning.editor_view("﻿A = 1\r\nB = 2\nC = 3\rD = 4") == "A = 1\nB = 2\nC = 3\nD = 4"
+
+
+def test_an_unedited_text_comes_back_as_the_same_bytes_whatever_the_endings() -> None:
+    """Mutation: write every line with one ending and this fails on the mixed file."""
+    raw = "﻿A = 1\r\nB = 2\nC = 3\rD = 4\r\n"
+    assert tuning.save_text(raw, tuning.editor_view(raw)) == raw
+
+
+def test_an_edited_line_changes_and_its_neighbours_keep_their_own_endings() -> None:
+    raw = "A = 1\r\nB = 2\nC = 3\r\n"
+    edited = tuning.editor_view(raw).replace("B = 2", "B = 9")
+    assert tuning.save_text(raw, edited) == "A = 1\r\nB = 9\nC = 3\r\n"
+
+
+def test_an_added_line_takes_the_ending_of_the_line_above_it() -> None:
+    raw = "A = 1\nB = 2\r\n"
+    assert tuning.save_text(raw, "A = 1\nNEW = 1\nB = 2\n") == "A = 1\nNEW = 1\nB = 2\r\n"
+
+
+def test_a_line_added_at_the_end_of_a_file_with_no_final_newline() -> None:
+    assert tuning.save_text("A = 1\r\nB = 2", "A = 1\nB = 2\nC = 3") == "A = 1\r\nB = 2\r\nC = 3"
+
+
+def test_a_deleted_line_takes_its_ending_with_it() -> None:
+    raw = "A = 1\r\nB = 2\nC = 3\r\n"
+    assert tuning.save_text(raw, "A = 1\nC = 3\n") == "A = 1\r\nC = 3\r\n"
+
+
+def test_a_file_with_no_bom_gets_none_and_a_pasted_cr_is_an_lf_edit() -> None:
+    assert tuning.save_text("A = 1\n", "A = 1\r\nB = 2\n") == "A = 1\nB = 2\n"
+    assert not tuning.save_text("A = 1\n", "A = 1\n").startswith("﻿")
+
+
+def test_an_emptied_editor_writes_an_empty_file() -> None:
+    assert tuning.save_text("A = 1\r\n", "") == ""

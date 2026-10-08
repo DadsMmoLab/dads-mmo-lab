@@ -13655,6 +13655,30 @@ def test_the_raw_revert_restores_from_the_backup_and_says_which(
     assert ".bak" in view.tuning_report.toPlainText()
 
 
+def test_a_raw_save_keeps_the_bom_and_every_untouched_lines_own_ending(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The real editor's text goes through `save_tuning_file`, as the Save press does.
+
+    Mutation: write `text.replace("\\n", newline)` again and the BOM goes, the LF line becomes
+    CRLF and the lone CR becomes a line ending of the file's usual kind.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_bytes("\ufeffA = 1\r\nBeastMaster.Enable = 1\nC = 3\rD = 4\r\n".encode())
+    view.open_tuning_file(file)
+    editor = view.tuning_panel.editor
+    assert "\ufeff" not in editor.toPlainText()
+    editor.setPlainText(
+        editor.toPlainText().replace("BeastMaster.Enable = 1", "BeastMaster.Enable = 0")
+    )
+
+    view.save_tuning_file(editor.toPlainText())
+
+    assert path.read_bytes() == "\ufeffA = 1\r\nBeastMaster.Enable = 0\nC = 3\rD = 4\r\n".encode()
+
+
 def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
 

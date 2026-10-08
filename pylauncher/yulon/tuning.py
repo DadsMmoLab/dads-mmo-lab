@@ -25,6 +25,7 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import re
@@ -576,6 +577,57 @@ def _newline_of(raw: str) -> str:
     user may also edit with a Windows editor.
     """
     return "\r\n" if "\r\n" in raw else "\n"
+
+
+BOM = "\ufeff"
+_TERMINATOR = re.compile(r"\r\n|\n|\r")
+
+
+def editor_view(raw: str) -> str:
+    """The text the raw editor is given for a file whose exact text is `raw` (T573).
+
+    Without a leading byte-order mark, and with every line ending, `\\r\\n`,
+    `\\n` and a lone `\\r` alike, as the `\\n` the editor hands back anyway.
+    `save_text()` puts the originals back.
+    """
+    return _TERMINATOR.sub("\n", raw.removeprefix(BOM))
+
+
+def save_text(raw: str, edited: str) -> str:
+    """The file's new text after an edit in the raw editor, every untouched line as it was.
+
+    `raw` is the file as it was read (`newline=""`, so nothing is translated) and
+    `edited` is what the editor now holds. The editor cannot carry a byte-order
+    mark or tell `\\r\\n` from `\\n` from a lone `\\r`, so writing its text back
+    converted the whole file (T573 item 2). Here the two are lined up by line,
+    and a line the player did not change is written with its own bytes: its text
+    and its own ending. A line they changed or added takes the ending of the line
+    it replaced, or else of the one above it, or else the file's usual one
+    (`_newline_of`). A leading BOM is kept.
+    """
+    bom = BOM if raw.startswith(BOM) else ""
+    body = raw.removeprefix(BOM)
+    default = _newline_of(body)
+    old_lines: list[str] = []
+    old_ends: list[str] = []
+    at = 0
+    for found in _TERMINATOR.finditer(body):
+        old_lines.append(body[at : found.start()])
+        old_ends.append(found.group())
+        at = found.end()
+    old_lines.append(body[at:])
+    old_ends.append("")
+    new_lines = _TERMINATOR.sub("\n", edited).split("\n")
+    ends = [default] * len(new_lines)
+    plan = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for _, i1, i2, j1, j2 in plan.get_opcodes():
+        for k in range(j2 - j1):
+            if i1 + k < i2:
+                ends[j1 + k] = old_ends[i1 + k] or default
+            elif j1 + k > 0:
+                ends[j1 + k] = ends[j1 + k - 1]
+    ends[-1] = ""
+    return bom + "".join(line + end for line, end in zip(new_lines, ends, strict=True))
 
 
 PRIVATE_MODE = 0o600

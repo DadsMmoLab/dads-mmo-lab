@@ -18370,7 +18370,8 @@ class ControllerView(QWidget):
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         # T302: the built-in Server rates card's rows, read with the modules'.
         self._rate_rows: tuple[tuning.TuningRow, ...] = ()
-        self._tuning_newline = "\n"
+        # The raw editor's file exactly as read (T573 item 2); see `tuning.save_text`.
+        self._tuning_raw = ""
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
         # and forgotten on restart for the same reason: a persisted marker is
@@ -19626,13 +19627,15 @@ class ControllerView(QWidget):
                 "", read_only=True, note=tuning.NOT_UTF8.format(file=file, why=exc)
             )
             return
-        # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
-        # "\n" whatever it was given, so a raw save of a CRLF conf would convert
-        # the whole file -- the same defect `tuning.write()` reads around.
-        self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
+        # Remembered at load and merged at save: `QPlainTextEdit` hands back "\n"
+        # whatever it was given and has no byte-order mark, so a raw save of the
+        # editor's text would convert the whole file -- the same defect
+        # `tuning.write()` reads around. `tuning.save_text()` keeps every line
+        # the player did not edit as it was (T573).
+        self._tuning_raw = raw
         note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
         self.tuning_panel.set_file_text(
-            raw.replace("\r\n", "\n"),
+            tuning.editor_view(raw),
             read_only=core,
             note=note,
             # Which of THIS file's keys the running containers override (T44
@@ -19726,7 +19729,7 @@ class ControllerView(QWidget):
             # Refuses a link out of the server folder, before any byte moves (T573).
             made = tuning.backup(path, root=server_dir)
             with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text.replace("\n", self._tuning_newline))
+                handle.write(tuning.save_text(self._tuning_raw, text))
         except tuning.TuningError as exc:
             self.tuning_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
