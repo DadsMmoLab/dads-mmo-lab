@@ -994,7 +994,12 @@ class CmangosInstaller(StagedInstaller):
         )
 
     def _record_world_files(
-        self, ctx: StageContext, rows: Sequence[sqlplan.FileRow], *, claim: bool = False
+        self,
+        ctx: StageContext,
+        rows: Sequence[sqlplan.FileRow],
+        *,
+        claim: bool = False,
+        reclaim_at: int | None = None,
     ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
         db = self._native().db
@@ -1006,6 +1011,7 @@ class CmangosInstaller(StagedInstaller):
             password=ctx.secrets.db_password,
             exec_stdin=self._seams.exec_stdin,
             claim=claim,
+            reclaim_at=reclaim_at,
         )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
@@ -2579,6 +2585,15 @@ class CmangosInstaller(StagedInstaller):
         runs = self._expand(sub, ctx.server_dir, {})
         order = {(run.phase.name, run.rel): n for n, run in enumerate(runs)}
         rows.sort(key=lambda row: (order.get((row.phase, row.file), -1), row.file))
+        times = sqlplan.parse_file_times(
+            self._query_seam()(
+                self.entry.container_spec().db,
+                db.client,
+                ctx.secrets.db_password,
+                plan.marker_db,
+                sqlplan.file_times_query(plan.marker_db),
+            )
+        )
         found = []
         for row in rows:
             path = ctx.server_dir / row.file
@@ -2594,6 +2609,8 @@ class CmangosInstaller(StagedInstaller):
                     state=row.state,
                     repeatable=path.is_file() and sqlplan.whole_table_problem(path) is None,
                     behind=behind,
+                    sha256=sqlplan.file_digest(path) if path.is_file() else "",
+                    at_unix=times.get((row.phase, row.file), 0),
                 )
             )
         return tuple(found)
@@ -2645,9 +2662,24 @@ class CmangosInstaller(StagedInstaller):
                 one.file,
             )
             sha = sqlplan.file_digest(path)
-            self._record_world_files(
-                ctx, (sqlplan.FileRow(one.phase, one.file, sha, sqlplan.FILE_STARTED),)
-            )
+            if sha != one.sha256:
+                yield (
+                    f"{one.file} is not the file the confirmation showed, so it was not run. "
+                    "Press Refresh on the Server tab and look again."
+                )
+                return
+            try:
+                self._record_world_files(
+                    ctx,
+                    (sqlplan.FileRow(one.phase, one.file, sha, sqlplan.FILE_STARTED),),
+                    reclaim_at=one.at_unix,
+                )
+            except InstallerError as exc:
+                yield (
+                    f"{one.file} was not run: another update of this server took it first, or "
+                    f"its record could not be written ({exc}). Nothing after it was run."
+                )
+                return
             refused: list[sqlplan.PhaseRun] = []
             yield from self._stream(
                 _apply_one(

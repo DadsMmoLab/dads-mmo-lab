@@ -790,6 +790,10 @@ class StuckWorldUpdate:
     running it again leaves what one run leaves. False is most content updates."""
     behind: int = 0
     """How many newer world updates of its phase wait behind it and run after it."""
+    sha256: str = ""
+    """The sha256 of the file's bytes when the dialog was built: the press runs those bytes only."""
+    at_unix: int = 0
+    """When its ledger row was written: the press takes the row only if it is still this one."""
 
 
 @dataclass(frozen=True)

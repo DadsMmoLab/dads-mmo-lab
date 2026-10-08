@@ -1527,13 +1527,47 @@ def recordable(rel: str) -> bool:
     return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
 
 
-def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: bool = False) -> str:
+def file_times_query(marker_db: str) -> str:
+    """When each stuck row was written: what `reclaim_at` is compared with (T545)."""
+    return (
+        f"SELECT phase, file, at_unix FROM `{marker_db}`.`{FILE_TABLE}` "
+        f"WHERE state IN ('{FILE_STARTED}', '{FILE_FAILED}')"
+    )
+
+
+def parse_file_times(answer: str) -> dict[tuple[str, str], int]:
+    """`file_times_query()`'s answer. A row that is not three columns raises `ValueError`."""
+    times: dict[tuple[str, str], int] = {}
+    for line in answer.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[2].isdigit():
+            raise ValueError(f"unreadable {FILE_TABLE} row: {line!r}")
+        times[(parts[0], parts[1])] = int(parts[2])
+    return times
+
+
+def file_rows_sql(
+    marker_db: str,
+    rows: Sequence[FileRow],
+    now: int,
+    *,
+    claim: bool = False,
+    reclaim_at: int | None = None,
+) -> str:
     """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
 
     `claim` writes a plain `INSERT` instead: the key is `(phase, file)`, so it fails
     when ANY row for that file is already there, which is what makes the `started`
     row a claim two presses cannot both win (Codex, T531) -- the client refuses the
     second, and that press stops before it runs the file.
+
+    `reclaim_at` (one row, T545) takes a stuck row over: it deletes the row only if it
+    was written at that second -- the one the dialog showed -- and then does the plain
+    `INSERT`. Two presses that both read the stuck row both delete at most that one
+    row, and only one `INSERT` wins; a press that arrives later finds the winner's new
+    row (written now, not then) and deletes nothing, so its `INSERT` is refused.
 
     InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
     capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
@@ -1558,8 +1592,18 @@ def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: b
     values = ", ".join(
         f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
     )
+    take = ""
+    if reclaim_at is not None:
+        if len(rows) != 1:
+            raise InstallerError("internal: a reclaim takes exactly one ledger row")
+        claim = True
+        take = (
+            f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{rows[0].phase}' "
+            f"AND file = '{rows[0].file}' AND at_unix = {int(reclaim_at)};\n"
+        )
     return (
         text
+        + take
         + f"{'INSERT' if claim else 'REPLACE'} INTO `{marker_db}`.`{FILE_TABLE}` "
         + "(phase, file, sha256, state, at_unix) "
         + f"VALUES {values};\n"
@@ -1579,6 +1623,7 @@ def record_world_files(
     exec_stdin: ExecStdin,
     wsl_distro: str | None = None,
     claim: bool = False,
+    reclaim_at: int | None = None,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
 
@@ -1586,10 +1631,10 @@ def record_world_files(
         InstallerError: the client refused the script, or could not be reached.
     """
     _run_sql(
-        file_rows_sql(marker_db, rows, int(time.time()), claim=claim),
+        file_rows_sql(marker_db, rows, int(time.time()), claim=claim, reclaim_at=reclaim_at),
         what=(
             "claiming a world update (another update of this server may be applying it)"
-            if claim
+            if claim or reclaim_at is not None
             else "recording which world updates this server has"
         ),
         container=container,

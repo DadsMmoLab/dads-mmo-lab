@@ -12,6 +12,7 @@ engine and the databases is a double.
 
 from __future__ import annotations
 
+import io
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -97,9 +98,15 @@ def test_a_refused_world_update_is_offered_with_what_waits_behind_it(tmp_path: P
     check = an_engine(PLAN, db).correction_check(folder(tmp_path))
     assert check.state == "stale", check
     assert check.offered == ()
-    assert check.stuck == (
-        native.StuckWorldUpdate("content updates", U2, "failed", repeatable=False, behind=1),
+    (one,) = check.stuck
+    assert (one.phase, one.file, one.state, one.repeatable, one.behind) == (
+        "content updates",
+        U2,
+        "failed",
+        False,
+        1,
     )
+    assert len(one.sha256) == 64 and one.at_unix > 0
     banner = native.corrections_banner_text(check)
     assert "0002.sql" in banner and native.CORRECTIONS_BUTTON_LABEL in banner
 
@@ -206,3 +213,51 @@ def test_a_refusal_on_the_first_of_two_stuck_files_stops_before_the_second(tmp_p
     assert any("refused" in line and U2 in line for line in lines), lines
     assert "t3" not in db.tables("mangos")
     assert _ledger(db)[U2] == "failed" and _ledger(db)[U3] == "started"
+
+
+def test_a_stuck_file_edited_after_the_dialog_is_not_run(tmp_path: Path) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    engine = an_engine(PLAN, db)
+    check = engine.correction_check(folder(tmp_path))
+    _lay(server_dir, U2, "CREATE TABLE IF NOT EXISTS t2 (id INT, extra INT);\n")
+    with pytest.raises(InstallerError, match="changed since the confirmation"):
+        list(engine.apply_corrections(check, folder(tmp_path)))
+    assert "t2" not in db.tables("mangos")
+
+
+def test_only_one_of_two_presses_can_take_a_stuck_row(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    # the stuck row is old, as it is when a player reads the dialog and then presses
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "mangos"],
+        io.BytesIO(b"UPDATE yulon_install_file SET at_unix = 1000 WHERE state = 'failed';"),
+        env={},
+    )
+    seen = _times(db)[("content updates", U2)]
+    assert seen == 1000
+    row = sqlplan.FileRow("content updates", U2, "a" * 64, "started")
+
+    def take() -> None:
+        sqlplan.record_world_files(
+            (row,),
+            marker_db="mangos",
+            container="tbc-db",
+            client="mariadb",
+            password="x",
+            exec_stdin=db.exec_stdin,
+            reclaim_at=seen,
+        )
+
+    take()
+    with pytest.raises(InstallerError):
+        take()
+    assert _ledger(db)[U2] == "started"
+
+
+def _times(db: _Db) -> dict[tuple[str, str], int]:
+    answer = "\n".join(
+        f"{p}\t{f}\t{t}"
+        for p, f, t in db.rows("mangos", "SELECT phase, file, at_unix FROM yulon_install_file")  # type: ignore[misc]
+    )
+    return sqlplan.parse_file_times(answer)
