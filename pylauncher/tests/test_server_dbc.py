@@ -82,6 +82,10 @@ class _CloneFromManifest:
                 _write(dest / sql.path, b"SELECT 1;\n")
         (dest / ".git").mkdir(parents=True, exist_ok=True)
 
+    def head_sha(self, dest: Path) -> str | None:
+        """The one commit this fake ever has (T557: an Update reads HEAD before and after)."""
+        return "c" * 40 if (dest / ".git").is_dir() else None
+
 
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

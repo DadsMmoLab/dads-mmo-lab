@@ -558,12 +558,22 @@ class TrinityCoreInstaller(CmangosInstaller):
         that it had changed.
         """
         packs = self._map_inputs()
-        downloads = [pack.label for pack in packs if pack.source.kind != "checkout"]
+        downloads = [pack.label for pack in packs if not pack.source.from_checkout]
         if downloads:
             raise InstallerError(
                 f"{self.entry.name}'s catalog makes {', '.join(downloads)} a required client "
                 "pack from a download, and the map data is made only from packs in the server's "
                 f"own checkout. Nothing was extracted. {CATALOG_ERROR_TAIL}"
+            )
+        # A checkout folder (T555 T1) is a pack for the ready-to-play client: the map
+        # data's salt, its watched paths and its laying all read zips.
+        folders = [pack.label for pack in packs if pack.source.kind == "checkout_folder"]
+        if folders:
+            raise InstallerError(
+                f"{self.entry.name}'s catalog makes {', '.join(folders)} a required client "
+                "pack from a folder of the server's checkout that lays game archives under "
+                "Data/, and the map data is made only from zip packs. Nothing was extracted. "
+                f"{CATALOG_ERROR_TAIL}"
             )
         return packs
 

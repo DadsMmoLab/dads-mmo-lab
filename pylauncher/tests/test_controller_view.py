@@ -12475,7 +12475,12 @@ def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
     installed = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-aoe-loot"}))
     menu = _row_menu(installed, "mod-aoe-loot")
     labels = [action.text() for action in menu.actions() if action.text()]
-    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+    assert labels == [
+        "Install Selected Module",
+        "Remove Selected Module",
+        "Put back the last update…",
+        "Copy Module ID",
+    ]
     next(a for a in menu.actions() if a.text() == "Remove Selected Module").trigger()
     applier = installed.services.applier
     assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-aoe-loot"]
@@ -25924,6 +25929,185 @@ def test_a_url_pack_with_a_new_version_is_installed_again(
     assert b"Version: 2" in (play / "Interface" / "AddOns" / "Foo" / "Foo.toc").read_bytes()
 
 
+# -- A pack that is a folder of the checkout (T555 T1) ------------------------------------
+
+FOLDER_MODULE = "src/mod-unbound"
+FOLDER_PATH = f"{FOLDER_MODULE}/client/Interface/AddOns"
+FOLDER_ADDONS = {
+    "multiclass-talents-ui/multiclass-talents-ui.toc": b"## Interface: 30300\r\n",
+    "multiclass-talents-ui/Art/UI-Frame.blp": b"BLP2" + bytes(range(64)),
+    "multiclass-resources/multiclass-resources.toc": b"## Interface: 30300\n",
+    "multiclass-resources/multiclass-resources.lua": b"return 1\r\n",
+}
+
+
+def _lay_folder_module(server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS) -> None:
+    """The module's addon folder in the server's checkout, and its sha256sum list."""
+    lines = []
+    for name, data in sorted(files.items()):
+        path = server_dir / FOLDER_PATH / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        lines.append(f"{hashlib.sha256(data).hexdigest()}  client/Interface/AddOns/{name}\n")
+    (server_dir / FOLDER_MODULE / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
+
+
+FOLDER_PACK = ClientPack.model_validate(
+    {
+        "id": "unbound-addons",
+        "label": "Unbound addons",
+        "source": {"kind": "checkout_folder", "path": FOLDER_PATH},
+        "sha256_file": f"{FOLDER_MODULE}/MANIFEST.sha256",
+        "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+    }
+)
+
+
+def _folder_client(tmp_path: Path) -> tuple[CatalogEntry, Path, Path]:
+    """An entry whose one required pack is the folder pack, its checkout, and its two clients."""
+    _lay_folder_module(tmp_path)
+    client = WOTLK.client.model_copy(update={"packs": (FOLDER_PACK,)})
+    entry = WOTLK.model_copy(update={"client": client})
+    original = _game_client(tmp_path / "clients" / "WoW")
+    return entry, original, _built(original, tmp_path)
+
+
+def test_play_installs_a_folder_pack_from_the_checkout_and_never_downloads_it(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    own = play / "Interface" / "AddOns" / "Questie" / "Questie.toc"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"## Title: Questie\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == [], "a checkout folder went to the downloader"
+    assert steps == ["install unbound-addons", "launch"]
+    addons = play / "Interface" / "AddOns"
+    for name, data in FOLDER_ADDONS.items():
+        assert (addons / name).read_bytes() == data, name
+    assert own.read_bytes() == b"## Title: Questie\n", "the player's own addon was touched"
+    recorded = client_packs.read_record(play).packs["unbound-addons"]
+    assert sorted(recorded["files"]) == sorted(f"Interface/AddOns/{n}" for n in FOLDER_ADDONS)
+
+
+def test_a_folder_pack_that_is_already_installed_is_not_installed_again(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["launch"]
+
+
+def test_a_pack_whose_recorded_file_was_deleted_is_installed_again_at_the_next_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Lead decision 2026-10-08: "addons look missing" is answered by the next Play."""
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    gone = play / "Interface" / "AddOns" / "multiclass-resources"
+    shutil.rmtree(gone)
+    edited = play / "Interface" / "AddOns" / "multiclass-talents-ui" / "multiclass-talents-ui.toc"
+    edited.write_bytes(b"## Interface: 30300\n## Notes: my own edit\n")
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["install unbound-addons", "launch"]
+    for name in ("multiclass-resources.toc", "multiclass-resources.lua"):
+        assert (gone / name).read_bytes() == FOLDER_ADDONS[f"multiclass-resources/{name}"]
+    # Codex adversarial: putting a deleted file back never reverts an edit beside it.
+    assert edited.read_bytes() == b"## Interface: 30300\n## Notes: my own edit\n"
+    steps.clear()
+    view.play()
+    assert steps == ["launch"], "nothing is missing now: the edit is no reason to install"
+
+
+def test_a_linked_addons_folder_never_stops_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Cold review note 1: the player made `Interface/AddOns` a link to their own addons after
+    the pack went in. Play goes on as it did before missing files were put back."""
+    entry, original, play = _folder_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    view.play()
+    addons = play / "Interface" / "AddOns"
+    mine = tmp_path / "my-addons"
+    shutil.move(addons, mine)
+    shutil.rmtree(mine / "multiclass-resources")
+    addons.symlink_to(mine, target_is_directory=True)
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["launch"]
+    assert asks.calls == []
+    assert not (mine / "multiclass-resources").exists(), "wrote through the player's link"
+
+
+def test_a_folder_pack_the_checkout_does_not_match_stops_play_naming_the_file(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _folder_client(tmp_path)
+    extra = tmp_path / FOLDER_PATH / "multiclass-resources" / "Stray.lua"
+    extra.write_bytes(b"-- nobody listed me\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps == [], "nothing installed and nothing started"
+    assert site.calls == []
+    _title, text, retry, skip = asks.calls[0]
+    assert "multiclass-resources/Stray.lua" in text and "Unbound addons" in text
+    assert retry == "Retry" and skip is None, "a required pack is never played without"
+    assert not (play / "Interface" / "AddOns" / "multiclass-resources").exists()
+
+
+def test_a_missing_folder_or_list_is_named_before_a_ready_to_play_client_is_made(
+    tmp_path: Path,
+) -> None:
+    """`_checkout_refusal` (decision 3) checks a folder pack's folder and its list exist."""
+    refusal = controller_view_module._checkout_refusal
+    _lay_folder_module(tmp_path)
+    assert refusal(FOLDER_PACK, tmp_path) is None
+    (tmp_path / FOLDER_MODULE / "MANIFEST.sha256").unlink()
+    missing_list = refusal(FOLDER_PACK, tmp_path)
+    assert missing_list is not None and f"{FOLDER_MODULE}/MANIFEST.sha256" in missing_list
+    _lay_folder_module(tmp_path)
+    shutil.rmtree(tmp_path / FOLDER_PATH)
+    missing_folder = refusal(FOLDER_PACK, tmp_path)
+    assert missing_folder is not None and FOLDER_PATH in missing_folder
+    assert controller_view_module.server_build_presses.UPDATE_TO_LATEST in missing_folder
+
+
+def test_a_folder_pack_is_no_download_in_the_make_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site
+) -> None:
+    entry, original, _ = _folder_client(tmp_path)
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker, entry=entry)
+    shutil.rmtree(play_client.default_target(original, WOTLK.name, tmp_path))
+
+    view.make_play_client()
+
+    dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
+    assert dialog.client_options is not None
+    assert dialog.client_options.required_label.text() == "Nothing to download."
+
+
 def test_switching_an_optional_pack_off_removes_its_files_at_the_next_play(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
 ) -> None:
@@ -27116,6 +27300,33 @@ def test_a_typed_realm_address_replaces_the_catalogs_realmlist_and_patchlist(
         assert _realmlist(play).startswith("set realmlist 10.0.0.7\n"), "the same address"
     assert _realmlist(original) == "set realmlist logon.example.com\n"
     assert not (original / "WTF").exists()
+
+
+@pytest.mark.parametrize("config", [True, False])
+@pytest.mark.parametrize(("auth_port", "written"), [(3724, "10.0.0.7"), (3725, "10.0.0.7:3725")])
+def test_a_typed_address_reaches_config_wtf_and_realmlist_wtf_with_the_same_auth_port(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    config: bool,
+    auth_port: int,
+    written: str,
+) -> None:
+    """T565: a second server's client must not fall back to the first server's login."""
+    entry, original, play = _made_client(tmp_path, remove_locale=False, config=config, exe=False)
+    entry = entry.model_copy(update={"ports": entry.ports.model_copy(update={"auth": auth_port})})
+    _save_launcher(play, {"realm_address": "10.0.0.7"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith(f"set realmlist {written}\n")
+    text = _config(play)
+    assert f'SET realmList "{written}"' in text and f'SET patchList "{written}"' in text
 
 
 def test_without_a_typed_address_the_catalogs_realmlist_stays(
@@ -28609,3 +28820,436 @@ def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
     assert said not in view.server_reasons.text()
     assert view.start_button.isEnabled()
     assert view.stop_button.toolTip() == "The server is not running."
+
+
+# -------------------------------------------------- T557: the put-back tip (D2)
+
+
+class _PutBackTipApplier(_FakeApplier):
+    """Records the updates that reach the applier; the skip record is the real one."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.updates: list[str] = []
+
+    def update(  # type: ignore[override]
+        self,
+        manifest: object,
+        values: object = None,
+        *,
+        approved: apply_module.UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        self.updates.append(str(manifest.id))  # type: ignore[attr-defined]
+        return self.install(manifest, values)
+
+
+@pytest.mark.parametrize("yes", [False, True], ids=["no-runs-nothing", "yes-clears-and-updates"])
+def test_update_on_the_put_back_tip_asks_first_and_only_a_yes_runs_it(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: bool,
+) -> None:
+    """T557 D2: the newest version failed to build and was put back; updating to it asks.
+
+    The question is the design's sentence, under `Try <id>'s update again?`, and
+    the dialog defaults to No (`_confirm()`). A No changes nothing, record
+    included. A Yes clears the skipped tip and runs the Update.
+
+    Mutation: drop the question and a No still updates; drop `clear_skip` and the
+    tip is hidden again after a Yes.
+    """
+    from yulon import module_moves
+
+    tip = "b" * 40
+    key = module_moves.key("module", "mod-transmog")
+    assert module_moves.skip(tmp_path, key, tip=tip) == ""
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    row = apply_module.ModuleUpdate(
+        "mod-transmog", tmp_path, True, 0, fetched=tip, put_back_tip=tip
+    )
+    view._module_updates_done((row,))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+
+    assert asked == [
+        (
+            "Try mod-transmog's update again?",
+            "The newest version of mod-transmog (bbbbbbb) did not build on this server last "
+            "time and was put back. It will probably fail again unless the server itself has "
+            "been updated since. Update anyway?",
+        )
+    ]
+    ledger = module_moves.read(tmp_path)
+    assert ledger is not None
+    if yes:
+        assert applier.updates == ["mod-transmog"]
+        assert key not in ledger.skipped
+    else:
+        assert applier.updates == []
+        assert ledger.skipped[key].tip == tip
+        assert view.module_report.toPlainText() == (
+            "update mod-transmog: cancelled — nothing on this machine was changed."
+        )
+
+
+def test_update_on_a_tip_that_was_not_put_back_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackTipApplier(tmp_path)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[str] = []
+    monkeypatch.setattr(view, "_confirm", lambda title, question: asked.append(title) or False)
+    view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+    assert asked == []
+    assert applier.updates == ["mod-transmog"]
+
+
+# ------------------------------------ T557: "Put back the last update…" on a module row
+
+PUT_BACK_ACTION = "Put back the last update…"
+_OLD = "a" * 40
+_NEW = "b" * 40
+
+
+class _PutBackApplier(_FakeApplier):
+    """Answers `last_update()`, records `put_back()`, and notes whether either ran on a worker.
+
+    `on_worker` is switched on by the wrapped `_run()` around exactly the work it
+    is handed, so a call made straight from a slot (the GUI thread, in the app)
+    finds it off. `ContainerGit`'s reads are a `docker run`.
+    """
+
+    def __init__(self, server_dir: Path, last: apply_module.LastUpdate | None) -> None:
+        super().__init__(server_dir)
+        self.last = last
+        self.on_worker = False
+        self.asked_on_gui: list[str] = []
+        self.put_back_calls: list[apply_module.LastUpdate] = []
+        self.refuse: Exception | None = None
+        self.skipped_lines: tuple[str, ...] = ()
+
+    def last_update(self, manifest: Manifest) -> apply_module.LastUpdate | None:
+        if not self.on_worker:
+            self.asked_on_gui.append("last_update")
+        return self.last
+
+    def put_back(  # type: ignore[override]
+        self, manifest: Manifest, values: object = None, *, last: apply_module.LastUpdate
+    ) -> ApplyReport:
+        if not self.on_worker:
+            self.asked_on_gui.append("put_back")
+        self.put_back_calls.append(last)
+        if self.refuse is not None:
+            raise self.refuse
+        return ApplyReport(
+            "install",
+            manifest.id,
+            family=manifest.type,
+            done=("clone",),
+            skipped=self.skipped_lines,
+            rebuild_required=True,
+        )
+
+
+def _put_back_view(
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    last: apply_module.LastUpdate | None,
+    *,
+    yes: bool = True,
+) -> tuple[ControllerView, _PutBackApplier, list[tuple[str, str]]]:
+    services = _services(ps, tmp_path, [])
+    applier = _PutBackApplier(tmp_path, last)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    real_run = view._run
+
+    def run(work: Any, on_done: Any, on_error: Any) -> None:
+        def on_the_worker() -> object:
+            applier.on_worker = True
+            try:
+                return work()
+            finally:
+                applier.on_worker = False
+
+        real_run(on_the_worker, on_done, on_error)
+
+    monkeypatch.setattr(view, "_run", run)
+    _select_module(view, "mod-transmog")
+    return view, applier, asked
+
+
+def _last(source: str = "ledger") -> apply_module.LastUpdate:
+    return apply_module.LastUpdate(
+        item_id="mod-transmog",
+        from_sha=_OLD,
+        to_sha=_NEW,
+        source=source,  # type: ignore[arg-type]
+    )
+
+
+def test_an_installed_module_row_menu_offers_to_put_back_the_last_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    labels = [a.text() for a in _row_menu(view, "mod-transmog").actions() if a.text()]  # type: ignore[attr-defined]
+    assert PUT_BACK_ACTION in labels
+    absent = _wotlk_modules_view(ps, tmp_path)
+    labels = [a.text() for a in _row_menu(absent, "mod-aoe-loot").actions() if a.text()]  # type: ignore[attr-defined]
+    assert PUT_BACK_ACTION not in labels, "offered on a module that is not installed"
+
+
+def test_put_back_with_nothing_to_put_back_says_so_and_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    view._put_back_last_update()
+    assert view.module_report.toPlainText() == (
+        "Yu'lon cannot tell which version mod-transmog was on before its last update, so "
+        "there is nothing to put back."
+    )
+    assert asked == [] and applier.put_back_calls == []
+    assert applier.asked_on_gui == []
+
+
+def test_put_back_asks_first_with_no_by_default_and_a_no_changes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, _last(), yes=False)
+    view._put_back_last_update()
+    assert asked == [
+        (
+            "Put back mod-transmog?",
+            "This puts mod-transmog back on the version it had before its last update "
+            "(aaaaaaa). The newer version (bbbbbbb) is not offered again until its author "
+            "publishes a newer one. Your server keeps running. Press “Rebuild the server…” "
+            "afterwards to build without the update.\n\nPut it back?",
+        )
+    ]
+    assert applier.put_back_calls == []
+    assert view.module_report.toPlainText() == (
+        "put back mod-transmog: cancelled — nothing on this machine was changed."
+    )
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["plain", "direct-sql-was-kept"])
+def test_put_back_yes_puts_it_back_on_a_worker_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept: bool
+) -> None:
+    """Mutation: call `applier.last_update()` or `put_back()` from the slot, off `_run()`."""
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    if kept:
+        applier.skipped_lines = (apply_module.PUT_BACK_KEPT_SQL,)
+    view._behind[("module", "mod-transmog")] = 3
+    view._put_back_last_update()
+    assert [last.from_sha for last in applier.put_back_calls] == [_OLD]
+    assert applier.asked_on_gui == [], "git was asked on the GUI thread"
+    said = view.module_report.toPlainText()
+    assert said.startswith(
+        "mod-transmog is back on aaaaaaa, the version it had before its last update. Press "
+        "“Rebuild the server…” to build your server without that update."
+    )
+    assert (apply_module.PUT_BACK_KEPT_SQL in said) is kept
+    assert ("module", "mod-transmog") not in view._behind, "a count about the old commit stayed"
+    assert ("module", "mod-transmog") in view._rebuild_owed
+
+
+def test_a_refused_put_back_is_reported_in_the_refusals_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    applier.refuse = apply_module.PutBackRefused(
+        "mod-transmog has files changed. Nothing was changed.", edited=True
+    )
+    view._put_back_last_update()
+    assert view.module_report.toPlainText() == (
+        "Put back mod-transmog did not finish: mod-transmog has files changed. "
+        "Nothing was changed."
+    )
+
+
+def test_a_failed_rebuild_reloads_the_modules_and_drops_what_a_put_back_made_stale(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The automatic put-back runs inside the Rebuild, so the tab learns of it from the record.
+
+    Mutation: reload only on success (the old shape) and the row keeps its count and
+    its version about a commit the clone has left.
+    """
+    from yulon import module_moves
+
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    assert module_moves.skip(tmp_path, module_moves.key("module", "mod-transmog"), tip=_NEW) == ""
+    view._behind[("module", "mod-transmog")] = 3
+    view._behind[("module", "mod-other")] = 2
+    reloads: list[int] = []
+    monkeypatch.setattr(view, "reload_modules", lambda: reloads.append(1))
+    cleared: list[int] = []
+    monkeypatch.setattr(view._versions, "clear", lambda: cleared.append(1))
+
+    view._rebuild_finished(False, "The build stopped on an error in mod-transmog…")
+
+    assert reloads and cleared
+    assert ("module", "mod-transmog") not in view._behind
+    assert view._behind[("module", "mod-other")] == 2
+
+
+# ----------------------------- T557 review: the Rebuild and the Modules jobs do not overlap
+
+
+def test_rebuild_is_refused_while_a_modules_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both write the record of module updates; two writers at once lose an entry's destination.
+
+    Mutation: drop the `_module_pending` check from `rebuild_server()`.
+    """
+    view, _applier, asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    started: list[int] = []
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: started.append(1))
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "show_information",
+        lambda _p, title, text: shown.append((title, text)),
+    )
+    view._module_pending = "update mod-transmog"
+
+    assert view.rebuild_server() is False
+
+    assert shown == [
+        (
+            "Something else is running",
+            "A Modules tab action (update mod-transmog) is still running. Wait for it to finish, "
+            "then press “Rebuild the server…” again. Nothing was started.",
+        )
+    ]
+    assert started == [] and asked == []
+
+
+@pytest.mark.parametrize("which", ["update", "remove", "put back"])
+def test_a_modules_job_is_refused_while_a_server_build_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    """The context menu is not greyed by `_set_busy()`, so the handlers say no themselves.
+
+    Mutation: drop `_build_is_running()` from the handler.
+    """
+    view, applier, asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._busy = True
+
+    if which == "put back":
+        view._put_back_last_update()
+    else:
+        view._module_action(which)
+
+    assert view.module_report.toPlainText() == (
+        f"{which.capitalize()} mod-transmog was not started. Wait: the server build is running. "
+        "Try again when it has finished. Nothing was changed."
+    )
+    assert applier.put_back_calls == [] and applier.installed == [] and applier.removed == []
+    assert asked == [] and view._module_pending is None
+
+
+def test_the_reload_after_a_failed_build_waits_for_a_stopped_distro(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reads the record (a file read under `\\\\wsl.localhost`), which starts a stopped distro.
+
+    Mutation: drop the `_waits_for_the_distro()` line.
+    """
+    view, _applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    reads: list[int] = []
+    monkeypatch.setattr(controller_view_module.module_moves, "read", lambda _dir: reads.append(1))
+    view._distro = "stopped"
+
+    view._reload_after_a_failed_build()
+
+    assert reads == [], "the record was read while the distro was stopped"
+    assert "modules after a failed build" in view._waiting_on_distro
+
+
+def test_a_modules_job_during_another_server_job_names_that_job(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start, Stop or Check for updates also set `_busy`; none of them is a server build.
+
+    Mutation: say "the server build" whatever is busy.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, _last())
+    view._set_busy(True, "Start")
+
+    view._module_action("update")
+
+    assert view.module_report.toPlainText() == (
+        "Update mod-transmog was not started. Wait: Start is running. Try again when it has "
+        "finished. Nothing was changed."
+    )
+
+
+def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_ends(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_module_pending` is one slot: the first job to finish cleared it under the second.
+
+    Jobs are held here and finished by hand, in the order the test chooses.
+
+    Mutation: guard on `_module_pending` alone, or let the count go below zero.
+    """
+    view, applier, _asked = _put_back_view(ps, tmp_path, monkeypatch, None)
+    held: list[tuple[Any, Any, Any]] = []
+    view._jobs = lambda work, on_done, on_error: held.append((work, on_done, on_error))  # type: ignore[assignment]
+    monkeypatch.setattr(view, "_run", lambda w, d, e: held.append((w, d, e)))
+    shown: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_information", lambda _p, _t, text: shown.append(text)
+    )
+    object.__setattr__(view.services, "rebuild", lambda *a, **k: iter(()))
+    view._module_action("update")
+    view._module_action("remove")
+    assert len(held) == 2 and view._module_jobs == 2
+
+    _work, done, _error = held[0]
+    done(None)  # the first finishes and clears the single slot
+    assert view._module_pending is None
+    assert view.rebuild_server() is False and len(shown) == 1, "Rebuild opened under a running job"
+
+    _work, done, _error = held[1]
+    done(None)
+    assert view._module_jobs == 0
+    view._module_job_ended()
+    assert view._module_jobs == 0, "the count went below zero"
+    assert not view._module_job_running()
