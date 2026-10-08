@@ -6,10 +6,12 @@
 // it is called from here.
 
 void AddUnboundScripts();
+void AddUnboundMulticlassBridge();
 void Addmod_multiclass_summonsScripts();
 
 void Addmod_unboundScripts()
 {
     AddUnboundScripts();
+    AddUnboundMulticlassBridge();
     Addmod_multiclass_summonsScripts();
 }
