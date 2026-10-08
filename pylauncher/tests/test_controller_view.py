@@ -20636,6 +20636,31 @@ def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
     assert view.custom_module_line_note.isHidden()
 
 
+def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T596: the shipped games split cleanly; WotLK and Unbound (its sibling) take outside modules.
+
+    Unbound is built by WotLK's factory, so its box must keep both presses and
+    the card's own sentence; every other game must show the "can't take" sentence.
+    """
+    takes = {"wow-wotlk", "wow-unbound"}
+    for entry in load_catalog().games:
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
+        view = ControllerView(entry, services, status_poll_ms=0)
+        if entry.id in takes:
+            assert services.module_install_custom is not None, entry.id
+            assert not view.module_link_button.isHidden(), entry.id
+            assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+        else:
+            assert services.module_install_custom is None, entry.id
+            assert view.module_link_button.isHidden(), entry.id
+            assert view.module_folder_button.isHidden(), entry.id
+            assert "outside" in view.custom_module_note.text() or "no add-on" in (
+                view.custom_module_note.text()
+            ), entry.id
+
+
 THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))
 """Every height from `main.MINIMUM_WINDOW_SIZE`'s to past the 800 the app opens at.
 
