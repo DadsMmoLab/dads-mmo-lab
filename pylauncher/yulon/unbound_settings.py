@@ -7,9 +7,12 @@ module's own code at world start, so a change lands at the next start:
 key                        what it turns on
 =========================  ===============================================
 `Unbound.ReagentFree`      casting needs no reagents (soul shards, candles, powders)
-`Unbound.InstantSummons`   class summons are instant, free and have no cooldown
-`Unbound.AutoBuff`         the `#buffs` chat command that buffs the party
+`Unbound.InstantSummons`   class summons are instant, cost no mana and have no cooldown
+`Unbound.AutoBuff`         the `#buffs` chat command: automatic buffs for a player and their summons
 =========================  ===============================================
+
+Instant summons does NOT remove reagents: a Soul Shard or Infernal Stone is still used
+unless `Unbound.ReagentFree` is on too, so no text here calls it "free" (U3 review).
 
 **Off is the default everywhere.** The shipped `mod_unbound.conf.dist` spells each
 `0`; the C++ reads `GetOption<bool>(key, false)` and the Lua reads
@@ -38,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 from yulon import tuning
+from yulon.catalog.catalog import CatalogEntry
 from yulon.manifest import ConfKey
 
 FILE = "env/dist/etc/modules/mod_unbound.conf"
@@ -61,8 +65,9 @@ _SWITCHES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "Unbound.InstantSummons",
-        "Instant, free class summons",
-        "Summoning a pet or demon is instant, costs nothing and has no cooldown.",
+        "Instant class summons",
+        "Summoning a pet or demon is instant, costs no mana and has no cooldown. "
+        "It still uses reagents (soul shards and the like) unless free casting reagents is on.",
     ),
     (
         "Unbound.AutoBuff",
@@ -110,6 +115,17 @@ def rows(server_dir: Path) -> tuple[tuning.TuningRow, ...]:
         )
         for key, spec in conf_keys().items()
     )
+
+
+def shown_for(entry: CatalogEntry) -> bool:
+    """Whether this entry has the card: its install makes `mod_unbound.conf` from the `.dist`.
+
+    Read off the entry's data (`confs_from_dist`), never off its id, so a second server that
+    carries the module gets the card and WotLK, whose data does not name the conf, does not.
+    """
+    native = entry.install.native
+    block = native.azerothcore if native is not None else None
+    return block is not None and FILE in block.confs_from_dist
 
 
 def is_on(row: tuning.TuningRow) -> bool:

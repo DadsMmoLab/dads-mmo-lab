@@ -96,6 +96,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     tuning,
+    unbound_settings,
     useraccounts,
     wsl,
 )
@@ -2268,9 +2269,16 @@ class ControllerServices:
             )
         if play_client_dir is None:
             return _with_the_ready_wait(
-                _with_take_back(factory(entry, server_dir, client_dir, wsl_distro)), entry
+                _with_take_back(
+                    _knowing_its_server_sources(
+                        factory(entry, server_dir, client_dir, wsl_distro), entry
+                    )
+                ),
+                entry,
             )
-        services = factory(entry, server_dir, play_client_dir, wsl_distro)
+        services = _knowing_its_server_sources(
+            factory(entry, server_dir, play_client_dir, wsl_distro), entry
+        )
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
@@ -4247,8 +4255,25 @@ def _for_tortoise(
 
 _Factory = Callable[[CatalogEntry, Path, Path | None, str | None], ControllerServices]
 
+
+def _knowing_its_server_sources(
+    services: ControllerServices, entry: CatalogEntry
+) -> ControllerServices:
+    """Tell the applier which folders the server install itself cloned (T554).
+
+    Done once here, for every game, so no factory has to remember: the applier then refuses
+    to install, update or remove a module whose clone folder is one of them.
+    """
+    if services.applier is not None:
+        services.applier.server_sources = native.server_source_folders(entry)
+        services.applier.server_name = entry.name
+    return services
+
+
 _FACTORIES: dict[str, _Factory] = {
     "wow-wotlk": _for_wotlk,
+    # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
+    "wow-unbound": _for_wotlk,
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
@@ -4272,8 +4297,6 @@ class _BotBrowser:
         self.server_dir = server_dir
         self._sql = sql
 
-    # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
-    "wow-unbound": _for_wotlk,
     def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
@@ -16057,6 +16080,12 @@ class ControllerView(QWidget):
                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
             broken += skipped
+            # T554: a manifest whose clone folder the server install itself cloned (WoW
+            # Unbound's `modules/mod-ale`) is part of the server, so it is not offered as a
+            # module; its folder is listed as part of the server instead.
+            items = [
+                m for m in items if not apply_module.is_server_source(m, self._server_sources())
+            ]
             manifests += items
             for manifest in items:
                 # T42 round 2's key shape, threaded through T43's extraction of
@@ -16310,6 +16339,10 @@ class ControllerView(QWidget):
             # that moves it is the T64 one, and this is that button's own slot
             # -- its dialog, backup offer, busy gates and refusals included.
             self.update_to_latest()
+
+    def _server_sources(self) -> frozenset[PurePosixPath]:
+        """The folders this entry's install clones its own sources into (T554)."""
+        return native.server_source_folders(self.entry)
 
     def _server_updated(self) -> frozenset[PurePosixPath]:
         """Where "Update the server to latest…" moves a checkout here; empty with no route (T146).
@@ -18094,6 +18127,7 @@ class ControllerView(QWidget):
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         # T302: the built-in Server rates card's rows, read with the modules'.
         self._rate_rows: tuple[tuning.TuningRow, ...] = ()
+        self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -18135,6 +18169,8 @@ class ControllerView(QWidget):
         self._tuning_rows = rows
         # T302: the world conf's rates, read in the same pass -- one file, no job.
         self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
+        # T554: WoW Unbound's three switches, from the same pass over its own conf.
+        self._unbound_rows = self._read_unbound_rows()
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -18166,7 +18202,18 @@ class ControllerView(QWidget):
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
         rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
-        return rates + modules + self._bot_rows
+        return rates + self._unbound_rows + modules + self._bot_rows
+
+    def _read_unbound_rows(self) -> tuple[tuning.TuningRow, ...]:
+        """The Unbound card's rows: only for an entry that makes `mod_unbound.conf`, and only
+        once the install has laid it (a Save must never create the module's conf)."""
+        server_dir = self.services.controller.server_dir
+        if (
+            not unbound_settings.shown_for(self.entry)
+            or not (server_dir / unbound_settings.FILE).is_file()
+        ):
+            return ()
+        return unbound_settings.rows(server_dir)
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -19146,6 +19193,8 @@ class ControllerView(QWidget):
             return botpop.conf_keys(self.entry)
         if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
             return server_rates.conf_keys(self.entry)
+        if (family, module_id) == unbound_settings.CARD and file == unbound_settings.FILE:
+            return unbound_settings.conf_keys()
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -19206,7 +19255,12 @@ class ControllerView(QWidget):
                     return
         for file, values in per_file.items():
             try:
-                made = tuning.write(server_dir / file, values, spec=specs[file])
+                if (family, module_id) == unbound_settings.CARD:
+                    # Only `0` and `1` reach the file: the module reads `== "1"` and a `true`
+                    # would silently mean off (`unbound_settings.write`).
+                    made = unbound_settings.write(server_dir, values)
+                else:
+                    made = tuning.write(server_dir / file, values, spec=specs[file])
             except tuning.TuningError as exc:
                 # Unreachable through the loop above, which has already checked
                 # every value on the card. Kept because `tuning.write()` is a

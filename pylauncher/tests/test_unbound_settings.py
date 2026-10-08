@@ -155,3 +155,11 @@ def test_every_switch_defaults_off_in_code_and_in_the_rows() -> None:
     assert unbound_settings.DEFAULT == "0"
     assert tuple(unbound_settings.conf_keys()) == KEYS
     assert {spec.default for spec in unbound_settings.conf_keys().values()} == {"0"}
+
+
+def test_the_instant_summons_text_never_says_free_and_says_reagents_are_still_used() -> None:
+    spec = unbound_settings.conf_keys()["Unbound.InstantSummons"]
+    assert "free" not in (spec.label or "").lower()
+    assert "free" not in (spec.explain or "").lower().replace("free casting reagents", "")
+    assert "no mana" in (spec.explain or "")
+    assert "reagents" in (spec.explain or "")

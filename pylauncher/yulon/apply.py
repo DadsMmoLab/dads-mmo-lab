@@ -101,6 +101,16 @@ CLONE_DIRS: dict[ManifestType, str] = {
 }
 
 
+def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
+    """Whether this manifest's clone folder is one the server install itself clones into (T554).
+
+    `folders` is `native.server_source_folders(entry)`. The test is the folder and not the
+    game: WotLK's sources are `modules/mod-playerbots` alone, which no manifest names, so for
+    WotLK this is `False` for every manifest, and for Unbound it is `True` for `mod-ale`.
+    """
+    return PurePosixPath(CLONE_DIRS[manifest.type]) / manifest.id in folders
+
+
 def _default_git(server_dir: Path) -> Git:
     """Host git where it can actually run, containerised git otherwise (T58).
 
@@ -2871,6 +2881,12 @@ class Applier:
         # `client_origins` by `ControllerServices.for_entry()`; empty, nothing
         # is recorded.
         self.client_game = ""
+        # T554: the folders (server-dir relative) this entry's emulator sources clone into,
+        # and the entry's name. A manifest whose clone folder is one is part of the server
+        # build, so install, update and remove refuse it (`_refuse_a_server_source`). Set by
+        # `ControllerServices.for_entry()` from the catalog entry; empty, nothing is refused.
+        self.server_sources: frozenset[PurePosixPath] = frozenset()
+        self.server_name = ""
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -3012,6 +3028,20 @@ class Applier:
     def git(self, value: Git) -> None:
         self._git = value
 
+    def _refuse_a_server_source(self, manifest: Manifest) -> None:
+        """Refuse a manifest whose clone folder is one the server install itself cloned (T554).
+
+        WoW Unbound builds `modules/mod-ale` into its worldserver, and WotLK's `mod-ale`
+        manifest clones into the same folder; installing, updating or removing it here would
+        reset or delete a source the compile needs. Asked before anything is touched.
+        """
+        if is_server_source(manifest, self.server_sources):
+            raise ApplyRefusal(
+                f"{manifest.name} is part of the {self.server_name or 'this'} server: it is "
+                "built into the world server, so it is not added, updated or removed from the "
+                "Modules tab. Nothing was changed."
+            )
+
     def clone_dir(self, manifest: Manifest) -> Path:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
@@ -3058,6 +3088,7 @@ class Applier:
         (`_says_the_database_is_up()`). A finished install says it in its
         report's "started the database alone" line instead.
         """
+        self._refuse_a_server_source(manifest)
         log = _Log()
         with self._says_the_database_is_up(log):
             return self._install(
@@ -3547,6 +3578,7 @@ class Applier:
         answer (`ReleaseDirectionUnknown`), and holds for that HEAD and that
         release only (`UncheckedApproval`).
         """
+        self._refuse_a_server_source(manifest)
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyRefusal(refusal)
@@ -3866,6 +3898,7 @@ class Applier:
         cannot say that. Values the caller hands in still win: the Modules tab
         asks only when there is no usable record, and then a person answered.
         """
+        self._refuse_a_server_source(manifest)
         vals = self._values(manifest, values)
         relative = reapplies_on_top(manifest)
         applied, _why = self.applied_record(manifest) if relative else (None, "")

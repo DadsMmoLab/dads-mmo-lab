@@ -245,6 +245,20 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=("'azerothcore'",),
     ),
+    Site(
+        "yulon.unbound_settings",
+        "shown_for",
+        "the Tuning tab's Unbound card is for an entry whose AzerothCore install makes "
+        "mod_unbound.conf (T554)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("a CMaNGOS entry has no AzerothCore block, so no such conf"),
+            "trinitycore": not_applicable(
+                "a TrinityCore entry has no AzerothCore block, so no such conf"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
         "yulon.catalog.families.__init__",

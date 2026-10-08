@@ -3412,6 +3412,21 @@ def held_at_its_pin(source: EmulatorSource) -> bool:
     return name.endswith(_DB_REPO_SUFFIX)
 
 
+def server_source_folders(entry: CatalogEntry) -> frozenset[PurePosixPath]:
+    """Every folder under the server dir this entry's install clones a source into (T554).
+
+    The core itself (`dest: "."`) is not a folder of its own. Unlike `server_update_dests()`
+    a source held at its pin counts: the Modules tab must not offer a module whose clone
+    folder the server build already owns, whether or not "Update the server to latest…"
+    moves it. Normalised through `PurePosixPath`.
+    """
+    return frozenset(
+        path
+        for path in (PurePosixPath(source.dest) for source in entry.emulator.sources)
+        if path != PurePosixPath(".")
+    )
+
+
 def server_update_dests(entry: CatalogEntry) -> frozenset[PurePosixPath]:
     """Where "Update the server to latest…" moves a checkout on this entry, by `dest` (T146).
 
