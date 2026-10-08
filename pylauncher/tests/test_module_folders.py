@@ -117,3 +117,25 @@ def test_a_folder_outside_the_server_dir_does_not_load(bad: str) -> None:
 
 def test_a_folder_below_the_server_dir_loads() -> None:
     assert parse_manifest({**ALE, "folders": [LUA]}).folders == (LUA,)
+
+
+def test_remove_takes_back_a_folder_and_its_empty_parent_listed_parent_first(
+    tmp_path: Path,
+) -> None:
+    manifest = parse_manifest(
+        {
+            "id": "mod-nested",
+            "name": "Nested",
+            "type": "module",
+            "game": "wow-wotlk",
+            "source": {"repo": "azerothcore/mod-nested"},
+            "folders": ["env/dist/x", "env/dist/x/y"],
+        }
+    )
+    applier = _untouched(Applier(tmp_path, git=_FakeGit({"README.md": "x"})), manifest)
+    applier.install(manifest)
+    assert (tmp_path / "env/dist/x/y").is_dir()
+
+    applier.remove(manifest)
+
+    assert not (tmp_path / "env/dist/x").exists()

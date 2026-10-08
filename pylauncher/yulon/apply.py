@@ -5167,7 +5167,10 @@ class Applier:
         anything in it stays and the report names it (`left_behind`). Only the
         folder itself goes -- never a parent, and never through `rmtree`.
         """
-        for rel in manifest.folders:
+        # Deepest first, so a folder listed beside its own parent leaves neither behind.
+        for rel in sorted(
+            manifest.folders, key=lambda r: len(PurePosixPath(r).parts), reverse=True
+        ):
             path = self.server_dir / rel
             if path.is_symlink() or not path.is_dir():
                 continue
