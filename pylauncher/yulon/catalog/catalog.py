@@ -3179,7 +3179,10 @@ class Catalog(_Strict):
                     continue
                 pairs = {
                     "database": (first.ports.db, second.ports.db),
-                    "SOAP": (first.operations.port, second.operations.port),
+                    "SOAP": (
+                        first.operations.port if first.operations else None,
+                        second.operations.port if second.operations else None,
+                    ),
                 }
                 for what, (a, b) in pairs.items():
                     if a is not None and a == b:
