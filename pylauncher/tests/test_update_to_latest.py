@@ -1716,6 +1716,10 @@ def test_the_return_reaches_a_tested_pin_that_moved_past_the_install(tmp_path: P
     `no_local_commits()` after its own fetch) must let it through, and the
     pinned move (`_update_lines()` with no reset, `_pin_lines()`) must land on
     the new pin, not on the tip and not where it was. Real git on both sides.
+
+    A characterization, not a RED: it passed before T588's code, which changes
+    only the OFFER (`native.source_version()`), never the press. It is here to
+    prove the press T588 now offers can do what the offer says.
     """
     if not git.git_available():
         pytest.skip("no host git")

@@ -1501,7 +1501,7 @@ def tested_pins(server_dir: Path, sources: Sequence[EmulatorSource]) -> tuple[Ca
 def _against_the_catalog(
     revs: Sequence[SourceRev], pins: Sequence[CatalogPin]
 ) -> tuple[tuple[SourceRev, ...], tuple[CatalogPin, ...]]:
-    """The record's rows read against the catalog's pins, and the pins that moved under one.
+    """The record's rows read against the catalog's pins, and the pins this server can catch up to.
 
     Three cases per source, and only the last two are T588's:
 
@@ -1516,14 +1516,25 @@ def _against_the_catalog(
 
     A moved pin is returned only while its source is OFF it: an update that
     landed exactly on the new pin is on it, and offered nothing.
+
+    **And only while the press is a catch-up for every source it moves** (cold
+    review). A source still on the pin it was installed or returned at (no row,
+    or a row built on its old recorded pin) moves onto the commits this app is
+    tested with. A source an update took past its pin -- one past the old pin,
+    or past an unchanged one -- moves BACK, a downgrade, and then nothing is
+    returned: the press keeps the way-back wording, which warns that nothing
+    undoes what the newer server wrote.
     """
     by_repo = {pin.repo: pin for pin in pins}
     rows: list[SourceRev] = []
     moved: list[CatalogPin] = []
+    back = False
     for row in revs:
         pin = by_repo.pop(row.repo, None)
         if pin is None or row.pin == pin.rev:
             rows.append(row)
+            # Off an unchanged pin is past it: only an update puts it there.
+            back = back or (pin is not None and not on_its_pin(row))
             continue
         now = replace(row, pin=pin.rev, ahead=None)
         built = _built_sha(row)
@@ -1534,8 +1545,13 @@ def _against_the_catalog(
             # folder is already on (Codex adversarial). Unread, the record decides.
             now = replace(now, built=pin.head[:_SHORT_SHA])
         rows.append(now)
-        if not on_its_pin(now):
+        if on_its_pin(now):
+            continue
+        on_the_old_pin = bool(_built_sha(now)) and row.pin.startswith(_built_sha(now))
+        if on_the_old_pin:
             moved.append(pin)
+        else:
+            back = True
     for pin in by_repo.values():
         if pin.head is None or pin.head == pin.rev:
             continue
@@ -1543,7 +1559,7 @@ def _against_the_catalog(
         rows.append(now)
         if not on_its_pin(now):
             moved.append(pin)
-    return tuple(rows), tuple(moved)
+    return tuple(rows), () if back else tuple(moved)
 
 
 def _built_sha(row: SourceRev) -> str:

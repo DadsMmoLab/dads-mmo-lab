@@ -399,3 +399,80 @@ def test_the_tab_tells_the_report_whether_the_pin_moved(tmp_path: Path) -> None:
         "server_moves": False,
         "pin_moved": False,
     }
+
+
+# -- cold review: an install an Update took PAST its old pin is not "catching up" ----------
+
+
+def _updated_past_the_old_pin() -> native.SourceRev:
+    """Update to latest pressed after 2 Oct, before the catalog moved: X is 40 past 7f12e89e."""
+    return native.SourceRev(CORE, f"{AHEAD[:7]} · 2026-10-05", pin=OLD_CORE, ahead=40)
+
+
+def test_an_install_updated_past_its_old_pin_keeps_the_way_back_wording() -> None:
+    """The press moves X BACK to f19a1879: a downgrade, never framed as catching up."""
+    state = _state(_updated_past_the_old_pin())
+    pins = (_pin(CORE, NEW_CORE, AHEAD),)
+
+    said = native.source_version(state, (), pins)
+
+    assert said.past_the_pin is True, "the way back stays offered"
+    assert said.pin_moved is False
+    assert native.PIN_MOVED_NOTE not in said.line
+    assert native.moved_pins(state, pins) == ()
+
+
+def test_one_source_updated_past_its_pin_keeps_the_way_back_wording_for_the_whole_press() -> None:
+    """Mixed: the core sits on its old pin (catch-up), the bots were updated past theirs.
+
+    The press moves both, one of them backwards, so the question must keep the
+    warning about what a newer server wrote.
+    """
+    core = native.SourceRev(CORE, f"{OLD_CORE[:7]} · 2026-09-20", pin=OLD_CORE, ahead=0)
+    bots = native.SourceRev(BOTS, f"{AHEAD[:7]} · 2026-10-05", pin=NEW_BOTS, ahead=3)
+    pins = (_pin(CORE, NEW_CORE, OLD_CORE), _pin(BOTS, NEW_BOTS, AHEAD))
+
+    said = native.source_version(_state(core, bots), (), pins)
+
+    assert said.past_the_pin is True
+    assert said.pin_moved is False
+    assert native.moved_pins(_state(core, bots), pins) == ()
+
+
+def test_the_route_asks_the_way_back_question_of_an_install_updated_past_its_old_pin(
+    tmp_path: Path,
+) -> None:
+    _checkout(tmp_path, {CORE: AHEAD, BOTS: _catalog_pins()[BOTS]})
+    native.write_state(
+        tmp_path,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id="x",
+            source_revs=(_updated_past_the_old_pin(),),
+        ),
+    )
+    route = install_wiring.update_to_latest_for_app(ENTRY, tmp_path)
+    assert route is not None
+
+    assert route.source_version().past_the_pin is True
+    assert route.pin_confirmation() == native.return_to_pin_confirmation(
+        ENTRY, tmp_path, ENTRY.emulator.sources[0].repo
+    )
+    assert "newer server already wrote" in route.pin_confirmation()
+
+
+def test_a_head_file_that_is_not_text_reads_as_unknown(tmp_path: Path) -> None:
+    """Cold review: a non-UTF-8 HEAD or packed-refs raised UnicodeDecodeError into the tab."""
+    for source in ENTRY.emulator.sources:
+        git_dir = tmp_path / source.dest / ".git"
+        git_dir.mkdir(parents=True, exist_ok=True)
+        (git_dir / "HEAD").write_bytes(b"ref: refs/heads/\xff\xfe\n")
+    (tmp_path / ".git" / "HEAD").write_bytes(b"\xff\xfe\x00garbage")
+    bots = tmp_path / ENTRY.emulator.sources[1].dest / ".git"
+    (bots / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    (bots / "packed-refs").write_bytes(b"\xff\xfe not text\n")
+
+    pins = native.tested_pins(tmp_path, ENTRY.emulator.sources)
+
+    assert [pin.head for pin in pins] == [None, None]
+    assert native.source_version(None, (), pins) == native.SourceVersion("", past_the_pin=False)
