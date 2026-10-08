@@ -2591,6 +2591,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
+    ("rmtree.py", "remove_tree_stoppably"): (
+        "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "
+        "can ask the claim's `stop()` before each unlink and rmdir. It IS a write, and it is "
+        "the one place that decides it: the caller asked for this very tree to go, a link "
+        "inside is unlinked, never followed, a link given as the root is refused, and a stop "
+        "leaves whole files for the next press to settle (T549)"
+    ),
     ("apply.py", "_conflict_refusal"): (
         "lists the clone directory of a module this manifest DECLARES a conflict with, to "
         "answer one question about it: does it hold anything. `clone_names()` counts every "

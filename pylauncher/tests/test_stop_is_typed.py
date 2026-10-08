@@ -51,6 +51,10 @@ NOT_THE_STOP = {
     "selfupdate/apply.py::_stop_if_cancelled": "the app's own update, said in its own dialog",
     "selfupdate/fetch.py::download": "the app's own update, said in its own dialog",
     "selfupdate/fetch.py::_refuse_if_stalled": "the app stopped a stalled download; no Stop",
+    "rmtree.py::remove_tree_stoppably": (
+        "its `stop` is a press's lost folder claim, never the player's Stop; the press catches "
+        "`StoppedPartWay` and says the claim was lost (T549)"
+    ),
 }
 """Sentences that mention a stop and are not the player's Stop taking effect, with why."""
 
