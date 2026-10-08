@@ -2310,6 +2310,10 @@ def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
     assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
     for entry in _every_game():
         game = entry.id
+        if game == "wow-unbound":  # T554: it runs the WotLK importer, on its own containers
+            assert entry.container_spec().import_service == "ub-db-import"
+            assert ControllerServices.for_entry(entry, tmp_path).module_sql is not None
+            continue
         if game == "wow-wotlk":
             continue
         assert entry.container_spec().import_service == "", f"{game} now names an importer"
@@ -4634,6 +4638,7 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
     """
     prints = {
         "wow-wotlk": "ready...",
+        "wow-unbound": "ready...",
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
@@ -4799,7 +4804,7 @@ def test_a_tab_gets_a_manifest_store_exactly_when_the_catalog_says_it_has_one(
             continue
         assert services.store is not None and services.applier is not None, entry.id
         assert (
-            services.store.game == entry.id
+            services.store.game == entry.manifest_game()
         ), f"{entry.id}'s tab was handed {services.store.game}'s manifests"
         assert services.store.game_dir.is_dir(), f"{entry.id} has no manifests/<game>/ on disk"
 
@@ -6696,6 +6701,8 @@ BOT_SQL_BY_GAME = {
     "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
     # T179: the shipped entry's names (`catalog.json`, T179 Task 7).
     "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
+    # T554: the same schema names as WotLK, in the database container of its own.
+    "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
 }
 """Written out per game rather than read back out of the entry.
 

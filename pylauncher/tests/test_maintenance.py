@@ -1443,6 +1443,8 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
     catalog = load_catalog()
     factories = {
         "wow-wotlk": maintenance.mysql_for,
+        # WoW Unbound (T554) runs the WotLK controller on a database of its own.
+        "wow-unbound": maintenance.mysql_for,
         "wow-tbc": tbc.mysql_for,
         "wow-vanilla": vanilla.mysql_for,
         "wow-tortoise": tortoise.mysql_for,

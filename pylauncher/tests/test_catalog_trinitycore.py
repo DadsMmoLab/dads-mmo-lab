@@ -187,6 +187,7 @@ def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> 
         "wow-vanilla",
         "wow-tortoise",
         "wow-centurion",
+        "wow-unbound",
     ]
     for entry in catalog.games:
         native = entry.install.native

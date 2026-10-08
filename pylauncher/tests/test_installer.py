@@ -687,6 +687,7 @@ def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks
     }
     assert set(landings) == {
         "wow-wotlk",
+        "wow-unbound",
         "wow-tbc",
         "wow-vanilla",
         "wow-tortoise",
@@ -697,7 +698,8 @@ def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks
         for game_id, dests in landings.items()
         if any(PurePosixPath(dest) == PurePosixPath(".") for dest in dests)
     }
-    assert into_server_dir == {"wow-wotlk"}, (
+    # WoW Unbound is WotLK's layout (T554): the core is the server dir itself.
+    assert into_server_dir == {"wow-wotlk", "wow-unbound"}, (
         "a game's clone layout changed under `cancelled_install_message()`, which tells the "
         "user of every other game that nothing this install downloads reaches the server dir: "
         + repr(landings)

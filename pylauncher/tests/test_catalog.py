@@ -26,20 +26,29 @@ from yulon.catalog.catalog import (
 )
 from yulon.controller_wow_wotlk import docker_ctl
 
-V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+V1_GAMES = (
+    "wow-wotlk",
+    "wow-tbc",
+    "wow-vanilla",
+    "wow-tortoise",
+    "wow-centurion",
+    "wow-unbound",
+)
 """README §1's four v1 servers, and Centurion after them (T179 Task 7)."""
 
 
-def test_bundled_catalog_describes_exactly_the_five_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_six_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
-    Plus Centurion (T179), the first server that is not one of the four.
+    Plus Centurion (T179), the first server that is not one of the four, and WoW Unbound
+    (T554), a WotLK of its own that runs beside the first and so has ports of its own.
     """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
     for game in catalog.games:
         assert "Dadcraft" not in game.name and "Dadcraft" not in game.id
-        assert game.ports.auth == 3724  # shared by every v1 server (README §12)
+        # shared by every v1 server (README §12), except the one built to run beside WotLK
+        assert game.ports.auth == (3725 if game.id == "wow-unbound" else 3724)
         assert game.client.build > 0
 
 
@@ -355,6 +364,7 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
     offered = {game.id: game.install.native.update_to_latest for game in load_catalog().games}
     assert offered == {
         "wow-wotlk": True,
+        "wow-unbound": True,
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
@@ -365,8 +375,10 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
-    ports = {g.ports.auth for g in load_catalog().games}
+    ports = {g.ports.auth for g in load_catalog().games if g.id != "wow-unbound"}
     assert ports == {3724}
+    # ... and the one entry made to run BESIDE another has ports of its own (T552).
+    assert load_catalog().get("wow-unbound").ports.auth == 3725
 
 
 def test_unknown_game_and_bad_entries_are_rejected() -> None:

@@ -217,6 +217,14 @@ _GAMES: dict[str, _GameRates] = {
         keys=_ALL_KEYS,
         notes={},
     ),
+    # T554: the same core at the same pin, and the same world conf, as wow-wotlk.
+    "wow-unbound": _GameRates(
+        file="env/dist/etc/worldserver.conf",
+        repo="mod-playerbots/azerothcore-wotlk",
+        rev="7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+        keys=_ALL_KEYS,
+        notes={},
+    ),
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",

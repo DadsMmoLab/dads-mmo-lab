@@ -3056,7 +3056,7 @@ class InstallParty:
         an AzerothCore module. A CMaNGOS tree gets no My Party control rather
         than a control that sends AzerothCore's commands at it.
         """
-        return entry.observability is not None and entry.id == "wow-wotlk"
+        return entry.observability is not None and entry.id in ("wow-wotlk", "wow-unbound")
 
     # -- reads ---------------------------------------------------------------
 

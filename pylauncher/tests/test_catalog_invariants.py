@@ -1164,13 +1164,13 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 51, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 51; "
+    assert len(values) == 62, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 62; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
 
-def test_the_provenance_debts_are_exactly_these_four() -> None:
+def test_the_provenance_debts_are_exactly_these() -> None:
     """The exit line's own clause: the unmeasured set, by name, in the catalog test.
 
     Spelled out here rather than derived, because the derivation is what it is
@@ -1183,12 +1183,32 @@ def test_the_provenance_debts_are_exactly_these_four() -> None:
     saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Three are values a
     press read back without ever asking for the answer the tree would refuse,
     and the fourth is a real measurement whose reading is not in this repo.
+
+    Since T554 also the eleven values `wow-unbound` copies from `wow-wotlk` (the same core
+    at the same pin): nobody has asked an Unbound server, and its live proof is what
+    settles them. They are debts by name, not `inherited` rows, because the guard above
+    forbids shipping an inherited value.
     """
     assert set(catalog_provenance.OWED) == {
         "wow-wotlk:play.mail_item_cap",
         "wow-wotlk:accounts.level.max_level",
         "wow-tbc:accounts.level.max_level",
         "wow-tortoise:accounts.scheme",
+    } | {
+        f"wow-unbound:{path}"
+        for path in (
+            "play.equipped.template_column",
+            "play.equipped.instance_table",
+            "play.equipped.inventory_column",
+            "play.teleport_command",
+            "play.rename_command",
+            "play.set_level_command",
+            "play.mail_item_cap",
+            "accounts.level.table",
+            "accounts.level.account_column",
+            "accounts.level.level_column",
+            "accounts.level.max_level",
+        )
     }
     for key, reason in catalog_provenance.OWED.items():
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"

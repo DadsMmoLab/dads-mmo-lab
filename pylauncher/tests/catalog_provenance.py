@@ -416,7 +416,29 @@ PROVENANCE: dict[str, Provenance] = {
 }
 
 
+_UNBOUND_COPIED_FROM_WOTLK = (
+    "Copied from wow-wotlk, which measured it (8.3a, 8.4a). Unbound builds the SAME core at the "
+    "same pin (7f12e89e) plus four source patches and the Unbound module, so the value is very "
+    "likely right, and that is what makes it worth a row: nobody has asked an Unbound server. "
+    "Settled by 8.4a's character presses and 8.3a's account-level press run on the Unbound "
+    "install (T554's live proof)."
+)
+"""One reason for all eleven of wow-unbound's play and accounts values."""
+
+
 OWED: dict[str, str] = {
+    # -- wow-unbound (T554): the same AzerothCore pin as wow-wotlk, never asked itself --------
+    "wow-unbound:play.equipped.template_column": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.equipped.instance_table": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.equipped.inventory_column": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.teleport_command": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.rename_command": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.set_level_command": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:play.mail_item_cap": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:accounts.level.table": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:accounts.level.account_column": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:accounts.level.level_column": _UNBOUND_COPIED_FROM_WOTLK,
+    "wow-unbound:accounts.level.max_level": _UNBOUND_COPIED_FROM_WOTLK,
     "wow-wotlk:play.mail_item_cap": (
         "8.4a sent twelve worn items in ONE mail and split nineteen into two, so twelve FITS -- "
         "but nothing on this tree has been asked whether thirteen is refused, and a cap is a "

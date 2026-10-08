@@ -4272,6 +4272,8 @@ class _BotBrowser:
         self.server_dir = server_dir
         self._sql = sql
 
+    # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
+    "wow-unbound": _for_wotlk,
     def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
