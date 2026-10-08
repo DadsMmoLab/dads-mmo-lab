@@ -7572,13 +7572,22 @@ _CLAIM_STILL_OURS_ASKS = 2
 """How many answers it takes to call a claim lost (cold review of T549): one slow or failed
 `docker inspect` is not a lost claim, and a loss, once said, stays said."""
 
+_CLAIM_ASK_GAP = 1.5
+"""Seconds between two such answers (cold review 2 of T549). Back to back, a transient
+fault -- the daemon answering "no such container" for a moment, as it can while it
+restarts its network -- fails both in milliseconds. The most a loss costs is two bounded
+asks plus this one wait."""
+
 
 def _claim_still_ours(held: _Claim) -> bool:
     """Does Docker say the claim `held` still runs, carrying this press's nonce? (T549)
 
-    Asked with `_CLAIM_ASK_TIMEOUT`, and once more before the answer is no.
+    Asked with `_CLAIM_ASK_TIMEOUT`, and once more, `_CLAIM_ASK_GAP` later, before the
+    answer is no.
     """
-    for _ in range(_CLAIM_STILL_OURS_ASKS):
+    for attempt in range(_CLAIM_STILL_OURS_ASKS):
+        if attempt:
+            time.sleep(_CLAIM_ASK_GAP)
         facts = _claim_facts(held.name, timeout=_CLAIM_ASK_TIMEOUT)
         if facts is not None and facts.nonce == held.nonce and facts.status == "running":
             return True

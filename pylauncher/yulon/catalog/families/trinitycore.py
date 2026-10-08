@@ -166,8 +166,9 @@ REEXTRACT_KEPT_ASIDE_CLAIM_LOST = (
 """What a `reextract()` whose folder claim ended mid-press ends with (T549)."""
 
 REEXTRACT_FINISH_AGAIN = (
-    "The new map data is in place, but this press did not finish: press "
-    f"\u201c{REEXTRACT_BUTTON}\u201d again to finish it."
+    "The new map data is in place, but this press did not finish clearing out the old data: "
+    f"press \u201c{REEXTRACT_BUTTON}\u201d again. It removes what is left of it, then "
+    "extracts the map data once more from the start."
 )
 """What a `reextract()` whose claim ended after the old map data was deleted ends with (T549)."""
 

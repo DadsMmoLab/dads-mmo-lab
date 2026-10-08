@@ -55,6 +55,7 @@ NOT_THE_STOP = {
         "its `stop` is a press's lost folder claim, never the player's Stop; the press catches "
         "`StoppedPartWay` and says the claim was lost (T549)"
     ),
+    "rmtree.py::_empty_stoppably": "the same stop as `remove_tree_stoppably`, for a subfolder",
 }
 """Sentences that mention a stop and are not the player's Stop taking effect, with why."""
 

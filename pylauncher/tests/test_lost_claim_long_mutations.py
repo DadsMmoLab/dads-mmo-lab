@@ -9,11 +9,13 @@ stops at the next file boundary in a state the next press settles.
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from yulon import rmtree
+from yulon import links, rmtree
 from yulon.catalog.families import extract
 
 
@@ -154,3 +156,59 @@ def test_a_stoppable_removal_refuses_a_root_that_is_a_link_and_leaves_its_target
         rmtree.remove_tree_stoppably(link, lambda: False)
     assert not isinstance(raised.value, rmtree.StoppedPartWay)
     assert (outside / "keep.map").read_bytes() == b"MAPS", "the link's target was walked"
+
+
+def _junction(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
+    """`links.is_link` says yes for exactly `paths`, as for an NTFS junction (a reparse point
+    whose tag is a mount point, which `stat.S_ISLNK` and `os.path.islink` call a folder)."""
+    real = links._lstat
+    named = {os.fspath(path) for path in paths}
+
+    class _Junction:
+        st_mode = stat.S_IFDIR | 0o755
+        st_file_attributes = links.FILE_ATTRIBUTE_REPARSE_POINT | 0x10
+        st_reparse_tag = links.IO_REPARSE_TAG_MOUNT_POINT
+
+    monkeypatch.setattr(
+        links,
+        "_lstat",
+        lambda path, *a, **k: _Junction() if os.fspath(path) in named else real(path, *a, **k),
+    )
+
+
+def test_a_junction_inside_the_tree_is_never_entered_and_its_target_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review 2 of T549: `os.walk` and `islink` do not know an NTFS junction, so the
+    removal went through `data\\maps -> D:\\shared-maps` and unlinked the target's files.
+
+    A directory the walk would enter is made to read as a junction; its files must stay.
+    Mutations this catches: the junction rule dropped from `_is_link`; the leaf decision
+    made after the descent instead of before it.
+    """
+    tree = tmp_path / "old"
+    (tree / "maps").mkdir(parents=True)
+    (tree / "maps" / "own.map").write_bytes(b"MAPS")
+    shared = tree / "shared"
+    shared.mkdir()
+    keep = [shared / f"keep-{i}.bin" for i in range(5)]
+    for path in keep:
+        path.write_bytes(b"SHARED")
+    _junction(monkeypatch, shared)
+    with pytest.raises(OSError):  # a real junction would just go; this one holds files
+        rmtree.remove_tree_stoppably(tree, lambda: False)
+    assert all(path.read_bytes() == b"SHARED" for path in keep), "the junction's target was walked"
+
+
+def test_a_junction_given_as_the_root_is_refused_and_its_target_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation this catches: the root checked with `islink` alone."""
+    target = tmp_path / "shared"
+    target.mkdir()
+    (target / "keep.map").write_bytes(b"MAPS")
+    _junction(monkeypatch, target)
+    with pytest.raises(OSError, match="junction") as raised:
+        rmtree.remove_tree_stoppably(target, lambda: False)
+    assert not isinstance(raised.value, rmtree.StoppedPartWay)
+    assert (target / "keep.map").read_bytes() == b"MAPS"

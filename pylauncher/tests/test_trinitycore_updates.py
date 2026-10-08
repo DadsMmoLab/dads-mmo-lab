@@ -3717,6 +3717,12 @@ def test_a_claim_lost_just_before_the_flag_goes_keeps_the_flag_and_says_press_ag
     assert "reservation" in str(raised.value), raised.value
     assert flag.exists() and needs_reextract(box.server_dir, ENTRY) is not None
     assert trinitycore.REEXTRACT_FINISH_AGAIN in str(raised.value), raised.value
+    # The sentence is true (cold review 2): the next press extracts the map data again.
+    _watcher_claim(box)
+    box.m.tools.seen.clear()
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "mapextractor" in box.m.tools.seen, "the next press did not extract again"
+    assert needs_reextract(box.server_dir, ENTRY) is None
 
 
 def _lose_claim_when(

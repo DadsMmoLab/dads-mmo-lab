@@ -22,6 +22,7 @@ import stat
 from collections.abc import Callable
 from pathlib import Path
 
+from yulon import links
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -40,37 +41,72 @@ class StoppedPartWay(Exception):
     """A removal or a move its `stop` ended between two files (T549); every file left is whole."""
 
 
+def _is_link(path: str) -> bool:
+    """Is `path` a symbolic link or a junction: something that points out of the tree?
+
+    `yulon.links` has the one rule (T375): on Windows a junction is a folder to
+    `os.path.islink()`, `DirEntry.is_symlink()` and `os.walk()`, so a walk that trusts
+    them goes THROUGH it and works on the target. A path that cannot be looked at
+    counts as a link, the cautious answer: the removal then touches only that name.
+    """
+    try:
+        return links.is_link(path)
+    except OSError:
+        return True
+
+
+def _unlink_link(path: str) -> None:
+    """Remove a link or junction itself, never what it points at."""
+    try:
+        os.unlink(path)
+    except OSError:
+        # A directory link on Windows can need `rmdir`, which removes the link and
+        # refuses (never empties) a real directory.
+        os.rmdir(path)
+
+
+def _empty_stoppably(path: str, root: Path, stop: Callable[[], bool]) -> None:
+    """Remove everything under `path`, asking `stop()` before each unlink and each rmdir."""
+    with os.scandir(path) as listing:
+        entries = list(listing)
+    for entry in entries:
+        full = entry.path
+        if _is_link(full):
+            # A leaf, whatever it points at (files, folders, a junction to another disk):
+            # only the link goes.
+            if stop():
+                raise StoppedPartWay(f"the removal of {root} was stopped part way")
+            _unlink_link(full)
+        elif entry.is_dir(follow_symlinks=False):
+            _empty_stoppably(full, root, stop)
+            if stop():
+                raise StoppedPartWay(f"the removal of {root} was stopped part way")
+            os.rmdir(full)
+        else:
+            if stop():
+                raise StoppedPartWay(f"the removal of {root} was stopped part way")
+            os.unlink(full)
+
+
 def remove_tree_stoppably(path: Path, stop: Callable[[], bool]) -> bool:
     """`shutil.rmtree(path)` file by file, asking `stop()` before each; False when nothing there.
 
     For a long change to a folder a press may lose its claim on during it (T549):
     the claim watcher's flag is asked per file -- in process, no Docker call -- and
-    the removal stops at the next file boundary. A link inside is removed as a link,
-    never followed.
+    the removal stops at the next file boundary. A symbolic link or an NTFS junction
+    inside is removed as a link and never entered, so what it points at is untouched
+    (`os.walk` does not know a junction; this does). A link or junction given as the
+    ROOT is refused, as `shutil.rmtree` refuses one.
 
     Raises:
         StoppedPartWay: `stop()` answered True; what is left is whole files.
-        OSError: as `shutil.rmtree` would.
+        OSError: as `shutil.rmtree` would, and for a root that is a link or junction.
     """
     if not os.path.lexists(path):
         return False
-    if os.path.islink(path):
-        # `shutil.rmtree` refuses a top-level link, and `os.walk` would follow it into its
-        # target, outside the claimed folder (Codex adversarial review, T549 round 6).
-        raise OSError(f"Cannot remove {path}: it is a symbolic link, not a folder")
-    for root, dirs, files in os.walk(path, topdown=False):
-        for name in files:
-            if stop():
-                raise StoppedPartWay(f"the removal of {path} was stopped part way")
-            os.unlink(os.path.join(root, name))
-        for name in dirs:
-            full = os.path.join(root, name)
-            if stop():
-                raise StoppedPartWay(f"the removal of {path} was stopped part way")
-            if os.path.islink(full):
-                os.unlink(full)
-            else:
-                os.rmdir(full)
+    if _is_link(os.fspath(path)):
+        raise OSError(f"Cannot remove {path}: it is a symbolic link or junction, not a folder")
+    _empty_stoppably(os.fspath(path), path, stop)
     if stop():
         raise StoppedPartWay(f"the removal of {path} was stopped part way")
     os.rmdir(path)

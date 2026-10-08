@@ -709,3 +709,33 @@ def test_one_slow_answer_about_a_held_claim_does_not_lose_it(
         assert held.held(), "one slow answer lost the claim"
         assert not held.lost.is_set()
         assert timeouts and all(t == docker._CLAIM_ASK_TIMEOUT for t in timeouts), timeouts
+
+
+def test_the_two_asks_about_a_held_claim_are_a_moment_apart(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review 2 of T549: back to back, a transient "no such container" fails both asks in
+    milliseconds. The second ask waits `_CLAIM_ASK_GAP`, and only when the first said no.
+
+    Mutations this catches: no wait between the asks; a wait before the first ask too.
+    """
+    folder = tmp_path / "data"
+    folder.mkdir()
+    with docker.folder_claim(folder, IMAGE) as held:
+        real = docker._claim_facts
+        events: list[str] = []
+        asked = [0]
+
+        def transient(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+            events.append("ask")
+            asked[0] += 1
+            return None if asked[0] == 1 else real(name, timeout=timeout)
+
+        monkeypatch.setattr(docker, "_claim_facts", transient)
+        monkeypatch.setattr(docker.time, "sleep", lambda seconds: events.append(f"sleep {seconds}"))
+        assert held.held(), "a transient no lost the claim"
+        assert events == ["ask", f"sleep {docker._CLAIM_ASK_GAP}", "ask"], events
+        events.clear()
+        assert held.held()
+        assert events == ["ask"], "a claim that answers at once is not made to wait"
+    assert 1.0 <= docker._CLAIM_ASK_GAP <= 2.0
