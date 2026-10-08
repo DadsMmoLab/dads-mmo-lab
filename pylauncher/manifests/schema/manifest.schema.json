@@ -778,6 +778,15 @@
       "title": "Description",
       "type": "string"
     },
+    "folders": {
+      "default": [],
+      "description": "Empty folders, relative to the server dir, the install makes when they are not there: a place the module reads that the player fills (mod-ale's lua_scripts). Files already in one are never touched; a Remove takes back a folder that is still empty and leaves one that holds anything, and says so.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Folders",
+      "type": "array"
+    },
     "game": {
       "minLength": 1,
       "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
