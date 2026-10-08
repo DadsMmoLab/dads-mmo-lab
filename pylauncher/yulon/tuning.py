@@ -585,6 +585,22 @@ def _check_decimal(key: ConfKey, value: str) -> None:
         raise RateRefused(f"{row}: {text} is above the largest allowed value {key.max}.")
 
 
+def core_bool(value: str) -> bool | None:
+    """What AzerothCore's `GetOption<bool>` makes of `value`, or `None`.
+
+    `StringTo<bool>` non-strict (`StringConvert.h:94-122` at 7f12e89e): `1`,
+    `y`, `on`, `yes`, `true` are on and `0`, `n`, `off`, `no`, `false` are off,
+    letters in any case. `None` is a bad value, for which the core logs and
+    uses the option's compiled default.
+    """
+    word = value.strip()
+    if word == "1" or word.lower() in ("y", "on", "yes", "true"):
+        return True
+    if word == "0" or word.lower() in ("n", "off", "no", "false"):
+        return False
+    return None
+
+
 _BOOL_WORDS = frozenset({"0", "1", "true", "false"})
 """What a `bool` key accepts, and nothing wider.
 

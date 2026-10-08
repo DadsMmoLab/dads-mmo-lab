@@ -1,0 +1,108 @@
+diff --git a/src/server/game/Conditions/ConditionMgr.cpp b/src/server/game/Conditions/ConditionMgr.cpp
+index 90319545d..9a5ba20ed 100644
+--- a/src/server/game/Conditions/ConditionMgr.cpp
++++ b/src/server/game/Conditions/ConditionMgr.cpp
+@@ -132,7 +132,15 @@ bool Condition::Meets(ConditionSourceInfo& sourceInfo)
+     case CONDITION_CLASS:
+     {
+         if (Unit* unit = object->ToUnit())
++        {
+             condMeets = unit->getClassMask() & ConditionValue1;
++
++            // Unbound Wrath Edition — also meets the condition if any class
++            // this character has unlocked via the Mentor matches.
++            if (!condMeets)
++                if (Player* player = unit->ToPlayer())
++                    condMeets = player->GetUnboundClassMask() & ConditionValue1;
++        }
+         break;
+     }
+     case CONDITION_RACE:
+diff --git a/src/server/game/Entities/Creature/Trainer.cpp b/src/server/game/Entities/Creature/Trainer.cpp
+index 58b61aabb..819a6e5a6 100644
+--- a/src/server/game/Entities/Creature/Trainer.cpp
++++ b/src/server/game/Entities/Creature/Trainer.cpp
+@@ -216,7 +216,12 @@ namespace Trainer
+             case Type::Class:
+             case Type::Pet:
+                 // check class for class trainers
+-                return player->getClass() == GetTrainerRequirement();
++                if (player->getClass() == GetTrainerRequirement())
++                    return true;
++
++                // Unbound Wrath Edition — also valid for any class this
++                // character has unlocked via the Mentor.
++                return (player->GetUnboundClassMask() & (1u << (GetTrainerRequirement() - 1))) != 0;
+             case Type::Mount:
+                 // check race for mount trainers
+                 return player->getRace() == GetTrainerRequirement();
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+index ee531531a..335b9b2cd 100644
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -12367,7 +12367,9 @@ float Player::GetReputationPriceDiscount(FactionTemplateEntry const* factionTemp
+ bool Player::IsSpellFitByClassAndRace(uint32 spell_id) const
+ {
+     uint32 racemask  = getRaceMask();
+-    uint32 classmask = getClassMask();
++    // Unbound Wrath Edition — also fit spells belonging to any class this
++    // character has unlocked via the Mentor (trainer spell visibility).
++    uint32 classmask = getClassMask() | GetUnboundClassMask();
+ 
+     SkillLineAbilityMapBounds bounds = sSpellMgr->GetSkillLineAbilityMapBounds(spell_id);
+     if (bounds.first == bounds.second)
+diff --git a/src/server/game/Entities/Player/Player.h b/src/server/game/Entities/Player/Player.h
+index 4f38d8012..190374724 100644
+--- a/src/server/game/Entities/Player/Player.h
++++ b/src/server/game/Entities/Player/Player.h
+@@ -2134,6 +2134,12 @@ public:
+     void SetFactionForRace(uint8 race);
+     void setTeamId(TeamId teamid) { m_team = teamid; };
+ 
++    // Unbound Wrath Edition — bitmask of classes this character has access to
++    // via the Mentor (native class | every class unlocked in unbound_character_unlocks).
++    // 0 means this character is not Unbound. Populated on login by UnboundSystem.cpp.
++    [[nodiscard]] uint32 GetUnboundClassMask() const { return m_unboundClassMask; }
++    void SetUnboundClassMask(uint32 mask) { m_unboundClassMask = mask; }
++
+     void InitDisplayIds();
+ 
+     bool IsAtGroupRewardDistance(WorldObject const* pRewardSource) const;
+@@ -2829,6 +2835,7 @@ protected:
+     ObjectGuid m_lootGuid;
+ 
+     TeamId m_team;
++    uint32 m_unboundClassMask = 0; // Unbound Wrath Edition — see GetUnboundClassMask()
+     uint32 m_nextSave; // pussywizard
+     uint16 m_additionalSaveTimer; // pussywizard
+     uint8 m_additionalSaveMask; // pussywizard
+diff --git a/src/server/game/Entities/Player/PlayerQuest.cpp b/src/server/game/Entities/Player/PlayerQuest.cpp
+index 94ac419b4..b92ab0925 100644
+--- a/src/server/game/Entities/Player/PlayerQuest.cpp
++++ b/src/server/game/Entities/Player/PlayerQuest.cpp
+@@ -1091,7 +1091,9 @@ bool Player::SatisfyQuestClass(Quest const* qInfo, bool msg) const
+     if (reqClass == 0)
+         return true;
+ 
+-    if ((reqClass & getClassMask()) == 0)
++    // Unbound Wrath Edition — also satisfy class quests for any class this
++    // character has unlocked via the Mentor.
++    if ((reqClass & (getClassMask() | GetUnboundClassMask())) == 0)
+     {
+         if (msg)
+             SendCanTakeQuestResponse(INVALIDREASON_DONT_HAVE_REQ);
+diff --git a/src/server/game/Entities/Player/PlayerStorage.cpp b/src/server/game/Entities/Player/PlayerStorage.cpp
+index eb7f10aab..1e37b5b9b 100644
+--- a/src/server/game/Entities/Player/PlayerStorage.cpp
++++ b/src/server/game/Entities/Player/PlayerStorage.cpp
+@@ -2389,7 +2389,9 @@ InventoryResult Player::CanUseItem(ItemTemplate const* proto) const
+         return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+     }
+ 
+-    if ((proto->AllowableClass & getClassMask()) == 0 || (proto->AllowableRace & getRaceMask()) == 0)
++    // Unbound Wrath Edition — characters who've unlocked extra classes via the
++    // Mentor can ignore an item's AllowableClass restriction; AllowableRace is untouched.
++    if ((GetUnboundClassMask() == 0 && (proto->AllowableClass & getClassMask()) == 0) || (proto->AllowableRace & getRaceMask()) == 0)
+     {
+         return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+     }

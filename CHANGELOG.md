@@ -14,12 +14,19 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
+- WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
+- The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.
+- WoW Unbound's Mentor stands in every capital and in Dalaran, and the install checks that all nine are there.
 - **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
+- **Set level** on a character in the world now saves it, so the Characters list shows the new level.
+- **My Party** no longer says the Lua engine is switched off when its settings file says true.
+- Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
@@ -27,6 +34,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
+- A world update whose file is gone can be skipped from **Apply database corrections…**; a renamed one is retried.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.

@@ -61,6 +61,7 @@ VANILLA = load_catalog().get("wow-vanilla")
 
 NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
     "wow-wotlk": ("auth", "characters", "world", "playerbots"),
+    "wow-unbound": ("auth", "characters", "world", "playerbots"),  # WotLK's family and pin
     "wow-tbc": (),
     "wow-vanilla": (),
     "wow-tortoise": ("auth", "characters"),

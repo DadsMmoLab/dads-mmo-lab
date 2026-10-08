@@ -265,7 +265,10 @@ def test_the_database_image_is_no_familys_to_remove_and_this_ones_is_shared(
         if game.install.native is not None
         and game.id != WOTLK
         and game.install.native.db.image == wotlk_db
-    } == {"wow-centurion"}
+    } == {
+        "wow-centurion",
+        "wow-unbound",
+    }  # T554: Unbound runs WotLK's database image too
 
 
 def test_only_the_cmangos_tree_makes_the_record_name_a_folder_outside_the_install(

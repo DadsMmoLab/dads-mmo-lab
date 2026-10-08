@@ -301,6 +301,36 @@ class SqlCheck(_Strict):
         return f"SELECT COUNT(*) FROM `{schema}`.`{self.table}`{where};"
 
 
+class ModuleHealth(_Strict):
+    """What the Server tab checks to say a module loaded, once per run (T555 T5).
+
+    Data, not a rule about one entry's id: the module's name for the sentence, the lines its
+    own code prints to the world log when it loads (`log_markers`), and which of the entry's
+    `sql_checks` counts the thing the player can see stand somewhere (`count_table`, said as
+    `<count_label> in N places`). The tables and counts are `AzerothCoreData.sql_checks`.
+    """
+
+    name: str = Field(min_length=1, description="The module as the sentence names it.")
+    log_markers: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Lines the module prints to the world's log at EVERY start (not only when some "
+            "table has rows), matched as text."
+        ),
+    )
+    count_label: str = Field(default="", description="What `count_table` counts: `Mentor`.")
+    count_table: str = Field(
+        default="",
+        description="The `sql_checks` table whose count is said as `<label> in N places`.",
+    )
+
+    @model_validator(mode="after")
+    def _a_count_has_both_halves(self) -> ModuleHealth:
+        if bool(self.count_label) != bool(self.count_table):
+            raise ValueError("health count_label and count_table are given together or not at all")
+        return self
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
@@ -322,6 +352,11 @@ class AzerothCoreData(_Strict):
         description="Read-only counts the databases must reach after the import (T553).",
     )
 
+    health: ModuleHealth | None = Field(
+        default=None,
+        description='The Server tab\'s "module loaded" sentence for this entry (T555 T5).',
+    )
+
     confs_from_dist: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -334,6 +369,17 @@ class AzerothCoreData(_Strict):
             "for such a module stay in `world_env`, which wins over the file."
         ),
     )
+
+    @model_validator(mode="after")
+    def _a_counted_table_is_a_checked_one(self) -> AzerothCoreData:
+        health = self.health
+        if health is not None and health.count_table:
+            if health.count_table not in {check.table for check in self.sql_checks}:
+                raise ValueError(
+                    f"health count_table {health.count_table!r} is not a table of this "
+                    "entry's sql_checks, so it could not be counted"
+                )
+        return self
 
     @field_validator("confs_from_dist")
     @classmethod
@@ -3150,8 +3196,10 @@ class CatalogEntry(_Strict):
     manifests_from: Slug | None = Field(
         default=None,
         description=(
-            "The entry whose manifests/<id>/ tree this one reads, when it shares another's "
-            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id."
+            "The entry whose SHIPPED manifests/<id>/ tree this one reads, when it shares another's "
+            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id. "
+            "Modules the user added from a link or a folder are never shared: they stay under "
+            "this entry's own id (T554)."
         ),
     )
     help_places: tuple[HelpPlace, ...] = Field(
@@ -3357,7 +3405,10 @@ class CatalogEntry(_Strict):
         return found
 
     def manifest_game(self) -> str:
-        """The `manifests/<game>/` tree this entry's modules come from (T552)."""
+        """The shipped `manifests/<game>/` tree this entry's modules come from (T552).
+
+        The user layer is not covered: a module added on this server is kept under `self.id`.
+        """
         return self.manifests_from or self.id
 
     def schema_map(self) -> dict[Db, str]:

@@ -69,10 +69,17 @@ class ManifestStore:
     arrive by hand as easily as by a press.
     """
 
-    def __init__(self, root: Path, game: str, user_root: Path | None = None) -> None:
+    def __init__(
+        self, root: Path, game: str, user_root: Path | None = None, *, user_game: str | None = None
+    ) -> None:
         self.root = root
         self.game = game
         self.user_root = user_root
+        # The user layer's game, `game` unless a caller names its own. A server
+        # that offers another game's SHIPPED manifests keeps the modules the user
+        # added to it under its own id (T554: WoW Unbound shows WotLK's catalog,
+        # and a Remove on Unbound must never drop WotLK's record).
+        self.user_game = user_game or game
 
     @property
     def game_dir(self) -> Path:
@@ -99,17 +106,18 @@ class ManifestStore:
     def _user_game_dir(self) -> Path:
         if self.user_root is None:
             raise ManifestError("this store has no user layer")
-        return self.user_root / self.game
+        return self.user_root / self.user_game
 
     def load_index(self, kind: ManifestType) -> Index:
         """Parse the family index; raises `ManifestError` if missing/invalid."""
         return self._index_at(self.index_path(kind), kind)
 
-    def _index_at(self, path: Path, kind: ManifestType) -> Index:
+    def _index_at(self, path: Path, kind: ManifestType, game: str | None = None) -> Index:
+        expected = game or self.game
         index = parse_index(_read_json(path))
-        if index.game != self.game or index.type != kind:
+        if index.game != expected or index.type != kind:
             raise ManifestError(
-                f"{path} is for {index.game}/{index.type}, expected {self.game}/{kind}"
+                f"{path} is for {index.game}/{index.type}, expected {expected}/{kind}"
             )
         return index
 
@@ -128,7 +136,7 @@ class ManifestStore:
         path = self.user_index_path(kind)
         if not path.is_file():
             return ()
-        return self._index_at(path, kind).items
+        return self._index_at(path, kind, self.user_game).items
 
     def load(self, kind: ManifestType, item_id: str) -> Manifest:
         """Parse one item; raises `ManifestError` if missing/invalid or mismatched.
@@ -136,17 +144,19 @@ class ManifestStore:
         The bundled file when the bundled index lists the id, the user file
         otherwise. With no user layer this is what it always was, byte for byte.
         """
-        path = self.item_path(kind, item_id)
         if self.user_root is not None and item_id not in self.load_index(kind).items:
-            path = self.user_item_path(kind, item_id)
-        return self._load_at(path, kind, item_id)
+            return self._load_at(self.user_item_path(kind, item_id), kind, item_id, self.user_game)
+        return self._load_at(self.item_path(kind, item_id), kind, item_id)
 
-    def _load_at(self, path: Path, kind: ManifestType, item_id: str) -> Manifest:
+    def _load_at(
+        self, path: Path, kind: ManifestType, item_id: str, game: str | None = None
+    ) -> Manifest:
+        expected = game or self.game
         manifest = load_manifest(path)
-        if manifest.id != item_id or manifest.type != kind or manifest.game != self.game:
+        if manifest.id != item_id or manifest.type != kind or manifest.game != expected:
             raise ManifestError(
                 f"{path} declares {manifest.game}/{manifest.type}/{manifest.id}, "
-                f"expected {self.game}/{kind}/{item_id}"
+                f"expected {expected}/{kind}/{item_id}"
             )
         return manifest
 
@@ -186,7 +196,7 @@ class ManifestStore:
                 continue
             path = self.user_item_path(kind, item_id)
             try:
-                yield self._load_at(path, kind, item_id)
+                yield self._load_at(path, kind, item_id, self.user_game)
             except USER_ITEM_UNREADABLE as exc:
                 reason = _skip_reason(path, exc)
                 logger.warning(f"skipping {reason}")
