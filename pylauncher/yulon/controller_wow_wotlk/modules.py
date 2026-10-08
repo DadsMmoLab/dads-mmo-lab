@@ -104,7 +104,9 @@ def shipped_ids(kind: ManifestType = "module") -> tuple[str, ...]:
     return ManifestStore(BUNDLED_MANIFESTS_DIR, GAME).load_index(kind).items
 
 
-def store(root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None) -> ManifestStore:
+def store(
+    root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None, *, user_game: str = GAME
+) -> ManifestStore:
     """The WotLK manifest store over `root`, with the user layer over it.
 
     `root` is the bundled tree by default (or a refreshed cache); the second layer
@@ -114,22 +116,34 @@ def store(root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None) -> 
     next start without the view learning anything new. A caller that wants the
     bundled tree ALONE builds `ManifestStore(root, GAME)` itself — `shipped_ids()`
     is the one that does.
+
+    `user_game` is the server whose user layer is read: another AzerothCore
+    server that offers WotLK's shipped manifests (WoW Unbound) keeps the modules
+    added to it under its own game id, never under WotLK's (T554).
     """
-    return ManifestStore(root, GAME, user_root if user_root is not None else user_manifests_dir())
+    return ManifestStore(
+        root,
+        GAME,
+        user_root if user_root is not None else user_manifests_dir(),
+        user_game=user_game,
+    )
 
 
-def derive_link(text: str) -> Manifest:
+def derive_link(text: str, game: str = GAME) -> Manifest:
     """A WotLK module manifest for the link `text`, or `module_source.DeriveError`.
 
     Minimal: what a link can be known to say before it is cloned. `complete()`
     below is the other half, run once the clone is on disk.
     """
-    return module_source.derive_link(text, GAME, today=date.today(), shipped_ids=shipped_ids())
+    return module_source.derive_link(text, game, today=date.today(), shipped_ids=shipped_ids())
 
 
-def derive_folder(path: Path) -> Manifest:
-    """A WotLK module manifest for the folder `path`, or `module_source.DeriveError`."""
-    return module_source.derive_folder(path, GAME, today=date.today(), shipped_ids=shipped_ids())
+def derive_folder(path: Path, game: str = GAME) -> Manifest:
+    """A WotLK module manifest for the folder `path`, or `module_source.DeriveError`.
+
+    `game` is the server it is added to, which is also where `complete()` keeps it.
+    """
+    return module_source.derive_folder(path, game, today=date.today(), shipped_ids=shipped_ids())
 
 
 def complete(manifest: Manifest, clone: Path) -> Manifest:
@@ -149,13 +163,17 @@ def complete(manifest: Manifest, clone: Path) -> Manifest:
     return completed
 
 
-def forget(manifest: Manifest) -> bool:
-    """Drop `manifest` from the user layer; `True` if there was one to drop.
+def forget(manifest: Manifest, game: str = GAME) -> bool:
+    """Drop `manifest` from `game`'s user layer; `True` if there was one to drop.
 
     Called AFTER a remove returned, never before. `False` for every shipped
     module, which is how the caller learns a shipped one has nothing to forget
-    without reading `manifest.origin` itself.
+    without reading `manifest.origin` itself. `False` too for a manifest of
+    another server's user layer: a Remove on WoW Unbound never drops WotLK's
+    record of a module still installed there (T554).
     """
+    if manifest.game != game:
+        return False
     return module_source.forget(user_manifests_dir(), manifest)
 
 
@@ -305,6 +323,7 @@ def module_updates(
     server_dir: Path,
     *,
     git: BehindReader | None = None,
+    user_game: str = GAME,
 ) -> tuple[ModuleUpdate, ...]:
     """How far behind each module installed at `server_dir` is (checklist 8.7a).
 
@@ -338,7 +357,7 @@ def module_updates(
         # and this loop continues past it, so the entries AFTER a bad custom file
         # keep their branch. What still reaches the `except` is this app's own
         # catalog and either index -- the cases that are app bugs, not user data.
-        for manifest in store().load_all("module"):
+        for manifest in store(user_game=user_game).load_all("module"):
             branches[manifest.id] = manifest.source.branch if manifest.source else None
             if manifest.source is not None and manifest.source.follow == "releases":
                 slug = github_slug(manifest.source.repo)
@@ -384,6 +403,7 @@ def apply_module_sql(
     output: Callable[[str], None] | None = None,
     wsl_distro: str | None = None,
     ledger: LedgerReader | None,
+    user_game: str = GAME,
 ) -> docker.AttachedRun:
     """Run the AzerothCore importer over `server_dir` for the modules that are ON DISK.
 
@@ -450,7 +470,9 @@ def apply_module_sql(
     database rather than one that quietly guesses.
     """
     say: Callable[[str], None] = output if output is not None else logger.info
-    plan = module_sql_plan(server_dir, _module_manifests(), docker.module_dir_names(server_dir))
+    plan = module_sql_plan(
+        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+    )
     service = spec.import_service or "the importer"
     say(f"Modules {service} is allowed to update: {plan.allowed or 'none'}")
     seen: list[str] = []
@@ -491,7 +513,7 @@ def apply_module_sql(
     return run
 
 
-def _module_manifests() -> tuple[Manifest, ...]:
+def _module_manifests(user_game: str = GAME) -> tuple[Manifest, ...]:
     """Every module manifest this app knows, or none if the tree cannot be read.
 
     The same boundary `module_updates()` keeps one function above, for the same
@@ -500,7 +522,7 @@ def _module_manifests() -> tuple[Manifest, ...]:
     logged, because "the updater was given everything" is a decision here.
     """
     try:
-        return tuple(store().load_all("module"))
+        return tuple(store(user_game=user_game).load_all("module"))
     except Exception as exc:  # boundary: a broken manifest tree must not stop the press
         logger.warning(f"could not read the wow-wotlk module manifests: {exc}")
         return ()

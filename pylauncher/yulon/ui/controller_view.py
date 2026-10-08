@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import functools
 import math
 import os
 import re
@@ -3085,8 +3086,12 @@ def _for_wotlk(
             "Nothing was opened."
         )
     spec = entry.container_spec()
-    record_backed = _record_backed_keys(wotlk_modules.store())
-    settings_mods = _settings_mods(wotlk_modules.store())
+    # The shipped manifests are WotLK's for every server here; the modules the
+    # user ADDED are this server's own, under its game id (T554: a Remove on
+    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    user_game = entry.id
+    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
+    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3321,7 +3326,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store() if entry.has_manifests else None,
+        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -3338,7 +3343,12 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir,
+                    spec=spec,
+                    output=output,
+                    wsl_distro=wsl_distro,
+                    ledger=sql,
+                    user_game=user_game,
                 )
             )
             if spec.import_service
@@ -3351,7 +3361,9 @@ def _for_wotlk(
         # this to `import_service` would make that coincidence load-bearing for
         # a future core that compiles modules and imports differently.
         module_updates=(
-            (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
+            (lambda: wotlk_modules.module_updates(server_dir, user_game=user_game))
+            if entry.has_manifests
+            else None
         ),
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
@@ -3391,8 +3403,16 @@ def _for_wotlk(
         # against a second one. `store()` already carries lane A's user layer
         # by default, which is what puts a derived manifest into the list on
         # the next start.
-        module_from_link=wotlk_modules.derive_link if module_applier is not None else None,
-        module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
+        module_from_link=(
+            functools.partial(wotlk_modules.derive_link, game=user_game)
+            if module_applier is not None
+            else None
+        ),
+        module_from_folder=(
+            functools.partial(wotlk_modules.derive_folder, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
         ),
@@ -3401,7 +3421,11 @@ def _for_wotlk(
             if module_applier is not None
             else None
         ),
-        module_forget=wotlk_modules.forget if module_applier is not None else None,
+        module_forget=(
+            functools.partial(wotlk_modules.forget, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
         # containers with `docker ps` — a second question, to the same daemon,

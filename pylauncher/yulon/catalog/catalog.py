@@ -3068,8 +3068,10 @@ class CatalogEntry(_Strict):
     manifests_from: Slug | None = Field(
         default=None,
         description=(
-            "The entry whose manifests/<id>/ tree this one reads, when it shares another's "
-            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id."
+            "The entry whose SHIPPED manifests/<id>/ tree this one reads, when it shares another's "
+            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id. "
+            "Modules the user added from a link or a folder are never shared: they stay under "
+            "this entry's own id (T554)."
         ),
     )
     help_places: tuple[HelpPlace, ...] = Field(
@@ -3275,7 +3277,10 @@ class CatalogEntry(_Strict):
         return found
 
     def manifest_game(self) -> str:
-        """The `manifests/<game>/` tree this entry's modules come from (T552)."""
+        """The shipped `manifests/<game>/` tree this entry's modules come from (T552).
+
+        The user layer is not covered: a module added on this server is kept under `self.id`.
+        """
         return self.manifests_from or self.id
 
     def schema_map(self) -> dict[Db, str]:

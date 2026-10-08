@@ -117,3 +117,135 @@ def test_wotlks_modules_tab_still_offers_ale(qapp: object, tmp_path: Path) -> No
     view = ControllerView(wotlk, ControllerServices.for_entry(wotlk, tmp_path), status_poll_ms=0)
     view.reload_modules()
     assert "mod-ale" in _offered(view)
+
+
+# -- T554 rework item 2: user-added manifests are per server, shipped ones shared --
+
+
+def _hand_made_folder(where: Path, setting: str) -> Path:
+    source = where / "mod-hand-made"
+    (source / "src").mkdir(parents=True)
+    (source / "conf").mkdir()
+    (source / "conf" / "mod_hand_made.conf.dist").write_text(
+        f"[worldserver]\nHandMade.Enable = {setting}\n", encoding="utf-8"
+    )
+    return source
+
+
+def _services_for(game: str, server_dir: Path) -> ControllerServices:
+    server_dir.mkdir()
+    password_file = entry(game).install.password.file
+    if password_file:
+        (server_dir / password_file).write_text("hunter2", encoding="utf-8")
+    return ControllerServices.for_entry(entry(game), server_dir)
+
+
+def _added(services: ControllerServices, source: Path) -> Manifest:
+    assert services.module_from_folder is not None
+    assert services.module_install_custom is not None
+    manifest = services.module_from_folder(source)
+    services.module_install_custom(manifest, source)
+    return manifest
+
+
+def _listed(services: ControllerServices) -> dict[str, Manifest]:
+    assert services.store is not None
+    return {m.id: m for m in services.store.load_all("module")}
+
+
+def test_a_module_added_on_unbound_is_its_own_and_never_touches_wotlks_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead decision 2026-10-08: `manifests_from` shares WotLK's SHIPPED manifests
+    only. A module the user added from a link or a folder is a record of one
+    server, kept under `<config>/manifests/user/<that server's game id>/`.
+
+    Before: Unbound read and wrote `user/wow-wotlk/`, so adding the same module
+    on Unbound overwrote WotLK's saved manifest and a Remove on Unbound deleted
+    it, leaving the module still installed on WotLK as an uncatalogued folder
+    with no Remove."""
+    from yulon import docker
+    from yulon.controller_wow_wotlk import modules
+
+    monkeypatch.setattr(docker, "world_running", lambda *a, **k: None)
+    wotlk = _services_for("wow-wotlk", tmp_path / "wotlk")
+    unbound = _services_for("wow-unbound", tmp_path / "unbound")
+    user_dir = modules.user_manifests_dir()
+
+    on_wotlk = _added(wotlk, _hand_made_folder(tmp_path / "a", "1"))
+    wotlk_record = user_dir / "wow-wotlk" / "modules" / "mod-hand-made.json"
+    wotlk_bytes = wotlk_record.read_bytes()
+    assert "mod-hand-made" not in _listed(unbound), "WotLK's own module is not offered on Unbound"
+
+    on_unbound = _added(unbound, _hand_made_folder(tmp_path / "b", "0"))
+    unbound_record = user_dir / "wow-unbound" / "modules" / "mod-hand-made.json"
+    assert unbound_record.is_file()
+    assert wotlk_record.read_bytes() == wotlk_bytes, "Unbound's add overwrote WotLK's record"
+    assert "mod-hand-made" in _listed(unbound)
+
+    assert unbound.module_forget is not None
+    assert unbound.module_forget(on_unbound) is True
+    assert not unbound_record.exists()
+    assert wotlk_record.read_bytes() == wotlk_bytes, "Unbound's remove dropped WotLK's record"
+    assert "mod-hand-made" in _listed(wotlk)
+    assert "mod-hand-made" not in _listed(unbound)
+    # The manifest the old shared tab handed Unbound's Remove: WotLK's own.
+    assert unbound.module_forget(on_wotlk) is False
+    assert wotlk_record.read_bytes() == wotlk_bytes
+
+
+def test_unbound_still_offers_wotlks_shipped_modules(tmp_path: Path) -> None:
+    shipped = set(ManifestStore(resources.manifests_dir(), "wow-wotlk").load_index("module").items)
+    unbound = ControllerServices.for_entry(entry("wow-unbound"), tmp_path)
+    assert shipped <= set(_listed(unbound))
+
+
+def test_the_update_count_and_the_sql_run_read_unbounds_own_user_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two other readers of the merged list: the update count's branch table and
+    the importer's plan. Both are handed the server's own game id."""
+    from yulon.controller_wow_wotlk import modules
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        modules, "module_updates", lambda server_dir, **kw: seen.update(updates=kw) or ()
+    )
+    monkeypatch.setattr(
+        modules, "apply_module_sql", lambda server_dir, **kw: seen.update(sql=kw) or None
+    )
+    services = ControllerServices.for_entry(entry("wow-unbound"), tmp_path)
+    assert services.module_updates is not None and services.module_sql is not None
+    services.module_updates()
+    services.module_sql(lambda _line: None)
+    assert seen["updates"] == {"user_game": "wow-unbound"}
+    assert seen["sql"]["user_game"] == "wow-unbound"  # type: ignore[index]
+
+
+def test_the_merged_list_reads_the_named_servers_user_layer_only(tmp_path: Path) -> None:
+    from yulon import module_source
+    from yulon.controller_wow_wotlk import modules
+
+    source = _hand_made_folder(tmp_path, "1")
+    made = modules.derive_folder(source, "wow-unbound")
+    module_source.persist(modules.user_manifests_dir(), made, shipped_ids=())
+    assert "mod-hand-made" in {m.id for m in modules._module_manifests("wow-unbound")}
+    assert "mod-hand-made" not in {m.id for m in modules._module_manifests()}
+
+
+def test_the_update_counts_branch_table_reads_the_named_servers_user_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import module_source
+    from yulon.controller_wow_wotlk import modules
+
+    made = modules.derive_link("https://github.com/you/mod-linked", "wow-unbound")
+    module_source.persist(modules.user_manifests_dir(), made, shipped_ids=())
+    asked: list[set[str]] = []
+    monkeypatch.setattr(
+        modules, "apply_updates", lambda _dir, **kw: asked.append(set(kw["branches"])) or ()
+    )
+    modules.module_updates(tmp_path, git=object(), user_game="wow-unbound")  # type: ignore[arg-type]
+    modules.module_updates(tmp_path, git=object())  # type: ignore[arg-type]
+    assert "mod-linked" in asked[0]
+    assert "mod-linked" not in asked[1]
