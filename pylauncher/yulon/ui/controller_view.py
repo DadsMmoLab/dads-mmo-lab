@@ -19558,7 +19558,7 @@ class ControllerView(QWidget):
                 continue
             try:
                 note = self._put_back(backups[-1], path)
-            except OSError as exc:
+            except (OSError, tuning.TuningError) as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
             self._note_tuning_owed(file)
@@ -19602,6 +19602,10 @@ class ControllerView(QWidget):
         bots. `put_back_file` keeps the file's own key lines whenever the backup
         asks for a rebuild anywhere; the sentence it returns goes in the report.
         """
+        # `tuning.restore` is a plain copy onto `target` and follows a link: a conf that
+        # was linked out of the install before an upgrade still has its `.bak` beside
+        # the link, and Revert would write the old text into the other file (T573).
+        tuning.check_inside(target, self.services.controller.server_dir)
         seam = self.services.bot_pool_rebuild
         if seam is None:
             tuning.restore(backup, target)
@@ -19713,6 +19717,10 @@ class ControllerView(QWidget):
             return
         try:
             note = self._put_back(backups[-1], path)
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))

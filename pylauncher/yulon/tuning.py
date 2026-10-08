@@ -655,8 +655,8 @@ def is_one_of(name: str, names: Iterable[str], root: Path | None = None) -> bool
     return False
 
 
-MAX_EDIT_BYTES = 2 * 1024 * 1024
-"""The largest conf the raw editor opens: 2 MB (T573 item 4).
+MAX_EDIT_BYTES = 1024 * 1024
+"""The largest conf the raw editor opens: 1 MB (T573 item 4).
 
 The shipped `worldserver.conf` is about 150 KB. The editor reads on the window's
 own thread, so a file of hundreds of megabytes (a log renamed to `.conf`, say)
@@ -710,15 +710,43 @@ def save_text(raw: str, edited: str) -> str:
     old_ends.append("")
     new_lines = _TERMINATOR.sub("\n", edited).split("\n")
     ends = [default] * len(new_lines)
-    plan = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
-    for _, i1, i2, j1, j2 in plan.get_opcodes():
-        for k in range(j2 - j1):
-            if i1 + k < i2:
-                ends[j1 + k] = old_ends[i1 + k] or default
-            elif j1 + k > 0:
-                ends[j1 + k] = ends[j1 + k - 1]
+    # The lines both texts start and end with are matched without any diff: a typical edit
+    # touches a few lines, and a line diff of a whole big file took seconds on the window's
+    # thread. What is left in the middle is diffed only when it is small; a rewrite bigger than
+    # `MAX_DIFF_LINES` on either side takes the file's usual ending (a lone edit of every line
+    # has no line worth keeping the bytes of).
+    low = len(old_lines)
+    high = len(new_lines)
+    head = 0
+    while head < min(low, high) and old_lines[head] == new_lines[head]:
+        ends[head] = old_ends[head] or default
+        head += 1
+    tail = 0
+    while tail < min(low, high) - head and old_lines[low - 1 - tail] == new_lines[high - 1 - tail]:
+        ends[high - 1 - tail] = old_ends[low - 1 - tail] or default
+        tail += 1
+    old_mid = old_lines[head : low - tail]
+    new_mid = new_lines[head : high - tail]
+    if len(old_mid) <= MAX_DIFF_LINES and len(new_mid) <= MAX_DIFF_LINES:
+        plan = difflib.SequenceMatcher(a=old_mid, b=new_mid, autojunk=False)
+        for _, i1, i2, j1, j2 in plan.get_opcodes():
+            for k in range(j2 - j1):
+                at = head + j1 + k
+                if i1 + k < i2:
+                    ends[at] = old_ends[head + i1 + k] or default
+                elif at > 0:
+                    ends[at] = ends[at - 1]
     ends[-1] = ""
+    # A lone-CR line followed by an empty line that ends in a bare LF would read back as ONE
+    # CRLF: the blank line gone. Such an empty line takes a lone CR as well.
+    for k in range(len(new_lines) - 1):
+        if ends[k] == "\r" and new_lines[k + 1] == "" and ends[k + 1] == "\n":
+            ends[k + 1] = "\r"
     return bom + "".join(line + end for line, end in zip(new_lines, ends, strict=True))
+
+
+MAX_DIFF_LINES = 1500
+"""The most lines of either side `save_text` lines up with a diff (about a second at worst)."""
 
 
 PRIVATE_MODE = 0o600

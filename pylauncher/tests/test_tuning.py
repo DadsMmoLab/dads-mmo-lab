@@ -1119,6 +1119,80 @@ def test_a_file_with_no_bom_gets_none_and_a_pasted_cr_is_an_lf_edit() -> None:
     assert not tuning.save_text("A = 1\n", "A = 1\n").startswith("﻿")
 
 
+def test_a_blank_line_added_after_a_lone_cr_line_stays_a_blank_line() -> None:
+    """T573 review: 'A = 1\\rB = 2\\r' typed to a blank line plus C must not glue \\r\\n.
+
+    Mutation: drop the glue pass and the blank line merges into a CRLF.
+    """
+    raw = "A = 1\rB = 2\r"
+    edited = "A = 1\nB = 2\n\nC = 3"
+
+    out = tuning.save_text(raw, edited)
+
+    assert out == "A = 1\rB = 2\r\rC = 3"
+    assert tuning.editor_view(out) == edited
+
+
+def test_whatever_is_typed_comes_back_as_the_same_lines_after_a_save() -> None:
+    """T573 review, fuzz: a save never merges or splits lines, and keeps untouched bytes.
+
+    Seeded, so a failure is reproducible. `editor_view(save_text(raw, edited))` is what the
+    editor shows after the save re-reads the file: it must be exactly what was typed.
+    """
+    import random
+
+    rng = random.Random(573)
+    words = ["A = 1", "B = 2", "", "# note", "[s]", "Key = x y"]
+    ends = ["\n", "\r\n", "\r"]
+    for _ in range(3000):
+        n = rng.randint(0, 7)
+        raw = "".join(rng.choice(words) + rng.choice(ends) for _ in range(n))
+        raw += rng.choice(["", "", "tail"])
+        if rng.random() < 0.2:
+            raw = tuning.BOM + raw
+        lines = tuning.editor_view(raw).split("\n")
+        for _ in range(rng.randint(0, 3)):
+            op = rng.choice(["del", "add", "change"])
+            if op == "add" or not lines:
+                lines.insert(rng.randint(0, len(lines)), rng.choice(words))
+            elif op == "del":
+                del lines[rng.randrange(len(lines))]
+            else:
+                lines[rng.randrange(len(lines))] = rng.choice(words)
+        edited = "\n".join(lines)
+        out = tuning.save_text(raw, edited)
+        assert tuning.editor_view(out) == edited, (raw, edited, out)
+        assert out.startswith(tuning.BOM) == raw.startswith(tuning.BOM)
+
+
+def test_a_big_conf_saves_fast_and_keeps_the_lines_that_were_not_touched() -> None:
+    """T573 review (d): 7.7 s on a big conf with many alike lines, on the window's thread.
+
+    One edit in the middle of a big mixed-ending file must keep every other line's bytes, and a
+    rewrite of every line (the worst case for a line diff of alike lines: 4.6 s at 12000 lines
+    without the size fallback) must still finish at once.
+    Mutation: set `MAX_DIFF_LINES` huge and the rewrite takes seconds.
+    """
+    import time
+
+    n = 12000
+    lines = [f"Key{i % 40} = {i % 7}" for i in range(n)]
+    raw = "".join(line + ("\r\n" if i % 3 else "\n") for i, line in enumerate(lines))
+
+    started = time.perf_counter()
+    edited = list(lines)
+    edited[6000] = "Key6000 = changed"
+    out = tuning.save_text(raw, "\n".join(edited) + "\n")
+    expected = raw.split("\n")
+    expected[6000] = expected[6000].replace(lines[6000], "Key6000 = changed")
+    assert out == "\n".join(expected)
+
+    everything = "\n".join(f"Key{(i * 3) % 40} = {(i * 2) % 7}" for i in range(n)) + "\n"
+    again = tuning.save_text(raw, everything)
+    assert tuning.editor_view(again) == everything
+    assert time.perf_counter() - started < 2.0
+
+
 def test_an_emptied_editor_writes_an_empty_file() -> None:
     assert tuning.save_text("A = 1\r\n", "") == ""
 

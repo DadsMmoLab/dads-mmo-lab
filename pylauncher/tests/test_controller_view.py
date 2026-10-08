@@ -12691,6 +12691,52 @@ def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
     assert not list(tmp_path.glob("**/*.bak"))
 
 
+def _card_key(view: ControllerView, module_id: str) -> tuple[str, str]:
+    card = view.tuning_panel.card(module_id).card
+    return (card.family, card.module_id)
+
+
+def _link_out_with_a_backup(path: Path, tmp_path: Path) -> Path:
+    """`_link_out`, plus a `.bak` of the old text beside the link (what an upgrader has)."""
+    outside = _link_out(path, tmp_path)
+    old = path.with_name(path.name + ".20260101-000000-000000.bak")
+    old.write_text("Key = OLD\n", encoding="utf-8")
+    return outside
+
+
+def test_a_card_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. `tuning.restore` is `shutil.copy2` onto the target and follows a link.
+
+    Mutation: drop the `check_inside` in `_put_back` and "Key = OLD" lands in the outside file.
+    """
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out_with_a_backup(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+
+    view.revert_tuning(*_card_key(view, "mod-transmog"))
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. Same defect on the raw editor's Revert. Mutation: as the card's."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out_with_a_backup(tmp_path / file, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    view.open_tuning_file(file)
+
+    view.revert_tuning_file()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
 def test_the_raw_editor_opens_a_conf_that_links_out_read_only_and_says_why(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

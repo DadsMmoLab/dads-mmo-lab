@@ -18,8 +18,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
-- My Party and the bot counts read a hand-edited conf as the server does: indented settings count, the first copy wins.
-- A server setting file over 2 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
+- My Party reads a hand-edited conf as the server does (indented settings count, the first copy wins); the bot counts now see indented settings too.
+- A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
 - On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
 - **Save file** on the Tuning tab keeps the file's byte-order mark and the line endings of every line you did not edit.
 - A server setting file that is a link to a file outside the server folder is no longer opened, saved or backed up by the Tuning tab.
