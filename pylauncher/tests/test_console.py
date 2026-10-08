@@ -628,6 +628,7 @@ def _timed_send(
     prompt: str,
     precedes: bool,
     command: str = "saveall",
+    marker: str | None = "All players saved.",
 ) -> tuple[console.ConsoleReply, float]:
     import time
 
@@ -641,6 +642,7 @@ def _timed_send(
         window=window,
         prompt=prompt,
         prompt_precedes_answer=precedes,
+        answer_marker=marker,
         popen=popen,  # type: ignore[arg-type]
     )
     return reply, time.monotonic() - started
@@ -749,6 +751,7 @@ def test_the_in_distro_transport_ends_the_window_at_the_answer_too(
         window=8.0,
         prompt="mangos>",
         prompt_precedes_answer=False,
+        answer_marker="All players saved.",
         popen=popen,  # type: ignore[arg-type]
     )
     assert reply.lines == ("All players saved.",)
@@ -767,4 +770,39 @@ def test_a_prompt_straight_after_our_echo_is_not_taken_for_the_end(_no_settle: N
     # Only the time is pinned: the stale prompt glues itself to the front of the answer line, which
     # `_parse_reply()` has always read as a second command's prompt.
     assert reply.prompted is True
+    assert 1.1 < took < 3.2, took
+
+
+@needs_pty
+def test_without_a_marker_the_whole_window_is_listened_to(_no_settle: None) -> None:
+    """A prompt alone is not proof of whose answer ended: with no text named, the window is kept."""
+    script = [(0.0, b"saveall\r\n"), (0.1, b"All players saved.\r\nmangos> ")]
+    reply, took = _timed_send(script, window=1.5, prompt="mangos>", precedes=False, marker=None)
+    assert reply.lines == ("All players saved.",)
+    assert took >= 1.4, took
+
+
+@needs_pty
+def test_another_clients_prompt_after_log_lines_does_not_end_the_wait(_no_settle: None) -> None:
+    """Our echo, a log line, somebody else's prompt, and only later our own answer."""
+    script = [
+        (0.0, b"saveall\r\n"),
+        (0.05, b"[0 ms] SQL: SELECT 1\r\n"),
+        (0.1, b"mangos> "),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    reply, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    assert reply.prompted is True
+    assert 1.1 < took < 3.2, took
+
+
+@needs_pty
+def test_the_marker_of_another_command_is_not_ours(_no_settle: None) -> None:
+    """A prompt after the echo and an unrelated answer is not the end of `saveall`."""
+    script = [
+        (0.0, b"saveall\r\n"),
+        (0.1, b"Server uptime: 1 Minute.\r\nmangos> "),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    _, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
     assert 1.1 < took < 3.2, took

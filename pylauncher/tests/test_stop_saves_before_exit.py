@@ -510,6 +510,8 @@ class _Console:
         """Commands that alone fail as a console this host cannot reach does."""
         self.prompted = True
         self.after_look: object = None
+        self.markers: dict[str, object] = {}
+        """The text each command was told to end its wait on (None: the whole window)."""
         self.windows: dict[str, float] = {}
         """The listening window each command was typed with."""
 
@@ -522,6 +524,7 @@ class _Console:
             raise ConsoleError(self.refuse or "no attach")
         self.fake.events.append(f"console: {command}")
         self.windows[command] = float(kw["window"])  # type: ignore[arg-type]
+        self.markers[command] = kw.get("answer_marker")
         if command != "server debug":
             return ConsoleReply(command, ("All players saved.",), prompted=self.prompted)
         self.looks += 1
@@ -768,6 +771,8 @@ def test_saveall_is_given_the_window_its_console_can_afford(
     console = _with_console(monkeypatch, fake, [0])
     _stop(fake, tmp_path)
     assert console.windows["saveall"] == window
+    # Only a console that prompts after its answer is told what `saveall`'s answer looks like.
+    assert console.markers["saveall"] == ("All players saved." if window > 10 else None)
 
 
 def test_a_tortoise_console_with_no_prompt_is_said_as_not_asked(

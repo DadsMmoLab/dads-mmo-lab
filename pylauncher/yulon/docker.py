@@ -3601,6 +3601,11 @@ a console whose prompt follows its answer (`SaveFirst.prompt_precedes_answer` Fa
 console then ends the wait as soon as the answer is in, so this costs a normal stop nothing. A
 readline console (Centurion) sleeps its whole window, so it keeps the 10 s."""
 
+_SAVE_ANSWER = "All players saved."
+"""What `saveall` prints when it is done (`ObjectAccessor::SaveAllPlayers()`, read from a Tortoise
+world's log, 2026-10-08). A console that prompts after its answer ends the wait for `saveall` at
+this line followed by its prompt (T561); without the line the whole window is listened to."""
+
 _QUEUE_LOOK_WINDOW_SECONDS = 4.0
 """How long the console is listened to for one `server debug` answer (T410).
 
@@ -3867,7 +3872,11 @@ def _ask_the_channel(
 
 
 def _type_at_the_world(
-    spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
+    spec: ContainerSpec,
+    command: str,
+    window: float,
+    wsl_distro: str | None,
+    answer_marker: str | None = None,
 ) -> Any | None:
     """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
 
@@ -3886,6 +3895,7 @@ def _type_at_the_world(
             window=window,
             prompt=save.prompt,
             prompt_precedes_answer=save.prompt_precedes_answer,
+            answer_marker=answer_marker,
         )
     except Exception as exc:  # noqa: BLE001 - every console failure means "not typed" here
         logger.warning(f"could not type {command!r} at {spec.world}'s console: {exc}")
@@ -3962,7 +3972,13 @@ def _save_everyone_first(
         if save.prompt_precedes_answer
         else _SAVE_COMMAND_STALLED_WINDOW_SECONDS
     )
-    reply = _type_at_the_world(spec, save.command, window, wsl_distro)
+    reply = _type_at_the_world(
+        spec,
+        save.command,
+        window,
+        wsl_distro,
+        answer_marker=None if save.prompt_precedes_answer else _SAVE_ANSWER,
+    )
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:

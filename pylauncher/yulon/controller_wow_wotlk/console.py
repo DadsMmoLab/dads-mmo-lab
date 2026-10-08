@@ -243,9 +243,17 @@ def send_command(
     window: float = _DEFAULT_WINDOW_SECONDS,
     prompt: str = _PROMPT,
     prompt_precedes_answer: bool = True,
+    answer_marker: str | None = None,
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> ConsoleReply:
     """Send one console line to the worldserver and return that command's answer.
+
+    `answer_marker` lets the wait end before the window does (T561): text this command's own
+    answer contains, e.g. "All players saved." for `saveall`. Only when it is given, the console
+    prints its prompt AFTER its answer (`prompt_precedes_answer` False) and the marker line is
+    followed by that prompt does the wait stop; otherwise the whole window is listened to, as it
+    always was. A prompt alone cannot say whose it is: a command of somebody else's (a second
+    `docker attach`, an earlier send) that finishes after our echo prints one too.
 
     `window` bounds how long the console is listened to, not what counts as the
     reply — `_parse_reply()` cuts the answer out of the window using the
@@ -282,6 +290,7 @@ def send_command(
             window=window,
             prompt=prompt,
             prompt_precedes_answer=prompt_precedes_answer,
+            answer_marker=answer_marker,
             popen=popen,
         )
         return _parse_reply(
@@ -335,7 +344,7 @@ def send_command(
     except OSError as exc:
         _close_console(proc, master, reader)
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
-    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer)
+    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer, answer_marker)
     # Detach without stopping the server. `docker attach` ignores SIGTERM here,
     # so kill our client outright — the container is untouched either way. Both
     # halves were measured on the Ubuntu VM, 2026-08-23: an attach client sent
@@ -411,56 +420,56 @@ _ANSWER_POLL_SECONDS = 0.05
 
 
 def _wait_for_answer(
-    out: _Lines, window: float, command: str, prompt: str, prompt_precedes_answer: bool
+    out: _Lines,
+    window: float,
+    command: str,
+    prompt: str,
+    prompt_precedes_answer: bool,
+    answer_marker: str | None,
 ) -> None:
-    """Listen for up to `window` seconds; stop early when an `fgets` console has finished (T561).
+    """Listen for up to `window` seconds; stop early when the command's own answer has ended (T561).
 
-    The window is a ceiling, and for most consoles it is also the wait: an AzerothCore
-    (readline) console prints its prompt in FRONT of the answer, so no prompt proves the answer
-    is complete. An `fgets` console (CMaNGOS, Tortoise: `prompt_precedes_answer` False)
-    prompts only from `commandFinished()`, after the answer, so the first prompt that follows
-    our own echo is its end and nothing more is coming. Measured on Tortoise with 500 bots
-    (2026-10-08): `saveall` answers in 0.07-0.33 s, but 13-18 s in the first minutes after a
-    start, so a ceiling that covers the stall must not be slept out on every Stop.
+    The window is a ceiling, and for most callers it is also the wait. It ends early only for
+    an `fgets` console (CMaNGOS, Tortoise: `prompt_precedes_answer` False), which prompts only
+    from `commandFinished()`, after the answer, and only when the caller named text that
+    command's answer contains (`answer_marker`): our echo, then a line with the marker, then
+    the prompt. A readline (AzerothCore) console prints its prompt in FRONT of the answer, so no
+    prompt proves the answer is complete. Measured on Tortoise with 500 bots (2026-10-08):
+    `saveall` answers in 0.07-0.33 s, but 13-18 s in the first minutes after a start, so a
+    ceiling that covers the stall must not be slept out on every Stop.
     """
     deadline = time.monotonic() + window
+    early = answer_marker is not None and not prompt_precedes_answer
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
-        if not prompt_precedes_answer and _answer_closed(out.snapshot(), command, prompt):
+        if early and _answer_closed(out.snapshot(), command, prompt, answer_marker or ""):
             return
         time.sleep(min(_ANSWER_POLL_SECONDS, remaining))
 
 
-def _answer_closed(raw: list[str], command: str, prompt: str) -> bool:
-    """Has the console printed its prompt after our own echo of `command` and some output?
+def _answer_closed(raw: list[str], command: str, prompt: str, marker: str) -> bool:
+    """Has the console printed our echo, then a line with `marker`, then its prompt?
 
     Counted from the echo, as `_parse_reply()` does: a prompt before it belongs to an earlier
-    command and says nothing about this one. Only meaningful for an `fgets` console.
-
-    A prompt that follows the echo with nothing between is not taken for the end: a command
-    still running from before (a second `docker attach`, an earlier send) prints its prompt
-    whenever it finishes, which can be right after our echo and before our answer (Codex
-    adversarial review, T561). Every command this ends early prints at least one line
-    (`saveall`: "All players saved."), and one that prints none just waits its window out, as
-    it always did. A stale prompt that arrives after unrelated log lines still looks like an
-    end; nothing in the stream tells those apart.
+    command. A prompt after it counts only once the marker has gone by, because any other
+    client's command that finishes meanwhile prints a prompt too, with or without log lines
+    before it (two Codex reviews, T561). Only meaningful for an `fgets` console.
     """
     sent = command.strip()
     anchored = False
-    printed = False
+    answered = False
     for line in raw:
         text = runner.strip_ansi(line).replace("\x1b", "").strip()
-        if anchored and printed and text.startswith(prompt):
+        if answered and text.startswith(prompt):
             return True
         while text.startswith(prompt):
             text = text[len(prompt) :].lstrip()
         if text == sent:
             anchored = True
-            printed = False
-        elif anchored and text:
-            printed = True
+        elif anchored and marker in text:
+            answered = True
     return False
 
 
@@ -472,6 +481,7 @@ def _send_inside_distro(
     window: float,
     prompt: str,
     prompt_precedes_answer: bool,
+    answer_marker: str | None,
     popen: type[subprocess.Popen[bytes]],
 ) -> list[str]:
     """One command through a pty the distro opens; returns the raw window.
@@ -502,7 +512,7 @@ def _send_inside_distro(
     except OSError as exc:
         _detach_console(proc, reader)
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
-    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer)
+    _wait_for_answer(out, window, command, prompt, prompt_precedes_answer, answer_marker)
     _detach_console(proc, reader)
     lines = list(out)
     # The one failure this transport has that the pty path does not: a distro
