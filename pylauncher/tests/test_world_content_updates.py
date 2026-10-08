@@ -487,6 +487,24 @@ def test_a_file_a_stopped_press_left_started_is_named_and_nothing_after_it_runs(
     assert ("content updates", U4) not in db.rows
 
 
+def test_a_skipped_file_that_is_back_in_the_checkout_is_named_not_run_and_holds_nothing(
+    tmp_path: Path,
+) -> None:
+    """T566: the player skipped U3 when its file was gone. The pin brings it back: it is
+    said, not run, and the update behind it (U4) still goes in."""
+    rec, server_dir, db, world = _installed(tmp_path)
+    for rel in (U1, U2):
+        db.rows[("content updates", rel)] = (sqlplan.file_digest(server_dir / rel), "seeded")
+    db.rows[("content updates", U3)] = ("0" * 64, "skipped")
+    db.table = True
+    lines = _press(rec, server_dir, db, world)
+    assert _sent(rec, U3) == 0, "a skipped file is never run"
+    assert _sent(rec, U4) == 1 and db.state(U4) == "applied"
+    assert db.state(U3) == "skipped"
+    assert any(U3 in line and "skip" in line and "not run" in line for line in lines), lines
+    assert not any("wait behind it" in line for line in lines), lines
+
+
 def test_a_file_that_fails_stops_the_world_updates_there_and_is_never_retried_unasked(
     tmp_path: Path,
 ) -> None:

@@ -94,6 +94,7 @@ from yulon.catalog.native import (
     INSTALL_REALM_HOST,
     NEWER_WORLD_CONTENT_WAITS,
     RERUN_CANCEL_NOTE,
+    SKIP_STUCK_LABEL,
     UPDATE_SOURCES_STAGE,
     UPDATES_BUTTON_LABEL,
     CorrectionCheck,
@@ -769,6 +770,11 @@ class CmangosInstaller(StagedInstaller):
                 f"{rel} changed upstream since this server applied it. It is not run again; a "
                 "fresh install gets the new version."
             )
+        for rel in owed.skipped:
+            yield (
+                f"{rel} is in the sources again. You chose to skip it, so it is not run; a fresh "
+                "install of the server gets it."
+            )
         for rel in owed.unsure:
             yield (
                 f"An earlier update stopped while applying {rel}, and Yu'lon cannot tell whether "
@@ -1009,6 +1015,7 @@ class CmangosInstaller(StagedInstaller):
         claim: bool = False,
         reclaim_at: int | None = None,
         reclaim_state: str = "",
+        reclaim_file: str | None = None,
         not_before: int = 0,
     ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
@@ -1023,6 +1030,7 @@ class CmangosInstaller(StagedInstaller):
             claim=claim,
             reclaim_at=reclaim_at,
             reclaim_state=reclaim_state,
+            reclaim_file=reclaim_file,
             not_before=not_before,
         )
 
@@ -2570,7 +2578,10 @@ class CmangosInstaller(StagedInstaller):
 
         Bot (`replace_changed`) rows are left out: the next update loads such a file again on
         its own, since a whole-table file is safe to repeat (T534). A row whose file is gone
-        from the checkout is listed too, as not repeatable -- it still holds its phase back.
+        from the checkout is listed too, as `missing` and not repeatable -- it still holds its
+        phase back, and the dialog offers to skip it (T566). Unless one file in the same phase
+        holds its exact bytes under a new name: that is listed as the new file with
+        `renamed_from`, and the press moves the record there (`sqlplan.renamed_stuck()`).
         """
         applying = {phase.name for phase in self._world_catch_up_plan().applying()}
         if not applying:
@@ -2595,8 +2606,15 @@ class CmangosInstaller(StagedInstaller):
             update={"phases": tuple(p for p in plan.phases if p.name in applying)}
         )
         runs = self._expand(sub, ctx.server_dir, {})
+        renamed = sqlplan.renamed_stuck(runs, ledger)
         order = {(run.phase.name, run.rel): n for n, run in enumerate(runs)}
-        rows.sort(key=lambda row: (order.get((row.phase, row.file), -1), row.file))
+
+        def where(row: sqlplan.FileRow) -> tuple[int, str]:
+            target = renamed.get((row.phase, row.file))
+            name = target.rel if target is not None else row.file
+            return (order.get((row.phase, name), -1), name)
+
+        rows.sort(key=where)
         times = sqlplan.parse_file_times(
             self._query_seam()(
                 self.entry.container_spec().db,
@@ -2610,25 +2628,33 @@ class CmangosInstaller(StagedInstaller):
             f"{source.dest}@{self._seams.head_sha(ctx.server_dir / source.dest)}"
             for source in self._world_catch_up_plan().held()
         )
+        targets = {(run.phase.name, run.rel) for run in renamed.values()}
         found = []
         for row in rows:
-            path = ctx.server_dir / row.file
+            target = renamed.get((row.phase, row.file))
+            file = target.rel if target is not None else row.file
+            path = ctx.server_dir / file
             behind = sum(
                 1
                 for run in runs
-                if run.phase.name == row.phase and (run.phase.name, run.rel) not in ledger
+                if run.phase.name == row.phase
+                and (run.phase.name, run.rel) not in ledger
+                and (run.phase.name, run.rel) not in targets
             )
+            there = path.is_file()
             found.append(
                 StuckWorldUpdate(
                     phase=row.phase,
-                    file=row.file,
+                    file=file,
                     state=row.state,
-                    repeatable=path.is_file() and sqlplan.whole_table_problem(path) is None,
+                    repeatable=there and sqlplan.whole_table_problem(path) is None,
                     behind=behind,
-                    sha256=sqlplan.file_digest(path) if path.is_file() else "",
-                    changed=path.is_file() and sqlplan.file_digest(path) != row.sha256,
+                    sha256=sqlplan.file_digest(path) if there else row.sha256,
+                    changed=there and sqlplan.file_digest(path) != row.sha256,
                     heads=heads,
                     at_unix=times.get((row.phase, row.file), 0),
+                    missing=not there,
+                    renamed_from=row.file if target is not None else "",
                 )
             )
         return tuple(found)
@@ -2659,11 +2685,38 @@ class CmangosInstaller(StagedInstaller):
             self._check_cancel(ctx.cancel)
             path = ctx.server_dir / one.file
             if not path.is_file():
-                yield (
-                    f"{one.file} is no longer in the sources, so it cannot be run again; a fresh "
-                    "install of the server gets every world update. Nothing after it was run."
+                if not agreed.skip_missing:
+                    yield (
+                        f"{one.file} is no longer in the sources, so it cannot be run again; a "
+                        "fresh install of the server gets every world update. Nothing after it "
+                        f'was run. The "{CORRECTIONS_BUTTON_LABEL}" dialog offers '
+                        f'"{SKIP_STUCK_LABEL}".'
+                    )
+                    return
+                try:
+                    self._record_world_files(
+                        ctx,
+                        (sqlplan.FileRow(one.phase, one.file, one.sha256, sqlplan.FILE_SKIPPED),),
+                        reclaim_at=one.at_unix,
+                        reclaim_state=one.state,
+                        not_before=one.at_unix + 1,
+                    )
+                except InstallerError as exc:
+                    yield (
+                        f"{one.file} was not skipped: another update of this server took it "
+                        f"first, or its record could not be written ({exc}). Nothing after it "
+                        "was run."
+                    )
+                    return
+                ledger[(one.phase, one.file)] = sqlplan.FileRow(
+                    one.phase, one.file, one.sha256, sqlplan.FILE_SKIPPED
                 )
-                return
+                yield (
+                    f"{one.file} is no longer in the sources. Recorded as skipped: it is never "
+                    "run, and the updates behind it go on. Whatever it already changed in "
+                    f"{self.entry.databases.world} stays as it is; Yu'lon does not undo it."
+                )
+                continue
             reaches = sqlplan.foreign_schemas(path, others)
             if reaches:
                 yield (
@@ -2692,6 +2745,7 @@ class CmangosInstaller(StagedInstaller):
                     (sqlplan.FileRow(one.phase, one.file, sha, sqlplan.FILE_STARTED),),
                     reclaim_at=one.at_unix,
                     reclaim_state=one.state,
+                    reclaim_file=one.renamed_from or None,
                 )
             except InstallerError as exc:
                 yield (
@@ -2699,6 +2753,12 @@ class CmangosInstaller(StagedInstaller):
                     f"its record could not be written ({exc}). Nothing after it was run."
                 )
                 return
+            if one.renamed_from:
+                ledger.pop((one.phase, one.renamed_from), None)
+                yield (
+                    f"{one.renamed_from} is now {one.file}: the same bytes under a new name, so "
+                    "its record moved there and it is run there."
+                )
             refused: list[sqlplan.PhaseRun] = []
             yield from self._stream(
                 _apply_one(

@@ -102,6 +102,7 @@ import stat as stat_module
 import subprocess
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -1451,8 +1452,16 @@ FILE_SEEDED = "seeded"
 FILE_STARTED = "started"
 FILE_APPLIED = "applied"
 FILE_FAILED = "failed"
+FILE_SKIPPED = "skipped"
+"""The player chose to leave a stuck file un-run (T566): not pending, not stuck, never run.
 
-_FILE_STATES = frozenset({FILE_SEEDED, FILE_STARTED, FILE_APPLIED, FILE_FAILED})
+Written by "Apply database corrections…" over a `started`/`failed` row whose file is gone
+from the checkout. Whatever the file already changed stays; the phase's later files run.
+A file that comes back under that name is named and not run; one that comes back under
+another name with the same bytes is recorded `seeded`, as for any file the ledger holds.
+"""
+
+_FILE_STATES = frozenset({FILE_SEEDED, FILE_STARTED, FILE_APPLIED, FILE_FAILED, FILE_SKIPPED})
 _FILE_MAX = 255
 """`FILE_TABLE.file`'s `VARCHAR(255)`: a longer path cannot be recorded, so it is not applied."""
 
@@ -1556,6 +1565,7 @@ def file_rows_sql(
     claim: bool = False,
     reclaim_at: int | None = None,
     reclaim_state: str = "",
+    reclaim_file: str | None = None,
 ) -> str:
     """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
 
@@ -1571,6 +1581,9 @@ def file_rows_sql(
     not moved. So a second press holding the same time finds a row that no longer carries it,
     deletes nothing, and its `INSERT` is refused; and a refused `INSERT` rolls the `DELETE`
     back, so the stuck row is never lost to a failed claim.
+
+    `reclaim_file` (T566) names the row the `DELETE` takes when it is not the row written: a
+    stuck record moved to the name upstream gave its file. The `INSERT` is still of `rows[0]`.
 
     InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
     capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
@@ -1601,11 +1614,14 @@ def file_rows_sql(
         # Past the second the press read, whatever the clock says: that is what makes the row
         # a claim only one press can hold.
         taken_at = max(now, int(reclaim_at) + 1)
+        taken = row.file if reclaim_file is None else reclaim_file
+        if not recordable(taken):
+            raise InstallerError("internal: a reclaim names a file the ledger cannot hold")
         return (
             text
             + "BEGIN;\n"
             + f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
-            + f"AND file = '{row.file}' AND state = '{reclaim_state}' "
+            + f"AND file = '{taken}' AND state = '{reclaim_state}' "
             + f"AND at_unix = {int(reclaim_at)};\n"
             + f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
             + f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
@@ -1637,6 +1653,7 @@ def record_world_files(
     claim: bool = False,
     reclaim_at: int | None = None,
     reclaim_state: str = "",
+    reclaim_file: str | None = None,
     not_before: int = 0,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
@@ -1655,6 +1672,7 @@ def record_world_files(
             claim=claim,
             reclaim_at=reclaim_at,
             reclaim_state=reclaim_state,
+            reclaim_file=reclaim_file,
         ),
         what=(
             "claiming a world update (another update of this server may be applying it)"
@@ -1998,6 +2016,8 @@ class PendingFiles:
     """Not in the ledger under this name, but its exact bytes are, under another: a file
     upstream renamed or moved (Codex, T531). Recorded `seeded` under the new name and
     never run again."""
+    skipped: tuple[str, ...] = ()
+    """In the ledger `skipped` (T566) and in the checkout again: never run, only named."""
 
 
 def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
@@ -2012,9 +2032,13 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     }
     here = {(run.phase.name, run.rel) for run in runs}
     # A move: the same phase, bytes the ledger holds under a path that is GONE now
-    # (Codex, T531 round 5) -- a copy beside its original is new, and runs.
+    # (Codex, T531 round 5) -- a copy beside its original is new, and runs. Not bytes of a
+    # `started`/`failed` row: that file never completed, so the same bytes under a new name
+    # are still owed, and the corrections press moves its record there (T566).
     gone_bytes = {
-        (phase, row.sha256) for (phase, file), row in ledger.items() if (phase, file) not in here
+        (phase, row.sha256)
+        for (phase, file), row in ledger.items()
+        if (phase, file) not in here and row.state not in _STUCK_STATES
     }
     new: list[PhaseRun] = []
     moved: list[PhaseRun] = []
@@ -2022,6 +2046,7 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
     changed: list[str] = []
     unsure: list[str] = []
     failed: list[str] = []
+    skipped: list[str] = []
     for run in runs:
         row = ledger.get((run.phase.name, run.rel))
         if row is None:
@@ -2035,6 +2060,8 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
             unsure.append(run.rel)
         elif row.state == FILE_FAILED:
             failed.append(run.rel)
+        elif row.state == FILE_SKIPPED:
+            skipped.append(run.rel)
         elif run.path is not None and file_digest(run.path) != row.sha256:
             changed.append(run.rel)
     # A stuck row whose file is gone from the checkout still holds its phase back, so
@@ -2053,7 +2080,43 @@ def pending_files(runs: Sequence[PhaseRun], ledger: FileLedger) -> PendingFiles:
         failed=tuple(failed),
         withheld=tuple(withheld),
         moved=tuple(moved),
+        skipped=tuple(skipped),
     )
+
+
+_STUCK_STATES = (FILE_STARTED, FILE_FAILED)
+
+
+def renamed_stuck(runs: Sequence[PhaseRun], ledger: FileLedger) -> dict[tuple[str, str], PhaseRun]:
+    """Each stuck row whose file is gone, mapped to the one file now holding its exact bytes (T566).
+
+    Only an exact match counts: same phase, same sha256, no ledger row of its own under the new
+    name. An ambiguous match is no match: two files with those bytes, or two gone rows of that
+    phase sharing them (any state), re-point nothing, and the row stays missing for the player.
+    Pure but for reading each candidate's bytes.
+    """
+    here = {(run.phase.name, run.rel) for run in runs}
+    phases = {run.phase.name for run in runs}
+    gone = [
+        (key, row)
+        for key, row in ledger.items()
+        if key[0] in phases and key not in here and row.state in _STUCK_STATES
+    ]
+    if not gone:
+        return {}
+    twins = Counter(
+        (phase, row.sha256) for (phase, file), row in ledger.items() if (phase, file) not in here
+    )
+    free: dict[tuple[str, str], list[PhaseRun]] = {}
+    for run in runs:
+        if run.path is not None and (run.phase.name, run.rel) not in ledger:
+            free.setdefault((run.phase.name, file_digest(run.path)), []).append(run)
+    found: dict[tuple[str, str], PhaseRun] = {}
+    for key, row in gone:
+        same = free.get((key[0], row.sha256), [])
+        if len(same) == 1 and twins[(key[0], row.sha256)] == 1:
+            found[key] = same[0]
+    return found
 
 
 def _run_sql(
