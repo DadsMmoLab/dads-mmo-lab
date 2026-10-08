@@ -4,7 +4,9 @@
 
 -- ============================================================
 -- Per-character class unlock records.
--- One row per (player, class) pair. Never deleted — additive only.
+-- One row per (player, class) pair. Removed with the character: mod-unbound's
+-- OnPlayerDeleteFromDB deletes them when a character is deleted, and its
+-- start-up sweep removes rows whose char_guid has no character.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `unbound_character_unlocks` (
     `char_guid`        INT UNSIGNED     NOT NULL,

@@ -3,6 +3,10 @@
 #include "ScriptDefines/PlayerScript.h"
 #include "DatabaseEnv.h"
 #include "Entities/Item/ItemTemplate.h"
+#include "Log.h"
+#include "ScriptDefines/WorldScript.h"
+
+#include <array>
 
 // Unbound Wrath Edition — power chassis + weapon/armor proficiency hooks.
 //
@@ -30,7 +34,50 @@
 //   Playerbots' own class-appropriateness heuristics (which read those tables
 //   directly) are unaffected for the random bot population.
 //
+// OnPlayerDeleteFromDB + UnboundOrphanSweepWorldScript (character-delete cleanup):
+//   Unbound's per-character rows are keyed by the character's GUID counter, and
+//   AzerothCore's own character delete does not know them. After a restart the
+//   core hands the next new character MAX(characters.guid)+1, which is the
+//   deleted character's GUID when it was the newest, so before this cleanup a
+//   new level-1 character inherited the deleted one's unlocked classes.
+//
 // Everything else lives in env/dist/etc/modules/lua_scripts/unbound_mentor.lua.
+
+namespace
+{
+struct GuidKeyedTable
+{
+    char const* table;
+    char const* guidColumn;
+};
+
+// Every characters-database table that Unbound, or a script shipped beside it,
+// keys by character GUID. Each is checked for before it is touched:
+//   unbound_character_unlocks  data/sql/db-characters/01_unbound_characters.sql
+//   unbound_character_talents  made by v1.4.0's Lua talent bridge, which this
+//                              branch no longer ships; a server that ran it
+//                              still has the table
+//   dml_autobuff_kv            data/sql/db-characters/02_dml_autobuff_kv.sql
+//                              (#buffs, lua_scripts/dml_autobuff.lua)
+constexpr std::array<GuidKeyedTable, 3> UnboundGuidKeyedTables = {{
+    { "unbound_character_unlocks", "char_guid" },
+    { "unbound_character_talents", "char_guid" },
+    { "dml_autobuff_kv",           "guid"      },
+}};
+
+// True when the characters database has this table with this column.
+// Every statement below is guarded by it: AzerothCore stops the worldserver
+// on a query that names a missing table or column (ER_NO_SUCH_TABLE and
+// ER_BAD_FIELD_ERROR abort in MySQLConnection::_HandleMySQLErrno), and inside
+// the character-delete transaction one failed statement would also roll back
+// the whole delete. information_schema answers "no row" instead of failing.
+bool CharacterTableHasColumn(char const* table, char const* column)
+{
+    return CharacterDatabase.Query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+        "AND TABLE_NAME = '{}' AND COLUMN_NAME = '{}'", table, column) != nullptr;
+}
+}
 
 class UnboundPlayerScript : public PlayerScript
 {
@@ -39,8 +86,21 @@ public:
     {
         PLAYERHOOK_ON_PLAYER_HAS_ACTIVE_POWER_TYPE,
         PLAYERHOOK_ON_LOGIN,
-        PLAYERHOOK_ON_AFTER_UPDATE_MAX_POWER
+        PLAYERHOOK_ON_AFTER_UPDATE_MAX_POWER,
+        PLAYERHOOK_ON_DELETE_FROM_DB
     }) {}
+
+    // Called only when a character is removed for good (Player::DeleteFromDB,
+    // CHAR_DELETE_REMOVE, after the core's own deletes and before the commit).
+    // A soft delete (CharDeleteMethod = 1) keeps the GUID and does not get
+    // here, so a restorable character keeps its unlocks; its final removal
+    // later (DeleteOldCharacters) does. Bots come through here too, harmlessly.
+    void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
+    {
+        for (GuidKeyedTable const& keyed : UnboundGuidKeyedTables)
+            if (CharacterTableHasColumn(keyed.table, keyed.guidColumn))
+                trans->Append("DELETE FROM `{}` WHERE `{}` = {}", keyed.table, keyed.guidColumn, guid);
+    }
 
     // Prevent AzerothCore's UpdateMaxPower from wiping a Lua-set mana pool.
     // For non-caster classes (warriors, rogues, etc.) GetCreatePowers(POWER_MANA)
@@ -119,8 +179,72 @@ public:
     }
 };
 
+// Once per worldserver start, before the world opens to players: remove the
+// rows of characters that no longer exist. It covers every delete the hook
+// above never saw: deletes made before this cleanup existed, and characters
+// removed while this module was not loaded or outside the worldserver.
+//
+// It deletes nothing unless the characters table is there and answers, and
+// each DELETE joins against that same table, so a row whose GUID belongs to a
+// character that exists (a bot, or a soft-deleted character that can still be
+// restored) is never touched.
+class UnboundOrphanSweepWorldScript : public WorldScript
+{
+public:
+    UnboundOrphanSweepWorldScript() : WorldScript("UnboundOrphanSweepWorldScript",
+    {
+        WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED
+    }) {}
+
+    void OnBeforeWorldInitialized() override
+    {
+        if (!CharacterTableHasColumn("characters", "guid"))
+        {
+            LOG_WARN("module", "[UNBOUND] Orphan sweep skipped: the characters database has no characters.guid here.");
+            return;
+        }
+
+        QueryResult characters = CharacterDatabase.Query("SELECT COUNT(*) FROM characters");
+        if (!characters)
+        {
+            LOG_WARN("module", "[UNBOUND] Orphan sweep skipped: the characters table could not be read.");
+            return;
+        }
+
+        uint64 removedTotal = 0;
+        for (GuidKeyedTable const& keyed : UnboundGuidKeyedTables)
+        {
+            if (!CharacterTableHasColumn(keyed.table, keyed.guidColumn))
+                continue;
+
+            QueryResult orphans = CharacterDatabase.Query(
+                "SELECT COUNT(*) FROM `{0}` k LEFT JOIN characters c ON c.guid = k.`{1}` WHERE c.guid IS NULL",
+                keyed.table, keyed.guidColumn);
+            if (!orphans)
+            {
+                LOG_WARN("module", "[UNBOUND] Orphan sweep skipped {}: it could not be read.", keyed.table);
+                continue;
+            }
+
+            uint64 const count = orphans->Fetch()[0].Get<uint64>();
+            if (!count)
+                continue;
+
+            CharacterDatabase.DirectExecute(
+                "DELETE k FROM `{0}` k LEFT JOIN characters c ON c.guid = k.`{1}` WHERE c.guid IS NULL",
+                keyed.table, keyed.guidColumn);
+            LOG_INFO("module", "[UNBOUND] Orphan sweep: removed {} row(s) of deleted characters from {}.", count, keyed.table);
+            removedTotal += count;
+        }
+
+        LOG_INFO("module", "[UNBOUND] Orphan sweep done: {} row(s) removed, {} character(s) on this realm.",
+            removedTotal, characters->Fetch()[0].Get<uint64>());
+    }
+};
+
 void AddUnboundScripts()
 {
     new UnboundPlayerScript();
+    new UnboundOrphanSweepWorldScript();
 }
 // cache-bust: 1781408710
