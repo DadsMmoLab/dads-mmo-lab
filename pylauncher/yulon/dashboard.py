@@ -371,6 +371,8 @@ class Dashboard:
             )
         else:
             self._login_log_of = None
+        self._hint_run: str | None = None
+        self._hint = False
         self._login_run: str | None = None
         self._login_read_at: datetime | None = None
         self._wrong_client_at: datetime | None = None
@@ -460,7 +462,13 @@ class Dashboard:
         if state.status == "restarting" or (
             self._looping and self._loop_is_current and state.status == "running"
         ):
-            return Verdict("restart_loop", state.restart_count, state.started_at, uptime)
+            return Verdict(
+                "restart_loop",
+                state.restart_count,
+                state.started_at,
+                uptime,
+                warning=self._foreign_data_hint(state.started_at),
+            )
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
@@ -471,6 +479,39 @@ class Dashboard:
             if line:
                 verdict = replace(verdict, module_line=line)
         return self._with_wrong_client(verdict, state.started_at)
+
+    def _foreign_data_hint(self, run: str) -> str:
+        """The sentence blaming the client's data files for a loop, or "" (T593).
+
+        Only for a server whose catalog names the line its world dies after on a client
+        with foreign data (`client.foreign_data_dies_after`), and only when THIS run's log
+        ends on that line (the SQL echo lines under it are ignored): a world that went on
+        past it, or died elsewhere, blames nothing. The log is read once per run, and an
+        unreadable one is an empty answer, not a guess.
+        """
+        marker = self.entry.client.foreign_data_dies_after
+        if marker is None or not run:
+            return ""
+        if self._hint_run != run:
+            try:
+                log = self._log_of(self.spec.world, run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
+                return ""
+            lines = [
+                text
+                for text in (raw.strip() for raw in log.splitlines())
+                if text and " SQL: " not in text
+            ]
+            self._hint_run = run
+            self._hint = bool(lines) and lines[-1].endswith(marker)
+        if not self._hint:
+            return ""
+        return (
+            f"the world server dies while loading its transports ({marker.rstrip('.')}), which "
+            f"is how a game client whose data files are not {self.entry.client.version} "
+            "looks: pick a stock client of that version and run Re-extract map data"
+        )
 
     def _first_since(self, run: str) -> str:
         """Where a run's first read starts: the run, but not further back than the sentence lives.

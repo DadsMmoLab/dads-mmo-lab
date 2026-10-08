@@ -466,6 +466,15 @@ def gather(
         )
         client_checks = validate(client_dir, spec)
         refused = any(check.verdict == "refuse" for check in client_checks)
+        if not refused and client_dir is not None:
+            # T594: the build is read after the folder rules (they say a missing exe) and
+            # before anything is compiled or extracted. A wrong one refuses like any other.
+            from yulon.catalog.families import clientdir
+
+            wrong_build = clientdir.build_check(client_dir, entry.client)
+            if wrong_build is not None:
+                client_checks = (*client_checks, wrong_build)
+                refused = True
         if ready and client_dir is not None and not refused:
             client_bind = probe(client_dir)
     return Facts(

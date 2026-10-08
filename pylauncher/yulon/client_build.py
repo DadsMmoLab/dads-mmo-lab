@@ -189,13 +189,16 @@ def read_version(exe: Path) -> ExeVersion | None:
     return _cache[key]
 
 
-def refusal(exe: Path, *, version: str, build: int | None) -> str | None:
+def refusal(
+    exe: Path, *, version: str, build: int | None, also: tuple[int, ...] = ()
+) -> str | None:
     """The sentence refusing `exe`, or None when it may be used.
 
     `version` and `build` are what the server's catalog entry asks of the player's
-    own client (`3.3.5a`, `12340`). No `build`, no exe to read, or an exe with no
-    readable version resource is accepted: only a build that was read and is not
-    `build` is refused, and the sentence names both.
+    own client (`3.3.5a`, `12340`); `also` is every further build the server takes
+    (Vanilla's 6005 and 6141). No `build`, no exe to read, or an exe with no
+    readable version resource is accepted: only a build that was read and is none
+    of those is refused, and the sentence names the version found and the one needed.
     """
     if build is None or not exe.is_file():
         return None
@@ -203,11 +206,11 @@ def refusal(exe: Path, *, version: str, build: int | None) -> str | None:
     if found is None:
         logger.info("client build: %s has no version resource; accepted as it is", exe)
         return None
-    if found.build == build:
+    if found.build == build or found.build in also:
         return None
+    others = f" (or {', '.join(str(b) for b in also)})" if also else ""
     return (
-        f"That game client is {found}, not {version} ({build}). This server only lets "
-        f"a {version} client, build {build}, stay connected: any other build is "
-        "accepted at the password and then disconnected by the world server. "
-        f"Use a stock {version} client folder."
+        f"That game client is {found}, and this server needs a {version} client, whose "
+        f"game program reports build {build}{others}. Any other build is turned away at "
+        f"the login or dropped by the world server. Pick a {version} client folder."
     )

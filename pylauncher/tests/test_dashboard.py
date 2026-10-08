@@ -2027,3 +2027,90 @@ def test_a_clock_that_goes_backwards_does_not_hold_a_replayed_reading(tmp_path: 
     watch.tick()
 
     assert sql.tables_asked == 2, "a reading stamped in the future was replayed"
+
+
+# --- T593: a world that dies while loading its transports, on a client with foreign data ----
+
+TORTOISE = catalog_module.load_catalog().get("wow-tortoise")
+
+TRANSPORT_DEATH_LOG = (
+    "2026-10-08T21:30:01.100Z Loading transport templates...\n"
+    "2026-10-08T21:30:01.101Z [2 ms] SQL: SELECT `entry` FROM `gameobject_template` "
+    "WHERE `type` = 15 ORDER BY entry ASC\n"
+)
+
+
+def _transport_watch(
+    tmp_path: Path,
+    log: str,
+    states: list[docker.ContainerState] | None = None,
+    entry: catalog_module.CatalogEntry = TORTOISE,
+    reads: list[str] | None = None,
+) -> dashboard.Dashboard:
+    remaining = list(states or [docker.ContainerState("restarting", "run-1", 11)])
+
+    def log_of(_container: str, since: str) -> str:
+        if reads is not None:
+            reads.append(since)
+        return log
+
+    return dashboard.Dashboard(
+        entry.container_spec(),
+        entry,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _c: remaining.pop(0) if len(remaining) > 1 else remaining[0],
+        daemon_of=lambda: "bridge-before",
+        log_of=log_of,
+        now=lambda: NOW,
+    )
+
+
+def test_a_restart_loop_that_dies_at_the_transports_blames_the_clients_data(
+    tmp_path: Path,
+) -> None:
+    verdict = _transport_watch(tmp_path, TRANSPORT_DEATH_LOG).tick()
+
+    assert verdict.state == "restart_loop"
+    assert "transport" in verdict.warning
+    assert "1.18.1" in verdict.warning and "client" in verdict.warning
+    assert verdict.warning in dashboard.line(verdict)
+
+
+def test_a_restart_loop_that_dies_elsewhere_blames_nothing(tmp_path: Path) -> None:
+    log = "Loading spell chains...\n[1 ms] SQL: SELECT 1\n"
+
+    verdict = _transport_watch(tmp_path, log).tick()
+
+    assert verdict.state == "restart_loop" and verdict.warning == ""
+
+
+def test_a_world_that_got_past_the_transports_blames_nothing(tmp_path: Path) -> None:
+    log = (
+        TRANSPORT_DEATH_LOG
+        + "Transport 181056 (name: Naxxramas) ... skipped.\nLoading spell chains...\n"
+    )
+
+    verdict = _transport_watch(tmp_path, log).tick()
+
+    assert verdict.warning == ""
+
+
+def test_a_game_with_no_such_signature_blames_nothing(tmp_path: Path) -> None:
+    verdict = _transport_watch(tmp_path, TRANSPORT_DEATH_LOG, entry=WOTLK).tick()
+
+    assert verdict.state == "restart_loop" and verdict.warning == ""
+
+
+def test_the_log_is_read_once_per_run_of_a_loop(tmp_path: Path) -> None:
+    reads: list[str] = []
+    watch = _transport_watch(tmp_path, TRANSPORT_DEATH_LOG, reads=reads)
+
+    for _ in range(3):
+        watch.tick()
+
+    assert reads == ["run-1"]
+
+
+def test_the_catalog_names_the_line_a_foreign_clients_world_dies_after() -> None:
+    assert TORTOISE.client.foreign_data_dies_after == "Loading transport templates..."

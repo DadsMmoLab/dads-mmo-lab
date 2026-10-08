@@ -22,6 +22,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
+- A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
 - My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
