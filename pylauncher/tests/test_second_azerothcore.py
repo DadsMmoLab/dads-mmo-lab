@@ -529,7 +529,11 @@ def test_a_resumed_install_starts_the_database_before_the_port_statement(tmp_pat
 
 
 def _guarded_services(
-    monkeypatch: pytest.MonkeyPatch, entry: object, run_statement: object, row: str = "8086\n"
+    monkeypatch: pytest.MonkeyPatch,
+    entry: object,
+    run_statement: object,
+    row: str = "8086\n",
+    server_dir: Path = Path("/nonexistent/srv"),
 ) -> object:
     from yulon import apply, docker
     from yulon.ui import controller_view
@@ -540,9 +544,7 @@ def _guarded_services(
     monkeypatch.setattr(
         docker, "start_database", lambda spec, *_a, **_k: started.append(spec.db) or True
     )
-    services = controller_view._for_wotlk(
-        entry, Path("/nonexistent/srv"), None, None  # type: ignore[arg-type]
-    )
+    services = controller_view._for_wotlk(entry, server_dir, None, None)  # type: ignore[arg-type]
     services.started_dbs = started  # type: ignore[attr-defined]
     return services
 
@@ -560,6 +562,48 @@ def test_before_the_servers_start_the_realm_gets_its_port(monkeypatch: pytest.Mo
     assert controller.before_servers() is None
     assert ran == [("auth", PORT_SQL)]
     assert services.started_dbs == [SECOND_CONTAINERS["db"]]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("dotenv", "port"),
+    [
+        ("DOCKER_WORLD_EXTERNAL_PORT=9086\n", 9086),
+        ("export DOCKER_WORLD_EXTERNAL_PORT = 9086\n", 9086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=8000\nDOCKER_WORLD_EXTERNAL_PORT=9086\n", 9086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=127.0.0.1:9086\n", 9086),
+        ('DOCKER_WORLD_EXTERNAL_PORT="9086"\n', 9086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=9086 # alternate port\n", 9086),
+        ('DOCKER_WORLD_EXTERNAL_PORT="9086" # alternate port\n', 9086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=9086#alternate\n", 8086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=\n", 8086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=high\n", 8086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=0\n", 8086),
+        ("DOCKER_WORLD_EXTERNAL_PORT=70000\n", 8086),
+        ("DOCKER_AUTH_EXTERNAL_PORT=9086\n", 8086),
+        (None, 8086),
+    ],
+)
+def test_the_realm_row_gets_the_world_port_the_server_is_published_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dotenv: str | None, port: int
+) -> None:
+    """A hand-set `DOCKER_WORLD_EXTERNAL_PORT` in .env moves the published port (T565).
+
+    Compose takes it over the catalog's, so the realm row must say it too or the
+    client is handed a port nothing listens on. A value compose could not use
+    leaves the catalog's.
+    """
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+    ran: list[tuple[str, str]] = []
+    services = _guarded_services(
+        monkeypatch,
+        second_ac_entry(manifests_from="wow-wotlk"),
+        lambda self, db, statement: ran.append((db, statement)),
+        row=f"{port}\n",
+        server_dir=tmp_path,
+    )
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == [("auth", PORT_SQL.replace("8086", str(port)))]
 
 
 @pytest.mark.parametrize("row", ["8085\n", "", "NULL\n", "8086\n8086\n"])

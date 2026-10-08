@@ -3437,15 +3437,17 @@ def realmlist_value(address: str, auth_port: int) -> str:
     return address if auth_port == STANDARD_AUTH_PORT else f"{address}:{auth_port}"
 
 
-def realm_port_sql(entry: CatalogEntry) -> str:
+def realm_port_sql(entry: CatalogEntry, port: int | None = None) -> str:
     """The UPDATE that makes the realm row's port the entry's published world port (T552).
 
     The authserver hands each client the row's address AND port, and the
     install's import seeds AzerothCore's 8085. Guarded by `port<>`, so a row
-    that already says it is left untouched.
+    that already says it is left untouched. `port` is the one the server is
+    really published on when that is not the catalog's (T565: a hand-set
+    `DOCKER_WORLD_EXTERNAL_PORT`); omitted, the catalog's.
     """
     rl = entry.realmlist
-    port = entry.ports.world
+    port = entry.ports.world if port is None else port
     return (
         f"UPDATE {entry.databases.auth}.{rl.table} SET port={port} "
         f"WHERE id={rl.realm_id} AND port<>{port};"
