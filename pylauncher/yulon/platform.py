@@ -7,6 +7,7 @@ here while keeping the rest of the app 100% shared. See pyplan/README.md §3
 
 from __future__ import annotations
 
+import errno
 import functools
 import importlib
 import json
@@ -26,7 +27,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PureWindowsPath
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from yulon import runner
 from yulon.log import get_logger
@@ -667,6 +668,76 @@ def probe_tcp(host: str, port: int, timeout: float = 3.0) -> PortProbe:
             return PortProbe(host, port, "open", "connection accepted")
     except (TimeoutError, ConnectionRefusedError, OSError) as exc:
         return PortProbe(host, port, "unknown", f"{type(exc).__name__}: {exc}")
+
+
+BindStatus = Literal["free", "reserved", "in_use", "unknown"]
+
+_WSAEADDRINUSE = 10048
+_WSAEACCES = 10013
+
+
+@dataclass(frozen=True)
+class PortBind:
+    """What binding `host:port` for listening answered (T574).
+
+    `free` = the bind worked. `reserved` = Windows refused it for permission
+    (WSAEACCES: the port sits in an excluded range, or a process holds it
+    exclusively). `in_use` = another socket holds it. `unknown` = anything else,
+    which is never a reason to refuse.
+    """
+
+    host: str
+    port: int
+    status: BindStatus
+    detail: str
+
+
+def classify_bind_error(exc: OSError, *, windows: bool) -> BindStatus:
+    """Which of the three bind failures this is; `unknown` for the rest.
+
+    A permission error is `reserved` ONLY on Windows. Docker publishes a port
+    from the daemon's own process; on Windows that is the same host whose
+    excluded ranges this user process just hit, but a Linux or macOS user bind
+    being denied says nothing about what a root daemon may do.
+    """
+    code = getattr(exc, "winerror", None) or exc.errno
+    if windows:
+        if code in (_WSAEADDRINUSE, errno.EADDRINUSE):
+            return "in_use"
+        if code in (_WSAEACCES, errno.EACCES):
+            return "reserved"
+        return "unknown"
+    return "in_use" if exc.errno == errno.EADDRINUSE else "unknown"
+
+
+def bind_tcp(
+    host: str,
+    port: int,
+    *,
+    make_socket: Callable[..., Any] = socket.socket,
+    windows: bool | None = None,
+) -> PortBind:
+    """Bind `host:port` and let go at once: the question a connect cannot answer (T574).
+
+    A port inside a Windows excluded range has no listener, so `probe_tcp()`
+    sees only a refusal, the same refusal an idle port gives. Only a bind meets
+    the reservation. Windows gets no `SO_REUSEADDR`, which there means "share it
+    with the current owner" and would hide a taken port; elsewhere it is set, as
+    Docker sets it, so a socket in TIME_WAIT is not called taken.
+    """
+    here = detect() == "windows" if windows is None else windows
+    sock = None
+    try:
+        sock = make_socket(socket.AF_INET, socket.SOCK_STREAM)
+        if not here:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+    except OSError as exc:
+        return PortBind(host, port, classify_bind_error(exc, windows=here), f"{exc}")
+    finally:
+        if sock is not None:
+            sock.close()
+    return PortBind(host, port, "free", "bound and released")
 
 
 # --------------------------------------------------------------- provisioning
