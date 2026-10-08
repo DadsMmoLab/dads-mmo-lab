@@ -357,14 +357,21 @@ def test_the_onyxia_level_answer_reaches_the_row_upstream_sets_from_it(tmp_path:
         ("world", "teleporter_capital.dist"),
         ("world", "teleporter_starting_zone.dist"),
     ]
-    # T564: between and after the two files, the corrections that move the teleporter's menus
-    # out of the base game's ids (tests/test_npc_teleporter_menus.py); the Onyxia answer is
-    # written into the row at its NEW id, SourceGroup 60004 (= 50004 + 10000).
-    assert [text.split(" ", 1)[0] for _db, text in sql.statements] == ["DELETE", "UPDATE", "UPDATE"]
-    assert sql.statements[1] == (
+    # T564: around the two files, the corrections that keep the teleporter's menus off the base
+    # game's ids (tests/test_npc_teleporter_menus.py runs them). The Onyxia answer is written into
+    # the row at the capital NPC's menu + 4, wherever the menus are.
+    assert [text.split(" ", 2)[0:2] for _db, text in sql.statements] == [
+        ["START", "TRANSACTION;"],
+        ["START", "TRANSACTION;"],
+        ["REPLACE", "INTO"],
+        ["SET", "@tp_menu:=(SELECT"],
+        ["START", "TRANSACTION;"],
+    ]
+    assert sql.statements[3] == (
         "world",
+        "SET @tp_menu:=(SELECT gossip_menu_id FROM creature_template WHERE entry=190000); "
         "UPDATE conditions SET ConditionValue1=80 WHERE SourceTypeOrReferenceId=15 "
-        "AND SourceGroup=60004 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
+        "AND SourceGroup=@tp_menu+4 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
     )
     assert [p.key for p in manifest.prompts] == ["ony_level"]
 

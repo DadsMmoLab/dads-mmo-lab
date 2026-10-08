@@ -117,7 +117,9 @@ def _remove_text() -> str:
 
 def _remove_statements() -> list[str]:
     return [
-        s.strip() for s in re.split(r";\s*(?=(?:DELETE|REPLACE)\b)", _remove_text()) if s.strip()
+        s.strip().rstrip(";")
+        for s in re.split(r";\s*(?=(?:DELETE|REPLACE|SET|START|COMMIT)\b)", _remove_text())
+        if s.strip().rstrip(";") and not re.match(r"(SET|START|COMMIT)\b", s.strip(), re.I)
     ]
 
 
@@ -155,6 +157,8 @@ def _removed_ids() -> dict[str, set[int]]:
         if not found:
             continue
         table, where = found.group(1).lower(), found.group(2)
+        if "@tp_" in where:
+            continue  # T564: the menus found through the NPCs (tests/test_npc_teleporter_menus.py)
         key = _KEYS[table]
         between = re.search(rf"\b{key}\s+BETWEEN\s+(\d+)\s+AND\s+(\d+)", where, re.I)
         listed = re.search(rf"\b{key}\s+IN\s*\(([\d,\s]+)\)", where, re.I)
@@ -172,11 +176,7 @@ def _removed_ids() -> dict[str, set[int]]:
 
 def test_remove_clears_exactly_the_ids_the_install_clears() -> None:
     """Every table, every id: the union of the two `.dist` DELETE blocks, no more and no less."""
-    # T564: plus the free range the install now moves the teleporter's gossip menus to.
-    expected = _dist_ids()
-    for table in ("gossip_menu", "gossip_menu_option", "conditions"):
-        expected[table] = expected[table] | set(range(60000, 60011))
-    assert _removed_ids() == expected
+    assert _removed_ids() == _dist_ids()
 
 
 def test_remove_keeps_the_install_s_other_conditions_on_the_row_it_matches() -> None:
