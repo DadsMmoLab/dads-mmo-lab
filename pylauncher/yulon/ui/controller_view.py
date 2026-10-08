@@ -72,6 +72,7 @@ from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
+    client_build,
     client_config,
     client_exe,
     client_names,
@@ -10771,6 +10772,19 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
         show_warning(self, f"{self.entry.name}", message)
 
+    def _wrong_build_refusal(self, client_dir: Path) -> str | None:
+        """Why this client folder's Wow.exe may not be used for this server, or None (T576).
+
+        Asked of the catalog entry's `client.required_build` and never of a game id; an
+        exe with no readable version is accepted. Cached per exe by size and mtime.
+        """
+        client = self.entry.client
+        return client_build.refusal(
+            steam_module.client_executable(client_dir),
+            version=client.version,
+            build=client.required_build,
+        )
+
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
 
@@ -10844,6 +10858,10 @@ class ControllerView(QWidget):
                 f"The client folder cannot be the server folder or inside it ({server_dir}): "
                 "Uninstall removes that whole tree."
             )
+            return
+        wrong = self._wrong_build_refusal(chosen)
+        if wrong is not None:
+            self._client_dir_refused(wrong)
             return
         spec = preflight.client_spec_for(self.entry)
         if spec is not None:
@@ -11256,6 +11274,9 @@ class ControllerView(QWidget):
                 )
                 if missing is not None:
                     raise play_client.PlayClientError(missing)
+        wrong = self._wrong_build_refusal(original)
+        if wrong is not None:
+            raise play_client.PlayClientError(wrong)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
@@ -11492,7 +11513,8 @@ class ControllerView(QWidget):
         """Start the game from this server's ready-to-play client (T181 §2).
 
         In order: the folder must still be this server's (else the offer to
-        make it again); the server must run (else "Start it first?"); a patched
+        make it again); the client it was made from must be the build the server
+        needs (T576); the server must run (else "Start it first?"); a patched
         original offers Refresh; then the realmlist is written again and the
         game is started, detached.
 
@@ -11507,7 +11529,14 @@ class ControllerView(QWidget):
             return
         if self._play_client_blocked():
             return
-        if self._usable_play_client() is None:
+        marker = self._usable_play_client()
+        if marker is None:
+            return
+        # T576: a client picked before the build check existed. Read once per exe (cached
+        # by size and mtime), so it costs nothing on the presses after the first.
+        wrong = self._wrong_build_refusal(marker.source_client_dir)
+        if wrong is not None:
+            self._play_refused(f"{wrong} Nothing was started.")
             return
         self._play_pending = True
         self._say_play("Checking that the server is running…")

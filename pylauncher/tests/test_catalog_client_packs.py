@@ -179,7 +179,13 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_alone() -> None:
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
         if entry["id"] != "wow-centurion":
-            assert set(entry["client"]) <= {"version", "build", "realmlist_file", "notes"}
+            assert set(entry["client"]) <= {
+                "version",
+                "build",
+                "required_build",
+                "realmlist_file",
+                "notes",
+            }
     for game in load_catalog().games:
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
