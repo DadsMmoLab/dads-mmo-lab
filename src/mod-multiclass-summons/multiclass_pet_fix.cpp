@@ -64,13 +64,20 @@ namespace
         if (!session)
             return false;
 
-        if constexpr (requires { session->IsBot(); })
+        // The newest playerbots core renamed WorldSession::IsBot() to IsHeadless();
+        // older cores only have IsBot(). Ask whichever the core has. A core with
+        // neither is a compile error, never a quiet "not a bot".
+        if constexpr (requires { session->IsHeadless(); })
+        {
+            return session->IsHeadless();
+        }
+        else if constexpr (requires { session->IsBot(); })
         {
             return session->IsBot();
         }
         else
         {
-            return false;
+            static_assert(sizeof(T) == 0, "WorldSession has neither IsHeadless() nor IsBot()");
         }
     }
 

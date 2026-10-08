@@ -5,6 +5,7 @@
 #include "Entities/Item/ItemTemplate.h"
 #include "Log.h"
 #include "ScriptDefines/WorldScript.h"
+#include "WorldSession.h"
 
 #include <array>
 #include <string>
@@ -47,6 +48,23 @@
 
 namespace
 {
+// The newest playerbots core renamed WorldSession::IsBot() to IsHeadless(); older
+// cores only have IsBot(). Ask whichever the core has. A core with neither is a
+// compile error here, never a quiet "not a bot".
+template <typename Session>
+bool UnboundIsBotSession(Session* session)
+{
+    if (!session)
+        return false;
+
+    if constexpr (requires { session->IsHeadless(); })
+        return session->IsHeadless();
+    else if constexpr (requires { session->IsBot(); })
+        return session->IsBot();
+    else
+        static_assert(sizeof(Session) == 0, "WorldSession has neither IsHeadless() nor IsBot()");
+}
+
 struct GuidKeyedTable
 {
     char const* table;
@@ -185,7 +203,7 @@ public:
         // the Unbound class mask (Playerbots' own heuristics read
         // item_template/SkillLineAbility/quest_template directly and must
         // see the bot's native class only).
-        if (player->GetSession()->IsBot())
+        if (UnboundIsBotSession(player->GetSession()))
             return;
 
         // Build the Unbound class mask: bitmask of EXTRA classes unlocked
