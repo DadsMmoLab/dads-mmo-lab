@@ -1503,6 +1503,233 @@ def test_a_1_mb_conf_of_repeated_sections_saves_fast_with_edits_far_apart() -> N
     assert took < 0.5, took
 
 
+def test_a_line_moved_past_a_run_of_alike_lines_leaves_the_run_its_endings() -> None:
+    """T573 fourth review (p1): a line moved past 20 `#` lines took 10 of them a neighbour's ending.
+
+    The `#` lines end in LF and CRLF by turns. The moved line is the only line in its gap
+    whose text occurs once on each side, so lining the gap up at it first left every `#`
+    line unmatched; a gap this small is lined up exactly instead.
+    Mutation: look for unique-line anchors before the exact line-up and this is red (10).
+    """
+    lines = ["Top = 1", "U = 1", *["#"] * 20, "V = 2", "W = 3"]
+    ends = ["\r\n", "\r\n", *["\n", "\r\n"] * 10, "\r\n", "\r\n"]
+    raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    moved = items.pop(1)
+    items.insert(21, (None, moved[1]))
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert tuning.editor_view(out) == edited
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+def _repeated(section: list[str], n: int) -> tuple[list[str], str]:
+    """`n` lines of `section` over and over, ending in LF and CRLF by turns."""
+    lines = (section * (n // len(section) + 1))[:n]
+    ends = ["\r\n" if i % 2 else "\n" for i in range(n)]
+    return lines, "".join(line + end for line, end in zip(lines, ends, strict=True))
+
+
+_SECTION = [
+    "[Bots]",
+    "#",
+    "#    Bot.Enabled",
+    "#        Description: Whether this bot is on.",
+    "#        Default:     1",
+    "",
+    "Bot.Enabled = 1",
+    "Bot.Count = 50",
+    "#",
+    "",
+]
+
+
+@pytest.mark.parametrize(
+    "section, n, at, size, text",
+    [
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 10, "", id="10-fresh-lines-twice"),
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 17, "", id="17-fresh-lines-twice"),
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 20, "", id="20-fresh-lines-twice"),
+        pytest.param(_SECTION, 1000, (100, 700), 12, "", id="12-fresh-lines-in-sections"),
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 3, "E = 1", id="3-twin-lines-twice"),
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 10, "E = 1", id="10-twin-lines-twice"),
+        pytest.param(["#", "", "E = 1"], 600, (100, 400), 20, "E = 1", id="20-twin-lines-twice"),
+    ],
+)
+def test_blocks_added_among_repeated_sections_leave_every_other_line_its_ending(
+    section: list[str], n: int, at: tuple[int, int], size: int, text: str
+) -> None:
+    """T573 fourth review (p7): two blocks pasted into a file of repeated sections.
+
+    No line occurs once, so the file goes to the in-order match. 295 of 600 untouched lines
+    took a neighbour's ending there: a window counting only matches lined the lines after
+    the block up with a twin a few lines on, as the true line-up's last lines fall past
+    its edge. Fresh lines (texts the file does not have) and lines the file has (`E = 1`)
+    are both tried.
+    Mutation: line a window up by matches alone (closed at both ends) and the twin-line
+    cases are red; let a changed line cost nothing and the fresh-line cases are red.
+    """
+    lines, raw = _repeated(section, n)
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    for where in sorted(at, reverse=True):
+        items[where:where] = [(None, text or f"New{where}.{k} = 1") for k in range(size)]
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert tuning.editor_view(out) == edited
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+@pytest.mark.parametrize(
+    "section, changed",
+    [
+        pytest.param(["#"], (125, 157, 242, 247, 351, 468, 477, 531), id="all-hash-lines"),
+        pytest.param(["#", "", "E = 1"], (82, 99, 101, 135, 301), id="two-close-in-sections"),
+    ],
+)
+def test_lines_changed_among_twins_keep_the_twins_their_endings(
+    section: list[str], changed: tuple[int, ...]
+) -> None:
+    """A changed line among twins is the line it replaced, not an added one (T573 round 5).
+
+    In a window, `#` changed into `C` reads the same as `C` added and one `#` dropped further
+    on; the line counts of the whole tell them apart. Counted as added, every `#` line after
+    it took its neighbour's ending (263 of 624).
+    Mutation: drop the charge for leaving the sides uneven (`_BEHIND = 0`) and this is red.
+    """
+    lines, raw = _repeated(section, 624)
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    for k, where in enumerate(changed):
+        items[where] = (None, f"C{k} = changed")
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert tuning.editor_view(out) == edited
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+def test_a_block_pasted_above_changed_lines_stays_added_lines() -> None:
+    """Changed lines further down do not make a pasted block read as changed lines (T573 r5).
+
+    Ten fresh lines pasted into a file of repeated sections, three lines changed far below.
+    In a window at the block, three of its lines paired with the old lines there read as
+    well as the changes below; taken so, every line between moved a section on (397 of 600).
+    Mutation: let a run of any length of fresh lines be changed lines and this is red.
+    """
+    lines, raw = _repeated(["#", "", "E = 1"], 600)
+    items: list[tuple[int | None, str]] = list(enumerate(lines))
+    for k, where in enumerate((300, 400, 500)):
+        items[where] = (None, f"C{k} = changed")
+    items[100:100] = [(None, f"Pasted{k} = 1") for k in range(10)]
+    edited = "\n".join(text for _, text in items) + "\n"
+
+    out = tuning.save_text(raw, edited)
+
+    assert tuning.editor_view(out) == edited
+    assert _unedited_lines_that_lost_their_bytes(raw, items, out) == []
+
+
+@pytest.mark.parametrize("edits", [("add", "paste"), ("change", "change-run")])
+def test_fresh_edits_in_big_files_of_repeated_sections_keep_every_other_lines_bytes(
+    edits: tuple[str, str],
+) -> None:
+    """T573 fourth review (p6), fuzz: files of 300-700 lines of one section repeated.
+
+    Endings CRLF, LF and lone CR at random; 1-8 edits that each type text the file does not
+    have: lines added one at a time or pasted 5-80 at once, or lines changed one at a time
+    or 2-3 together. The file is far bigger than `_walk`'s window and has no line that
+    occurs once, so this goes through the window, keeps its first half and moves on. With
+    the twins' texts untouched, which old line each untouched new line is can be read off,
+    so every one of them must end as it did. 126 of 250 such cases lost endings before.
+    """
+    import random
+
+    rng = random.Random(573)
+    alike = ["#", "", "# ---", "E = 1", "C = 5", "[S]"]
+    for case in range(120):
+        section = [rng.choice(alike) for _ in range(rng.randint(3, 12))]
+        n = rng.randint(300, 700)
+        lines = (section * (n // len(section) + 1))[:n]
+        ends = [rng.choice(["\n", "\r\n", "\r"]) for _ in lines]
+        for k in range(n - 1):
+            if ends[k] == "\r" and lines[k + 1] == "":
+                ends[k] = "\n"  # a lone CR before a blank line would read back as one CRLF
+        raw = "".join(line + end for line, end in zip(lines, ends, strict=True))
+        items: list[tuple[int | None, str]] = list(enumerate(lines))
+        for step in range(rng.randint(1, 8)):
+            edit = rng.choice(edits)
+            at = rng.randrange(len(items))
+            if edit == "add":
+                items.insert(at, (None, f"N{case}.{step}"))
+            elif edit == "paste":
+                items[at:at] = [(None, f"P{case}.{step}.{k}") for k in range(rng.randint(5, 80))]
+            elif edit == "change":
+                items[at] = (None, f"C{case}.{step}")
+            else:
+                width = len(items[at : at + rng.randint(2, 3)])
+                items[at : at + width] = [(None, f"R{case}.{step}.{k}") for k in range(width)]
+        edited = "\n".join(text for _, text in items) + "\n"
+
+        out = tuning.save_text(raw, edited)
+
+        assert tuning.editor_view(out) == edited, case
+        got_ends = _lines_and_ends(out)[1]
+        lost = [
+            j
+            for j in _unedited_lines_that_lost_their_bytes(raw, items, out)
+            # The glue rule: a blank line after a lone-CR line takes a lone CR itself.
+            if not (items[j][1] == "" and got_ends[j - 1] == got_ends[j] == "\r")
+        ]
+        assert lost == [], case
+
+
+def test_a_1_mb_file_of_one_letter_lines_with_swaps_everywhere_saves_at_once() -> None:
+    """T573 Codex adversarial review: the in-order match's windows were not budgeted.
+
+    About 420,000 lines of `a` or `b` at random, LF and CRLF by turns, with every third
+    pair of lines swapped: no line is unique and the two texts differ every few lines, so
+    every difference opened an exactly lined-up window (1.8 s for 500,000 such lines, on the
+    window's thread). The windows are charged to the save's `_EXACT_CELLS`, and once those
+    are spent the rest is matched in linear time. Measured 0.3 s; the bound leaves room
+    for a slower machine.
+    Mutation: never charge a window and this takes seconds.
+    """
+    import random
+    import time
+
+    rng = random.Random(573)
+    n = 1024 * 1024 * 2 // 5
+    lines = [rng.choice("ab") for _ in range(n)]
+    raw = "".join(line + ("\r\n" if i % 2 else "\n") for i, line in enumerate(lines))
+    new = list(lines)
+    for k in range(0, n - 1, 3):
+        new[k], new[k + 1] = new[k + 1], new[k]
+    edited = "\n".join(new) + "\n"
+
+    started = time.perf_counter()
+    out = tuning.save_text(raw, edited)
+    took = time.perf_counter() - started
+
+    assert tuning.editor_view(out) == edited
+    assert len(raw) > 1000 * 1000
+    assert took < 0.75, took
+
+
+def test_a_line_added_at_the_top_of_a_lone_cr_file_ends_in_a_lone_cr() -> None:
+    """A file whose lines all end in a lone CR keeps that ending on a line added above them.
+
+    Such a line has no line above it and replaces none, so it takes the file's usual ending,
+    which was LF for any file without a CRLF in it.
+    """
+    out = tuning.save_text("A = 1\rB = 2\r", "New = 1\nA = 1\nB = 2\n")
+
+    assert out == "New = 1\rA = 1\rB = 2\r"
+
+
 def test_an_emptied_editor_writes_an_empty_file() -> None:
     assert tuning.save_text("A = 1\r\n", "") == ""
 

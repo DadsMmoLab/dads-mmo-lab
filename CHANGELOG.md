@@ -22,7 +22,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The bot counts see an indented setting in a hand-edited conf.
 - A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
 - On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
-- **Save file** on the Tuning tab keeps the file's byte-order mark and the line endings of every line you did not edit.
+- **Save file** on the Tuning tab keeps the file's line endings and byte-order mark.
 - The Tuning tab no longer opens, saves, backs up or reverts a setting file that is a link out of the server folder.
 - **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
