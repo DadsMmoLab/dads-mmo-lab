@@ -1,0 +1,20 @@
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+index 489450092..8059c385b 100644
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -5418,6 +5418,15 @@ float Player::OCTRegenMPPerSpirit()
+     uint8 level = GetLevel();
+     uint32 pclass = getClass();
+ 
++    // Unbound multiclass: a class with no mana of its own (warrior, rogue,
++    // death knight) has no spirit regen in its row, so the mana pool of an
++    // unlocked mana class never refilled. Such a character reads the priest's
++    // row instead. A character with no mana pool is unaffected: Regenerate()
++    // skips a power whose maximum is 0.
++    if (ChrClassesEntry const* classEntry = sChrClassesStore.LookupEntry(pclass))
++        if (classEntry->powerType != POWER_MANA)
++            pclass = CLASS_PRIEST;
++
+     if (level > GT_MAX_LEVEL)
+         level = GT_MAX_LEVEL;
+ 
