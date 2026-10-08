@@ -753,3 +753,18 @@ def test_the_in_distro_transport_ends_the_window_at_the_answer_too(
     )
     assert reply.lines == ("All players saved.",)
     assert time.monotonic() - started < 3.0
+
+
+@needs_pty
+def test_a_prompt_straight_after_our_echo_is_not_taken_for_the_end(_no_settle: None) -> None:
+    """An earlier command finishing right after our echo prints its prompt before our answer."""
+    script = [
+        (0.0, b"saveall\r\n"),
+        (0.05, b"mangos> "),
+        (1.2, b"All players saved.\r\nmangos> "),
+    ]
+    reply, took = _timed_send(script, window=4.0, prompt="mangos>", precedes=False)
+    # Only the time is pinned: the stale prompt glues itself to the front of the answer line, which
+    # `_parse_reply()` has always read as a second command's prompt.
+    assert reply.prompted is True
+    assert 1.1 < took < 3.2, took

@@ -434,21 +434,33 @@ def _wait_for_answer(
 
 
 def _answer_closed(raw: list[str], command: str, prompt: str) -> bool:
-    """Has the console printed its prompt after our own echo of `command`?
+    """Has the console printed its prompt after our own echo of `command` and some output?
 
     Counted from the echo, as `_parse_reply()` does: a prompt before it belongs to an earlier
     command and says nothing about this one. Only meaningful for an `fgets` console.
+
+    A prompt that follows the echo with nothing between is not taken for the end: a command
+    still running from before (a second `docker attach`, an earlier send) prints its prompt
+    whenever it finishes, which can be right after our echo and before our answer (Codex
+    adversarial review, T561). Every command this ends early prints at least one line
+    (`saveall`: "All players saved."), and one that prints none just waits its window out, as
+    it always did. A stale prompt that arrives after unrelated log lines still looks like an
+    end; nothing in the stream tells those apart.
     """
     sent = command.strip()
     anchored = False
+    printed = False
     for line in raw:
         text = runner.strip_ansi(line).replace("\x1b", "").strip()
-        if anchored and text.startswith(prompt):
+        if anchored and printed and text.startswith(prompt):
             return True
         while text.startswith(prompt):
             text = text[len(prompt) :].lstrip()
         if text == sent:
             anchored = True
+            printed = False
+        elif anchored and text:
+            printed = True
     return False
 
 
