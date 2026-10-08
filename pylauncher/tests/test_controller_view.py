@@ -2547,7 +2547,7 @@ def _with_the_card_buttons(services: ControllerServices) -> None:
 
 
 def _services_with_the_card_buttons(ps: _Ps, tmp_path: Path) -> ControllerServices:
-    """`_services` for WotLK's layout tests: the card has its two presses, as the real game's does."""
+    """`_services` for WotLK's layout tests: the card has its two presses, as the game's does."""
     services = _services(ps, tmp_path, [])
     _with_the_card_buttons(services)
     return services
