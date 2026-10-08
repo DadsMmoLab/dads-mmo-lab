@@ -21,10 +21,14 @@ from typing import BinaryIO
 
 import pytest
 
+from tests.support_native import Recorder
+from tests.test_families_cmangos import entry_with_sql
 from tests.test_plan_corrections import BASE, _Mariadb, an_engine, folder, imported_with, plan
+from yulon import resources
 from yulon.catalog import native
 from yulon.catalog.catalog import SqlPhase
 from yulon.catalog.families import sqlplan
+from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 
 CONTENT = SqlPhase(
@@ -184,6 +188,94 @@ def test_the_press_refuses_when_the_stuck_files_changed_since_the_dialog(tmp_pat
     with pytest.raises(InstallerError, match="changed since the confirmation"):
         list(engine.apply_corrections(forged, folder(tmp_path)))
     assert "t2" not in db.tables("mangos") and "t3" not in db.tables("mangos")
+
+
+def _recorded_engine(db: _Db) -> tuple[CmangosInstaller, Recorder]:
+    """`an_engine()` with its Recorder kept, to see which git moves a press makes."""
+    rec = Recorder()
+    rec.db_started = True
+    engine = CmangosInstaller(
+        entry_with_sql(PLAN),
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(
+            platform_id=lambda: "linux",
+            exec_stdin=db.exec_stdin,
+            sql_query=db.query,
+            world_running=lambda container: False,
+            db_running=lambda container: True,
+        ),
+    )
+    return engine, rec
+
+
+def _the_db_checkout(engine: CmangosInstaller, server_dir: Path) -> Path:
+    (source,) = (s for s in engine.entry.emulator.sources if native.held_at_its_pin(s))
+    return server_dir / source.dest
+
+
+def test_the_press_runs_only_what_is_on_disk_and_never_moves_the_checkout(
+    tmp_path: Path,
+) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    engine, rec = _recorded_engine(db)
+    dest = _the_db_checkout(engine, server_dir)
+    rec.heads[dest] = "a" * 40  # not the catalog pin: an older Yu'lon's checkout
+    check = engine.correction_check(folder(tmp_path))
+    lines = list(engine.apply_corrections(check, folder(tmp_path)))
+    assert rec.clones == [], rec.clones
+    assert rec.heads[dest] == "a" * 40
+    assert not any("Moving " in line for line in lines), lines
+    assert _ledger(db) == {U1: "seeded", U2: "applied", U3: "applied"}
+    assert lines[-1] == native.NEWER_WORLD_CONTENT_WAITS, lines
+
+
+def test_a_checkout_at_its_pin_gets_no_extra_line(tmp_path: Path) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    engine, rec = _recorded_engine(db)
+    dest = _the_db_checkout(engine, server_dir)
+    (source,) = (s for s in engine.entry.emulator.sources if native.held_at_its_pin(s))
+    rec.heads[dest] = source.rev or ""
+    check = engine.correction_check(folder(tmp_path))
+    lines = list(engine.apply_corrections(check, folder(tmp_path)))
+    assert native.NEWER_WORLD_CONTENT_WAITS not in lines and rec.clones == []
+
+
+def test_the_press_refuses_when_the_checkout_moved_since_the_dialog(tmp_path: Path) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    engine, rec = _recorded_engine(db)
+    dest = _the_db_checkout(engine, server_dir)
+    rec.heads[dest] = "a" * 40
+    check = engine.correction_check(folder(tmp_path))
+    rec.heads[dest] = "b" * 40
+    with pytest.raises(InstallerError, match="changed since the confirmation"):
+        list(engine.apply_corrections(check, folder(tmp_path)))
+    assert "t2" not in db.tables("mangos") and rec.clones == []
+
+
+def test_a_retrys_final_record_is_past_the_time_the_dialog_showed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, _ = _stuck_server(tmp_path)
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "mangos"],
+        io.BytesIO(b"UPDATE yulon_install_file SET at_unix = 5000 WHERE state = 'failed';"),
+        env={},
+    )
+    monkeypatch.setattr(sqlplan.time, "time", lambda: 5000.0)
+    engine = an_engine(PLAN, db)
+    check = engine.correction_check(folder(tmp_path))
+    list(engine.apply_corrections(check, folder(tmp_path)))
+    assert _times(db)[("content updates", U2)] > 5000
+
+
+def test_stuck_files_alone_still_say_what_this_version_changed_and_will_not_apply() -> None:
+    one = native.StuckWorldUpdate("content updates", U2, "failed", False, sha256="a" * 64)
+    check = native.CorrectionCheck("stale", withheld=("core updates",), stuck=(one,))
+    assert "core updates" in native.corrections_banner_text(check)
+    entry = entry_with_sql(PLAN)
+    text = native.corrections_confirmation(entry, Path("/srv"), (), (), ("core updates",), (one,))
+    assert "NOT applied by this: core updates" in text
 
 
 def test_the_update_s_sentence_now_points_at_the_press() -> None:

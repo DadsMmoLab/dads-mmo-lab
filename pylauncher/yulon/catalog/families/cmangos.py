@@ -92,6 +92,7 @@ from yulon.catalog.native import (
     ERROR_RUN_INSTALL,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    NEWER_WORLD_CONTENT_WAITS,
     RERUN_CANCEL_NOTE,
     UPDATE_SOURCES_STAGE,
     UPDATES_BUTTON_LABEL,
@@ -694,8 +695,15 @@ class CmangosInstaller(StagedInstaller):
         catch_up: _WorldCatchUp,
         ledger: dict[tuple[str, str], sqlplan.FileRow],
         applied: list[int],
+        *,
+        move: bool = True,
     ) -> Iterator[str]:
-        """Seed, move each `*-db` checkout to its pin, then apply each new file once (T531)."""
+        """Seed, move each `*-db` checkout to its pin, then apply each new file once (T531).
+
+        `move=False` (the retry press, T545) leaves every checkout where it is and applies only
+        the files already on disk: the dialog counted those, and the player's own edits in a
+        checkout are not this press's to discard.
+        """
         world = self.entry.databases.world
         plan = self._data().sql
         db = self._native().db
@@ -718,7 +726,7 @@ class CmangosInstaller(StagedInstaller):
         for source in held:
             dest = ctx.server_dir / source.dest
             old = self._seams.head_sha(dest)
-            if not source.rev or old == source.rev:
+            if not source.rev or old == source.rev or not move:
                 continue
             yield (
                 f"Moving {source.repo} in {source.dest} to {source.rev[:7]}, the commit this "
@@ -2598,6 +2606,10 @@ class CmangosInstaller(StagedInstaller):
                 sqlplan.file_times_query(plan.marker_db),
             )
         )
+        heads = ",".join(
+            f"{source.dest}@{self._seams.head_sha(ctx.server_dir / source.dest)}"
+            for source in self._world_catch_up_plan().held()
+        )
         found = []
         for row in rows:
             path = ctx.server_dir / row.file
@@ -2615,6 +2627,7 @@ class CmangosInstaller(StagedInstaller):
                     behind=behind,
                     sha256=sqlplan.file_digest(path) if path.is_file() else "",
                     changed=path.is_file() and sqlplan.file_digest(path) != row.sha256,
+                    heads=heads,
                     at_unix=times.get((row.phase, row.file), 0),
                 )
             )
@@ -2716,7 +2729,13 @@ class CmangosInstaller(StagedInstaller):
             ledger[(one.phase, one.file)] = sqlplan.FileRow(one.phase, one.file, sha, state)
             yield f"{one.file}: applied and recorded."
         applied: list[int] = [0, 0]
-        yield from self._bring_new_world_files(ctx, self._world_catch_up_plan(), ledger, applied)
+        catch_up = self._world_catch_up_plan()
+        yield from self._bring_new_world_files(ctx, catch_up, ledger, applied, move=False)
+        if any(
+            source.rev and self._seams.head_sha(ctx.server_dir / source.dest) != source.rev
+            for source in catch_up.held()
+        ):
+            yield NEWER_WORLD_CONTENT_WAITS
 
     def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
         """The confirmation's step list: the steps the press streams, by name."""

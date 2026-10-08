@@ -796,6 +796,9 @@ class StuckWorldUpdate:
     """When its ledger row was written: the press takes the row only if it is still this one."""
     changed: bool = False
     """The file's bytes are not the ones the ledger row recorded when the update tried it."""
+    heads: str = ""
+    """Where the world-database checkouts stood when the dialog was built (T545): the press runs
+    what is on disk then, so a checkout that moved since is a different press and is refused."""
 
 
 @dataclass(frozen=True)
@@ -1515,6 +1518,10 @@ _STOPS_THE_WORLD = (
 )
 
 
+NEWER_WORLD_CONTENT_WAITS = "Yu'lon's newer world content waits for Update to latest."
+"""Said after a retry press left a world-database checkout short of this Yu'lon's pin (T545)."""
+
+
 def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
     """What the corrections dialog says about world updates an update left unfinished (T545).
 
@@ -1553,6 +1560,11 @@ def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
 def corrections_banner_text(check: CorrectionCheck) -> str:
     """The Server tab banner for a `stale` reading: corrected steps, unfinished updates, or both."""
     said = []
+    if check.withheld and not check.offered:
+        said.append(
+            f"{', '.join(check.withheld)} also changed in this version, and only a new install "
+            "gets it."
+        )
     if check.offered:
         held = (
             f" ({', '.join(check.withheld)} also changed, and only a new install gets "
@@ -1600,7 +1612,8 @@ def corrections_confirmation(
     )
     if not offered:
         return f"Run the unfinished world updates of {entry.name} again?\n\n" + (
-            f"Folder: {server_dir}\n\n{stuck_world_updates_text(stuck)}\n\n{_STOPS_THE_WORLD}"
+            f"Folder: {server_dir}\n\n{stuck_world_updates_text(stuck)}\n\n{held}"
+            f"{_STOPS_THE_WORLD}"
         )
     extra = f"{stuck_world_updates_text(stuck)}\n\n" if stuck else ""
     return (
