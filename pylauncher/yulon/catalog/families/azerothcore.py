@@ -415,6 +415,12 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"The new sources have no {missing[0]}, so this server's Lua scripts could not "
                 "be laid from them. Nothing was built."
             )
+        linked = scriptdeploy.linked_sources(server_dir, block.lua_scripts)
+        if linked:
+            raise InstallerError(
+                f"The new sources have {linked[0]} as a link, so this server's Lua scripts "
+                "could not be laid from them. Nothing was built."
+            )
 
     def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
         """Write the patches and lay the scripts into moved (or put back) sources (T553).
@@ -434,6 +440,10 @@ class AzerothCoreInstaller(StagedInstaller):
         (re-cloned, or reset by hand) gets it back here rather than compiling
         without it; a tree that has it says nothing. Quiet: on the update route the
         same work has just run in `apply_carried_patches()`.
+
+        The scripts are laid here while the old world may still be running, so a
+        `.reload ale` or a crash-restart in the compile window loads the new
+        scripts on the old binary (T562 moves the laying to the servers-down step).
         """
         yield from self._carried(server_dir, quiet=True)
 

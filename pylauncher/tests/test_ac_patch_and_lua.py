@@ -499,9 +499,20 @@ def test_an_update_whose_new_source_lost_its_scripts_is_put_back(
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
 
 
-def test_a_lua_source_that_is_a_link_is_not_followed(tmp_path: Path) -> None:
+def _spec(src: str) -> Any:
     from yulon.catalog.catalog import LuaScripts
 
+    return LuaScripts(src=src, dest=f"{LUA_SCRIPTS_DIR}/m")
+
+
+def _plain_source(tmp_path: Path) -> Path:
+    server_dir = tmp_path / "srv"
+    (server_dir / "modules/m/lua").mkdir(parents=True)
+    (server_dir / "modules/m/lua/a.lua").write_text("a\n", encoding="utf-8")
+    return server_dir
+
+
+def test_a_lua_source_that_is_a_link_is_refused_whole(tmp_path: Path) -> None:
     server_dir = tmp_path / "srv"
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -509,12 +520,144 @@ def test_a_lua_source_that_is_a_link_is_not_followed(tmp_path: Path) -> None:
     (server_dir / "modules/m").mkdir(parents=True)
     (server_dir / "modules/m/lua").symlink_to(elsewhere, target_is_directory=True)
 
-    said = list(
-        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")])
+    with pytest.raises(InstallerError, match="is a link"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+    assert not (server_dir / LUA_SCRIPTS_DIR).exists()
+    assert not scriptdeploy.record_path(server_dir).exists()
+
+
+def test_a_linked_file_in_the_source_refuses_before_any_script_is_laid(tmp_path: Path) -> None:
+    server_dir = _plain_source(tmp_path)
+    (server_dir / "modules/m/real.txt").write_text("r\n", encoding="utf-8")
+    (server_dir / "modules/m/lua/b.lua").symlink_to(server_dir / "modules/m/real.txt")
+
+    with pytest.raises(InstallerError, match="b.lua"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+    assert not (server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua").exists()
+    assert not scriptdeploy.record_path(server_dir).exists()
+
+
+def test_a_linked_subfolder_in_the_source_refuses_before_any_script_is_laid(
+    tmp_path: Path,
+) -> None:
+    server_dir = _plain_source(tmp_path)
+    (server_dir / "modules/m/other").mkdir()
+    (server_dir / "modules/m/lua/sub").symlink_to(
+        server_dir / "modules/m/other", target_is_directory=True
     )
 
-    assert not (server_dir / LUA_SCRIPTS_DIR / "m" / "secret.lua").exists()
-    assert any("is a link" in line for line in said), said
+    with pytest.raises(InstallerError, match="sub"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+    assert not (server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua").exists()
+
+
+def test_an_update_whose_new_source_is_a_link_is_refused_and_put_back(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            real = dest / "lua_scripts"
+            real.rename(dest / "lua_scripts_copy")
+            real.symlink_to(dest / "lua_scripts_copy", target_is_directory=True)
+
+    rec.on_clone = fetched
+
+    with pytest.raises(InstallerError, match="as a link") as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert "Nothing was built" in str(raised.value)
+    assert rec.heads[server_dir / MODULE] == OLD
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+
+
+def test_a_failed_record_write_stops_the_press_and_says_how_to_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _plain_source(tmp_path)
+
+    def full(*_args: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    said: list[str] = []
+    with pytest.raises(InstallerError, match="delete") as raised:
+        for line in scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]):
+            said.append(line)
+    assert scriptdeploy.RECORD_FILE in str(raised.value)
+    assert not any("Lua scripts are in place" in line for line in said), said
+
+
+def test_a_failed_record_write_keeps_the_world_from_starting(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(*_args: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "server"
+    rec.on_clone = lay_tree(server_dir)
+    rec.query_answer = "1\n"
+    made = make(scratch_entry(**FULL), rec, installers)
+
+    with pytest.raises(InstallerError, match=scriptdeploy.RECORD_FILE):
+        list(made.run(InstallOptions(server_dir=server_dir)))
+    assert "up" not in rec.calls
+
+
+def test_a_write_that_fails_mid_loop_keeps_its_own_sentence_over_the_record_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _plain_source(tmp_path)
+
+    def broken(*_args: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", broken)
+    monkeypatch.setattr(scriptdeploy, "_publish", broken)
+    with pytest.raises(InstallerError, match="could not be laid"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+
+def test_a_failing_stale_removal_is_not_hidden_by_a_finished_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _plain_source(tmp_path)
+    list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+    (server_dir / "modules/m/lua/a.lua").unlink()
+    (server_dir / "modules/m/lua/c.lua").write_text("c\n", encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.name == "a.lua":
+            raise PermissionError(13, "denied")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    monkeypatch.setattr(
+        scriptdeploy, "_write_record", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    with pytest.raises(InstallerError, match="could not be laid"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+
+def test_closing_the_laying_early_never_raises_for_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _plain_source(tmp_path)
+
+    def full(*_args: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    gen = scriptdeploy.lay(server_dir, [_spec("modules/m/lua")])
+    assert next(gen).startswith("Laid")
+    gen.close()
 
 
 # -- the catalog data ------------------------------------------------------------

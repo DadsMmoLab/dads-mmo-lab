@@ -165,37 +165,56 @@ def missing_sources(server_dir: Path, specs: Sequence[LuaScripts]) -> tuple[str,
     )
 
 
-def _plan(server_dir: Path, specs: Sequence[LuaScripts]) -> tuple[list[_Planned], list[str]]:
-    """Every file the specs lay, and a line for each link that was not followed."""
+def _linked_source(server_dir: Path, src: Path) -> Path | None:
+    """The first link at or under a Lua source: the source, a folder above it, or inside it."""
+    link = src if src.is_symlink() else _through_a_link(server_dir, src / "_")
+    if link is not None:
+        return link
+    if not src.is_dir():
+        return None
+    for root, dirs, files in os.walk(src, followlinks=False):
+        dirs.sort()
+        for name in [*dirs, *sorted(files)]:
+            if (Path(root) / name).is_symlink():
+                return Path(root) / name
+    return None
+
+
+def linked_sources(server_dir: Path, specs: Sequence[LuaScripts]) -> tuple[str, ...]:
+    """The first link (relative to the server dir) in each present source that has one."""
+    found: list[str] = []
+    for spec in specs:
+        src = server_dir / spec.src
+        if not src.is_dir() and not src.is_file():
+            continue
+        link = _linked_source(server_dir, src)
+        if link is not None:
+            found.append(link.relative_to(server_dir).as_posix())
+    return tuple(found)
+
+
+def _plan(server_dir: Path, specs: Sequence[LuaScripts], remedy: str) -> list[_Planned]:
+    """Every file the specs lay; a link anywhere in a source refuses the whole plan."""
     planned: list[_Planned] = []
-    skipped: list[str] = []
     for spec in specs:
         src = server_dir / spec.src
         dest = server_dir / spec.dest.rstrip("/")
-        if src.is_symlink():
-            skipped.append(f"{spec.src} is a link, so no script was laid from it.")
-            continue
+        link = _linked_source(server_dir, src)
+        if link is not None:
+            raise InstallerError(
+                f"{link.relative_to(server_dir).as_posix()} is a link, so Yu'lon did not read "
+                "the Lua scripts through it and the server would start without them. Nothing "
+                f"was changed. Put a plain copy of the file or folder there, then press {remedy}."
+            )
         if src.is_file():
             pairs = [(src, dest / src.name)]
         elif src.is_dir():
             pairs = []
-            for root, dirs, files in os.walk(src, followlinks=False):
+            for root, _dirs, files in os.walk(src, followlinks=False):
                 here = Path(root)
-                for name in sorted(dirs):
-                    if (here / name).is_symlink():
-                        skipped.append(
-                            f"{(here / name).relative_to(server_dir).as_posix()} is a link, "
-                            "so nothing in it was laid."
-                        )
-                for name in sorted(files):
-                    path = here / name
-                    if path.is_symlink():
-                        skipped.append(
-                            f"{path.relative_to(server_dir).as_posix()} is a link, so it was "
-                            "not laid."
-                        )
-                        continue
-                    pairs.append((path, dest / path.relative_to(src)))
+                pairs.extend(
+                    (here / name, dest / (here / name).relative_to(src)) for name in sorted(files)
+                )
         else:
             raise InstallerError(
                 f"{spec.src} is not in {server_dir}, so its Lua scripts cannot be laid and "
@@ -204,7 +223,7 @@ def _plan(server_dir: Path, specs: Sequence[LuaScripts]) -> tuple[list[_Planned]
         for source, target in pairs:
             rel = target.relative_to(server_dir).as_posix()
             planned.append(_Planned(source, target, rel))
-    return planned, skipped
+    return planned
 
 
 def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -> Iterator[str]:
@@ -214,8 +233,9 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     Rebuild call this on every press, and "all current" every time is noise).
 
     Raises:
-        InstallerError: a source is not there, or a file could not be written.
-            Files written before it stay, and are in the record.
+        InstallerError: a source is not there or has a link in it (nothing is written),
+            a file could not be written (files written before it stay, and are in the
+            record), or the record itself could not be saved after the files were.
     """
     if not specs:
         return
@@ -230,11 +250,10 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
         link = target if target.is_symlink() else _through_a_link(server_dir, target)
         if link is not None:
             raise _link_refusal(server_dir, link, remedy)
-    planned, skipped = _plan(server_dir, specs)
-    yield from skipped
+    planned = _plan(server_dir, specs, remedy)
+    folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
     record, unreadable = _read_record(server_dir)
     if unreadable:
-        folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
         yield (
             f"{LUA_SCRIPTS_DIR}/{RECORD_FILE}, Yu'lon's list of the scripts it laid, could not "
             f"be read ({unreadable}), so no script counts as Yu'lon's and none is replaced or "
@@ -243,6 +262,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
         )
     kept_record = dict(record)
     wrote = current = 0
+    finished = False
     try:
         for item in planned:
             link = _through_a_link(server_dir, item.target)
@@ -298,6 +318,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 yield f"Removed {rel}: this server no longer ships it."
             else:
                 yield f"{rel} is no longer shipped and was changed on this machine; left as it is."
+        finished = True
     except OSError as exc:
         raise InstallerError(
             f"The Lua scripts could not be laid ({exc}). The server would start without them, "
@@ -309,6 +330,13 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 _write_record(server_dir, kept_record)
             except OSError as exc:
                 logger.warning(f"could not write {record_path(server_dir)}: {exc}")
+                if finished:
+                    raise InstallerError(
+                        "The Lua scripts were copied, but Yu'lon could not save its list of "
+                        f"them, {LUA_SCRIPTS_DIR}/{RECORD_FILE} ({exc}), so it stopped here and "
+                        f"started nothing new. Once that is fixed, delete {folders} and that "
+                        f"file, then press {remedy}."
+                    ) from exc
     if wrote or not quiet:
         yield f"Lua scripts are in place ({wrote} written, {current} already current)."
 

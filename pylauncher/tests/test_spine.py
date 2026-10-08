@@ -2503,6 +2503,9 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "walks the Lua scripts a cloned checkout ships to copy them (T553); it decides what is "
         "copied, never whether the folder is somebody else's, and it does not follow links"
     ),
+    ("catalog/families/scriptdeploy.py", "_linked_source"): (
+        "walks a Lua source to find a link in it and refuse (T553); it never follows one"
+    ),
     ("catalog/families/extract.py", "file_count"): (
         "counts what a tool produced; a listing it cannot make is logged and counts as short, "
         "which re-runs the tool rather than skipping it"
