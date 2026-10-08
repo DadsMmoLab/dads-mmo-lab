@@ -370,6 +370,13 @@ class Recorder:
     at. Set it to `""` or to `"\\n"` to drive those two apart.
     """
 
+    file_ledger: str = ""
+    """What the world's update-file ledger answers (T531): no rows, unless a test says.
+
+    Apart from `query_answer` for `realm_row`'s reason: a row count read as a ledger
+    row is a ledger nobody can read, and the update route then refuses every press.
+    """
+
     column_answer: str | None = None
     """What an `information_schema.columns` question answers; None falls through to `query_answer`.
 
@@ -735,6 +742,8 @@ class Recorder:
             return self.realm_port
         if "realmlist" in statement:
             return self.realm_row
+        if "yulon_install_file" in statement:
+            return self.file_ledger
         if self.column_answer is not None and "information_schema.columns" in statement:
             return self.column_answer
         return self.query_answer

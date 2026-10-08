@@ -202,9 +202,125 @@ class ReadyMarkers(_Strict):
     )
 
 
+LUA_SCRIPTS_DIR = "env/dist/etc/modules/lua_scripts"
+"""mod-ale's script folder in an AzerothCore server dir, where the ALE manifests deploy too."""
+
+
+class LuaScripts(_Strict):
+    """Lua scripts an AzerothCore entry lays into mod-ale's script folder (T553, `lua-and-sql`).
+
+    The shape of a manifest's `Deploy` (`src`, `dest`), for the same job one level
+    up: the files come from a checkout the install cloned, and land in a folder of
+    their own under `LUA_SCRIPTS_DIR`, never at its top, where the ALE modules the
+    Modules tab installs put theirs.
+    """
+
+    src: str = Field(
+        min_length=1,
+        description="A folder or one file inside the server dir (a cloned source), relative.",
+    )
+    dest: str = Field(
+        min_length=1,
+        description=f"The folder the files land in, strictly below {LUA_SCRIPTS_DIR}/.",
+    )
+
+    @field_validator("src")
+    @classmethod
+    def _src_stays_inside_the_server_dir(cls, value: str) -> str:
+        return _below(value.rstrip("/"), "lua_scripts src", "the server dir")
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_is_a_folder_of_its_own_under_the_script_dir(cls, value: str) -> str:
+        path = PurePosixPath(_below(value.rstrip("/"), "lua_scripts dest", LUA_SCRIPTS_DIR))
+        root = PurePosixPath(LUA_SCRIPTS_DIR)
+        if len(path.parts) <= len(root.parts) or path.parts[: len(root.parts)] != root.parts:
+            raise ValueError(
+                f"lua_scripts dest must be a folder strictly below {LUA_SCRIPTS_DIR}/, so the "
+                f"scripts never mix with the ones the Modules tab installs; got {value!r}"
+            )
+        return value
+
+
+_SQL_COMPARISON = (
+    r"[A-Za-z_][A-Za-z0-9_]*\s*(?:=|<>|!=|>=|<=|>|<)\s*(?:-?[0-9]+|'[A-Za-z0-9 _.:-]*')"
+)
+_SQL_CHECK_WHERE = re.compile(
+    rf"^\s*{_SQL_COMPARISON}(?:\s+AND\s+{_SQL_COMPARISON})*\s*$", re.IGNORECASE
+)
+"""What a `SqlCheck.where` may be: `column op literal`, joined by AND, and nothing else.
+
+A grammar rather than a list of forbidden marks (Codex, adversarial review): any
+free text after `WHERE` can still turn the count into something that is not a read
+(`... INTO OUTFILE '...'`) or that runs for ever (`SLEEP(...)`), so the condition
+is a column name, a comparison, and an integer or a plain quoted word.
+"""
+
+
+class SqlCheck(_Strict):
+    """A read-only count an AzerothCore entry's database must reach after the import (T553).
+
+    `SELECT COUNT(*) FROM <schema>.<table> [WHERE <where>]`, at least `at_least`.
+    For an entry whose modules bring SQL the import applies (`modules/*/data/sql`):
+    the check is what tells a server missing that data from one that has it,
+    before the world starts and reads it.
+    """
+
+    db: Db = Field(description="Which of the entry's databases, by role.")
+    table: str = Field(min_length=1, description="One table name, letters, digits and `_`.")
+    where: str = Field(
+        default="",
+        description="An optional condition: `column op literal`, joined by AND (`entry = 900001`).",
+    )
+    at_least: int = Field(default=1, ge=1)
+    reason: str = Field(
+        min_length=1,
+        description="What is missing when the count falls short, in the player's words.",
+    )
+
+    @field_validator("table")
+    @classmethod
+    def _table_is_one_name(cls, value: str) -> str:
+        if not _SQL_NAME.match(value):
+            raise ValueError(f"sql check table must be one plain table name, got {value!r}")
+        return value
+
+    @field_validator("where")
+    @classmethod
+    def _where_is_comparisons_only(cls, value: str) -> str:
+        if value.strip() and not _SQL_CHECK_WHERE.match(value):
+            raise ValueError(
+                "sql check where must be `column op literal` comparisons joined by AND, with an "
+                f"integer or a plain quoted word as each literal; got {value!r}"
+            )
+        return value
+
+    def statement(self, schema: str) -> str:
+        """The one read-only statement this check sends."""
+        where = f" WHERE {self.where}" if self.where.strip() else ""
+        return f"SELECT COUNT(*) FROM `{schema}`.`{self.table}`{where};"
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
+
+    patches: tuple[SourcePatch, ...] = Field(
+        default=(),
+        description=(
+            "Source patches applied after the clone and before the build (`patch-sources`, "
+            "T553), the CMaNGOS family's shape. Empty for an entry that carries none, and "
+            "then the stage is not in its tuple at all."
+        ),
+    )
+    lua_scripts: tuple[LuaScripts, ...] = Field(
+        default=(),
+        description="Lua scripts the install lays into mod-ale's script folder (T553).",
+    )
+    sql_checks: tuple[SqlCheck, ...] = Field(
+        default=(),
+        description="Read-only counts the databases must reach after the import (T553).",
+    )
 
     confs_from_dist: tuple[str, ...] = Field(
         default=(),
@@ -623,6 +739,30 @@ class SqlPhase(_Strict):
         ),
     )
 
+    on_update: Literal["leave", "apply_new", "report", "replace_changed", "refuse_new"] = Field(
+        default="leave",
+        description=(
+            "What the server update route (to the newest code, and back to the tested pin) "
+            "does with this phase on a server that already exists (T531). `leave`: nothing. "
+            "`apply_new`: each file its globs match that the world database's file ledger "
+            "(`sqlplan.FILE_TABLE`) does not hold is applied ONCE, in the phase's order, with "
+            "the servers stopped before the new build starts; a file the ledger holds with "
+            "other content is named and never run again. Only for a phase into the world "
+            "schema whose files live in a `*-db` source (`native.held_at_its_pin`), which "
+            "nothing moves but this route, to its pin -- so what the install applied is "
+            "knowable; the family refuses anything else as a catalog error before the compile. "
+            "`report`: the files this press's move added or changed are named, never applied. "
+            "`replace_changed` (T534): each file whose bytes the ledger does not hold is run "
+            "again WHOLE, in the same window -- only for whole-table files (every table they "
+            "write is dropped or emptied first in the same file, `sqlplan.whole_table_problem`), "
+            "so a re-run leaves what a fresh install leaves; a file of any other shape is named "
+            "and not run. `refuse_new` (T533): a move that adds or changes a file under its globs "
+            "refuses the whole press before the compile -- for a chain the route cannot apply "
+            "safely to an existing server. Not in `digest()`: it does not change what an import "
+            "applies."
+        ),
+    )
+
     same_columns: tuple[tuple[str, str], ...] = Field(
         default=(),
         description=(
@@ -698,6 +838,20 @@ class SqlPhase(_Strict):
             raise ValueError(
                 f"phase {self.name!r}: `same_columns` is asked by the corrections press only, "
                 "and `rerun_on_marked` is not that press"
+            )
+        if self.on_update == "refuse_new" and self.statements:
+            raise ValueError(f"phase {self.name!r}: `refuse_new` watches files, not `statements`")
+        if self.on_update not in ("leave", "refuse_new") and (self.statements or self.into is None):
+            # The ledger keys a FILE, and the route checks the one schema it writes;
+            # a statement has no file and `into_each` names more than one schema.
+            raise ValueError(
+                f"phase {self.name!r}: `on_update` reads files into one schema, so it needs "
+                "`files` and `into`"
+            )
+        if self.on_update != "leave" and self.rerun_on_marked:
+            raise ValueError(
+                f"phase {self.name!r}: `rerun_on_marked` already applies it on every press; "
+                "`on_update` would apply its files a second time"
             )
         if self.same_columns and self.into is None:
             # The tables are named without a schema; `into` is the one they are in.
@@ -2965,15 +3119,35 @@ class CatalogEntry(_Strict):
         with "no such file" over a folder that was never meant to exist.
         """
         native = self.install.native
-        block = native.cmangos if native is not None else None
-        if block is None:
+        if native is None:
             return self
+        # T553: the AzerothCore block carries the same `SourcePatch`es.
+        patches = (
+            *(native.cmangos.patches if native.cmangos is not None else ()),
+            *(native.azerothcore.patches if native.azerothcore is not None else ()),
+        )
         dests = {source.dest for source in self.emulator.sources}
-        for spec in block.patches:
+        for spec in patches:
             if spec.source not in dests:
                 raise ValueError(
                     f"patch {spec.file!r} applies inside {spec.source!r}, which is not a dest "
                     f"of any of this entry's sources {sorted(dests)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_sql_check_names_a_database_this_entry_has(self) -> CatalogEntry:
+        """A `SqlCheck.db` is a role `databases` names, or the check could never be asked (T553)."""
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None:
+            return self
+        roles = self.databases.schema_map()
+        for check in block.sql_checks:
+            if check.db not in roles:
+                raise ValueError(
+                    f"sql check on {check.table!r} reads the {check.db!r} database, which this "
+                    f"entry does not name (it has {sorted(roles)})"
                 )
         return self
 
