@@ -1499,18 +1499,78 @@ def parse_file_ledger(answer: str) -> dict[tuple[str, str], FileRow]:
     return rows
 
 
+def read_file_ledger(
+    sql_query: SqlQuery, *, container: str, client: str, password: str, marker_db: str
+) -> dict[tuple[str, str], FileRow]:
+    """`FILE_TABLE`'s rows, or none when the table is not there (no update has run). T545.
+
+    Asked whether the table exists first, `_TABLE_EXISTS`'s reason: a SELECT from a table
+    that is not there is an error, and an error here must not read as "no rows".
+    Raises `ValueError` for a row it cannot read, `parse_file_ledger()`'s reason.
+    """
+    there = sql_query(
+        container,
+        client,
+        password,
+        marker_db,
+        _TABLE_EXISTS.format(schema=marker_db, table=FILE_TABLE),
+    ).strip()
+    if there != "1":
+        return {}
+    return parse_file_ledger(
+        sql_query(container, client, password, marker_db, file_ledger_query(marker_db))
+    )
+
+
 def recordable(rel: str) -> bool:
     """Can `FILE_TABLE` hold this path? Not past 255, and nothing `'...'` cannot carry."""
     return len(rel) <= _FILE_MAX and not set(rel) & _UNQUOTABLE
 
 
-def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: bool = False) -> str:
+def file_times_query(marker_db: str) -> str:
+    """When each stuck row was written: what `reclaim_at` is compared with (T545)."""
+    return (
+        f"SELECT phase, file, at_unix FROM `{marker_db}`.`{FILE_TABLE}` "
+        f"WHERE state IN ('{FILE_STARTED}', '{FILE_FAILED}')"
+    )
+
+
+def parse_file_times(answer: str) -> dict[tuple[str, str], int]:
+    """`file_times_query()`'s answer. A row that is not three columns raises `ValueError`."""
+    times: dict[tuple[str, str], int] = {}
+    for line in answer.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[2].isdigit():
+            raise ValueError(f"unreadable {FILE_TABLE} row: {line!r}")
+        times[(parts[0], parts[1])] = int(parts[2])
+    return times
+
+
+def file_rows_sql(
+    marker_db: str,
+    rows: Sequence[FileRow],
+    now: int,
+    *,
+    claim: bool = False,
+    reclaim_at: int | None = None,
+    reclaim_state: str = "",
+) -> str:
     """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
 
     `claim` writes a plain `INSERT` instead: the key is `(phase, file)`, so it fails
     when ANY row for that file is already there, which is what makes the `started`
     row a claim two presses cannot both win (Codex, T531) -- the client refuses the
     second, and that press stops before it runs the file.
+
+    `reclaim_at` and `reclaim_state` (one row, T545) take a stuck row over, in one transaction:
+    it deletes the row only if it is still in that state and was written at that second --
+    the row the dialog showed -- and then does
+    the plain `INSERT`, which is written at a time past that second even when the clock has
+    not moved. So a second press holding the same time finds a row that no longer carries it,
+    deletes nothing, and its `INSERT` is refused; and a refused `INSERT` rolls the `DELETE`
+    back, so the stuck row is never lost to a failed claim.
 
     InnoDB named, because the dumps' own tables are MyISAM and a MyISAM key is
     capped at 1000 bytes, which `(phase, file)` in utf8mb4 is past.
@@ -1532,6 +1592,25 @@ def file_rows_sql(marker_db: str, rows: Sequence[FileRow], now: int, *, claim: b
             )
         if row.state not in _FILE_STATES or not _HEX64.fullmatch(row.sha256):
             raise InstallerError(f"internal: a malformed {FILE_TABLE} row {row!r}")
+    if reclaim_at is not None:
+        if len(rows) != 1:
+            raise InstallerError("internal: a reclaim takes exactly one ledger row")
+        row = rows[0]
+        if reclaim_state not in _FILE_STATES:
+            raise InstallerError("internal: a reclaim names the state it expects the row in")
+        # Past the second the press read, whatever the clock says: that is what makes the row
+        # a claim only one press can hold.
+        taken_at = max(now, int(reclaim_at) + 1)
+        return (
+            text
+            + "BEGIN;\n"
+            + f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
+            + f"AND file = '{row.file}' AND state = '{reclaim_state}' "
+            + f"AND at_unix = {int(reclaim_at)};\n"
+            + f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
+            + f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
+            + "COMMIT;\n"
+        )
     values = ", ".join(
         f"('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {now})" for row in rows
     )
@@ -1556,17 +1635,30 @@ def record_world_files(
     exec_stdin: ExecStdin,
     wsl_distro: str | None = None,
     claim: bool = False,
+    reclaim_at: int | None = None,
+    reclaim_state: str = "",
+    not_before: int = 0,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
+
+    `not_before` keeps the time written from going back past a second a stale press may still
+    hold (T545): a retry's own records are never older than the time it took the row at.
 
     Raises:
         InstallerError: the client refused the script, or could not be reached.
     """
     _run_sql(
-        file_rows_sql(marker_db, rows, int(time.time()), claim=claim),
+        file_rows_sql(
+            marker_db,
+            rows,
+            max(int(time.time()), not_before),
+            claim=claim,
+            reclaim_at=reclaim_at,
+            reclaim_state=reclaim_state,
+        ),
         what=(
             "claiming a world update (another update of this server may be applying it)"
-            if claim
+            if claim or reclaim_at is not None
             else "recording which world updates this server has"
         ),
         container=container,

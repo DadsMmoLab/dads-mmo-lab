@@ -17620,19 +17620,7 @@ class ControllerView(QWidget):
         if check is None or check.state != "stale":
             self.corrections_banner.setVisible(False)
             return
-        held = (
-            f" ({', '.join(check.withheld)} also changed, and only a new install gets "
-            f"{'it' if len(check.withheld) == 1 else 'them'}.)"
-            if check.withheld
-            else ""
-        )
-        self.corrections_banner_label.setText(
-            f"This version of Yu'lon corrects {', '.join(check.offered)} in this server's install "
-            f"plan, and these databases were imported before that. "
-            f"{native.CORRECTIONS_BUTTON_LABEL} applies it — it asks first, names every step, "
-            f"and stops the world server first if it is up. Nothing changes until you "
-            f"press it.{held}"
-        )
+        self.corrections_banner_label.setText(native.corrections_banner_text(check))
         self.corrections_banner.setVisible(True)
 
     def apply_database_corrections(self) -> bool:

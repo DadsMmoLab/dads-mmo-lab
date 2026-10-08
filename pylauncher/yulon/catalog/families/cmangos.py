@@ -92,6 +92,7 @@ from yulon.catalog.native import (
     ERROR_RUN_INSTALL,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    NEWER_WORLD_CONTENT_WAITS,
     RERUN_CANCEL_NOTE,
     UPDATE_SOURCES_STAGE,
     UPDATES_BUTTON_LABEL,
@@ -103,6 +104,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    StuckWorldUpdate,
     _put_all,
     _speaking,
     _stop_control,
@@ -693,8 +695,15 @@ class CmangosInstaller(StagedInstaller):
         catch_up: _WorldCatchUp,
         ledger: dict[tuple[str, str], sqlplan.FileRow],
         applied: list[int],
+        *,
+        move: bool = True,
     ) -> Iterator[str]:
-        """Seed, move each `*-db` checkout to its pin, then apply each new file once (T531)."""
+        """Seed, move each `*-db` checkout to its pin, then apply each new file once (T531).
+
+        `move=False` (the retry press, T545) leaves every checkout where it is and applies only
+        the files already on disk: the dialog counted those, and the player's own edits in a
+        checkout are not this press's to discard.
+        """
         world = self.entry.databases.world
         plan = self._data().sql
         db = self._native().db
@@ -717,7 +726,7 @@ class CmangosInstaller(StagedInstaller):
         for source in held:
             dest = ctx.server_dir / source.dest
             old = self._seams.head_sha(dest)
-            if not source.rev or old == source.rev:
+            if not source.rev or old == source.rev or not move:
                 continue
             yield (
                 f"Moving {source.repo} in {source.dest} to {source.rev[:7]}, the commit this "
@@ -981,22 +990,26 @@ class CmangosInstaller(StagedInstaller):
     def _say_so(self, rel: str) -> str:
         """What a player can do about a world update Yu'lon will not run again on its own word.
 
-        Nothing in the app retries it: the file may have half run, and running it again
-        could put rows in twice. A press that retries it with the player's consent is
-        T545 (lead, 2026-10-07); until it exists the sentence says so, and names the
-        fresh install that brings every update. The ledger row is named for whoever
-        administers the database by hand.
+        Nothing runs it again without the player's Yes: the file may have half run, and
+        running it again could put rows in twice. "Apply database corrections…" on the
+        Server tab offers it, says whether running it again is safe, and runs it and the
+        ones held back behind it (T545); a fresh install of the server brings every update.
         """
-        table = f"{self._data().sql.marker_db}.{sqlplan.FILE_TABLE}"
         return (
-            "Yu'lon does not run it again on its own, and a button to retry it is not in "
-            "the app yet; installing this server fresh gets every world update. (For "
-            f"database administrators: deleting its row in {table} has the next update try "
-            "it and everything after it.)"
+            f'Press "{CORRECTIONS_BUTTON_LABEL}" on the Server tab to run it again, and the '
+            "updates after it, once you have checked what it does; or install this server "
+            "fresh to get every world update."
         )
 
     def _record_world_files(
-        self, ctx: StageContext, rows: Sequence[sqlplan.FileRow], *, claim: bool = False
+        self,
+        ctx: StageContext,
+        rows: Sequence[sqlplan.FileRow],
+        *,
+        claim: bool = False,
+        reclaim_at: int | None = None,
+        reclaim_state: str = "",
+        not_before: int = 0,
     ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
         db = self._native().db
@@ -1008,6 +1021,9 @@ class CmangosInstaller(StagedInstaller):
             password=ctx.secrets.db_password,
             exec_stdin=self._seams.exec_stdin,
             claim=claim,
+            reclaim_at=reclaim_at,
+            reclaim_state=reclaim_state,
+            not_before=not_before,
         )
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
@@ -2523,13 +2539,20 @@ class CmangosInstaller(StagedInstaller):
                 ),
             )
         drift = sqlplan.phase_drift(plan, ledger.known)
-        if drift.offered:
+        try:
+            stuck = self._stuck_world_updates(ctx)
+        except (docker.DockerCommandError, ValueError) as exc:
+            return CorrectionCheck(
+                "unreadable", why=f"the world-update record could not be read ({exc})"
+            )
+        if drift.offered or stuck:
             return CorrectionCheck(
                 "stale",
                 offered=drift.offered,
                 withheld=drift.withheld,
                 marker=ledger.marker,
                 baseline=tuple((name, ledger.known.get(name)) for name in drift.offered),
+                stuck=stuck,
             )
         if drift.withheld:
             return CorrectionCheck(
@@ -2541,6 +2564,178 @@ class CmangosInstaller(StagedInstaller):
                 ),
             )
         return CorrectionCheck("current")
+
+    def _stuck_world_updates(self, ctx: StageContext) -> tuple[StuckWorldUpdate, ...]:
+        """The `started`/`failed` world updates of `apply_new` phases, in the order they run (T545).
+
+        Bot (`replace_changed`) rows are left out: the next update loads such a file again on
+        its own, since a whole-table file is safe to repeat (T534). A row whose file is gone
+        from the checkout is listed too, as not repeatable -- it still holds its phase back.
+        """
+        applying = {phase.name for phase in self._world_catch_up_plan().applying()}
+        if not applying:
+            return ()
+        plan = self._data().sql
+        db = self._native().db
+        ledger = sqlplan.read_file_ledger(
+            self._query_seam(),
+            container=self.entry.container_spec().db,
+            client=db.client,
+            password=ctx.secrets.db_password,
+            marker_db=plan.marker_db,
+        )
+        rows = [
+            row
+            for row in ledger.values()
+            if row.phase in applying and row.state in (sqlplan.FILE_STARTED, sqlplan.FILE_FAILED)
+        ]
+        if not rows:
+            return ()
+        sub = plan.model_copy(
+            update={"phases": tuple(p for p in plan.phases if p.name in applying)}
+        )
+        runs = self._expand(sub, ctx.server_dir, {})
+        order = {(run.phase.name, run.rel): n for n, run in enumerate(runs)}
+        rows.sort(key=lambda row: (order.get((row.phase, row.file), -1), row.file))
+        times = sqlplan.parse_file_times(
+            self._query_seam()(
+                self.entry.container_spec().db,
+                db.client,
+                ctx.secrets.db_password,
+                plan.marker_db,
+                sqlplan.file_times_query(plan.marker_db),
+            )
+        )
+        heads = ",".join(
+            f"{source.dest}@{self._seams.head_sha(ctx.server_dir / source.dest)}"
+            for source in self._world_catch_up_plan().held()
+        )
+        found = []
+        for row in rows:
+            path = ctx.server_dir / row.file
+            behind = sum(
+                1
+                for run in runs
+                if run.phase.name == row.phase and (run.phase.name, run.rel) not in ledger
+            )
+            found.append(
+                StuckWorldUpdate(
+                    phase=row.phase,
+                    file=row.file,
+                    state=row.state,
+                    repeatable=path.is_file() and sqlplan.whole_table_problem(path) is None,
+                    behind=behind,
+                    sha256=sqlplan.file_digest(path) if path.is_file() else "",
+                    changed=path.is_file() and sqlplan.file_digest(path) != row.sha256,
+                    heads=heads,
+                    at_unix=times.get((row.phase, row.file), 0),
+                )
+            )
+        return tuple(found)
+
+    def _retry_stuck(self, ctx: StageContext, agreed: CorrectionCheck) -> Iterator[str]:
+        """Run each agreed stuck world update again, then the ones held back behind it (T545).
+
+        Called by the corrections press after it has read the record again and found it
+        still exactly what the dialog showed, with the world stopped. Each file: a
+        `started` row first, then the file, then `applied` or `failed` -- the update's own
+        order -- and the first refusal stops the press there, naming it. What waits behind
+        is then applied by the update's own loop, in order.
+        """
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        ledger = sqlplan.read_file_ledger(
+            self._query_seam(),
+            container=container,
+            client=db.client,
+            password=password,
+            marker_db=plan.marker_db,
+        )
+        others = self._other_schemas()
+        yield f"Running {len(agreed.stuck)} unfinished world update(s) again, in order."
+        for one in agreed.stuck:
+            self._check_cancel(ctx.cancel)
+            path = ctx.server_dir / one.file
+            if not path.is_file():
+                yield (
+                    f"{one.file} is no longer in the sources, so it cannot be run again; a fresh "
+                    "install of the server gets every world update. Nothing after it was run."
+                )
+                return
+            reaches = sqlplan.foreign_schemas(path, others)
+            if reaches:
+                yield (
+                    f"{one.file} reaches outside {self.entry.databases.world} "
+                    f"({', '.join(reaches)}), so Yu'lon does not run it. Nothing after it was run."
+                )
+                return
+            run = sqlplan.PhaseRun(
+                self._named(plan, [one.phase])[0],
+                self.entry.databases.world,
+                path,
+                None,
+                False,
+                one.file,
+            )
+            sha = sqlplan.file_digest(path)
+            if sha != one.sha256:
+                yield (
+                    f"{one.file} is not the file the confirmation showed, so it was not run. "
+                    "Press Refresh on the Server tab and look again."
+                )
+                return
+            try:
+                self._record_world_files(
+                    ctx,
+                    (sqlplan.FileRow(one.phase, one.file, sha, sqlplan.FILE_STARTED),),
+                    reclaim_at=one.at_unix,
+                    reclaim_state=one.state,
+                )
+            except InstallerError as exc:
+                yield (
+                    f"{one.file} was not run: another update of this server took it first, or "
+                    f"its record could not be written ({exc}). Nothing after it was run."
+                )
+                return
+            refused: list[sqlplan.PhaseRun] = []
+            yield from self._stream(
+                _apply_one(
+                    run,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    exec_stdin=self._seams.exec_stdin,
+                    refused=refused,
+                ),
+                cancel=None,
+                stage="world-updates",
+            )
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            # Past the time the dialog showed, so no press still holding it can match the row.
+            self._record_world_files(
+                ctx,
+                (sqlplan.FileRow(one.phase, one.file, sha, state),),
+                not_before=one.at_unix + 1,
+            )
+            if refused:
+                yield (
+                    f"The database refused {one.file} again, so it and the updates after it are "
+                    "still waiting; the Server tab offers it again. A fresh install of the server "
+                    "gets every world update."
+                )
+                return
+            ledger[(one.phase, one.file)] = sqlplan.FileRow(one.phase, one.file, sha, state)
+            yield f"{one.file}: applied and recorded."
+        applied: list[int] = [0, 0]
+        catch_up = self._world_catch_up_plan()
+        yield from self._bring_new_world_files(ctx, catch_up, ledger, applied, move=False)
+        if any(
+            source.rev and self._seams.head_sha(ctx.server_dir / source.dest) != source.rev
+            for source in catch_up.held()
+        ):
+            yield NEWER_WORLD_CONTENT_WAITS
 
     def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
         """The confirmation's step list: the steps the press streams, by name."""
@@ -2619,6 +2814,19 @@ class CmangosInstaller(StagedInstaller):
                 f"they were imported again, or a step it named has been applied since. Nothing "
                 f"was applied. Press Refresh on the Server tab and look again."
             )
+        try:
+            stuck_now = self._stuck_world_updates(ctx)
+        except (docker.DockerCommandError, ValueError) as exc:
+            raise InstallerError(
+                f"{self.entry.name}'s world-update record could not be read ({exc}). Nothing was "
+                "applied."
+            ) from exc
+        if stuck_now != agreed.stuck:
+            raise InstallerError(
+                f"{self.entry.name}'s unfinished world updates have changed since the "
+                "confirmation was shown. Nothing was applied. Press Refresh on the Server tab "
+                "and look again."
+            )
         drift = sqlplan.phase_drift(plan, ledger.known)
         chosen = self._named(plan, [name for name in drift.offered if name in agreed.offered])
         for name in agreed.offered:
@@ -2630,6 +2838,9 @@ class CmangosInstaller(StagedInstaller):
             elif name not in drift.offered:
                 yield f"{name} is already at this version; it is not applied again."
         if not chosen:
+            if agreed.stuck:
+                yield from self._retry_stuck(ctx, agreed)
+                return
             yield "There is nothing left to apply. Nothing was sent to the databases."
             return
         db = self._native().db
@@ -2720,6 +2931,8 @@ class CmangosInstaller(StagedInstaller):
                 f"{', '.join(sorted(refused))}: a step was refused (see the warning above), so it "
                 "is not recorded and is offered again."
             )
+        if agreed.stuck:
+            yield from self._retry_stuck(ctx, agreed)
 
     # -- adopting an install this app did not make (T19) ----------------------
 
