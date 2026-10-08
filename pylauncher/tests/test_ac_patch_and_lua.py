@@ -928,3 +928,44 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
 
     assert record.read_bytes() == before
     assert sorted(p.name for p in elsewhere.iterdir()) == [scriptdeploy.RECORD_FILE]
+
+
+def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
+    tmp_path: Path, installers: Path
+) -> None:
+    """Rollback re-lays the OLD set: the checkout goes back, so the scripts must follow it.
+
+    The put-back tests above refuse in `check_carried_patches` before anything is
+    laid, so "LAID unchanged" proves nothing there. Here the new checkout's scripts
+    ARE laid (one changed, one new), the compile then fails, and the old bytes come
+    back, the new-only file goes, and the record agrees with the disk.
+    """
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+    new_only = server_dir / LUA_DEST / "extra.lua"
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / LUA_NAME).write_text('print("new")\n', encoding="utf-8")
+            (dest / "lua_scripts" / "extra.lua").write_text("extra\n", encoding="utf-8")
+
+    def checkout_force(dest: Path, rev: str) -> None:
+        rec.restore_rev(dest, rev)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / "extra.lua").unlink(missing_ok=True)
+        lay_tree(server_dir)(dest)
+
+    rec.on_clone = fetched
+    made._seams = rec.seams(restore_rev=checkout_force)
+    rec.build_result = docker.AttachedRun(1, ("boom",))
+    said: list[str] = []
+
+    with pytest.raises(InstallerError):
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+
+    assert f"Updated {LAID}." in said and f"Laid {LUA_DEST}/extra.lua." in said, said
+    assert rec.heads[server_dir / MODULE] == OLD
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not new_only.exists()
+    assert scriptdeploy.read_record(server_dir) == {LAID: scriptdeploy._sha(LUA_BODY.encode())}
