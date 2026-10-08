@@ -214,3 +214,20 @@ def test_a_block_with_no_counted_table_and_no_switches_is_just_loaded() -> None:
     plain = HEALTH.model_copy(update={"count_label": "", "count_table": ""})
     got = module_health.reading(plain, CHECKS, SCHEMAS, _Db(), MARKERS, ())
     assert module_health.sentence(got) == "Unbound loaded"
+
+
+def test_an_unreadable_log_asks_the_database_nothing() -> None:
+    db = _Db()
+    assert _line(db, log="").startswith("Unbound could not be checked:")
+    assert db.asked == []
+
+
+def test_an_unreadable_settings_file_is_said_and_never_read_as_off() -> None:
+    switches = (
+        Switch("free reagents", running=True, conf=None),
+        Switch("instant summons", running=None, conf=None),
+    )
+    assert _line(switches=switches).endswith(
+        "free reagents on (the settings file could not be read), "
+        "instant summons not said (the settings file could not be read)"
+    )

@@ -1621,3 +1621,44 @@ def test_the_health_comes_from_the_catalog_block_not_from_the_entrys_id(tmp_path
     )
 
     assert watch.tick().module_line.startswith("Unbound loaded: Mentor in 9 places")
+
+
+def test_a_switch_edited_while_the_world_runs_shows_at_once_without_asking_again(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the sentence was kept for the run, so a Tuning card edit never showed."""
+    sql = _UnboundSql()
+    watch = _unbound_watch(tmp_path, sql)
+    assert watch.tick().module_line == GOOD_LINE
+    conf = tmp_path / "env/dist/etc/modules/mod_unbound.conf"
+    conf.write_text(CONF_OFF.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1"))
+
+    line = watch.tick().module_line
+
+    assert "free reagents off (on at the next start)" in line
+    assert sql.tables_asked == 1, "the database was asked again for a settings edit"
+
+
+def test_a_settings_file_that_cannot_be_read_is_not_a_switch_that_is_off(tmp_path: Path) -> None:
+    """Codex adversarial: an unreadable conf read as off, so a running `on` became 'off next'."""
+    log = UNBOUND_LOG.replace("free reagents: off", "free reagents: on (stripped 3)")
+    conf = tmp_path / "env/dist/etc/modules/mod_unbound.conf"
+    watch = _unbound_watch(tmp_path, _UnboundSql(), log=log)
+    conf.write_bytes(b"\xff\xfe not utf-8")
+
+    line = watch.tick().module_line
+
+    assert "free reagents on (the settings file could not be read)" in line
+    assert "off at the next start" not in line
+
+
+def test_a_log_that_stays_unreadable_never_asks_the_database(tmp_path: Path) -> None:
+    """Codex adversarial: the tables were asked at every tick of a run with an unreadable log."""
+    sql = _UnboundSql()
+    old_run = _stamp(NOW - dashboard.SETTLED_AFTER - timedelta(minutes=1))  # ready without a log
+    watch = _unbound_watch(tmp_path, sql, runs=[old_run], log="")
+
+    lines = [watch.tick().module_line for _ in range(3)]
+
+    assert all(line.startswith("Unbound could not be checked:") for line in lines)
+    assert "log" in lines[0] and sql.tables_asked == 0

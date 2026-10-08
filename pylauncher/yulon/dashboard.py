@@ -345,7 +345,8 @@ class Dashboard:
         self._ready_seen_at: datetime | None = None
         # T555 T5: the module's health sentence for the run it was last read for.
         self._health_run: str | None = None
-        self._health_line = ""
+        self._health_got: module_health.HealthReading | None = None
+        self._health_running: dict[str, bool | None] | None = None
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -422,36 +423,43 @@ class Dashboard:
         return verdict
 
     def _module_line(self, run: str) -> str:
-        """The module's health sentence for run `run`, asked once per run (T555 T5).
+        """The module's health sentence for run `run` (T555 T5).
 
         Empty for an entry without a `health` block. Asked only after the world said ready, so
-        the module has printed its lines and made its tables. The answer is kept by `run`; one
-        that could not be read is not kept, so the next tick asks again.
+        the module has printed its lines and made its tables. What the database and the log
+        said is kept by `run` and asked once; one that could not be read is not kept, so the next
+        tick asks again. The switches are laid beside it afresh at every tick: the settings file
+        can change under a running world (the Tuning card), and "(on at the next start)" is
+        about the file as it is now.
         """
         native_block = self.entry.install.native
         block = native_block.azerothcore if native_block is not None else None
         health = block.health if block is not None else None
         if block is None or health is None:
             return ""
-        if self._health_run == run:
-            return self._health_line
-        try:
-            log = self._log_of(self.spec.world, run)
-        except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
-            logger.warning(f"could not read {self.entry.id}'s world log for its health: {exc}")
-            log = ""
-        switches = (
-            unbound_settings.switches(self.server_dir, log)
-            if unbound_settings.shown_for(self.entry)
-            else ()
-        )
-        got = module_health.reading(
-            health, block.sql_checks, self.entry.databases.schema_map(), self.sql, log, switches
-        )
-        line = module_health.sentence(got)
-        if not got.unreadable:
-            self._health_run, self._health_line = run, line
-        return line
+        if self._health_run != run or self._health_got is None:
+            try:
+                log = self._log_of(self.spec.world, run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for its health: {exc}")
+                log = ""
+            got = module_health.reading(
+                health, block.sql_checks, self.entry.databases.schema_map(), self.sql, log, ()
+            )
+            if got.unreadable:
+                return module_health.sentence(got)
+            self._health_run, self._health_got = run, got
+            self._health_running = (
+                unbound_settings.running_state(log)
+                if unbound_settings.shown_for(self.entry)
+                else None
+            )
+        got = self._health_got
+        if self._health_running is not None:
+            got = replace(
+                got, switches=unbound_settings.switches_for(self.server_dir, self._health_running)
+            )
+        return module_health.sentence(got)
 
     def _said_ready_and_stayed_up(self, run: str) -> bool:
         """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).

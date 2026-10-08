@@ -153,9 +153,20 @@ def running_state(log_text: str) -> dict[str, bool | None]:
 
 def switches(server_dir: Path, log_text: str) -> tuple[Switch, ...]:
     """The switches as this run started them (its log) beside the conf, in the card's order."""
-    running = running_state(log_text)
+    return switches_for(server_dir, running_state(log_text))
+
+
+def switches_for(server_dir: Path, running: Mapping[str, bool | None]) -> tuple[Switch, ...]:
+    """`running_state()`'s answer beside the conf as it is now, so an edit shows without a restart.
+
+    The file side is `None` when the file is there and cannot be read: an unreadable conf is not
+    a switch that is off. A file that is not there, or a key it does not carry, is off, which is
+    what the module itself starts with.
+    """
+    unreadable = (server_dir / FILE).is_file() and _read(server_dir / FILE) is None
     return tuple(
-        Switch(_RUNNING_LINES[row.key][0], running[row.key], is_on(row)) for row in rows(server_dir)
+        Switch(_RUNNING_LINES[row.key][0], running[row.key], None if unreadable else is_on(row))
+        for row in rows(server_dir)
     )
 
 

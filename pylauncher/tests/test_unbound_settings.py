@@ -257,3 +257,12 @@ def test_the_switches_pair_the_run_with_the_file(tmp_path: Path) -> None:
 def test_without_a_conf_every_file_side_is_off(tmp_path: Path) -> None:
     got = unbound_settings.switches(tmp_path, "")
     assert [(s.running, s.conf) for s in got] == [(None, False)] * 3
+
+
+def test_a_conf_that_is_there_and_unreadable_is_unknown_not_off(tmp_path: Path) -> None:
+    path = put(tmp_path, DIST)
+    path.write_bytes(b"\xff\xfe not utf-8")
+
+    got = unbound_settings.switches(tmp_path, ALL_ON_LOG)
+
+    assert [(s.running, s.conf) for s in got] == [(True, None)] * 3

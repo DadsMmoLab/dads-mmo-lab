@@ -36,8 +36,8 @@ class Switch:
     label: str
     running: bool | None
     """What this run's log said it started as; `None` when the log never said."""
-    conf: bool
-    """What the settings file says now, which the next start will use."""
+    conf: bool | None
+    """What the settings file says now, for the next start; `None` if it cannot be read."""
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,13 @@ def reading(
     log_text: str,
     switches: tuple[Switch, ...],
 ) -> HealthReading:
-    """Ask the database and read the log. Never raises: a failed read is `unreadable`."""
+    """Read the log, then ask the database. Never raises: a failed read is `unreadable`.
+
+    The log first, because a world whose log cannot be read cannot be judged, and the database
+    need not be asked for it again every tick while it stays unreadable.
+    """
+    if not log_text.strip():
+        return HealthReading(health.name, unreadable="the world's log could not be read")
     try:
         got = scriptdeploy.read_checks(checks, schemas, _asker(sql, schemas))
     except scriptdeploy.ChecksUnreadable as exc:
@@ -97,8 +103,6 @@ def reading(
             short.append((check.table, found, check.at_least))
     if got.missing or short:
         return HealthReading(health.name, missing=got.missing, short=tuple(short))
-    if not log_text.strip():
-        return HealthReading(health.name, unreadable="the world's log could not be read")
     absent = next((m for m in health.log_markers if m not in log_text), "")
     return HealthReading(health.name, absent_marker=absent, placed=placed, switches=switches)
 
@@ -141,9 +145,14 @@ def _word(on: bool) -> str:
 
 
 def _switch_text(switch: Switch) -> str:
+    if switch.conf is None:
+        file_side = " (the settings file could not be read)"
+    elif switch.running is None:
+        file_side = " (the settings file says on)" if switch.conf else ""
+    elif switch.conf != switch.running:
+        file_side = f" ({_word(switch.conf)} at the next start)"
+    else:
+        file_side = ""
     if switch.running is None:
-        return f"{switch.label} not said" + (" (the settings file says on)" if switch.conf else "")
-    text = f"{switch.label} {_word(switch.running)}"
-    if switch.conf != switch.running:
-        text += f" ({_word(switch.conf)} at the next start)"
-    return text
+        return f"{switch.label} not said{file_side}"
+    return f"{switch.label} {_word(switch.running)}{file_side}"
