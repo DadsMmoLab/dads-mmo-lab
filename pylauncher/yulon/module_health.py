@@ -121,9 +121,13 @@ def sentence(got: HealthReading) -> str:
     if got.unreadable:
         return f"{name} could not be checked: {got.unreadable}"
     if got.missing:
-        press = server_build_presses.under_server_build(server_build_presses.REBUILD)
+        # Measured live (T555 H5): Rebuild does not recreate a module table, because the
+        # importer skips a file its `updates` ledger already holds, and Repair refuses a
+        # finished install. Yu'lon writes nothing to that ledger, so there is no press to name.
         return (
-            f"{name} tables missing: {', '.join(got.missing)}. " f"Import them again with {press}"
+            f"{name} tables missing: {', '.join(got.missing)}. "
+            f"No button in Yu'lon brings them back, and {server_build_presses.REBUILD} does not. "
+            "Press “Save logs for support…” on the Logs tab and ask for help."
         )
     if got.short:
         parts = [

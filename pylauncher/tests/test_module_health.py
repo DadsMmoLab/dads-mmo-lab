@@ -142,10 +142,18 @@ def test_a_switch_the_log_never_said_is_not_said_and_never_off() -> None:
     assert "free reagents not said (the settings file says on)" in _line(switches=said_on)
 
 
-def test_tables_missing_names_them_and_the_press_and_counts_nothing() -> None:
-    text = _line(_Db(missing=("unbound_milestones",)))
-    assert text.startswith("Unbound tables missing: unbound_milestones.")
-    assert "Rebuild the server" in text
+def test_tables_missing_names_them_and_sends_the_player_to_support_not_to_a_press_that_fails() -> (
+    None
+):
+    """Live H5 (m910q, 2026-10-08): Rebuild leaves a missing module table missing, because the
+    importer skips a file its `updates` ledger already holds, and Repair says "nothing to repair".
+    No press recreates it, so the sentence must not name one."""
+    text = _line(_Db(missing=("unbound_milestones", "unbound_class_catalog")))
+    assert text == (
+        "Unbound tables missing: unbound_class_catalog, unbound_milestones. "
+        "No button in Yu'lon brings them back, and Rebuild the server… does not. "
+        "Press “Save logs for support…” on the Logs tab and ask for help."
+    )
     assert not any(ch.isdigit() for ch in text), "a missing table must not read as a count"
 
 
@@ -203,6 +211,14 @@ def test_a_marker_missing_from_this_runs_log_says_unbound_did_not_load() -> None
         'Unbound did not load: the world log has no "[UNBOUND] Prereq map built." line '
         "this run. Open the console log"
     )
+
+
+def test_the_button_the_sentence_names_is_on_the_logs_tab() -> None:
+    from pathlib import Path
+
+    logs_view = Path(module_health.__file__).parent / "ui" / "logs_view.py"
+    assert 'QPushButton("Save logs for support…"' in logs_view.read_text(encoding="utf-8")
+    assert module_health.server_build_presses.REBUILD == "Rebuild the server…"
 
 
 def test_tables_missing_is_said_before_a_missing_marker() -> None:

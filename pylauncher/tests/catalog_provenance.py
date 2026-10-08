@@ -413,32 +413,85 @@ PROVENANCE: dict[str, Provenance] = {
             "(auth_schema.sql:18-19); @ faac5fc9"
         ),
     ),
+    # -- wow-unbound (T554 live run on m910q, 2026-10-08): the app's own presses --
+    "wow-unbound:play.equipped.template_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "`send_gear_set` on an offline bot (12 worn pieces -> 1 mail) and an online one (18 ->"
+            " 2 mails, both arrived)"
+        ),
+    ),
+    "wow-unbound:play.equipped.instance_table": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=("same presses; the joined shape read the worn items on both"),
+    ),
+    "wow-unbound:play.equipped.inventory_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=("same presses"),
+    ),
+    "wow-unbound:play.teleport_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "offline row moved to Stormwind; an online character was moved too (`l3-owed-online-"
+            "tmentor.log`)"
+        ),
+    ),
+    "wow-unbound:play.rename_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            '`at_login` 0 -> 1, and the real client prompt "Your name has been flagged for '
+            'rename" (`shots-owed/8.4a-client-rename-prompt.png`)'
+        ),
+    ),
+    "wow-unbound:play.set_level_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "`You changed level of Aevaela to 60`, read back in the row (55 -> 60); online level "
+            "shown in the client (`l3-owed-online-tmentor.log`)"
+        ),
+    ),
+    "wow-unbound:play.mail_item_cap": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=('`send items`: 12 accepted, 13 refused with "Mail can\'t have more 12 item stacks"'),
+    ),
+    "wow-unbound:accounts.level.table": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=(
+            "`account_access` row `104 3 -1` read back, with `.account info` and the Accounts tab"
+        ),
+    ),
+    "wow-unbound:accounts.level.account_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=("same press: the row's account id is the `id` column"),
+    ),
+    "wow-unbound:accounts.level.level_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=(
+            "same press: the row's level is the `gmlevel` column the server's own query agreed with"
+        ),
+    ),
+    "wow-unbound:accounts.level.max_level": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=(
+            'levels 0..3 accepted, 4 refused "4 is not a GM level this server has"; the app\'s '
+            "own account refused"
+        ),
+    ),
 }
 
 
-_UNBOUND_COPIED_FROM_WOTLK = (
-    "Copied from wow-wotlk, which measured it (8.3a, 8.4a). Unbound builds the SAME core at the "
-    "same pin (7f12e89e) plus four source patches and the Unbound module, so the value is very "
-    "likely right, and that is what makes it worth a row: nobody has asked an Unbound server. "
-    "Settled by 8.4a's character presses and 8.3a's account-level press run on the Unbound "
-    "install (T554's live proof)."
-)
-"""One reason for all eleven of wow-unbound's play and accounts values."""
-
-
 OWED: dict[str, str] = {
-    # -- wow-unbound (T554): the same AzerothCore pin as wow-wotlk, never asked itself --------
-    "wow-unbound:play.equipped.template_column": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.equipped.instance_table": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.equipped.inventory_column": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.teleport_command": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.rename_command": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.set_level_command": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:play.mail_item_cap": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:accounts.level.table": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:accounts.level.account_column": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:accounts.level.level_column": _UNBOUND_COPIED_FROM_WOTLK,
-    "wow-unbound:accounts.level.max_level": _UNBOUND_COPIED_FROM_WOTLK,
     "wow-wotlk:play.mail_item_cap": (
         "8.4a sent twelve worn items in ONE mail and split nineteen into two, so twelve FITS -- "
         "but nothing on this tree has been asked whether thirteen is refused, and a cap is a "
@@ -473,7 +526,7 @@ This is the set Phase 8's exit line asks to be "enumerated by name in the
 catalog test rather than left to memory". Every row says what would settle it,
 because a list of debts with no discharge is a list that grows.
 
-It is EXACT and not a floor: `test_the_provenance_debts_are_exactly_these_four`
+It is EXACT and not a floor: `test_the_provenance_debts_are_exactly_these`
 fails on a key that has since been marked and on a key the catalog no longer
 writes, so the list cannot rot in either direction.
 """

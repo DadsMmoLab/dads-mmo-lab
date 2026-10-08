@@ -1183,32 +1183,12 @@ def test_the_provenance_debts_are_exactly_these() -> None:
     saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Three are values a
     press read back without ever asking for the answer the tree would refuse,
     and the fourth is a real measurement whose reading is not in this repo.
-
-    Since T554 also the eleven values `wow-unbound` copies from `wow-wotlk` (the same core
-    at the same pin): nobody has asked an Unbound server, and its live proof is what
-    settles them. They are debts by name, not `inherited` rows, because the guard above
-    forbids shipping an inherited value.
     """
     assert set(catalog_provenance.OWED) == {
         "wow-wotlk:play.mail_item_cap",
         "wow-wotlk:accounts.level.max_level",
         "wow-tbc:accounts.level.max_level",
         "wow-tortoise:accounts.scheme",
-    } | {
-        f"wow-unbound:{path}"
-        for path in (
-            "play.equipped.template_column",
-            "play.equipped.instance_table",
-            "play.equipped.inventory_column",
-            "play.teleport_command",
-            "play.rename_command",
-            "play.set_level_command",
-            "play.mail_item_cap",
-            "accounts.level.table",
-            "accounts.level.account_column",
-            "accounts.level.level_column",
-            "accounts.level.max_level",
-        )
     }
     for key, reason in catalog_provenance.OWED.items():
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
@@ -1224,7 +1204,13 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     and date, and the README inside it -- not prose, not a bare folder, not a
     path that climbs out of the notes.
     """
-    shape = re.compile(r"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md")
+    # A step's gate is its README; a live run's gate (`live-tNNN-<box>-<date>`) has no README,
+    # its pages are the named logs the presses wrote.
+    date = r"\d{4}-\d{2}-\d{2}"
+    shape = re.compile(
+        rf"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-{date}/README\.md"
+        rf"|gates/live-t\d+-[a-z0-9]+-{date}/[a-z0-9-]+\.log"
+    )
     measured = {
         key: mark.cite
         for key, mark in catalog_provenance.PROVENANCE.items()
@@ -1233,7 +1219,7 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
 
     assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
-    assert len(measured) == 34, len(measured)
+    assert len(measured) == 45, len(measured)
     assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
     assert not shape.fullmatch(
         "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"
