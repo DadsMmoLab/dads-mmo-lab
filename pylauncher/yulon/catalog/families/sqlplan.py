@@ -1649,7 +1649,9 @@ def record_world_files(
     """
     _run_sql(
         file_rows_sql(
-            marker_db, rows, max(int(time.time()), not_before),
+            marker_db,
+            rows,
+            max(int(time.time()), not_before),
             claim=claim,
             reclaim_at=reclaim_at,
             reclaim_state=reclaim_state,
