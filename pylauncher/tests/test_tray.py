@@ -89,9 +89,11 @@ class FakeView(QObject):
         self.realm_badge = FakeBadge(status)
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
+        self.restart_button = QPushButton("Restart")
         self.last_verdict: Any = None
         self.starts = 0
         self.stops = 0
+        self.restarts = 0
 
     def start_server(self) -> None:
         # The real one holds the badge at "starting" before its job runs (T188).
@@ -100,6 +102,10 @@ class FakeView(QObject):
 
     def stop_server(self) -> None:
         self.stops += 1
+        self.realm_badge.set_status("stopping")
+
+    def restart_from_server_tab(self) -> None:
+        self.restarts += 1
         self.realm_badge.set_status("stopping")
 
 
@@ -509,3 +515,47 @@ def test_the_application_is_watched_only_while_the_window_is_hidden(
     tray.open_window()
     QApplication.processEvents()
     assert not tray._watching_app, "still watching the whole app with the window back"
+
+
+# ------------------------------------------------------------- T559: Restart
+
+
+def test_the_menu_offers_restart_for_each_server_that_is_up(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """A player's suggestion: Restart beside Start/Stop, and in the tray for an online server."""
+    wotlk = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    _add(window, FakeView("Cata", "/srv/d", "partial"))
+    _add(window, FakeView("TBC", "/srv/b", "starting"))
+    _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+    menu = tray.build_menu()
+    texts = _texts(menu)
+    assert [t for t in texts if t.startswith("Restart")] == ["Restart WotLK", "Restart Cata"]
+    assert texts.index("Restart WotLK") == texts.index("WotLK — Realm online") + 1
+    next(a for a in menu.actions() if a.text() == "Restart WotLK").trigger()
+    assert wotlk.restarts == 1
+
+
+def test_a_restart_the_tab_cannot_do_now_is_greyed_with_its_reason(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    from yulon.ui.widgets.reasons import set_enabled_why
+
+    wotlk = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    set_enabled_why(wotlk.restart_button, "Wait: Rebuild is running.")
+    menu = tray.build_menu()
+    action = next(a for a in menu.actions() if a.text() == "Restart WotLK")
+    assert not action.isEnabled()
+    assert action.toolTip() == "Wait: Rebuild is running."
+
+
+def test_a_restart_from_a_stale_menu_reaches_the_tab_there_is_now(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    old = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    menu = tray.build_menu()
+    window.yulon_controllers.remove(old)
+    new = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    tray.restart(old)
+    assert (old.restarts, new.restarts) == (0, 1)
+    del menu
