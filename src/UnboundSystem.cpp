@@ -7,6 +7,8 @@
 #include "ScriptDefines/WorldScript.h"
 
 #include <array>
+#include <string>
+#include <vector>
 
 // Unbound Wrath Edition — power chassis + weapon/armor proficiency hooks.
 //
@@ -77,6 +79,30 @@ bool CharacterTableHasColumn(char const* table, char const* column)
         "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
         "AND TABLE_NAME = '{}' AND COLUMN_NAME = '{}'", table, column) != nullptr;
 }
+
+// The tables above that this server has, probed once per worldserver process
+// (thread-safe static initialisation) on first use, which may be the first
+// character delete: Player::DeleteOldCharacters runs at start-up before the
+// sweep, and a mass bot reset deletes many characters in a row. A table made
+// while the server runs is picked up at the next start, whose sweep removes
+// any rows the delete hook missed in between.
+std::vector<GuidKeyedTable> const& PresentGuidKeyedTables()
+{
+    static std::vector<GuidKeyedTable> const present = []
+    {
+        std::vector<GuidKeyedTable> found;
+        for (GuidKeyedTable const& keyed : UnboundGuidKeyedTables)
+            if (CharacterTableHasColumn(keyed.table, keyed.guidColumn))
+                found.push_back(keyed);
+
+        std::string names;
+        for (GuidKeyedTable const& keyed : found)
+            names += (names.empty() ? "" : ", ") + std::string(keyed.table);
+        LOG_INFO("module", "[UNBOUND] Character cleanup covers: {}.", names.empty() ? "no tables" : names);
+        return found;
+    }();
+    return present;
+}
 }
 
 class UnboundPlayerScript : public PlayerScript
@@ -123,9 +149,8 @@ public:
     // later (DeleteOldCharacters) does. Bots come through here too, harmlessly.
     void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
     {
-        for (GuidKeyedTable const& keyed : UnboundGuidKeyedTables)
-            if (CharacterTableHasColumn(keyed.table, keyed.guidColumn))
-                trans->Append("DELETE FROM `{}` WHERE `{}` = {}", keyed.table, keyed.guidColumn, guid);
+        for (GuidKeyedTable const& keyed : PresentGuidKeyedTables())
+            trans->Append("DELETE FROM `{}` WHERE `{}` = {}", keyed.table, keyed.guidColumn, guid);
     }
 
     // Prevent AzerothCore's UpdateMaxPower from wiping a Lua-set mana pool.
@@ -210,8 +235,10 @@ public:
 // above never saw: deletes made before this cleanup existed, and characters
 // removed while this module was not loaded or outside the worldserver.
 //
-// It deletes nothing unless the characters table is there and answers, and
-// each DELETE joins against that same table, so a row whose GUID belongs to a
+// It deletes nothing unless the characters table is there, answers and has at
+// least one character (an empty table more likely means one being reloaded
+// than a realm whose every character was deleted, and the sweep would then
+// take every Unbound row), and each DELETE joins against that same table, so a row whose GUID belongs to a
 // character that exists (a bot, or a soft-deleted character that can still be
 // restored) is never touched.
 class UnboundOrphanSweepWorldScript : public WorldScript
@@ -237,12 +264,17 @@ public:
             return;
         }
 
-        uint64 removedTotal = 0;
-        for (GuidKeyedTable const& keyed : UnboundGuidKeyedTables)
+        uint64 const characterCount = characters->Fetch()[0].Get<uint64>();
+        if (!characterCount)
         {
-            if (!CharacterTableHasColumn(keyed.table, keyed.guidColumn))
-                continue;
+            LOG_WARN("module", "[UNBOUND] Orphan sweep skipped: the characters table is empty, so every Unbound row "
+                "would count as an orphan. Nothing was removed.");
+            return;
+        }
 
+        uint64 removedTotal = 0;
+        for (GuidKeyedTable const& keyed : PresentGuidKeyedTables())
+        {
             QueryResult orphans = CharacterDatabase.Query(
                 "SELECT COUNT(*) FROM `{0}` k LEFT JOIN characters c ON c.guid = k.`{1}` WHERE c.guid IS NULL",
                 keyed.table, keyed.guidColumn);
@@ -264,7 +296,7 @@ public:
         }
 
         LOG_INFO("module", "[UNBOUND] Orphan sweep done: {} row(s) removed, {} character(s) on this realm.",
-            removedTotal, characters->Fetch()[0].Get<uint64>());
+            removedTotal, characterCount);
     }
 };
 
