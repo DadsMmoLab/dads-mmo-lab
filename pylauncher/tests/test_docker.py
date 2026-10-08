@@ -8232,3 +8232,23 @@ def test_the_same_daemon_line_twice_is_said_once(monkeypatch: pytest.MonkeyPatch
     assert str(caught.value) == (
         "docker compose up -d exited 1: Error response from daemon: no space left"
     )
+
+
+def test_only_a_compose_failure_is_cut_down_to_the_daemons_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another command's stderr is its whole diagnosis; nothing there is progress to drop."""
+    stderr = " Container x Error\nError response from daemon: conflict\nsecond line\n"
+    _daemon_says(monkeypatch, stderr)
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker._run(["rm", "x"])
+    assert str(caught.value) == f"docker rm x exited 1: {stderr.strip()}"
+
+
+def test_what_the_headline_drops_stays_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _daemon_says(monkeypatch, _PULL_NOISE + "Error response from daemon: no space left\n")
+    with caplog.at_level("INFO", logger="yulon.docker"), pytest.raises(docker.DockerCommandError):
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    assert "88a022341f1e Pull complete" in caplog.text

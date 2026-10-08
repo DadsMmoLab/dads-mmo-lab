@@ -433,9 +433,13 @@ def _run(
         refusal = _port_refusal(proc.stderr)
         if refusal is not None:
             raise DockerRefusal(refusal)
+        headline = _daemon_lines(proc.stderr) if argv[:1] == ["compose"] else ""
+        if headline:
+            # Compose's pull and create progress is dropped from the sentence, not
+            # from the record: whatever else it printed stays in the log.
+            logger.info(f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
         said = (
-            f"docker {' '.join(argv)} exited {proc.returncode}: "
-            f"{_daemon_lines(proc.stderr) or proc.stderr.strip()}"
+            f"docker {' '.join(argv)} exited {proc.returncode}: {headline or proc.stderr.strip()}"
         )
         if timeout is not None and runner.timed_out(proc):
             raise DockerTimedOutError(said)
@@ -455,7 +459,8 @@ def _daemon_lines(stderr: str) -> str:
 
     `docker compose up` prints its pull and create progress first and the reason
     it failed last, so the head of stderr names an image layer, not the
-    failure. Several lines are joined; the same line twice is kept once.
+    failure. Several lines are joined; the same line twice is kept once. Only
+    a compose command's headline is cut down to these lines (see `_run()`).
     """
     found: list[str] = []
     for match in _DAEMON_LINE.finditer(stderr):
