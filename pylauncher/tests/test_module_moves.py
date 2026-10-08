@@ -233,6 +233,20 @@ def test_cmake_and_linker_errors_name_the_module() -> None:
     ) == ("mod-ld",)
 
 
+def test_cmake_names_the_module_by_the_path_relative_to_the_source_dir_too() -> None:
+    """CMake writes a file inside its own source tree relative to it: `modules/<id>/...`.
+
+    The shape the repository's own build-output tests already carry
+    (`test_docker.py`, `#25 3.2 CMake Error at modules/mod-city-bots/CMakeLists.txt:7`).
+    Mutation: keep the absolute-only prefix and a CMake failure puts nothing back.
+    """
+    assert _scan(
+        "#25 3.2 CMake Error at modules/mod-city-bots/CMakeLists.txt:7 (add_library):"
+    ) == ("mod-city-bots",)
+    assert _scan("CMake Error at modules/mod-x/cmake/find.cmake:3 (message):") == ("mod-x",)
+    assert _scan("CMake Error at src/server/CMakeLists.txt:7 (message):") == ()
+
+
 def test_sql_lines_at_world_start_do_not_name_a_module() -> None:
     """Test 9: worldserver's own SQL apply lines name a module folder and are not compile errors."""
     assert (

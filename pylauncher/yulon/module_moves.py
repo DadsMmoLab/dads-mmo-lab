@@ -353,8 +353,9 @@ _ERRORS = (
     re.compile(_MODULE + r":\d+(?::\d+)?: (?:fatal )?error:"),
     # The linker: `<path>:<line>: undefined reference to`.
     re.compile(_MODULE + r":\d+: undefined reference to"),
-    # CMake, configuring the module.
-    re.compile(r"CMake Error at " + _MODULE),
+    # CMake, configuring the module. It writes a file inside its own source tree
+    # relative to it (`modules/<id>/CMakeLists.txt`), and one outside it in full.
+    re.compile(r"CMake Error at (?:/azerothcore/)?" + _MODULE.removeprefix("/azerothcore/")),
 )
 """The three error shapes that name a module folder, and only those.
 
