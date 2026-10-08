@@ -218,6 +218,12 @@ class SqlStep(_Strict):
     Both are `direct`-only. A `db-import` step is handed to another program on a
     later boot and nothing here is in a position to check either end of it, so
     declaring one there would be a field nothing reads.
+
+    `migration_module` (T596) is for a server whose own updater keeps a
+    `migrations(Name, Module, Hash, AppliedAt)` table in each database (the
+    Tortoise core, `AutoUpdater.cpp:135-170`). The app runs the file itself and
+    writes the row the updater would have written, so neither runs it twice; a
+    file whose hash the table already holds under that Module is not sent again.
     """
 
     db: Db
@@ -241,6 +247,14 @@ class SqlStep(_Strict):
             "leaves none applied. Single files (templates ok), never globs; direct only."
         ),
     )
+    migration_module: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]{1,255}$",
+        description=(
+            "Record the file in the server's own `migrations` table under this Module name "
+            "and skip it when that table already holds its hash. One direct file only."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_body(self) -> SqlStep:
@@ -262,6 +276,17 @@ class SqlStep(_Strict):
                     "SqlStep.then needs `applied_by='direct'`: only a file this app runs itself "
                     "can be put inside its transaction"
                 )
+        if self.migration_module is not None and (
+            self.path is None or _glob_chars(self.path) or self.then or self.applied_by != "direct"
+        ):
+            # T596. A ledger row is one file's hash, written by the program that ran
+            # the file: a glob or a chain has no one hash, an inline statement has no
+            # file the server's updater could ever match, and a db-import file is the
+            # updater's to record.
+            raise ValueError(
+                "SqlStep.migration_module needs one direct `path` file: no glob, no `then`, "
+                "no inline statement"
+            )
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
