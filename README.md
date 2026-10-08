@@ -24,12 +24,12 @@ on the `main` branch of this repository is the older v1.2.2.
 | `WrathUnbound-Addons.zip` (client addons) | `eb36d2ebaad96910e05cdfbf8db11a9cbfad16c18078b3725226eff844ebc686` |
 | `README-PLAYERS.txt` | `f567013cce4c8c423826f6bc5cc6a48846ce79718df4de3d3c5a5c4e93537f3b` |
 
-The installer carries its whole server payload as quoted shell heredocs. Every server file
-on this branch is one of those heredocs, byte for byte, laid out by what it is rather than
-where the installer wrote it (the exceptions are `src/UnboundSystem_loader.cpp`, see Layout, and the files under "Changes on top of v1.4.0"). The installer itself is not on this branch. The client
-addons are the zip's contents, unzipped unchanged. The only files written for this branch
-are this README, `.gitattributes`, `MANIFEST.sha256` and the two files in `conf/`, which
-spell out the settings the installer writes into existing config files.
+The installer carries its whole server payload as quoted shell heredocs. The v1.4.0 files on
+this branch were taken from those heredocs byte for byte and **moved** (not rewritten) into
+the module layout described below; the move itself is a set of 100% renames in `git log`.
+The installer itself is not on this branch. The client addons start as the zip's contents,
+unzipped unchanged. Files written for this branch rather than taken from the release, and
+changes made to release files afterwards, are listed under "Changes on top of v1.4.0".
 
 ## Layout
 
@@ -37,14 +37,14 @@ This branch is laid out the way AzerothCore reads a module: **the branch root is
 module**. Clone it to `modules/mod-unbound` in an AzerothCore tree. AzerothCore only builds a
 module folder that has a `src/` directory, and only applies module SQL from
 `data/sql/<db-world|db-characters>/`. The v1.4.0 release record (commit `d29fac97`) kept the
-installer's own layout instead, which cannot be built from a plain clone. Its files are still
-byte-identical to the release: the SQL, the C++ sources and the Lua are `git mv` renames only.
-Fixes made since are listed under "Changes on top of v1.4.0" below.
+installer's own layout instead, which cannot be built from a plain clone. The release's files were moved
+into this layout unchanged (100% renames); what was added or changed after that is listed
+under "Changes on top of v1.4.0" below.
 
 | Path | What it is | Where the installer put it |
 |---|---|---|
-| `src/UnboundSystem.cpp`, `src/UnboundSystem_loader.cpp` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped; since v1.4.0 also the character-delete cleanup and the rogue/hunter class answers listed under "Changes on top of v1.4.0") and its loader (`Addmod_unboundScripts()`). The loader is the one change to the release's files: it also calls `Addmod_multiclass_summonsScripts()`, because AzerothCore only calls the loader of a folder that has the module's own name. The release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
-| `src/UnboundMulticlassBridge.cpp` | The multi-class talent bridge in C++, by ValentineSin (see Credits), with the rank handling added on the Dad's MMO Lab server (a repeated spell id is mapped to the talent's next rank, and the server's rank count is echoed back as `LEARNED:class:spell:rank`). It answers the client addon's `MCUB` messages (`SYNC`, `RESET`, `LEARN`) and hands each pick to the core's own `Player::LearnTalent`, so talents are stored natively in `character_talent`, prerequisites and tier points use the core's rules, and a respec is `resetTalents`. The Mentor stays the authority: a class that is not unlocked is refused. It needs a core patch that lets `Player::LearnTalent` accept the unlocked classes' talents. It replaces `unbound_addon_sync.lua` and `unbound_talent_data.lua`, which were in v1.4.0 and answer the same messages; never run both. | new in this branch |
+| `src/UnboundSystem.cpp`, `src/UnboundSystem_loader.cpp` | The `mod-unbound` C++ module: `UnboundSystem.cpp` (rage/energy for unlocked power types, keeping a Lua-set mana pool, and on login building the class mask from `unbound_character_unlocks` and granting weapon and armour proficiency; bots are skipped; since v1.4.0 also the character-delete cleanup and the rogue/hunter class answers listed under "Changes on top of v1.4.0") and its loader (`Addmod_unboundScripts()`). The loader also calls `AddUnboundMulticlassBridge()`, `AddUnboundReagentFree()` and `Addmod_multiclass_summonsScripts()` (the last because AzerothCore only calls the loader of a folder that has the module's own name). The release ships no `CMakeLists.txt` and no module `.conf.dist`. | `modules/mod-unbound/src/` |
+| `src/UnboundMulticlassBridge.cpp` | The multi-class talent bridge in C++, by ValentineSin (see Credits), with the rank handling added on the Dad's MMO Lab server (a repeated spell id is mapped to the talent's next rank, and the server's rank count is echoed back as `LEARNED:class:spell:rank`). It answers the client addon's `MCUB` messages (`SYNC`, `RESET`, `LEARN`) and hands each pick to the core's own `Player::LearnTalent`, so talents are stored natively in `character_talent`, prerequisites and tier points use the core's rules, and a respec is `resetTalents`. The Mentor stays the authority: a class that is not unlocked is refused. It needs a core change that lets `Player::LearnTalent` accept the unlocked classes' talents. That change is **not** in `core-patch/`: it ships as Yu'lon's own patch (the vendored `unbound-mentor-fix.patch`, Yu'lon's patch 02), so a server built from this branch alone needs it applied too. It replaces `unbound_addon_sync.lua` and `unbound_talent_data.lua`, which were in v1.4.0 and answer the same messages; never run both. | new in this branch |
 | `src/UnboundReagentFree.cpp` | Two optional server house rules, each behind its own switch and each **off** unless the conf turns it on: free casting reagents (`Unbound.ReagentFree`; soul shards, candles, powders, symbols, seeds, runes, ankh, corpse dust and the like; crafting materials are untouched; bots included) and instant, no-mana, cooldown-less class summons (`Unbound.InstantSummons`; their reagents are still used unless `Unbound.ReagentFree` is also on; warlock demons and Inferno, Water Elemental, Raise Dead, Feral Spirit). Both rewrite the spell store at start-up. The world log prints `[UNBOUND] free reagents: off` / `on (...)` and `[UNBOUND] instant summons: off` / `on (...)`. | new in this branch |
 | `conf/mod_unbound.conf.dist` | The switches `Unbound.ReagentFree`, `Unbound.InstantSummons` and `Unbound.AutoBuff`, all `0`. A missing conf also means off. | `env/dist/etc/modules/mod_unbound.conf` (copied from the `.dist`) |
 | `src/mod-multiclass-summons/` | bdodroid's `mod-multiclass-summons` C++ sources, used with permission (see Credits). It fixes Warlock, Mage and Death Knight pet and mount conflicts for multi-class characters and lets them field several guardians at once; playerbots are excluded at runtime. The loader files are the release's copy, byte-identical to `bdodroid/mod-multiclass-summons@6001603bfe038204b73d0d5878ac3e1f24dda915` (that commit's `README.md` was not part of the release and is not here). `multiclass_pet_fix.cpp` is the one exception, the Dad's MMO Lab server's copy with a fix on top of bdodroid's file: a hunter's Call Pet works while a warlock demon holds the pet slot, and the demon steps aside as a side summon instead of being lost (`SummonManager::DemotePrimary`, and spell 883 added to the list that dismisses the pet first). The fix is meant to be offered to bdodroid for his module. The module's `CMakeLists.txt` (two `AC_ADD_SCRIPT` lines for files AzerothCore already collects from `src/`) is not carried over. | `modules/mod-multiclass-summons/src/` |
@@ -64,8 +64,24 @@ There is no auth-database SQL in this release.
 
 ## Changes on top of v1.4.0
 
-Fixes for problems players reported in #wow-unbound and in this repository's issues. `git log`
-holds each change with its reason.
+Everything below was added to or changed in the v1.4.0 release files after the move into this
+layout. `git log` holds each change with its reason.
+
+**Added or replaced from the Dad's MMO Lab server (not in the release):**
+
+- `src/UnboundMulticlassBridge.cpp`: the C++ talent bridge by ValentineSin, with the server's
+  rank handling. It replaces `unbound_addon_sync.lua` and `unbound_talent_data.lua`, which are removed.
+- `src/UnboundReagentFree.cpp`: free casting reagents and instant summons, each off by default.
+- `lua_scripts/dml_autobuff.lua` (gated by `Unbound.AutoBuff`) and
+  `data/sql/db-characters/02_dml_autobuff_kv.sql` (its table).
+- `src/mod-multiclass-summons/multiclass_pet_fix.cpp`: the Call Pet fix on top of bdodroid's file.
+- Five client addon files replaced with the server's later versions:
+  `multiclass-talents-ui/Core.lua` and `UnboundSpellbook/{ClassData.lua, Core.lua, UI.lua, UnboundSpellbook.toc}`.
+- `src/UnboundSystem_loader.cpp`: calls the three new registration functions.
+- `conf/mod_unbound.conf.dist`: the three switches (`conf/mod_ale.conf` and `conf/worldserver.conf.unbound` are
+  from the release).
+
+**Fixes** for problems players reported in #wow-unbound and in this repository's issues:
 
 | File | Change |
 |---|---|
@@ -108,6 +124,12 @@ After the first start, a GM spawns the Mentor once in game with `.npc add 900001
   (Playerbot branch, ACDB 335.16-dev, 2026-05-29). The core patch also applies cleanly, with
   line offsets only, to `mod-playerbots/azerothcore-wotlk@7f12e89ee5f467a50e62eba1d525eac7dc953d03`
   (`git apply --check` passes).
+- **Do not also install bdodroid's standalone `mod-multiclass-summons`** on the same server. This
+  branch already carries its sources, and a second copy defines the same loader symbols, so the
+  worldserver fails to link.
+- **Upgrading an old v1.4.0 install in place** (rather than installing fresh) leaves the old
+  `unbound_character_talents` rows unmigrated: the C++ bridge stores talents in the core's
+  `character_talent`. A fresh Yu'lon install is not affected.
 - **mod-ale** (the Lua engine): `azerothcore/mod-ale` at
   `1cb86c9600260c3731c96dc3c98d25b4fc3f2153`, the commit the installer clones.
 

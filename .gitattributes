@@ -1,2 +1,2 @@
-# Keep every file byte for byte as released (the addons use CRLF line endings).
+# Keep every file byte for byte as shipped: most client addon files are CRLF, and the 5 refreshed addon files are LF.
 * -text
