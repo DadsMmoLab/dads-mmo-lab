@@ -780,6 +780,12 @@ def _fetch_checkout_folder(
             f"this server's checkout has no {_named(absent)} although {pack.sha256_file} "
             "lists it",
         )
+    if not files:
+        # An empty pack would install as done and never be noticed missing (Codex
+        # adversarial review): a folder Yu'lon is told to install holds something.
+        raise _folder_refusal(
+            pack, f"this server's checkout has no files in {source.path} at the commit it is on"
+        )
     dest = cache_dir() / entry_id / pack.id / _tree_digest(listed)[:16] / f"{pack.id}.zip"
     dest.parent.mkdir(parents=True, exist_ok=True)
     _refuse_without_room(

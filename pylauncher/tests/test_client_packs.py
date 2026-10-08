@@ -2843,6 +2843,14 @@ def _linked_module(server: Path) -> None:
     (server / MODULE).symlink_to(real)
 
 
+@_refusal("a folder with nothing in it and no lines", "has no files in")
+def _empty(server: Path) -> None:
+    """Codex adversarial round 2: an empty pack would install as done and never come back."""
+    shutil.rmtree(server / FOLDER)
+    (server / FOLDER).mkdir()
+    (server / LIST).write_bytes(_list_lines(OUTSIDE_FILES, prefix=""))
+
+
 @_refusal("no sha256sum list", "MANIFEST.sha256")
 def _no_list(server: Path) -> None:
     (server / LIST).unlink()
