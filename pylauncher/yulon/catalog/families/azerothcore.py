@@ -12,6 +12,12 @@ server dir IS the core checkout (source `dest` "."), the modules go under
 is a compose one-shot gated by the injected `acore_*` probe pair. The probe is
 INJECTED by the caller (`install_wiring.py`): this module never imports a
 `controller_*` package.
+
+T553 (Unbound P2) added two stages that only an entry asking for them runs:
+`patch-sources` after `clone-modules` (`AzerothCoreData.patches`, through
+`carried.py`) and `lua-and-sql` after `import` (`lua_scripts` and `sql_checks`,
+through `scriptdeploy.py`). An entry with none of the three -- WotLK -- runs the
+nine stages above and nothing else.
 """
 
 from __future__ import annotations
@@ -19,13 +25,14 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import git
-from yulon.catalog.catalog import CatalogEntry
+from yulon import git, server_build_presses
+from yulon.catalog.catalog import AzerothCoreData, CatalogEntry
+from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -269,18 +276,176 @@ class AzerothCoreInstaller(StagedInstaller):
     )
     """Pinned by `test_wotlk_stage_names_are_the_historical_tuple`; see the module docstring."""
 
+    PATCH_STAGE: ClassVar[str] = "patch-sources"
+    LUA_STAGE: ClassVar[str] = "lua-and-sql"
+    """T553's two stages, in the tuple only for an entry whose catalog block asks for them.
+
+    Not in `STAGE_NAMES`: an entry with no patches, scripts or checks (WotLK) runs
+    the historical tuple, word for word, and its state files and install log are
+    what they were. An entry that has them records `patch-sources` (the patched
+    tree is the evidence, and the body reads it on every press anyway);
+    `lua-and-sql` is never recorded, because it runs on every press like `up`.
+    """
+
     def stages(self) -> tuple[Stage, ...]:
+        block = self._block()
+        patch_stage = (Stage(self.PATCH_STAGE, self._patch_sources),) if block.patches else ()
+        lua_stage = (
+            (Stage(self.LUA_STAGE, self._lua_and_sql, recorded=False),)
+            if block.lua_scripts or block.sql_checks
+            else ()
+        )
         return (
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
+            *patch_stage,
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
             Stage("start-db", self._start_db, recorded=False),
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
+            *lua_stage,
             Stage("up", self._up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )
+
+    def _block(self) -> AzerothCoreData:
+        """This entry's AzerothCore block, or an empty one (no patches, scripts or checks)."""
+        native = self.entry.install.native
+        if native is None or native.azerothcore is None:
+            return AzerothCoreData()
+        return native.azerothcore
+
+    # -- T553: the source patches and Lua scripts this entry carries ---------
+
+    def _patch_sources(self, ctx: StageContext) -> Iterator[str]:
+        """Apply every `SourcePatch` the entry carries, after the clone and before the build.
+
+        `CmangosInstaller._patch_sources()`'s stage, through `carried`: read on every
+        press, never skipped on the record (a re-cloned checkout under a surviving
+        record would otherwise compile unpatched), and a hunk already on disk is
+        "already carries" and is not written again. A patch that no longer applies
+        refuses with `patch.PatchError`'s own sentence, naming the file and the line,
+        and nothing is written.
+
+        One refusal of its own: a patch that would change the tree of a server
+        whose build this press is going to skip. The compile would never see the
+        change, so the press stops before writing it, and names the press that
+        writes it AND compiles it (`before_rebuild()` lays the patches).
+        """
+        specs = self._block().patches
+        if not specs:
+            yield carried.NONE_CARRIED
+            return
+        patches = carried.loaded(self.entry.name, self.installers_root, specs)
+        changing = carried.would_change(patches, ctx.server_dir)
+        if changing is not None and self.build_would_be_skipped(ctx):
+            raise InstallerError(
+                f"{self.entry.name} was built before {changing.file} was carried, so this "
+                "press would patch its source and not compile it, and the server would run "
+                "without the change. Nothing was changed. Press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}: it "
+                "writes the patch and compiles it."
+            )
+        yield from carried.apply_lines(patches, ctx.server_dir)
+        yield "Source patches are in place."
+
+    def _lua_and_sql(self, ctx: StageContext) -> Iterator[str]:
+        """Check the entry's SQL after the import, then lay its Lua scripts before the start.
+
+        After `import` because the counts read what the import applied, and before
+        `up` because the world reads its scripts only when it starts. The SQL first:
+        a database missing what the scripts need is refused before anything is laid.
+        """
+        block = self._block()
+        if block.sql_checks:
+            yield from scriptdeploy.check_sql(
+                block.sql_checks,
+                self.entry.databases.schema_map(),
+                lambda schema, statement: self._seams.sql_query(
+                    self.entry.container_spec().db,
+                    self._native().db.client,
+                    ctx.secrets.db_password,
+                    schema,
+                    statement,
+                ),
+                self.entry.name,
+            )
+        yield from scriptdeploy.lay(ctx.server_dir, block.lua_scripts)
+
+    def _carried(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
+        """Write the carried patches and lay the Lua scripts; what an update and a rebuild need."""
+        block = self._block()
+        if block.patches:
+            patches = carried.loaded(self.entry.name, self.installers_root, block.patches)
+            yield from carried.apply_lines(patches, server_dir, quiet=quiet)
+        yield from scriptdeploy.lay(server_dir, block.lua_scripts, quiet=quiet)
+
+    def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
+        """The spine's compose files, plus every path a carried patch edits (T553).
+
+        The patched files are tracked and modified on every install that carries a
+        patch, so the update route's dirty-tree guard must read them as this app's
+        own, and `apply_carried_patches()` writes them again after the reset. Read
+        out of the patch files, as the CMaNGOS family does; a patch this build does
+        not ship adds nothing here and refuses where it is loaded.
+        """
+        found: dict[str, tuple[str, ...]] = dict(super().app_written_paths(server_dir))
+        specs = self._block().patches
+        if not specs:
+            return found
+        try:
+            patches = carried.loaded(self.entry.name, self.installers_root, specs)
+        except InstallerError as exc:
+            logger.warning(f"could not read a carried patch to exempt the paths it edits: {exc}")
+            return found
+        for dest, paths in carried.written_paths(patches).items():
+            found[dest] = tuple(dict.fromkeys((*found.get(dest, ()), *paths)))
+        return found
+
+    def check_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """The update route's dry run: every patch still applies, every script source is there."""
+        block = self._block()
+        if block.patches:
+            patches = carried.loaded(self.entry.name, self.installers_root, block.patches)
+            yield from carried.check_lines(patches, server_dir)
+        missing = scriptdeploy.missing_sources(server_dir, block.lua_scripts)
+        if missing:
+            raise InstallerError(
+                f"The new sources have no {missing[0]}, so this server's Lua scripts could not "
+                "be laid from them. Nothing was built."
+            )
+        linked = scriptdeploy.linked_sources(server_dir, block.lua_scripts)
+        if linked:
+            raise InstallerError(
+                f"The new sources have {linked[0]} as a link, so this server's Lua scripts "
+                "could not be laid from them. Nothing was built."
+            )
+
+    def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """Write the patches and lay the scripts into moved (or put back) sources (T553).
+
+        The update route calls this after the fetch's reset, and the restore calls
+        it after putting the old commits back, so the scripts on disk follow the
+        checkout they came from either way.
+        """
+        yield from self._carried(server_dir, quiet=False)
+
+    def before_rebuild(
+        self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
+    ) -> Iterator[str]:
+        """Before any rebuild compiles: the patches on disk and the scripts laid (T553).
+
+        A Rebuild compiles the tree as it stands, so a checkout that lost its patch
+        (re-cloned, or reset by hand) gets it back here rather than compiling
+        without it; a tree that has it says nothing. Quiet: on the update route the
+        same work has just run in `apply_carried_patches()`.
+
+        The scripts are laid here while the old world may still be running, so a
+        `.reload ale` or a crash-restart in the compile window loads the new
+        scripts on the old binary (T562 moves the laying to the servers-down step).
+        """
+        yield from self._carried(server_dir, quiet=True)
 
     def repair_database_stages(self) -> tuple[Stage, ...]:
         """The spine's four, after the client-data download (T377).

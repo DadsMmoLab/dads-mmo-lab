@@ -200,9 +200,24 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     Site(
         "yulon.catalog.catalog",
         "CatalogEntry._every_patch_names_a_source_this_entry_clones",
-        "a CMaNGOS source patch names a cloned dest",
-        _cmangos_only("this family's block carries no source patches"),
-        hits=(".cmangos",),
+        "a source patch (CMaNGOS or AzerothCore, T553) names a cloned dest",
+        {
+            "azerothcore": supported(),
+            "cmangos": supported(),
+            "trinitycore": not_applicable("its block carries no source patches"),
+        },
+        hits=(".azerothcore", ".azerothcore", ".cmangos", ".cmangos"),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._every_sql_check_names_a_database_this_entry_has",
+        "an AzerothCore SQL check reads a database the entry names (T553)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block carries SQL checks"),
+            "trinitycore": not_applicable("only an AzerothCore block carries SQL checks"),
+        },
+        hits=(".azerothcore",),
     ),
     Site(
         "yulon.catalog.catalog",
@@ -233,6 +248,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": not_applicable(
                 "TrinityCore writes its confs, playerbots.conf included, from its conf table"
             ),
+        },
+        hits=(".azerothcore", ".azerothcore"),
+    ),
+    Site(
+        "yulon.catalog.families.azerothcore",
+        "AzerothCoreInstaller._block",
+        "the AzerothCore engine reads its own block: patches, Lua scripts, SQL checks (T553)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only the AzerothCore engine reads this block"),
+            "trinitycore": not_applicable("only the AzerothCore engine reads this block"),
         },
         hits=(".azerothcore", ".azerothcore"),
     ),
@@ -912,7 +938,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "StagedInstaller.before_rebuild",
         "what a family stops before a rebuild, an update or a return to the tested commit",
         {
-            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "azerothcore": supported(
+                "AzerothCoreInstaller writes its carried patches and lays its Lua scripts (T553)"
+            ),
             "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
             "trinitycore": supported("TrinityCoreInstaller stops a running movement-map job"),
         },
