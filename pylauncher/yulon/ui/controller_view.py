@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import functools
 import math
 import os
 import re
@@ -98,6 +99,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     tuning,
+    unbound_settings,
     useraccounts,
     wsl,
 )
@@ -2289,9 +2291,16 @@ class ControllerServices:
             )
         if play_client_dir is None:
             return _with_the_ready_wait(
-                _with_take_back(factory(entry, server_dir, client_dir, wsl_distro)), entry
+                _with_take_back(
+                    _knowing_its_server_sources(
+                        factory(entry, server_dir, client_dir, wsl_distro), entry
+                    )
+                ),
+                entry,
             )
-        services = factory(entry, server_dir, play_client_dir, wsl_distro)
+        services = _knowing_its_server_sources(
+            factory(entry, server_dir, play_client_dir, wsl_distro), entry
+        )
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
@@ -3109,8 +3118,12 @@ def _for_wotlk(
             "Nothing was opened."
         )
     spec = entry.container_spec()
-    record_backed = _record_backed_keys(wotlk_modules.store())
-    settings_mods = _settings_mods(wotlk_modules.store())
+    # The shipped manifests are WotLK's for every server here; the modules the
+    # user ADDED are this server's own, under its game id (T554: a Remove on
+    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    user_game = entry.id
+    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
+    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3345,7 +3358,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store() if entry.has_manifests else None,
+        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -3362,7 +3375,12 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir,
+                    spec=spec,
+                    output=output,
+                    wsl_distro=wsl_distro,
+                    ledger=sql,
+                    user_game=user_game,
                 )
             )
             if spec.import_service
@@ -3375,7 +3393,9 @@ def _for_wotlk(
         # this to `import_service` would make that coincidence load-bearing for
         # a future core that compiles modules and imports differently.
         module_updates=(
-            (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
+            (lambda: wotlk_modules.module_updates(server_dir, user_game=user_game))
+            if entry.has_manifests
+            else None
         ),
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
@@ -3415,8 +3435,16 @@ def _for_wotlk(
         # against a second one. `store()` already carries lane A's user layer
         # by default, which is what puts a derived manifest into the list on
         # the next start.
-        module_from_link=wotlk_modules.derive_link if module_applier is not None else None,
-        module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
+        module_from_link=(
+            functools.partial(wotlk_modules.derive_link, game=user_game)
+            if module_applier is not None
+            else None
+        ),
+        module_from_folder=(
+            functools.partial(wotlk_modules.derive_folder, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
         ),
@@ -3425,7 +3453,11 @@ def _for_wotlk(
             if module_applier is not None
             else None
         ),
-        module_forget=wotlk_modules.forget if module_applier is not None else None,
+        module_forget=(
+            functools.partial(wotlk_modules.forget, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
         # containers with `docker ps` — a second question, to the same daemon,
@@ -4279,8 +4311,25 @@ def _for_tortoise(
 
 _Factory = Callable[[CatalogEntry, Path, Path | None, str | None], ControllerServices]
 
+
+def _knowing_its_server_sources(
+    services: ControllerServices, entry: CatalogEntry
+) -> ControllerServices:
+    """Tell the applier which folders the server install itself cloned (T554).
+
+    Done once here, for every game, so no factory has to remember: the applier then refuses
+    to install, update or remove a module whose clone folder is one of them.
+    """
+    if services.applier is not None:
+        services.applier.server_sources = native.server_source_folders(entry)
+        services.applier.server_name = entry.name
+    return services
+
+
 _FACTORIES: dict[str, _Factory] = {
     "wow-wotlk": _for_wotlk,
+    # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
+    "wow-unbound": _for_wotlk,
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
@@ -16205,6 +16254,12 @@ class ControllerView(QWidget):
                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
             broken += skipped
+            # T554: a manifest whose clone folder the server install itself cloned (WoW
+            # Unbound's `modules/mod-ale`) is part of the server, so it is not offered as a
+            # module; its folder is listed as part of the server instead.
+            items = [
+                m for m in items if not apply_module.is_server_source(m, self._server_sources())
+            ]
             manifests += items
             for manifest in items:
                 # T42 round 2's key shape, threaded through T43's extraction of
@@ -16459,6 +16514,10 @@ class ControllerView(QWidget):
             # that moves it is the T64 one, and this is that button's own slot
             # -- its dialog, backup offer, busy gates and refusals included.
             self.update_to_latest()
+
+    def _server_sources(self) -> frozenset[PurePosixPath]:
+        """The folders this entry's install clones its own sources into (T554)."""
+        return native.server_source_folders(self.entry)
 
     def _server_updated(self) -> frozenset[PurePosixPath]:
         """Where "Update the server to latest…" moves a checkout here; empty with no route (T146).
@@ -18425,6 +18484,7 @@ class ControllerView(QWidget):
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         # T302: the built-in Server rates card's rows, read with the modules'.
         self._rate_rows: tuple[tuning.TuningRow, ...] = ()
+        self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
@@ -18466,6 +18526,8 @@ class ControllerView(QWidget):
         self._tuning_rows = rows
         # T302: the world conf's rates, read in the same pass -- one file, no job.
         self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
+        # T554: WoW Unbound's three switches, from the same pass over its own conf.
+        self._unbound_rows = self._read_unbound_rows()
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -18497,7 +18559,18 @@ class ControllerView(QWidget):
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
         rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
-        return rates + modules + self._bot_rows
+        return rates + self._unbound_rows + modules + self._bot_rows
+
+    def _read_unbound_rows(self) -> tuple[tuning.TuningRow, ...]:
+        """The Unbound card's rows: only for an entry that makes `mod_unbound.conf`, and only
+        once the install has laid it (a Save must never create the module's conf)."""
+        server_dir = self.services.controller.server_dir
+        if (
+            not unbound_settings.shown_for(self.entry)
+            or not (server_dir / unbound_settings.FILE).is_file()
+        ):
+            return ()
+        return unbound_settings.rows(server_dir)
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -19492,6 +19565,8 @@ class ControllerView(QWidget):
             return botpop.conf_keys(self.entry)
         if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
             return server_rates.conf_keys(self.entry)
+        if (family, module_id) == unbound_settings.CARD and file == unbound_settings.FILE:
+            return unbound_settings.conf_keys()
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -19552,7 +19627,13 @@ class ControllerView(QWidget):
                     return
         for file, values in per_file.items():
             try:
-                made = tuning.write(server_dir / file, values, spec=specs[file])
+                if (family, module_id) == unbound_settings.CARD:
+                    # Only `0` and `1` reach the file: a switch flipped from a hand-edited
+                    # `true`/`false` is written back as the module's own 1/0
+                    # (`unbound_settings.write`).
+                    made = unbound_settings.write(server_dir, values)
+                else:
+                    made = tuning.write(server_dir / file, values, spec=specs[file])
             except tuning.TuningError as exc:
                 # Unreachable through the loop above, which has already checked
                 # every value on the card. Kept because `tuning.write()` is a

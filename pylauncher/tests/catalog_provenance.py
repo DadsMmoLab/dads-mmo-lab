@@ -421,10 +421,83 @@ PROVENANCE: dict[str, Provenance] = {
             "(auth_schema.sql:18-19); @ faac5fc9"
         ),
     ),
+    # -- wow-unbound (T554 live run on m910q, 2026-10-08): the app's own presses --
+    "wow-unbound:play.equipped.template_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "`send_gear_set` on an offline bot (12 worn pieces -> 1 mail) and an online one (18 ->"
+            " 2 mails, both arrived)"
+        ),
+    ),
+    "wow-unbound:play.equipped.instance_table": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=("same presses; the joined shape read the worn items on both"),
+    ),
+    "wow-unbound:play.equipped.inventory_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=("same presses"),
+    ),
+    "wow-unbound:play.teleport_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "offline row moved to Stormwind; an online character was moved too (`l3-owed-online-"
+            "tmentor.log`)"
+        ),
+    ),
+    "wow-unbound:play.rename_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            '`at_login` 0 -> 1, and the real client prompt "Your name has been flagged for '
+            'rename" (`shots-owed/8.4a-client-rename-prompt.png`)'
+        ),
+    ),
+    "wow-unbound:play.set_level_command": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-1.log",
+        note=(
+            "`You changed level of Aevaela to 60`, read back in the row (55 -> 60); online level "
+            "shown in the client (`l3-owed-online-tmentor.log`)"
+        ),
+    ),
+    "wow-unbound:play.mail_item_cap": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=('`send items`: 12 accepted, 13 refused with "Mail can\'t have more 12 item stacks"'),
+    ),
+    "wow-unbound:accounts.level.table": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=(
+            "`account_access` row `104 3 -1` read back, with `.account info` and the Accounts tab"
+        ),
+    ),
+    "wow-unbound:accounts.level.account_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=("same press: the row's account id is the `id` column"),
+    ),
+    "wow-unbound:accounts.level.level_column": Provenance(
+        "measured-on",
+        "gates/live-t554-m910q-2026-10-08/l3-owed-presses-2.log",
+        note=(
+            "same press: the row's level is the `gmlevel` column the server's own query agreed with"
+        ),
+    ),
 }
 
 
 OWED: dict[str, str] = {
+    "wow-unbound:accounts.level.max_level": (
+        "The live run on m910q set account levels 2 and 3 and read them back; the refusal of 4 "
+        "came from Yu'lon's own check (`commands.py`), whose highest level is this very catalog "
+        "value, so it proves nothing about the server. Same as wow-wotlk's row. Settled by "
+        "8.3d's probe (accept 3, refuse 4) run on the Unbound server."
+    ),
     "wow-wotlk:play.mail_item_cap": (
         "8.4a sent twelve worn items in ONE mail and split nineteen into two, so twelve FITS -- "
         "but nothing on this tree has been asked whether thirteen is refused, and a cap is a "
@@ -459,7 +532,7 @@ This is the set Phase 8's exit line asks to be "enumerated by name in the
 catalog test rather than left to memory". Every row says what would settle it,
 because a list of debts with no discharge is a list that grows.
 
-It is EXACT and not a floor: `test_the_provenance_debts_are_exactly_these_four`
+It is EXACT and not a floor: `test_the_provenance_debts_are_exactly_these`
 fails on a key that has since been marked and on a key the catalog no longer
 writes, so the list cannot rot in either direction.
 """

@@ -1,0 +1,12 @@
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -14293,7 +14293,7 @@ void Player::LearnTalent(uint32 talentId, uint32 talentRank, bool command /*= fa
+         return;
+ 
+     // xinef: prevent learn talent for different class (cheating)
+-    if ((getClassMask() & talentTabInfo->ClassMask) == 0)
++    if (((getClassMask() | GetUnboundClassMask()) & talentTabInfo->ClassMask) == 0)
+         return;
+ 
+     // xinef: find current talent rank

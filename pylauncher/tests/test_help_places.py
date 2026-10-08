@@ -48,6 +48,15 @@ EXPECTED: dict[str, list[tuple[str, str]]] = {
         ("Sagiroth/TortoiseBots", "https://github.com/Sagiroth/TortoiseBots/issues"),
         ("Yu'lon", YULON_ISSUES),
     ],
+    "wow-unbound": [
+        (
+            "Dad's MMO Lab Discord, #wow-unbound",
+            "https://discord.com/channels/1505690043044335749/1507088008837595226",
+        ),
+        ("AzerothCore", "https://github.com/azerothcore/azerothcore-wotlk/issues"),
+        ("mod-playerbots", "https://github.com/mod-playerbots/mod-playerbots/issues"),
+        ("Yu'lon", YULON_ISSUES),
+    ],
     "wow-wotlk": [
         ("AzerothCore", "https://github.com/azerothcore/azerothcore-wotlk/issues"),
         ("mod-playerbots", "https://github.com/mod-playerbots/mod-playerbots/issues"),
