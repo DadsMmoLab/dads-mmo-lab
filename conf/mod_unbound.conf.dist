@@ -1,0 +1,44 @@
+###########################################################################
+# Wrath Unbound (mod-unbound) server settings.
+#
+# These are server house rules. All are OFF by default; set a value to 1 to
+# turn it on. They are read once, when the worldserver starts.
+###########################################################################
+
+[worldserver]
+
+#
+#    Unbound.ReagentFree
+#        Description: Casting reagents are free for every character, bots
+#                     included: soul shards, candles, powders, symbols,
+#                     seeds, runes, ankh, corpse dust and the like. Crafting
+#                     materials are not touched. The client still checks for
+#                     reagents in your bags before it lets you cast.
+#        Default:     0 - (Disabled)
+#                     1 - (Enabled)
+#
+
+Unbound.ReagentFree = 0
+
+#
+#    Unbound.InstantSummons
+#        Description: Class summons (warlock demons and Inferno, Water
+#                     Elemental, Raise Dead, Feral Spirit) cast instantly, cost
+#                     nothing and have no cooldown. A big balance change:
+#                     Inferno's one-hour cooldown goes away.
+#        Default:     0 - (Disabled)
+#                     1 - (Enabled)
+#
+
+Unbound.InstantSummons = 0
+
+#
+#    Unbound.AutoBuff
+#        Description: Turns on the "#buffs" auto-buff command (dml_autobuff.lua)
+#                     for players. Players still opt in with "#buffs on"; bots
+#                     never do.
+#        Default:     0 - (Disabled)
+#                     1 - (Enabled)
+#
+
+Unbound.AutoBuff = 0

@@ -7,11 +7,13 @@
 
 void AddUnboundScripts();
 void AddUnboundMulticlassBridge();
+void AddUnboundReagentFree();
 void Addmod_multiclass_summonsScripts();
 
 void Addmod_unboundScripts()
 {
     AddUnboundScripts();
     AddUnboundMulticlassBridge();
+    AddUnboundReagentFree();
     Addmod_multiclass_summonsScripts();
 }
