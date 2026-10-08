@@ -148,7 +148,16 @@ def test_a_true_or_false_is_written_back_as_one_or_zero(
 
 @pytest.mark.parametrize(
     ("current", "on"),
-    [("1", True), ("true", True), ("0", False), ("false", False), (None, False), ("2", False)],
+    [
+        ("1", True),
+        ("true", True),
+        ("True", True),
+        ("0", False),
+        ("false", False),
+        ("FALSE", False),
+        (None, False),
+        ("2", False),
+    ],
 )
 def test_true_and_one_are_on_false_and_zero_are_off(
     tmp_path: Path, current: str | None, on: bool

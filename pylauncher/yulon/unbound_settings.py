@@ -16,7 +16,7 @@ unless `Unbound.ReagentFree` is on too, so no text here calls it "free" (U3 revi
 
 **Off is the default everywhere.** The shipped `mod_unbound.conf.dist` spells each
 `0`; the C++ reads `GetOption<bool>(key, false)` and `dml_autobuff.lua` turns on only
-for the text `1` or `true`, so a missing file or a missing key also means off.
+for `1` or `true` (any case, which ALE lowers), so a missing file or a missing key also means off.
 That is why a key the file does not carry has `current=None` here -- the row says
 nothing about the file rather than inventing a `0` -- and `is_on()` answers `False`.
 
@@ -134,8 +134,13 @@ def shown_for(entry: CatalogEntry) -> bool:
 
 
 def is_on(row: tuning.TuningRow) -> bool:
-    """Whether this row's switch is on: `1` or `true`. `0`, `false` and no value are off."""
-    return row.current is not None and row.current.strip() in ("1", "true")
+    """Whether this row's switch is on: `1` or `true` in any case. `0`, `false`, no value: off.
+
+    Any case because every reader lowers it: the C++ `GetOption<bool>` compares without
+    case, and ALE's `GetConfigValue` turns `True` into the boolean `true` before
+    `dml_autobuff.lua` sees it (`GlobalMethods.h:77-84` at 1cb86c96).
+    """
+    return row.current is not None and row.current.strip().lower() in ("1", "true")
 
 
 def write(server_dir: Path, edits: Mapping[str, str], *, now: datetime | None = None) -> Path:
