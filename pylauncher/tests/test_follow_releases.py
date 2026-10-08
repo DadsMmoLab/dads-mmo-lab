@@ -643,6 +643,18 @@ def test_tortoise_counts_its_addons_each_against_what_it_follows(tmp_path: Path)
     ]
 
 
+def test_tortoise_counts_a_module_clone_beside_its_mods(tmp_path: Path) -> None:
+    """T596 (E5): a clone under `modules/` is counted by the same press, not left out."""
+    _clones(tmp_path, "tortoise-gm-manager")
+    (tmp_path / apply_module.CLONE_DIRS["module"] / "tw-mod-x" / ".git").mkdir(parents=True)
+    git = _CountGit({"tortoise-gm-manager": 1, "tw-mod-x": 3}, {})
+    rows = tortoise_modules.module_updates(tmp_path, git=git, now=T0)
+    assert [(r.family, r.key, r.behind) for r in rows] == [
+        ("mod", "tortoise-gm-manager", 1),
+        ("module", "tw-mod-x", 3),
+    ]
+
+
 def test_the_tortoise_count_is_kept_for_a_day_and_recounted_when_the_clone_moves(
     tmp_path: Path,
 ) -> None:

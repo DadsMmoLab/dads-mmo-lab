@@ -6,12 +6,18 @@ location they are refreshed from. Loading and validating
 (`yulon.manifest_store`) and applying (`yulon.apply`) are shared and
 game-agnostic (style-guide §4).
 
-**What a "module" is here.** The same two shapes as TBC, for the same reason:
-this fork compiles no loadable modules either, so an item is
+**What a shipped item is here.** Three shapes, none of them a compiled module:
 
 * a **configuration activation** — `conf[].keys` written into
-  `etc/mangosd.conf`, which the installer materialises out of the image; or
-* a **SQL mod** — `sql[].statement` run against `tw_world`.
+  `etc/mangosd.conf`, which the installer materialises out of the image;
+* a **SQL mod** — `sql[].statement` run against `tw_world`; or
+* a **client add-on** cloned into `sql_scripts/clones/` and copied into the
+  ready-to-play client (TortoiseBots Manager, Tortoise GM Manager).
+
+The core DOES compile modules from `modules/<name>/src/` (`modules/README.md`,
+`ConfigureModules.cmake`; this docstring said it did not until T596). None is
+shipped, and a module from outside is a later Yu'lon: what a player can bring
+today is an add-on or a database package (`custom.py`, T596).
 
 **What is NOT inherited from TBC, and this is the whole reason 8.7d is its own
 box.** Three facts were measured against this fork's own source on m910q,
@@ -45,15 +51,20 @@ worth writing down, and without the files the Modules tab prints
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 
-from yulon import resources
+from yulon import module_source, resources
 from yulon.apply import (
     CLONE_DIRS,
+    Applier,
     ApplyReport,
     CountingGit,
+    FolderSource,
     ModuleUpdate,
+    SqlBackup,
     SqlRunner,
     cached_module_update,
     cached_module_updates,
@@ -62,11 +73,18 @@ from yulon.apply import (
 from yulon.catalog.native import read_state
 from yulon.catalog.upstream import Comparison, Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
-from yulon.controller_wow_tortoise import autoupdate
+from yulon.controller_wow_tortoise import autoupdate, custom
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
+from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
+
+# Explicit re-exports: the user layer's place, the copy and the replace question
+# are not game-bound, so this binding names the same functions WotLK's does.
+from yulon.controller_wow_wotlk.modules import CustomInstall as CustomInstall
+from yulon.controller_wow_wotlk.modules import replacement_question as replacement_question
+from yulon.controller_wow_wotlk.modules import user_manifests_dir as user_manifests_dir
 from yulon.git import Git, is_behind
 from yulon.log import get_logger
-from yulon.manifest import Manifest, ManifestType
+from yulon.manifest import Db, Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,
     ManifestFetcher,
@@ -75,6 +93,7 @@ from yulon.manifest_store import (
     load_manifest,
     urllib_get,
 )
+from yulon.module_source import copy_folder
 
 logger = get_logger(__name__)
 
@@ -94,9 +113,152 @@ def load_module(manifest_path: Path) -> Manifest:
     return load_manifest(manifest_path)
 
 
-def store(root: Path = BUNDLED_MANIFESTS_DIR) -> ManifestStore:
-    """The Tortoise manifest store over `root` (bundled by default, or a refreshed cache)."""
-    return ManifestStore(root, GAME)
+def store(root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None) -> ManifestStore:
+    """The Tortoise manifest store over `root`, with the user layer over it (T596).
+
+    `root` is the bundled tree by default (or a refreshed cache). The second
+    layer is where an add-on or database package brought from a link or a folder
+    is recorded (`complete()`), so it is a row in the list on the next start, as
+    on WotLK. `shipped_ids()` asks the bundled tree alone.
+    """
+    return ManifestStore(root, GAME, user_root if user_root is not None else user_manifests_dir())
+
+
+def shipped_ids(kind: ManifestType = "mod") -> tuple[str, ...]:
+    """The ids this app SHIPS for that family: the bundled index alone, never the user layer."""
+    return ManifestStore(BUNDLED_MANIFESTS_DIR, GAME).load_index(kind).items
+
+
+def shipped_addons() -> dict[str, str]:
+    """The add-on folder names the shipped items copy into the client (lower case) → the item.
+
+    An outside package carrying one of these would be copied over the shipped
+    add-on's folder, so `custom.read_package()` refuses it by name.
+    """
+    names: dict[str, str] = {}
+    for manifest in ManifestStore(BUNDLED_MANIFESTS_DIR, GAME).load_all("mod"):
+        for step in manifest.client:
+            if step.dest == "addons":
+                names[(step.name or Path(step.src).name).lower()] = manifest.name
+    return names
+
+
+def layout() -> custom.TortoiseLayout:
+    """This core's custom-route layout, knowing the shipped add-ons' names."""
+    return custom.TortoiseLayout(shipped_addons=shipped_addons())
+
+
+def derive_link(text: str) -> Manifest:
+    """A Tortoise add-on or database package for the link `text`, or `DeriveError` (T596)."""
+    return module_source.derive_link(
+        text, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+    )
+
+
+def derive_folder(path: Path) -> Manifest:
+    """As `derive_link()`, for a folder on this computer; read before anything is copied."""
+    return module_source.derive_folder(
+        path, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+    )
+
+
+def complete(manifest: Manifest, clone: Path) -> Manifest:
+    """Fill `manifest` in from what `clone` holds, PERSIST it, and return it.
+
+    The applier's completion hook, as on WotLK: what is persisted is what the
+    rest of the press acts on. A refusal raises `apply.CompletionRefused`, and
+    the applier takes a first install's folder back.
+    """
+    completed = custom.complete(manifest, clone, shipped_addons=shipped_addons())
+    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids())
+    return completed
+
+
+def forget(manifest: Manifest) -> bool:
+    """Drop `manifest` from the user layer; `True` if there was one. After a remove returned."""
+    return module_source.forget(user_manifests_dir(), manifest)
+
+
+def install_custom(applier: Applier) -> CustomInstall:
+    """The Modules tab's custom-install seam over the tab's own (guarded) applier (T596).
+
+    WotLK's shape, with this core's completion; and what the package holds that
+    Yu'lon left alone (`custom.unused()`) is added to the report's skipped lines,
+    so a file that was not run is said, not silently dropped.
+    """
+
+    def install(manifest: Manifest, folder: Path | None, *, replacing: bool = False) -> ApplyReport:
+        source = FolderSource(folder, copy_folder) if folder is not None else None
+        finished: list[Manifest] = []
+
+        def finish(derived: Manifest, clone: Path) -> Manifest:
+            finished.append(complete(derived, clone))
+            return finished[-1]
+
+        report = applier.install(
+            manifest, None, folder=source, complete=finish, replacing=replacing
+        )
+        left = custom.unused(finished[-1]) if finished else ()
+        return replace(report, skipped=(*report.skipped, *left)) if left else report
+
+    return install
+
+
+BACKUP_LABEL = "before-{id}"
+"""The label an outside item's automatic backup carries in its file names (T596, E2)."""
+
+
+@dataclass(frozen=True)
+class OutsideSqlBackup:
+    """`apply.SqlBackup` for Tortoise: a backup before an OUTSIDE item's database changes.
+
+    Owner decision 2026-10-08: automatic, of only the databases the press writes,
+    named in the report and again in Remove, which keeps the changes. A shipped
+    item takes none here: the one that changes the database (Bigger Stacks) keeps
+    its own backup table and undoes itself on Remove.
+
+    `take` is `maintenance.backup(only=..., label=...)` bound to this install; the
+    files are found again by their label, so nothing new is recorded anywhere.
+    """
+
+    server_dir: Path
+    take: Callable[[Sequence[str], str], BackupReport]
+    schemas: Mapping[Db, str]
+
+    def before(self, manifest: Manifest, dbs: tuple[Db, ...]) -> str | None:
+        if manifest.origin is None:
+            return None
+        names = [self.schemas.get(db, db) for db in dbs]
+        report = self.take(names, BACKUP_LABEL.format(id=manifest.id))
+        files = ", ".join(self._rel(dump.path) for dump in report.dumps)
+        return f"backed up {', '.join(names)} before {manifest.id}'s database changes: {files}"
+
+    def named(self, manifest: Manifest) -> str | None:
+        if manifest.origin is None:
+            return None
+        folder = backups_dir(self.server_dir)
+        label = BACKUP_LABEL.format(id=manifest.id)
+        found = sorted(p for p in folder.glob(f"*_{label}_*.sql") if p.is_file())
+        if not found:
+            return (
+                f"no backup taken before its database changes was found in {self._rel(folder)}, "
+                "so Yu'lon cannot name one that undoes them"
+            )
+        stamp = found[0].name[: len("YYYYmmdd_HHMMSS")]
+        first = [p for p in found if p.name.startswith(stamp)]
+        later = len({p.name[: len(stamp)] for p in found}) - 1
+        more = f" ({later} later backup(s) were taken before later installs of it)" if later else ""
+        return (
+            f"the backup taken before its first database change, "
+            f"{', '.join(self._rel(p) for p in first)}: restoring it undoes those changes, "
+            f"and everything played since{more}"
+        )
+
+    def _rel(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.server_dir).as_posix()
+        except ValueError:
+            return str(path)
 
 
 def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:
@@ -118,6 +280,7 @@ def applier(
     start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
+    sql_backup: SqlBackup | None = None,
 ) -> GuardedApplier:
     """A GUARDED `Applier` for the Tortoise install at `server_dir`.
 
@@ -143,8 +306,11 @@ def applier(
     goes to both — the subclass used to swallow the keyword, leaving 8.7a's
     guard at `None` on this game as on the other three.
 
-    No `dbc=`: `server_dbc` copies DBC files out of a clone, and nothing in
-    `manifests/wow-tortoise/` clones anything.
+    No `dbc=`: `server_dbc` copies DBC files out of a clone, and no Tortoise
+    item carries any.
+
+    `sql_backup` is T596's `OutsideSqlBackup`: the backup before an outside
+    item's database changes. Absent, none is taken.
     """
     return autoupdate.guarded_applier(
         server_dir,
@@ -154,6 +320,7 @@ def applier(
         start_database=start_database,
         git=git,
         client_dir=client_dir,
+        sql_backup=sql_backup,
     )
 
 
@@ -205,38 +372,45 @@ def module_updates(
     compare_commits: Callable[[str, str, str], Comparison | None] | None = None,
     now: int | None = None,
 ) -> tuple[ModuleUpdate, ...]:
-    """ "Check for updates" for this install's cloned mods -- the two client addons (T126).
+    """ "Check for updates" for this install's clones: mods, and modules too (T126, T596).
 
-    Tortoise's clones are `mod`s in `sql_scripts/clones/`; its SQL and conf mods
-    clone nothing and are not listed. Each clone is counted against what its
-    manifest follows -- the newest release for TortoiseBots Manager, the branch
-    tip for TortoiseGMManager -- through `apply.cached_module_updates()`, so a
-    row is kept for a day (an hour when nothing answered) and the press costs
-    GitHub nothing while the addon has not moved.
+    Tortoise's `mod` clones are in `sql_scripts/clones/`: the two shipped client
+    addons and any add-on or database package brought from a link (T596); its
+    SQL and conf mods clone nothing and are not listed. `module` clones in
+    `modules/` are counted the same way, so a server module brought in later is
+    not left out of the press; a server with no `modules/` folder gives none.
+    Each clone is counted against what its manifest follows -- the newest release
+    for TortoiseBots Manager, the branch tip for the others -- through
+    `apply.cached_module_updates()`, so a row is kept for a day (an hour when
+    nothing answered) and the press costs GitHub nothing while nothing moved.
     """
-    branches: dict[str, str | None] = {}
-    releases: dict[str, str] = {}
-    try:
-        for manifest in store().load_all("mod"):
-            if manifest.source is None:
-                continue
-            branches[manifest.id] = manifest.source.branch
-            if manifest.source.follow == "releases":
-                slug = github_slug(manifest.source.repo)
-                if slug is not None:
-                    releases[manifest.id] = slug
-    except Exception as exc:  # boundary: a broken manifest tree must not stop the count
-        logger.warning(f"could not read the wow-tortoise mods for what they follow: {exc}")
-    return cached_module_updates(
-        server_dir,
-        kind="mod",
-        git=git,
-        branches=branches,
-        releases=releases,
-        newest_release=newest_release,
-        compare_commits=compare_commits,
-        now=now,
-    )
+    rows: list[ModuleUpdate] = []
+    kinds: tuple[ManifestType, ...] = ("mod", "module")
+    for kind in kinds:
+        branches: dict[str, str | None] = {}
+        releases: dict[str, str] = {}
+        try:
+            for manifest in store().load_all(kind):
+                if manifest.source is None:
+                    continue
+                branches[manifest.id] = manifest.source.branch
+                if manifest.source.follow == "releases":
+                    slug = github_slug(manifest.source.repo)
+                    if slug is not None:
+                        releases[manifest.id] = slug
+        except Exception as exc:  # boundary: a broken manifest tree must not stop the count
+            logger.warning(f"could not read the wow-tortoise {kind}s for what they follow: {exc}")
+        rows += cached_module_updates(
+            server_dir,
+            kind=kind,
+            git=git,
+            branches=branches,
+            releases=releases,
+            newest_release=newest_release,
+            compare_commits=compare_commits,
+            now=now,
+        )
+    return tuple(rows)
 
 
 def release_note(

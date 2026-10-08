@@ -71,6 +71,7 @@ from yulon.apply import (
     Completer,
     FolderSource,
     LastUpdate,
+    SqlBackup,
     SqlRunner,
 )
 from yulon.catalog import upstream
@@ -511,13 +512,13 @@ class GuardedApplier(Applier):
         expect_head: str | None = None,
         record_move: bool = False,
     ) -> ApplyReport:
-        # `folder` and `complete` are the base class's second way to fill
-        # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
-        # not dropped: custom modules are wow-wotlk-only, so nothing reaches
-        # this class with either set today, and a subclass that silently
+        # `folder` and `complete` are the base class's second way to fill an
+        # item's folder (from a link or a folder on this computer). Passed
+        # THROUGH, not dropped: since T596 this game's own custom route sends an
+        # add-on or a database package here with both set, and a subclass that
         # ignored a keyword its base accepts would report an install it copied
         # nothing for. The guard still runs first, whichever route fills the
-        # folder -- the restart a C++ module asks for is the same restart.
+        # folder.
         # `release` and `expect_head` are the same rule's next two keywords
         # (T150): the release `update()` proved is not a step back and the
         # commit it proved that from. The one addon on this game that follows
@@ -600,6 +601,7 @@ def guarded_applier(
     start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
+    sql_backup: SqlBackup | None = None,
 ) -> GuardedApplier:
     """The applier the Tortoise Modules tab is handed. See `modules.applier()`."""
     return GuardedApplier(
@@ -610,6 +612,7 @@ def guarded_applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        sql_backup=sql_backup,
     )
 
 

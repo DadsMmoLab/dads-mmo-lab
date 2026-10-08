@@ -40,6 +40,7 @@ import tempfile
 from collections.abc import Container
 from datetime import date
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -83,6 +84,9 @@ FOLDER_DESCRIPTION = "Custom module (copied from a folder you provided)."
 _NOTHING_CHANGED = "Nothing on this machine was changed."
 """The tab's own closing clause, true of every refusal here: nothing writes first."""
 
+NOTHING_CHANGED = _NOTHING_CHANGED
+"""The same clause for a per-game `Layout`, whose refusals end the same way (T596)."""
+
 _CUSTOM_ID = re.compile(r"^mod-[a-z0-9-]{1,64}$")
 """`_valid_cpp_key` (`RUST modules.rs:40-50`), ported exactly.
 
@@ -125,6 +129,32 @@ neither spelling gets no step at all rather than a guessed database.
 """
 
 
+class Layout(Protocol):
+    """What one game's custom route takes, for a game whose rules are not WotLK's (T596).
+
+    `derive_link()`/`derive_folder()` keep WotLK's behaviour byte for byte when
+    they are handed none; a game with its own kinds hands its layout instead of a
+    copy of this module. Every refusal a layout raises is a whole `DeriveError`
+    sentence ending in `NOTHING_CHANGED`, because it is raised before anything is
+    written, as this module's own are.
+    """
+
+    link_description: str
+    folder_description: str
+
+    def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
+        """`(type, id, name)` for a repository or folder basename, or a `DeriveError`."""
+        ...
+
+    def refuse_folder(self, path: Path, name: str) -> str | None:
+        """Why the folder at `path` cannot be installed, read before any copy; None if it can."""
+        ...
+
+    def build(self) -> Build:
+        """What the derived item asks of the server after it is installed."""
+        ...
+
+
 class DeriveError(RuntimeError):
     """A link or a folder this app will not derive a module from.
 
@@ -138,7 +168,14 @@ class DeriveError(RuntimeError):
 # ---------------------------------------------------------------- deriving
 
 
-def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str] = ()) -> Manifest:
+def derive_link(
+    text: str,
+    game: str,
+    *,
+    today: date,
+    shipped_ids: Container[str] = (),
+    layout: Layout | None = None,
+) -> Manifest:
     """A minimal module manifest for the repository `text` points at.
 
     Minimal because a link's CONTENTS are not known until it is cloned: this
@@ -172,6 +209,23 @@ def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str
             f"on {', '.join(ALLOWED_REPO_HOSTS)}, or owner/name for github.com. "
             f"{_NOTHING_CHANGED}"
         ) from exc
+    if layout is not None:
+        kind, item_id, name = layout.identify(
+            _basename(text.rstrip("/").rsplit("/", 1)[-1]), folder=False
+        )
+        _refuse_shipped(item_id, shipped_ids)
+        return _manifest(
+            item_id,
+            game,
+            description=layout.link_description,
+            source=source,
+            origin=Origin(kind="link", added=today.isoformat()),
+            came_from=text,
+            today=today,
+            kind=kind,
+            name=name,
+            build=layout.build(),
+        )
     item_id = _id_from(text.rstrip("/").rsplit("/", 1)[-1])
     if item_id is None:
         raise DeriveError(
@@ -193,7 +247,12 @@ def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str
 
 
 def derive_folder(
-    path: Path, game: str, *, today: date, shipped_ids: Container[str] = ()
+    path: Path,
+    game: str,
+    *,
+    today: date,
+    shipped_ids: Container[str] = (),
+    layout: Layout | None = None,
 ) -> Manifest:
     """A minimal module manifest for the folder at `path`, with no `source` at all.
 
@@ -204,6 +263,24 @@ def derive_folder(
     """
     if not path.is_dir():
         raise DeriveError(f"{path} is not a folder this app can read. {_NOTHING_CHANGED}")
+    if layout is not None:
+        kind, item_id, name = layout.identify(path.name, folder=True)
+        refusal = layout.refuse_folder(path, name)
+        if refusal:
+            raise DeriveError(f"{refusal} {_NOTHING_CHANGED}")
+        _refuse_shipped(item_id, shipped_ids)
+        return _manifest(
+            item_id,
+            game,
+            description=layout.folder_description,
+            source=None,
+            origin=Origin(kind="folder", path=str(path), added=today.isoformat()),
+            came_from=str(path),
+            today=today,
+            kind=kind,
+            name=name,
+            build=layout.build(),
+        )
     item_id = _id_from(path.name)
     if item_id is None:
         raise DeriveError(
@@ -315,6 +392,11 @@ def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:
     return tuple(steps)
 
 
+def _basename(text: str) -> str:
+    """A repository basename with `.git` stripped once, case kept (a layout decides case)."""
+    return text[: -len(".git")] if text.endswith(".git") else text
+
+
 def _id_from(basename: str) -> str | None:
     """The module id a repository or folder basename yields, or `None` if it yields none.
 
@@ -347,6 +429,9 @@ def _manifest(
     origin: Origin,
     came_from: str,
     today: date,
+    kind: ManifestType = "module",
+    name: str | None = None,
+    build: Build | None = None,
 ) -> Manifest:
     """The fields a derivation can honestly fill in, and nothing beyond them.
 
@@ -360,13 +445,13 @@ def _manifest(
     """
     return Manifest(
         id=item_id,
-        name=item_id,
-        type="module",
+        name=name or item_id,
+        type=kind,
         game=game,
         description=description,
         source=source,
         origin=origin,
-        build=Build(rebuild=True),
+        build=build if build is not None else Build(rebuild=True),
         notes=(
             f"Derived by Yu'lon from {came_from} on {today.isoformat()}; "
             "nothing here was written by the module's author.",
