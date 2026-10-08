@@ -48,6 +48,12 @@ USB.CLASS_ACTIVE_SPELL_IDS = {
         355,    -- Taunt
         7386, 7405, 8380, 11596, 11597, 25225, 47467,   -- Sunder Armor, ranks 1-7
         34428,  -- Victory Rush
+        2457,   -- Battle Stance. Found live 2026-08-14: Defensive (71) and
+                -- Berserker (2458) were both here but Battle Stance was not,
+                -- so it fell through to the General tab, which by design
+                -- keeps exactly those tab-1 spells that are in NO class list.
+                -- A stray spell in General is the visible symptom of a hole
+                -- in this table -- worth checking whenever one shows up.
     },
     PALADIN = {
         465, 498, 633, 635, 639, 642, 643, 647, 853, 879, 1022, 1026, 1032, 1038, 1042, 1044,
@@ -235,4 +241,68 @@ USB.CLASS_ACTIVE_SPELL_IDS = {
         6795,   -- Growl
         8946,   -- Cure Poison
     },
+}
+
+-- Profession and tradeskill spells for the dedicated Professions tab:
+-- every rank (Apprentice through Grand Master) of the primary and
+-- secondary professions, plus the book-visible craft/gather spells
+-- (Smelting, Disenchant, Milling, Prospecting). The spellbook shows only
+-- the highest learned rank, but listing every rank ID keeps the tab
+-- working whatever rank a character stopped at.
+USB.PROFESSION_SPELL_IDS = {
+    2259, 3101, 3464, 11611, 28596, 51304,      -- Alchemy
+    2018, 3100, 3538, 9785, 29844, 51300,       -- Blacksmithing
+    7411, 7412, 7413, 13920, 28029, 51313,      -- Enchanting
+    4036, 4037, 4038, 12656, 30350, 51306,      -- Engineering
+    2366, 2368, 3570, 11993, 28695, 50300,      -- Herbalism
+    45357, 45358, 45359, 45360, 45361, 45363,   -- Inscription
+    25229, 25230, 28894, 28895, 28897, 51311,   -- Jewelcrafting
+    2108, 3104, 3811, 10662, 32549, 51302,      -- Leatherworking
+    2575, 2576, 3564, 10248, 29354, 50310,      -- Mining
+    8613, 8617, 8618, 10768, 32678, 50305,      -- Skinning
+    3908, 3909, 3910, 12180, 26790, 51309,      -- Tailoring
+    2550, 3102, 3413, 18260, 33359, 51296,      -- Cooking
+    3273, 3274, 7924, 10846, 27028, 45542,      -- First Aid
+    7620, 7731, 7732, 18248, 33095, 51294,      -- Fishing
+    2656,       -- Smelting
+    13262,      -- Disenchant
+    51005,      -- Milling
+    31252,      -- Prospecting
+}
+
+-- The GM tab: skill line 769 "Internal", extracted from the server's
+-- SkillLineAbility.dbc (2026-08-13). All standard WotLK spell IDs, so
+-- they resolve client-side by ID -- but the client's spellbook slot
+-- array is hard-capped at 1024 slots (General alone reports 1013) and
+-- these sit entirely past it, so slot access can never reach them; the
+-- tab is driven by this list, the same way the class tabs are.
+USB.GM_SPELL_IDS = {
+    5, 265, 1908, 6560, 7482, 8295, 10073, 11821, 18209, 18210,
+    18389, 19901, 23789, 25565, 26368, 27254, 27255, 27258, 27261,
+    33153, 35182, 35886, 35912, 36356, 38505, 38734, 39258, 45645,
+    45646, 45647, 45648, 45649, 45650, 45659, 45813,
+}
+
+-- Fallback for spellbook slots whose link (and so spell ID) the client
+-- does not expose: match the visible name instead. enUS names -- this
+-- realm's client.
+USB.PROFESSION_NAMES = {
+    ["Alchemy"] = true,
+    ["Blacksmithing"] = true,
+    ["Enchanting"] = true,
+    ["Engineering"] = true,
+    ["Herbalism"] = true,
+    ["Inscription"] = true,
+    ["Jewelcrafting"] = true,
+    ["Leatherworking"] = true,
+    ["Mining"] = true,
+    ["Skinning"] = true,
+    ["Tailoring"] = true,
+    ["Cooking"] = true,
+    ["First Aid"] = true,
+    ["Fishing"] = true,
+    ["Smelting"] = true,
+    ["Disenchant"] = true,
+    ["Milling"] = true,
+    ["Prospecting"] = true,
 }

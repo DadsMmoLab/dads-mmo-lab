@@ -288,17 +288,46 @@ function Adv2.ApplyUnboundClassSync(payload)
     local synced = {}
     for token in string.gmatch(payload or "", "(%d+)") do
         local classId = tonumber(token)
-        if classId and Adv2.Classes and Adv2.Classes[classId] then synced[classId] = true end
+        -- The server is authoritative.  Do not discard a valid unlock just
+        -- because the client-side class table has not finished initializing.
+        if classId and classId >= 1 and classId <= 11 then synced[classId] = true end
+    end
+    -- Keep a previously verified list if this client receives a malformed
+    -- empty reply.  A later non-empty server sync still replaces it normally.
+    if not next(synced) and next(Adv2.playerData.unboundClasses or {}) then
+        return
     end
     Adv2.playerData.unboundClasses = synced
     Adv2.SaveData()
     if Adv2.UpdateUI then Adv2.UpdateUI() end
-    Adv2.PrintUnboundClasses()
 end
 
 function Adv2.RequestUnboundClassSync()
     if type(SendAddonMessage) ~= "function" then return end
     SendAddonMessage(UNBOUND_PREFIX, "SYNC", "WHISPER", UnitName("player"))
+end
+
+-- Mentor writes its unlock record asynchronously.  When it confirms a class
+-- unlock in chat, retry the server sync briefly so the new class appears as
+-- soon as that write reaches the character database.
+local mentorSyncFrame = CreateFrame("Frame")
+mentorSyncFrame:Hide()
+mentorSyncFrame.elapsed = 0
+mentorSyncFrame.attempts = 0
+mentorSyncFrame:SetScript("OnUpdate", function(self, elapsed)
+    self.elapsed = self.elapsed + elapsed
+    if self.elapsed < 1 then return end
+    self.elapsed = 0
+    self.attempts = self.attempts + 1
+    Adv2.RequestUnboundClassSync()
+    if self.attempts >= 5 then self:Hide() end
+end)
+
+function Adv2.SyncAfterMentorUnlock()
+    mentorSyncFrame.elapsed = 0
+    mentorSyncFrame.attempts = 0
+    Adv2.RequestUnboundClassSync()
+    mentorSyncFrame:Show()
 end
 
 -- Cross-class talent learn over the MCUB bridge ------------------------------
@@ -318,16 +347,25 @@ function Adv2.RequestServerLearn(classId, specIndex, talentId, spellId)
     return true
 end
 
-function Adv2.OnServerLearned(classId, spellId)
+function Adv2.OnServerLearned(classId, spellId, serverRank)
     local key = classId .. ":" .. spellId
+    -- Do NOT consume the pending entry here: a multi-rank confirm sends the
+    -- same spellId several times, and the server answers each with the
+    -- AUTHORITATIVE rank it now holds (trailing field). Consuming the entry
+    -- on the first reply dropped the rest, so the local rank trailed the
+    -- server forever and every local rank/prereq check lied. The entry is
+    -- cleared on deny/reset, and overwritten by the next send.
     local pending = Adv2.pendingServerLearns[key]
-    Adv2.pendingServerLearns[key] = nil
     if not pending then return end
 
     local specIndex, talentId = pending.specIndex, pending.talentId
+    Adv2.playerData.unboundClasses = Adv2.playerData.unboundClasses or {}
+    Adv2.playerData.unboundClasses[classId] = true
     Adv2.playerData.learnedTalents[classId] = Adv2.playerData.learnedTalents[classId] or {}
     Adv2.playerData.learnedTalents[classId][specIndex] = Adv2.playerData.learnedTalents[classId][specIndex] or {}
-    local newRank = (Adv2.playerData.learnedTalents[classId][specIndex][talentId] or 0) + 1
+    local localRank = (Adv2.playerData.learnedTalents[classId][specIndex][talentId] or 0)
+    local newRank = serverRank or (localRank + 1)
+    if newRank < localRank then newRank = localRank end
     Adv2.playerData.learnedTalents[classId][specIndex][talentId] = newRank
     Adv2.SaveData()
     Adv2.UpdateUI()
@@ -343,7 +381,7 @@ function Adv2.OnServerLearnDenied(reason, classId, spellId)
     local msgByReason = {
         LOCKED   = "that class isn't unlocked. Try /mcunlock sync.",
         INVALID  = "that isn't a recognized cross-class talent.",
-        RANK     = "you must learn the lower ranks of that talent first.",
+        RANK     = "that talent is already at its maximum rank.",
         TIER     = "you need more points spent lower in that tree first.",
         PREREQ   = "a required talent below it isn't maxed yet.",
         NOPOINTS = "no talent points available (shared with your own tree).",
@@ -392,8 +430,9 @@ end
 
 function Adv2.StageCrossTalent(classId, specIndex, talentId, spellId)
     if not Adv2.IsTalentClassAllowed(classId) then
-        print("|cffff0000[Multiclass]|r That class isn't unlocked in Unbound. Try /mcunlock sync.")
-        return false
+        -- The 3.3.5 cache can miss a just-unlocked Mentor class.  Request a
+        -- refresh, but let the server remain the final authority on Confirm.
+        Adv2.RequestUnboundClassSync()
     end
     local talentData = Adv2.FindTalentData(classId, specIndex, talentId)
     if not talentData then return false end
@@ -497,6 +536,7 @@ end
 local syncFrame = CreateFrame("Frame")
 syncFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 syncFrame:RegisterEvent("CHAT_MSG_ADDON")
+syncFrame:RegisterEvent("CHAT_MSG_SYSTEM")
 syncFrame:SetScript("OnEvent", function(self, event, prefix, message, channel, sender)
     if event == "PLAYER_ENTERING_WORLD" then
         if type(RegisterAddonMessagePrefix) == "function" then RegisterAddonMessagePrefix(UNBOUND_PREFIX) end
@@ -510,15 +550,23 @@ syncFrame:SetScript("OnEvent", function(self, event, prefix, message, channel, s
                 if attempts >= 5 then frame:SetScript("OnUpdate", nil) end
             end
         end)
+    elseif event == "CHAT_MSG_SYSTEM" and prefix then
+        local systemPayload = prefix:match("^MCUBSYNC:(.*)$")
+        if systemPayload ~= nil then
+            Adv2.ApplyUnboundClassSync(systemPayload)
+        elseif string.find(prefix, "The path of the", 1, true) and
+            string.find(prefix, "now open to you", 1, true) then
+            Adv2.SyncAfterMentorUnlock()
+        end
     elseif event == "CHAT_MSG_ADDON" and prefix == UNBOUND_PREFIX and message then
         local payload = message:match("^CLASSES:(.*)$")
         if payload ~= nil then
             Adv2.ApplyUnboundClassSync(payload)
             return
         end
-        local lc, ls = message:match("^LEARNED:(%d+):(%d+)$")
+        local lc, ls, lr = message:match("^LEARNED:(%d+):(%d+):?(%d*)$")
         if lc then
-            Adv2.OnServerLearned(tonumber(lc), tonumber(ls))
+            Adv2.OnServerLearned(tonumber(lc), tonumber(ls), tonumber(lr))
             return
         end
         local reason, dc, ds = message:match("^DENY:(%u+):(%d+):(%d+)$")
@@ -691,11 +739,6 @@ end
 -- Learn a talent (native API on stock AC, local tracking on Adventurer servers)
 function Adv2.LearnTalent(classId, specIndex, talentId, spellId)
     if Adv2.IsClientOnly() then
-        if not Adv2.IsTalentClassAllowed(classId) then
-            print("|cffff0000[Multiclass]|r That class is not unlocked in Unbound. Use /mcunlock sync if you just unlocked it.")
-            return false
-        end
-
         if classId ~= Adv2.GetPlayerClassId() then
             if not spellId then return false end
             -- Cross-class: STAGE the pick (client-side tier/prereq/budget
@@ -884,9 +927,15 @@ function Adv2.CollectSpellbookSpells()
         local _, _, offset, numSpells = GetSpellTabInfo(tab)
         if offset and numSpells and numSpells > 0 then
             for i = offset + 1, offset + numSpells do
-                local name, rank = GetSpellName(i, BOOKTYPE_SPELL)
+                -- GM accounts report tab sizes that overshoot the real spell
+                -- array, and this client THROWS on an invalid slot instead of
+                -- returning nil. pcall + break: slots are contiguous, so the
+                -- first invalid one ends the tab.
+                local ok, name, rank = pcall(GetSpellName, i, BOOKTYPE_SPELL)
+                if not ok then break end
                 if name and name ~= "" then
-                    local link = GetSpellLink and GetSpellLink(i, BOOKTYPE_SPELL)
+                    local okLink, link = pcall(GetSpellLink or function() end, i, BOOKTYPE_SPELL)
+                    if not okLink then link = nil end
                     local spellId = link and tonumber(link:match("spell:(%d+)"))
                     if spellId and not seen[spellId] then
                         seen[spellId] = true

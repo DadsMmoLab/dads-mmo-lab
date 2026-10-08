@@ -1,9 +1,10 @@
 ## Interface: 30300
 ## Title: Unbound Spellbook
-## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages.
+## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages. Adds three spellbook-driven tabs: General (class-list spells and lower ranks filtered out), Professions, and a GM tab (skill line 769). Spells past the client's 1024-slot book cap pick up onto action bars via /cast macros, drawn from a pool that reuses free slots in place and never deletes a macro. /usbk macros reports the pool; /usbk adopt hands older macros to it.
 ## Author: OpenAI
-## Version: 0.3
+## Version: 1.0
 ## SavedVariables: UnboundSpellbookDB
+## OptionalDeps: multiclass-talents-ui
 
 ClassData.lua
 Core.lua
