@@ -139,6 +139,36 @@ def test_appimage_file_answers_for_a_binary_inside_its_appdir_only(tmp_path: Pat
     assert detect.appimage_file({**env, "APPDIR": "/"}, executable="/opt/yulon/yulon") is None
 
 
+def test_a_broad_appdir_is_not_a_runtime_folder(tmp_path: Path) -> None:
+    """Codex adversarial: containment alone would accept `APPDIR=/opt/apps` for a tarball in it."""
+    f = tmp_path / "Other.AppImage"
+    f.write_bytes(b"x")
+    install = _detect(environ={"APPIMAGE": str(f), "APPDIR": "/opt/apps"})
+    assert install.kind is InstallKind.TARBALL
+
+
+def test_a_symlinked_tmp_still_finds_the_mount(tmp_path: Path) -> None:
+    """`/tmp` that is a link to somewhere else: the env and the binary may spell it differently."""
+    real = tmp_path / "real"
+    (real / ".mount_YulonQ1" / "usr" / "bin").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    exe = real / ".mount_YulonQ1" / "usr" / "bin" / "yulon"
+    env = {"APPIMAGE": str(f), "APPDIR": str(link / ".mount_YulonQ1")}
+    assert detect.appimage_file(env, executable=exe) == f
+    assert detect.in_appimage_mount(link / ".mount_YulonQ1" / "usr" / "bin" / "yulon")
+
+
+def test_extract_and_run_is_recognised_the_same_way(tmp_path: Path) -> None:
+    f = tmp_path / "Yulon.AppImage"
+    f.write_bytes(b"x")
+    root = "/tmp/appimage_extracted_0a1b2c"
+    env = {"APPIMAGE": str(f), "APPDIR": root}
+    assert detect.appimage_file(env, executable=f"{root}/usr/bin/yulon") == f
+
+
 def test_tarball_target_is_the_folder_holding_the_binary() -> None:
     install = _detect()
     assert (install.kind, install.target, install.executable) == (

@@ -134,7 +134,7 @@ def _real(path: str | os.PathLike[str]) -> Path:
 def in_appimage_mount(executable: str | os.PathLike[str] | None = None) -> bool:
     """Whether `executable` sits inside a folder the AppImage runtime made for this run."""
     exe = sys.executable if executable is None else executable
-    return any(part.startswith(_MOUNT_PREFIXES) for part in Path(exe).parts)
+    return any(part.startswith(_MOUNT_PREFIXES) for part in _real(exe).parts)
 
 
 def appimage_file(
@@ -148,8 +148,9 @@ def appimage_file(
     environment is inherited: an AppImage terminal or file manager exports
     `APPIMAGE` and `APPDIR` to everything it starts, and a tarball launched
     from one is not that app (T578). So it is believed only when this process
-    really runs from that AppImage: `$APPDIR` is set and the running binary
-    (`sys.executable`) lies under it, and `$APPIMAGE` names a file that exists.
+    really runs from that AppImage: `$APPDIR` is set to a runtime-made folder
+    (`_MOUNT_PREFIXES`), the running binary (`sys.executable`) lies under it, and
+    `$APPIMAGE` names a file that exists.
     The runtime sets both variables together, so a real AppImage always passes.
 
     The running binary is NOT the AppImage file; it is a path inside the
@@ -163,7 +164,9 @@ def appimage_file(
     if not appimage or not appdir or not Path(appimage).is_file():
         return None
     root = _real(appdir)
-    if root == Path(root.anchor):
+    if not root.name.startswith(_MOUNT_PREFIXES):
+        # The runtime's folder for this run, not a broad folder a launcher or a
+        # script set by hand: `/opt/apps` would contain a tarball's binary too.
         return None
     exe = _real(sys.executable if executable is None else executable)
     if not exe.is_relative_to(root):
