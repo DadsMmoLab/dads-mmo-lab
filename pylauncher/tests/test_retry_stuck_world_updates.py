@@ -247,6 +247,7 @@ def test_only_one_of_two_presses_can_take_a_stuck_row(tmp_path: Path) -> None:
             password="x",
             exec_stdin=db.exec_stdin,
             reclaim_at=seen,
+            reclaim_state="failed",
         )
 
     take()
@@ -278,12 +279,51 @@ def test_two_presses_in_one_second_still_cannot_both_take_the_row(
             password="x",
             exec_stdin=db.exec_stdin,
             reclaim_at=5000,
+            reclaim_state="failed",
         )
 
     take()
     assert _times(db)[("content updates", U2)] > 5000
     with pytest.raises(InstallerError):
         take()
+
+
+def test_a_row_another_update_moved_on_in_the_same_second_is_not_taken(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    seen = _times(db)[("content updates", U2)]
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "mangos"],
+        io.BytesIO(b"UPDATE yulon_install_file SET state = 'applied' WHERE state = 'failed';"),
+        env={},
+    )
+    with pytest.raises(InstallerError):
+        sqlplan.record_world_files(
+            (sqlplan.FileRow("content updates", U2, "a" * 64, "started"),),
+            marker_db="mangos",
+            container="tbc-db",
+            client="mariadb",
+            password="x",
+            exec_stdin=db.exec_stdin,
+            reclaim_at=seen,
+            reclaim_state="failed",
+        )
+    assert _ledger(db)[U2] == "applied"
+
+
+def test_a_changed_file_that_is_not_safe_to_repeat_is_said_to_have_changed(tmp_path: Path) -> None:
+    db, server_dir = _stuck_server(tmp_path)
+    _lay(server_dir, U2, "INSERT INTO t2 VALUES (2);\n")  # not the bytes the ledger recorded
+    check = an_engine(PLAN, db).correction_check(folder(tmp_path))
+    assert check.stuck[0].changed
+    assert "changed since the update tried it" in native.stuck_world_updates_text(check.stuck)
+
+
+def test_a_file_unchanged_since_it_failed_is_not_said_to_have_changed(tmp_path: Path) -> None:
+    db, _ = _stuck_server(tmp_path)
+    check = an_engine(PLAN, db).correction_check(folder(tmp_path))
+    assert not check.stuck[0].changed
+    assert "changed since" not in native.stuck_world_updates_text(check.stuck)
 
 
 def test_a_claim_that_cannot_be_written_leaves_the_stuck_row_where_it_was(tmp_path: Path) -> None:
@@ -307,6 +347,7 @@ def test_a_claim_that_cannot_be_written_leaves_the_stuck_row_where_it_was(tmp_pa
             password="x",
             exec_stdin=db.exec_stdin,
             reclaim_at=seen,
+            reclaim_state="failed",
         )
     assert _ledger(db)[U2] == "failed"
 

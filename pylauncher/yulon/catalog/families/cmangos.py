@@ -1000,6 +1000,7 @@ class CmangosInstaller(StagedInstaller):
         *,
         claim: bool = False,
         reclaim_at: int | None = None,
+        reclaim_state: str = "",
         not_before: int = 0,
     ) -> None:
         """`sqlplan.record_world_files()` for this install: the file ledger's one write (T531)."""
@@ -1013,6 +1014,7 @@ class CmangosInstaller(StagedInstaller):
             exec_stdin=self._seams.exec_stdin,
             claim=claim,
             reclaim_at=reclaim_at,
+            reclaim_state=reclaim_state,
             not_before=not_before,
         )
 
@@ -2612,6 +2614,7 @@ class CmangosInstaller(StagedInstaller):
                     repeatable=path.is_file() and sqlplan.whole_table_problem(path) is None,
                     behind=behind,
                     sha256=sqlplan.file_digest(path) if path.is_file() else "",
+                    changed=path.is_file() and sqlplan.file_digest(path) != row.sha256,
                     at_unix=times.get((row.phase, row.file), 0),
                 )
             )
@@ -2675,6 +2678,7 @@ class CmangosInstaller(StagedInstaller):
                     ctx,
                     (sqlplan.FileRow(one.phase, one.file, sha, sqlplan.FILE_STARTED),),
                     reclaim_at=one.at_unix,
+                    reclaim_state=one.state,
                 )
             except InstallerError as exc:
                 yield (

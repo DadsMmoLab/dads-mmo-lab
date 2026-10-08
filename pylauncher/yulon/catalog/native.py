@@ -794,6 +794,8 @@ class StuckWorldUpdate:
     """The sha256 of the file's bytes when the dialog was built: the press runs those bytes only."""
     at_unix: int = 0
     """When its ledger row was written: the press takes the row only if it is still this one."""
+    changed: bool = False
+    """The file's bytes are not the ones the ledger row recorded when the update tried it."""
 
 
 @dataclass(frozen=True)
@@ -1531,6 +1533,11 @@ def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
             else "Yu'lon cannot show that running it again is safe: it may have run part way, "
             "and running it again could put rows in twice. Check what it does before you say yes."
         )
+        if one.changed and not one.repeatable:
+            safe += (
+                " The file has also changed since the update tried it, so the database may hold "
+                "what the older version did."
+            )
         after = (
             f" {one.behind} newer world update(s) waiting behind it run after it, in order."
             if one.behind

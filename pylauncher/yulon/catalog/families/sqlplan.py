@@ -1555,6 +1555,7 @@ def file_rows_sql(
     *,
     claim: bool = False,
     reclaim_at: int | None = None,
+    reclaim_state: str = "",
 ) -> str:
     """`FILE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows`.
 
@@ -1563,8 +1564,9 @@ def file_rows_sql(
     row a claim two presses cannot both win (Codex, T531) -- the client refuses the
     second, and that press stops before it runs the file.
 
-    `reclaim_at` (one row, T545) takes a stuck row over, in one transaction: it deletes the
-    row only if it was written at that second -- the one the dialog showed -- and then does
+    `reclaim_at` and `reclaim_state` (one row, T545) take a stuck row over, in one transaction:
+    it deletes the row only if it is still in that state and was written at that second --
+    the row the dialog showed -- and then does
     the plain `INSERT`, which is written at a time past that second even when the clock has
     not moved. So a second press holding the same time finds a row that no longer carries it,
     deletes nothing, and its `INSERT` is refused; and a refused `INSERT` rolls the `DELETE`
@@ -1594,6 +1596,8 @@ def file_rows_sql(
         if len(rows) != 1:
             raise InstallerError("internal: a reclaim takes exactly one ledger row")
         row = rows[0]
+        if reclaim_state not in _FILE_STATES:
+            raise InstallerError("internal: a reclaim names the state it expects the row in")
         # Past the second the press read, whatever the clock says: that is what makes the row
         # a claim only one press can hold.
         taken_at = max(now, int(reclaim_at) + 1)
@@ -1601,7 +1605,8 @@ def file_rows_sql(
             text
             + "BEGIN;\n"
             + f"DELETE FROM `{marker_db}`.`{FILE_TABLE}` WHERE phase = '{row.phase}' "
-            + f"AND file = '{row.file}' AND at_unix = {int(reclaim_at)};\n"
+            + f"AND file = '{row.file}' AND state = '{reclaim_state}' "
+            + f"AND at_unix = {int(reclaim_at)};\n"
             + f"INSERT INTO `{marker_db}`.`{FILE_TABLE}` (phase, file, sha256, state, at_unix) "
             + f"VALUES ('{row.phase}', '{row.file}', '{row.sha256}', '{row.state}', {taken_at});\n"
             + "COMMIT;\n"
@@ -1631,6 +1636,7 @@ def record_world_files(
     wsl_distro: str | None = None,
     claim: bool = False,
     reclaim_at: int | None = None,
+    reclaim_state: str = "",
     not_before: int = 0,
 ) -> None:
     """Write `rows` into `FILE_TABLE` (making it when there is none). The ledger's one write.
@@ -1643,7 +1649,10 @@ def record_world_files(
     """
     _run_sql(
         file_rows_sql(
-            marker_db, rows, max(int(time.time()), not_before), claim=claim, reclaim_at=reclaim_at
+            marker_db, rows, max(int(time.time()), not_before),
+            claim=claim,
+            reclaim_at=reclaim_at,
+            reclaim_state=reclaim_state,
         ),
         what=(
             "claiming a world update (another update of this server may be applying it)"
