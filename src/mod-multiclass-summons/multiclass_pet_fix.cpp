@@ -242,6 +242,44 @@ namespace
                 _players.erase(it);
         }
 
+        // A REAL pet (hunter Call Pet, stable retrieval, dismount re-summon) is about to
+        // claim the pet slot: if one of OUR guardians holds it, demote it to a side
+        // guardian first. Without this the core's SetMinion conflict path just
+        // UnSummon()s the guardian — the demon is lost instead of stepping aside. Runs
+        // synchronously inside Pet::LoadPetFromDB (hook fires before SetMinion), so the
+        // 1s Reconcile tick can never re-promote in the gap.
+        void DemotePrimary(Player* owner)
+        {
+            ObjectGuid const petGuid = owner->GetPetGUID();
+            if (petGuid.IsEmpty() || petGuid.IsPet())
+                return; // slot empty, or held by a real Pet — nothing of ours to move
+
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            PlayerSummons& ps = it->second;
+            for (auto itr = ps.list.begin(); itr != ps.list.end(); ++itr)
+            {
+                if (itr->guid != petGuid)
+                    continue;
+
+                ActiveSummon const demote = *itr;
+                Unsummon(owner, demote.guid);
+                ps.list.erase(itr);
+
+                float const followAngle = FollowAngleForIndex(ps.list.size());
+                if (TempSummon* summon = CreateGuardian(owner, demote.entry, demote.spellId, demote.duration,
+                    false, followAngle))
+                {
+                    ps.list.push_back({ summon->GetGUID(), demote.entry, demote.spellId, demote.duration, false });
+                    LOG_INFO("module.multiclass_pet_fix", "Demoted entry {} (spell {}) to guardian for {} (real pet incoming)",
+                        demote.entry, demote.spellId, owner->GetName());
+                }
+                return;
+            }
+        }
+
         // Session-only: drop the registry (and despawn the summons) when the player leaves.
         void Clear(Player* owner)
         {
@@ -403,6 +441,10 @@ public:
 
         if (petInfo)
         {
+            // A real pet is about to load into the pet slot: demote any module guardian
+            // holding it to a side summon so the load doesn't destroy it.
+            SummonManager::Instance().DemotePrimary(player);
+
             CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(petInfo->CreatureId);
             if (creatureInfo && creatureInfo->type != CREATURE_TYPE_UNDEAD)
             {
@@ -560,7 +602,14 @@ public:
     // attribute; setting it again is a no-op. Runs after spells are loaded.
     void OnStartup() override
     {
-        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150 };
+        // 883 = hunter Call Pet: without the attribute, CheckCast answers
+        // ALREADY_HAVE_SUMMON while a module guardian holds the pet slot, so a hunter
+        // with demons out could never call their real pet. Safe to add: 883 HAS
+        // SPELL_EFFECT_SUMMON_PET, so Spell::prepare's attr-driven RemovePet branch
+        // skips it (and Player::GetPet() is null for a guardian anyway). The guardian
+        // itself is demoted, not lost — see SummonManager::DemotePrimary, which the
+        // BeforeLoadPetFromDB hook runs before the real pet claims the slot.
+        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150, 883 };
         for (uint32 id : spells)
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
                 const_cast<SpellInfo*>(info)->AttributesEx |= SPELL_ATTR1_DISMISS_PET_FIRST;
