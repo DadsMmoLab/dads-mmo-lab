@@ -233,6 +233,11 @@ def _epoch(spec: docker.ContainerSpec) -> int:
 MARK_RETRY = timedelta(seconds=30)
 """How long the tick waits before it tries a failed mark on the same run again."""
 
+STOPPED_RETRY = timedelta(minutes=5)
+"""How long the tick waits before it tries a failed mark of a stopped world again.
+
+After Yu'lon's own Stop the database is down, so each try is one `docker ps` that finds it so."""
+
 FLAGS_READ_EVERY = timedelta(seconds=60)
 """How often the tick reads the realm's flags over a world that is up."""
 
@@ -264,9 +269,11 @@ class Keeper:
       (`deliberately_offline`) is in force or began or ended since the tick started. That is
       a cancelled Stop whose own put-back failed. A mark of a running world is followed by
       the same check, so a mark that landed just after the core cleared the bit comes off.
-    - The world stopped (exited, created, paused, dead): mark it once per run, database
-      already up, never retried; a world stopped outside Yu'lon's own Stop with realmd still
-      up is listed Offline. Gone or unread: nothing.
+    - The world stopped (exited, created, paused, dead): mark it, database already up, a
+      failure retried only every `STOPPED_RETRY`; a world stopped outside Yu'lon's own Stop
+      with realmd still up is listed Offline. Gone or unread: nothing.
+    - Each status of a run is its own spell (`_marked`): a run marked while loading that
+      came up and was stopped or crashed before a tick saw it up is marked again.
 
     Says once per spell what it did, never per tick, and never raises.
     """
@@ -291,7 +298,8 @@ class Keeper:
         self._now = now or (lambda: datetime.now(UTC))
         self._mark = mark or mark_offline
         self._clear = clear or clear_offline_if_world_up
-        self._marked_run: str | None = None
+        self._marked: str | None = None
+        """The status and run last marked: a new status of the same run is a new spell."""
         self._tried: tuple[str, datetime] | None = None
         self._spell_said: set[str] = set()
         self._ready_run: str | None = None
@@ -319,28 +327,29 @@ class Keeper:
 
     def _after_tick(self, status: str, run: str, ready: bool, begun: int) -> None:
         if status == "running" and ready:
-            # Up: the core cleared the bit. A crash of this same run is a new spell, and
-            # Docker's `restarting` still carries this run's StartedAt (Codex review).
+            # Up: the core cleared the bit. A crash of this same run is a new spell by its
+            # status (`_marked`): Docker's `restarting` still carries this run's StartedAt.
             self._spell_said.clear()
-            self._marked_run, self._tried = None, None
             self._unstick(run, begun)
         elif status:
             # Restarting, loading, or stopped (exited, created, paused, dead). A stopped world
-            # is marked once and never retried, for one stopped outside Yu'lon's own Stop with
-            # realmd still listing it (Codex adversarial review); its failure is not said,
-            # since after Yu'lon's own Stop the database is down too.
+            # is marked for one stopped outside Yu'lon's own Stop with realmd still listing it
+            # (Codex adversarial review), retried only every `STOPPED_RETRY` and never said
+            # when it fails, since after Yu'lon's own Stop the database is down too.
             self._ready_run = None
             self._make_offline(status, run, begun)
 
     def _make_offline(self, status: str, run: str, begun: int) -> None:
-        if self._marked_run == run:
+        key = f"{status} {run}"
+        if self._marked == key:
             return
         now = self._now()
         stopped = status not in ("running", "restarting")
         tried = self._tried
-        if tried is not None and tried[0] == run and (stopped or now - tried[1] < MARK_RETRY):
+        wait = STOPPED_RETRY if stopped else MARK_RETRY
+        if tried is not None and tried[0] == key and now - tried[1] < wait:
             return
-        self._tried = (run, now)
+        self._tried = (key, now)
         ok = self._mark(
             self.entry,
             self.spec,
@@ -355,10 +364,10 @@ class Keeper:
             # and the mark (the marker comes first, `World.cpp:2399` before `Master.cpp:228`),
             # so the mark is the stale one: take it off again now (Codex review).
             self._clear_unless_held(begun)
-            self._marked_run = run
+            self._marked = key
             return
         if ok:
-            self._marked_run = run
+            self._marked = key
             if "marked" not in self._spell_said:
                 self._spell_said.add("marked")
                 logger.info(

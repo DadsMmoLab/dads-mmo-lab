@@ -199,19 +199,36 @@ def test_a_world_stopped_outside_yulon_is_marked_once(rig: Rig) -> None:
     assert sql.flags & 2
 
 
-def test_a_stopped_world_whose_database_is_down_is_tried_once_and_quietly(
+def test_a_stopped_world_whose_database_is_down_is_retried_rarely_and_quietly(
     rig: Rig, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """After Yu'lon's own Stop the database is down too: one try, no retries, nothing said."""
-    watch, world, _sql, writes, clock = rig
+    """After Yu'lon's own Stop the database is down too: a try every five minutes, nothing said."""
+    watch, world, sql, writes, clock = rig
     caplog.set_level("INFO", logger="yulon.realm_flag")
     writes.mark_ok = False
     world.status = "exited"
-    for _ in range(40):
+    for _ in range(60):  # five minutes
         watch.tick()
         clock.advance(5)
     assert writes.names == ["mark"]
     assert [r.getMessage() for r in caplog.records] == []
+    writes.mark_ok = True  # its database came back (a world stopped alone)
+    watch.tick()
+    assert writes.names == ["mark", "mark"]
+    assert sql.flags & 2
+
+
+def test_a_run_stopped_right_after_it_said_ready_is_marked_again(rig: Rig) -> None:
+    """Marked while loading, cleared by the core, stopped before a tick saw it up (Codex)."""
+    watch, world, sql, writes, clock = rig
+    world.run, world.log = RUN_B, "Loading maps..."
+    watch.tick()
+    sql.flags &= ~2  # the core's own clear on listen
+    world.status = "exited"
+    clock.advance(5)
+    watch.tick()
+    assert writes.names == ["mark", "mark"]
+    assert sql.flags & 2
 
 
 def test_a_world_docker_cannot_find_is_left_alone(rig: Rig) -> None:
