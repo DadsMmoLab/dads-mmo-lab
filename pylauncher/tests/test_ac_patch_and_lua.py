@@ -15,6 +15,7 @@ what it refuses.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -788,15 +789,30 @@ def test_an_update_whose_new_source_is_a_link_is_refused_and_put_back(
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
 
 
+def fail_the_final_record_write(monkeypatch: pytest.MonkeyPatch, *, on_call: int = 1) -> None:
+    """Make the record's closing save fail (the `pending` saves before each file still work).
+
+    `on_call` counts closing saves only: 1 fails the first, 2 the second.
+    """
+    real = scriptdeploy._write_record
+    closing: list[int] = []
+
+    def write(root: Path, files: dict[str, str], pending: dict[str, str] | None = None) -> None:
+        if pending is None:
+            closing.append(1)
+            if len(closing) >= on_call:
+                raise OSError(28, "No space left on device")
+        real(root, files, pending)
+
+    monkeypatch.setattr(scriptdeploy, "_write_record", write)
+
+
 def test_a_failed_record_write_stops_the_press_and_says_how_to_recover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_dir = _plain_source(tmp_path)
 
-    def full(*_args: Any) -> None:
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    fail_the_final_record_write(monkeypatch)
     said: list[str] = []
     with pytest.raises(InstallerError, match="delete") as raised:
         for line in scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]):
@@ -808,10 +824,7 @@ def test_a_failed_record_write_stops_the_press_and_says_how_to_recover(
 def test_a_failed_record_write_keeps_the_world_from_starting(
     tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def full(*_args: Any) -> None:
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    fail_the_final_record_write(monkeypatch)
     rec = Recorder(images=False)
     server_dir = tmp_path / "server"
     rec.on_clone = lay_tree(server_dir)
@@ -831,7 +844,7 @@ def test_a_write_that_fails_mid_loop_keeps_its_own_sentence_over_the_record_one(
     def broken(*_args: Any) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(scriptdeploy, "_write_record", broken)
+    fail_the_final_record_write(monkeypatch)
     monkeypatch.setattr(scriptdeploy, "_publish", broken)
     with pytest.raises(InstallerError, match="could not be laid"):
         list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
@@ -852,9 +865,7 @@ def test_a_failing_stale_removal_is_not_hidden_by_a_finished_flag(
         real_unlink(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", refuse)
-    monkeypatch.setattr(
-        scriptdeploy, "_write_record", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
-    )
+    fail_the_final_record_write(monkeypatch)
     with pytest.raises(InstallerError, match="could not be laid"):
         list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
 
@@ -864,10 +875,7 @@ def test_closing_the_laying_early_never_raises_for_the_record(
 ) -> None:
     server_dir = _plain_source(tmp_path)
 
-    def full(*_args: Any) -> None:
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(scriptdeploy, "_write_record", full)
+    fail_the_final_record_write(monkeypatch)
     gen = scriptdeploy.lay(server_dir, [_spec("modules/m/lua")])
     assert next(gen).startswith("Laid")
     gen.close()
@@ -1141,3 +1149,462 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
 
     assert record.read_bytes() == before
     assert sorted(p.name for p in elsewhere.iterdir()) == [scriptdeploy.RECORD_FILE]
+
+
+def failed_compile_after_laying(
+    tmp_path: Path, installers: Path
+) -> tuple[Recorder, Path, list[str]]:
+    """An update whose new checkout changes one script and adds one, then fails to compile."""
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / LUA_NAME).write_text('print("new")\n', encoding="utf-8")
+            (dest / "lua_scripts" / "extra.lua").write_text("extra\n", encoding="utf-8")
+
+    def checkout_force(dest: Path, rev: str) -> None:
+        rec.restore_rev(dest, rev)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / "extra.lua").unlink(missing_ok=True)
+        lay_tree(server_dir)(dest)
+
+    rec.on_clone = fetched
+    made._seams = rec.seams(restore_rev=checkout_force)
+    rec.build_result = docker.AttachedRun(1, ("boom",))
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    return rec, server_dir, said
+
+
+def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
+    tmp_path: Path, installers: Path
+) -> None:
+    """Rollback re-lays the OLD set: the checkout goes back, so the scripts must follow it.
+
+    The put-back tests above refuse in `check_carried_patches` before anything is
+    laid, so "LAID unchanged" proves nothing there. Here the new checkout's scripts
+    ARE laid (one changed, one new), the compile then fails, and the old bytes come
+    back, the new-only file goes, and the record agrees with the disk.
+    """
+    rec, server_dir, said = failed_compile_after_laying(tmp_path, installers)
+
+    assert f"Updated {LAID}." in said and f"Laid {LUA_DEST}/extra.lua." in said, said
+    assert rec.heads[server_dir / MODULE] == OLD
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not (server_dir / LUA_DEST / "extra.lua").exists()
+    assert scriptdeploy.read_record(server_dir) == {LAID: scriptdeploy._sha(LUA_BODY.encode())}
+
+
+def test_a_rollback_that_cannot_save_the_script_record_says_that_not_the_patch(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-lay's own sentence goes through; "press again" would not mend a full disk."""
+    fail_the_final_record_write(monkeypatch, on_call=3)
+
+    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+
+    back = next(line for line in said if "back on their old commits, but" in line)
+    assert scriptdeploy.RECORD_FILE in back and "delete" in back, back
+    assert "source patch" not in back and "again: it writes" not in back, back
+
+
+@pytest.mark.parametrize("dangling", [False, True], ids=("to-a-file", "to-nothing"))
+def test_a_link_planted_at_the_temp_name_is_not_written_through(
+    tmp_path: Path, dangling: bool
+) -> None:
+    """`_publish` writes a temp sibling, then renames it; a link at that name leads elsewhere."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("shipped\n", encoding="utf-8")
+    dest = server_dir / LUA_SCRIPTS_DIR / "m"
+    dest.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    if not dangling:
+        victim.write_text("keep me\n", encoding="utf-8")
+    try:
+        (dest / ".a.lua.yulon-new").symlink_to(victim)
+    except OSError:  # pragma: no cover - a Windows account without the link privilege
+        pytest.skip("cannot make a symlink here")
+
+    list(
+        scriptdeploy.lay(server_dir, [LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")])
+    )
+
+    assert (dest / "a.lua").read_text(encoding="utf-8") == "shipped\n"
+    assert not (dest / "a.lua").is_symlink()
+    assert (victim.read_text(encoding="utf-8") if victim.exists() else None) == (
+        None if dangling else "keep me\n"
+    )
+    assert not (dest / ".a.lua.yulon-new").is_symlink() and not (dest / ".a.lua.yulon-new").exists()
+
+
+def test_an_entry_that_drops_all_its_scripts_removes_the_ones_it_laid(tmp_path: Path) -> None:
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("a\n", encoding="utf-8")
+    (src / "b.lua").write_text("b\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (laid / "b.lua").write_text("edited by hand\n", encoding="utf-8")
+    assert scriptdeploy.record_path(server_dir).exists()
+
+    said = list(scriptdeploy.lay(server_dir, [], quiet=True))
+
+    assert not (laid / "a.lua").exists()
+    assert (laid / "b.lua").read_text(encoding="utf-8") == "edited by hand\n"
+    assert "Removed" in " ".join(said) and "changed on this machine" in " ".join(said), said
+    assert not any("in place" in line for line in said), said
+    assert not scriptdeploy.record_path(server_dir).exists()
+
+
+def test_a_rebuild_of_an_entry_that_dropped_its_scripts_removes_them(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, _made, _said = installed(tmp_path, installers)
+    assert (server_dir / LAID).exists()
+    dropped = make(scratch_entry(**{**FULL, "lua_scripts": []}), rec, installers)
+
+    said = list(dropped.before_rebuild(server_dir, "rebuild"))
+
+    assert not (server_dir / LAID).exists()
+    assert not scriptdeploy.record_path(server_dir).exists()
+    assert f"Removed {LAID}: this server no longer ships it." in said, said
+
+
+def test_no_scripts_and_no_record_writes_and_refuses_nothing(tmp_path: Path) -> None:
+    """WotLK declares none and never had any: nothing is laid, written or refused for it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / "env").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    assert list(scriptdeploy.lay(server_dir, [])) == []
+    assert not (tmp_path / "elsewhere").exists()
+
+
+@pytest.mark.parametrize("new_bytes", [False, True], ids=("same-bytes", "new-bytes"))
+def test_a_case_only_rename_on_a_case_insensitive_folder_keeps_the_script(
+    tmp_path: Path, new_bytes: bool
+) -> None:
+    """Upstream renames Mentor.lua to mentor.lua; there the folder holds ONE file for both.
+
+    A case-insensitive folder is simulated with a hard link: the new name and the
+    old one are the same inode, which is what `samefile` sees there too. Without
+    the check the old name reads as "no longer shipped" and is removed, which on a
+    real case-insensitive folder removes the file the press just called in place.
+    """
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    body = "mentor v2\n" if new_bytes else "mentor\n"
+    (src / "mentor.lua").write_text(body, encoding="utf-8")
+    try:
+        os.link(laid / "Mentor.lua", laid / "mentor.lua")
+    except OSError:  # pragma: no cover - a filesystem without hard links
+        pytest.skip("cannot make a hard link here")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    key = f"{LUA_SCRIPTS_DIR}/m/mentor.lua"
+    assert (laid / "Mentor.lua").exists(), said
+    assert (laid / "mentor.lua").read_text(encoding="utf-8") == body
+    assert not any("Removed" in line or "changed on this machine" in line for line in said), said
+    assert scriptdeploy.read_record(server_dir) == {key: scriptdeploy._sha(body.encode())}
+
+
+def test_a_case_only_rename_on_a_case_sensitive_folder_still_removes_the_old_name(
+    tmp_path: Path,
+) -> None:
+    """Two files there: the old spelling is stale, and nothing ties it to the new one."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    (src / "mentor.lua").write_text("mentor\n", encoding="utf-8")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert not (laid / "Mentor.lua").exists() and (laid / "mentor.lua").exists(), said
+    assert f"Laid {LUA_SCRIPTS_DIR}/m/mentor.lua." in said, said
+
+
+def test_a_hard_link_under_another_name_is_not_a_case_only_rename(tmp_path: Path) -> None:
+    """Codex review: sharing an inode is not enough; the names must differ only by case."""
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "Mentor.lua").write_text("mentor\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    laid = server_dir / LUA_SCRIPTS_DIR / "m"
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "Mentor.lua").unlink()
+    (src / "other.lua").write_text("shipped other\n", encoding="utf-8")
+    try:
+        os.link(laid / "Mentor.lua", laid / "other.lua")
+    except OSError:  # pragma: no cover - a filesystem without hard links
+        pytest.skip("cannot make a hard link here")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert (laid / "other.lua").read_text(encoding="utf-8") == "mentor\n", said
+    assert any("was changed on this machine" in line for line in said), said
+
+
+def lay_then_crash_before_the_record(
+    server_dir: Path, spec: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One press that dies after it wrote the files: its closing record save never happens."""
+    real = scriptdeploy._write_record
+
+    def dies_before_the_closing_save(
+        root: Path, files: dict[str, str], pending: dict[str, str] | None = None
+    ) -> None:
+        if pending is not None:
+            real(root, files, pending)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(scriptdeploy, "_write_record", dies_before_the_closing_save)
+        list(scriptdeploy.lay(server_dir, [spec]))
+
+
+def crashed_press_tree(tmp_path: Path) -> tuple[Path, Path, Any, Path]:
+    from yulon.catalog.catalog import LuaScripts
+
+    server_dir = tmp_path / "srv"
+    src = server_dir / "modules/m/lua"
+    src.mkdir(parents=True)
+    (src / "a.lua").write_text("v1\n", encoding="utf-8")
+    spec = LuaScripts(src="modules/m/lua", dest=f"{LUA_SCRIPTS_DIR}/m")
+    return server_dir, src, spec, server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua"
+
+
+def test_a_crash_between_laying_and_the_record_leaves_the_script_claimable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, src, spec, laid = crashed_press_tree(tmp_path)
+    lay_then_crash_before_the_record(server_dir, spec, monkeypatch)
+    assert laid.read_text(encoding="utf-8") == "v1\n"
+    (src / "a.lua").write_text("v2\n", encoding="utf-8")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert laid.read_text(encoding="utf-8") == "v2\n", said
+    assert f"Updated {LUA_SCRIPTS_DIR}/m/a.lua." in said, said
+    assert not any("changed on this machine" in line for line in said), said
+    record = json.loads(scriptdeploy.record_path(server_dir).read_text(encoding="utf-8"))
+    assert "pending" not in record and list(record["files"]) == [f"{LUA_SCRIPTS_DIR}/m/a.lua"]
+
+
+def test_a_pending_digest_claims_only_bytes_that_match_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Somebody else's bytes at the pending name stay theirs: the digest is the proof."""
+    server_dir, src, spec, laid = crashed_press_tree(tmp_path)
+    lay_then_crash_before_the_record(server_dir, spec, monkeypatch)
+    laid.write_text("edited after the crash\n", encoding="utf-8")
+    (src / "a.lua").write_text("v2\n", encoding="utf-8")
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert laid.read_text(encoding="utf-8") == "edited after the crash\n"
+    assert any("was changed on this machine" in line for line in said), said
+
+
+def test_a_crash_before_the_write_keeps_the_old_claim_on_the_old_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pending digest is only adopted when the file IS those bytes.
+
+    The press died after saving "v2 is pending" and before writing v2: the file is
+    still Yu'lon's v1, recorded as such, and the next press must update it. Taking
+    the pending digest over the old one would make v1 read as somebody's edit.
+    """
+    server_dir, src, spec, laid = crashed_press_tree(tmp_path)
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "a.lua").write_text("v2\n", encoding="utf-8")
+    real = scriptdeploy._write_record
+
+    def dies_before_the_closing_save(
+        root: Path, files: dict[str, str], pending: dict[str, str] | None = None
+    ) -> None:
+        if pending is not None:
+            real(root, files, pending)
+
+    real_publish = scriptdeploy._publish
+
+    def dies_before_the_write(target: Path, data: bytes) -> None:
+        if target.name == scriptdeploy.RECORD_FILE:
+            real_publish(target, data)
+        else:
+            raise OSError(5, "the machine went away")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(scriptdeploy, "_write_record", dies_before_the_closing_save)
+        patched.setattr(scriptdeploy, "_publish", dies_before_the_write)
+        with pytest.raises(InstallerError):
+            list(scriptdeploy.lay(server_dir, [spec]))
+    assert laid.read_text(encoding="utf-8") == "v1\n"
+    kept = json.loads(scriptdeploy.record_path(server_dir).read_text(encoding="utf-8"))
+    assert kept["pending"], "the fixture never saved the pending digest"
+
+    said = list(scriptdeploy.lay(server_dir, [spec]))
+
+    assert laid.read_text(encoding="utf-8") == "v2\n", said
+    assert not any("changed on this machine" in line for line in said), said
+
+
+def test_a_stale_pending_entry_cannot_claim_a_file_the_player_put_there_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: `pending` must not outlive the next press, or its digest claims a stranger.
+
+    A press saved "a.lua is pending" and died before writing it. Upstream then dropped
+    a.lua, and the next press had nothing to do (so it never rewrote the record). The
+    player later put their own a.lua there, with those exact bytes; the press after
+    that must leave it alone, not adopt it and then remove it as no longer shipped.
+    """
+    server_dir, src, spec, laid = crashed_press_tree(tmp_path)
+    (src / "a.lua").unlink()
+    (src / "b.lua").write_text("b\n", encoding="utf-8")
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "a.lua").write_text("v1\n", encoding="utf-8")
+    real_write, real_publish = scriptdeploy._write_record, scriptdeploy._publish
+
+    def dies_before_the_closing_save(
+        root: Path, files: dict[str, str], pending: dict[str, str] | None = None
+    ) -> None:
+        if pending is not None:
+            real_write(root, files, pending)
+
+    def dies_before_the_script(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            raise OSError(5, "the machine went away")
+        real_publish(target, data)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(scriptdeploy, "_write_record", dies_before_the_closing_save)
+        patched.setattr(scriptdeploy, "_publish", dies_before_the_script)
+        with pytest.raises(InstallerError):
+            list(scriptdeploy.lay(server_dir, [spec]))
+    assert "pending" in scriptdeploy.record_path(server_dir).read_text(encoding="utf-8")
+    (src / "a.lua").unlink()
+
+    list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+
+    assert "pending" not in scriptdeploy.record_path(server_dir).read_text(encoding="utf-8")
+    laid.write_text("v1\n", encoding="utf-8")
+    said = list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+    assert laid.read_text(encoding="utf-8") == "v1\n", said
+    assert not any("Removed" in line for line in said), said
+
+
+def test_the_laying_failures_name_the_press_and_never_claim_the_server_was_not_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """These sentences are also said on a rollback, where the server may well have been started."""
+    from yulon import server_build_presses
+    from yulon.catalog.catalog import LuaScripts
+
+    press = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    server_dir, _src, spec, _laid = crashed_press_tree(tmp_path)
+    missing = LuaScripts(src="modules/gone/lua", dest=f"{LUA_SCRIPTS_DIR}/gone")
+    with pytest.raises(InstallerError) as absent:
+        list(scriptdeploy.lay(server_dir, [missing]))
+    monkeypatch.setattr(
+        scriptdeploy, "_publish", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    with pytest.raises(InstallerError) as unwritable:
+        list(scriptdeploy.lay(server_dir, [spec]))
+
+    for raised in (absent, unwritable):
+        assert press in str(raised.value), raised.value
+        assert "not started" not in str(raised.value), raised.value
+        assert "would start without" not in str(raised.value), raised.value
+
+
+def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import server_build_presses
+
+    real = scriptdeploy._publish
+    scripts: list[int] = []
+
+    def fourth_script_fails(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(1)
+            if len(scripts) >= 4:  # the install, the update's two, then the rollback's
+                raise OSError(5, "the disk went away")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", fourth_script_fails)
+
+    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+
+    back = next(line for line in said if "back on their old commits, but" in line)
+    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in back, back
+    assert "source patch" not in back and "not started" not in back, back
+
+
+def test_a_pending_only_record_is_cleared_by_an_entry_with_no_scripts(tmp_path: Path) -> None:
+    """The no-specs path: files={} and a pending entry, and the entry no longer ships scripts.
+
+    The press must not return early and leave `pending` behind, or a file the
+    player puts there later with those very bytes is adopted on the next press and
+    removed as "no longer shipped".
+    """
+    server_dir, _src, spec, laid = crashed_press_tree(tmp_path)
+    laid.parent.mkdir(parents=True)
+    key = f"{LUA_SCRIPTS_DIR}/m/a.lua"
+    scriptdeploy.record_path(server_dir).write_text(
+        json.dumps({"version": 1, "files": {}, "pending": {key: scriptdeploy._sha(b"v1\n")}}),
+        encoding="utf-8",
+    )
+
+    list(scriptdeploy.lay(server_dir, [], quiet=True))
+
+    assert not scriptdeploy.record_path(server_dir).exists()
+    laid.write_text("v1\n", encoding="utf-8")
+    said = list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+    assert laid.read_text(encoding="utf-8") == "v1\n", said
+    assert not any("Removed" in line for line in said), said
+    assert list(scriptdeploy.lay(server_dir, [], quiet=True)) == []
+    assert laid.read_text(encoding="utf-8") == "v1\n"
+
+
+def test_a_failed_record_save_with_no_folders_does_not_name_an_empty_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, src, spec, _laid = crashed_press_tree(tmp_path)
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "a.lua").unlink()
+    fail_the_final_record_write(monkeypatch)
+
+    with pytest.raises(InstallerError, match="delete") as raised:
+        list(scriptdeploy.lay(server_dir, []))
+
+    assert "delete  " not in str(raised.value) and "delete that file" in str(raised.value)

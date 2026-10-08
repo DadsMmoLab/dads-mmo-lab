@@ -1,4 +1,4 @@
-PySide6>=6.6
+PySide6>=6.6,<6.12
 pydantic>=2.7
 # SDL2 bindings for gamepad/navigation. On the Steam Deck the built-in pad is
 # presented as a virtual Xbox 360 pad to any non-Steam game, so reading it

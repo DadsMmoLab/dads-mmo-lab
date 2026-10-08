@@ -119,6 +119,7 @@ from yulon.catalog.installer import (
     OneShotLeftRunning,
     ReadyWaitStopped,
     RollbackNotDone,
+    SelfExplainedError,
     UnsupportedPlatformError,
     UpdateRefused,
     WorldStoppedAfterReadyError,
@@ -9250,6 +9251,15 @@ class StagedInstaller:
             return failed
         try:
             yield from self.apply_carried_patches(server_dir)
+        except SelfExplainedError as exc:
+            # T563: a stage that already said what failed and what to do (a Lua
+            # link, a record that could not be saved) is passed through as it
+            # stands: "press again" does not mend every one of them.
+            logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
+            yield (
+                f"The source folders are back on their old commits, but this app's own "
+                f"files could not be put into them again. {exc}"
+            )
         except (InstallerError, OSError) as exc:
             logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
             yield (
