@@ -83,6 +83,7 @@ from yulon import (
     docker_advice,
     install_wiring,
     logsnap,
+    module_moves,
     networking,
     party,
     platform,
@@ -7051,6 +7052,26 @@ TRY_UPDATE_AGAIN = (
 )
 """Update pressed on the version Yu'lon put back (T557, D2). No by default (`_confirm()`)."""
 
+PUT_BACK_ACTION = "Put back the last update…"
+"""The module row's menu entry that undoes its last Update (T557)."""
+PUT_BACK_TITLE = "Put back {id}?"
+_REBUILD_PRESS = f"“{server_build_presses.REBUILD}”"
+PUT_BACK_QUESTION = (
+    "This puts {id} back on the version it had before its last update ({old}). The newer "
+    "version ({new}) is not offered again until its author publishes a newer one. Your server "
+    "keeps running. Press " + _REBUILD_PRESS + " afterwards to build without the update."
+    "\n\nPut it back?"
+)
+PUT_BACK_DONE = (
+    "{id} is back on {old}, the version it had before its last update. Press "
+    + _REBUILD_PRESS
+    + " to build your server without that update."
+)
+PUT_BACK_NOTHING = (
+    "Yu'lon cannot tell which version {id} was on before its last update, so there is "
+    "nothing to put back."
+)
+
 MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
 """The title over `Applier.replacement_question()`'s sentence (T47).
 
@@ -7501,6 +7522,8 @@ class ControllerView(QWidget):
         self._behind: dict[tuple[str, str], int | Behind] = {}
         # T557: the newest version of a row that failed to build and was put back, by key.
         self._put_back_tip: dict[tuple[str, str], str] = {}
+        # T557: the update a "Put back the last update…" press found, for its done line.
+        self._put_back_pending: apply_module.LastUpdate | None = None
         # T126: the newest release's tag for a counted row that follows its
         # releases. Read only for a key `_behind` still has.
         self._behind_release: dict[tuple[str, str], str] = {}
@@ -16966,6 +16989,74 @@ class ControllerView(QWidget):
         )
 
     @Slot()
+    def _put_back_last_update(self) -> None:
+        """ "Put back the last update…" on the selected module row (T557).
+
+        Two steps, both on a worker because both read git (`ContainerGit` is a
+        `docker run`): find which update this was (`Applier.last_update()`), then,
+        once the player said yes, put it back. The question needs the two commits,
+        which is why the finding comes first and the menu entry is not greyed by
+        it: the entry is always there for an installed module, and a clone that
+        cannot say gets the "nothing to put back" sentence.
+        """
+        manifest = self.selected_manifest()
+        applier = self.services.applier
+        if manifest is None or applier is None or manifest.type != "module":
+            return
+        self._acting_on = manifest
+        self._module_pending = f"put back {manifest.id}"
+        self._put_back_pending = None
+        self.module_report.setPlainText(f"{self._module_pending}…")
+        self._run(lambda: applier.last_update(manifest), self._put_back_found, self._module_failed)
+
+    @Slot(object)
+    def _put_back_found(self, result: object) -> None:
+        manifest, applier = self._acting_on, self.services.applier
+        if manifest is None or applier is None:
+            self._module_pending = None
+            return
+        if not isinstance(result, apply_module.LastUpdate):
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(PUT_BACK_NOTHING.format(id=manifest.id))
+            return
+        if not self._confirm(
+            PUT_BACK_TITLE.format(id=manifest.id),
+            PUT_BACK_QUESTION.format(
+                id=manifest.id, old=result.from_sha[:7], new=result.to_sha[:7]
+            ),
+        ):
+            logger.info(f"put back {manifest.id} declined")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"put back {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
+        self._put_back_pending = result
+        self._run(
+            lambda: applier.put_back(manifest, None, last=result),
+            self._put_back_done,
+            self._module_failed,
+        )
+
+    @Slot(object)
+    def _put_back_done(self, result: object) -> None:
+        self._module_pending = None
+        acted_on, self._acting_on = self._acting_on, None
+        last, self._put_back_pending = self._put_back_pending, None
+        if not isinstance(result, ApplyReport) or last is None:
+            return
+        lines = [PUT_BACK_DONE.format(id=result.item_id, old=last.from_sha[:7])]
+        if apply_module.PUT_BACK_KEPT_SQL in result.skipped:
+            lines.append(apply_module.PUT_BACK_KEPT_SQL)
+        self.module_report.setPlainText(" ".join(lines))
+        # The clone is on another commit: the version and the count read at the old one are
+        # dropped before the redraw (`_note_session_facts()`), as after any Update.
+        self._note_session_facts(result, acted_on)
+        self.reload_modules()
+
+    @Slot()
     def check_module_updates(self) -> None:
         """Ask each installed module how far behind its upstream it is (checklist 8.7a).
 
@@ -17963,6 +18054,8 @@ class ControllerView(QWidget):
             # nothing about the running server changed.
             self._rebuild_owed.clear()
             self.reload_modules()
+        if not ok and not self.rebuild_log.cancelled:
+            self._reload_after_a_failed_build()
         if not ok:
             self.action_failed.emit(message)
             sentence = database_presence.sentence_in(message)
@@ -17985,6 +18078,25 @@ class ControllerView(QWidget):
             # A Stop that landed after T123 owed its restart: T123's own cancel
             # rule is "do not restart, say so", and that is kept.
             self._say_restart_owed()
+
+    def _reload_after_a_failed_build(self) -> None:
+        """A build that failed may have put modules back; read the clones again (T557).
+
+        The put-back runs inside the Rebuild (`install_wiring.with_module_moves()`),
+        so the tab learns of it from the record: a module whose newest version is
+        recorded as put back has a clone on another commit than the one its count
+        and its version were read at. Those are dropped before the redraw, as an
+        Update drops them, and every version is read again (a local `rev-parse` per
+        clone, off the GUI thread). Not on a Stop: nothing is put back on one.
+        """
+        ledger = module_moves.read(self.services.controller.server_dir)
+        if ledger is not None:
+            for item in ledger.skipped:
+                family, _slash, item_id = item.partition("/")
+                self._behind.pop((family, item_id), None)
+                self._put_back_tip.pop((family, item_id), None)
+        self._versions.clear()
+        self.reload_modules()
 
     def log_panels(self) -> tuple[LogPanel, ...]:
         """Every streaming panel this view owns, for the exit path to join.
@@ -19789,6 +19901,11 @@ class ControllerView(QWidget):
                 # T399: the row's own button is Install or Remove by whether it is here.
                 rem_act = menu.addAction("Remove Selected Module")
                 rem_act.triggered.connect(lambda: self._module_action("remove"))
+                manifest = self.selected_manifest()
+                if manifest is not None and manifest.type == "module":
+                    # T557. Only a compiled module's update can break the build.
+                    put_act = menu.addAction(PUT_BACK_ACTION)
+                    put_act.triggered.connect(self._put_back_last_update)
             if self._selected_row_is_record_backed():
                 forget_act = menu.addAction(FORGET_RECORD_ACTION)
                 forget_act.triggered.connect(self._forget_module_record)
