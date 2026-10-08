@@ -1355,3 +1355,43 @@ def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
     back = next(line for line in said if "back on their old commits, but" in line)
     assert server_build_presses.under_server_build(server_build_presses.REBUILD) in back, back
     assert "source patch" not in back and "not started" not in back, back
+
+
+def test_a_pending_only_record_is_cleared_by_an_entry_with_no_scripts(tmp_path: Path) -> None:
+    """The no-specs path: files={} and a pending entry, and the entry no longer ships scripts.
+
+    The press must not return early and leave `pending` behind, or a file the
+    player puts there later with those very bytes is adopted on the next press and
+    removed as "no longer shipped".
+    """
+    server_dir, _src, spec, laid = crashed_press_tree(tmp_path)
+    laid.parent.mkdir(parents=True)
+    key = f"{LUA_SCRIPTS_DIR}/m/a.lua"
+    scriptdeploy.record_path(server_dir).write_text(
+        json.dumps({"version": 1, "files": {}, "pending": {key: scriptdeploy._sha(b"v1\n")}}),
+        encoding="utf-8",
+    )
+
+    list(scriptdeploy.lay(server_dir, [], quiet=True))
+
+    assert not scriptdeploy.record_path(server_dir).exists()
+    laid.write_text("v1\n", encoding="utf-8")
+    said = list(scriptdeploy.lay(server_dir, [spec], quiet=True))
+    assert laid.read_text(encoding="utf-8") == "v1\n", said
+    assert not any("Removed" in line for line in said), said
+    assert list(scriptdeploy.lay(server_dir, [], quiet=True)) == []
+    assert laid.read_text(encoding="utf-8") == "v1\n"
+
+
+def test_a_failed_record_save_with_no_folders_does_not_name_an_empty_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, src, spec, _laid = crashed_press_tree(tmp_path)
+    list(scriptdeploy.lay(server_dir, [spec]))
+    (src / "a.lua").unlink()
+    fail_the_final_record_write(monkeypatch)
+
+    with pytest.raises(InstallerError, match="delete") as raised:
+        list(scriptdeploy.lay(server_dir, []))
+
+    assert "delete  " not in str(raised.value) and "delete that file" in str(raised.value)

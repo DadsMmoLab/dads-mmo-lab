@@ -355,6 +355,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             raise _link_refusal(server_dir, link, remedy)
     planned = _plan(server_dir, specs, remedy)
     folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
+    to_delete = f"{folders} and that file" if folders else "that file"
     record, unreadable, had_pending = _read_record(server_dir)
     if not specs and not record and not had_pending:
         return
@@ -362,7 +363,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
         yield (
             f"{LUA_SCRIPTS_DIR}/{RECORD_FILE}, Yu'lon's list of the scripts it laid, could not "
             f"be read ({unreadable}), so no script counts as Yu'lon's and none is replaced or "
-            f"removed. To have them laid fresh, delete {folders} and that file, then press "
+            f"removed. To have them laid fresh, delete {to_delete}, then press "
             f"{remedy}."
         )
     kept_record = dict(record)
@@ -447,8 +448,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                     raise SelfExplainedError(
                         "The Lua scripts were copied, but Yu'lon could not save its list of "
                         f"them, {LUA_SCRIPTS_DIR}/{RECORD_FILE} ({exc}), so it stopped here and "
-                        f"started nothing new. Once that is fixed, delete {folders} and that "
-                        f"file, then press {remedy}."
+                        f"started nothing new. Once that is fixed, delete {to_delete}, "
+                        f"then press {remedy}."
                     ) from exc
     if specs and (wrote or not quiet):
         yield f"Lua scripts are in place ({wrote} written, {current} already current)."
