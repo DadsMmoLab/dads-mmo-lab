@@ -72,6 +72,26 @@ def test_the_factory_hands_every_applier_its_entrys_server_sources(tmp_path: Pat
     assert services.applier.server_name == "WoW Unbound"
 
 
+def test_the_real_tab_wiring_with_a_ready_to_play_client_also_knows_its_server_sources(
+    tmp_path: Path,
+) -> None:
+    """T554 rework item 3. `main.py` builds every tab with `play_client_dir`, so the
+    tabs players see come out of `for_entry`'s SECOND branch; the test above only
+    drove the first. Both must hand the applier Unbound's server sources."""
+    play = tmp_path / "play"
+    play.mkdir()
+    services = ControllerServices.for_entry(
+        entry("wow-unbound"),
+        tmp_path / "server",
+        client_dir=tmp_path / "own-client",
+        play_client_dir=play,
+    )
+    assert services.play_client_dir == play
+    assert services.applier is not None
+    assert services.applier.server_sources == native.server_source_folders(entry("wow-unbound"))
+    assert services.applier.server_name == "WoW Unbound"
+
+
 def test_wotlks_applier_still_installs_and_removes_mod_ale(tmp_path: Path) -> None:
     services = ControllerServices.for_entry(entry("wow-wotlk"), tmp_path)
     assert services.applier is not None
