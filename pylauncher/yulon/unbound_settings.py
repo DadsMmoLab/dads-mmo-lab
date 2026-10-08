@@ -101,7 +101,10 @@ def conf_keys() -> dict[str, ConfKey]:
 
 def rows(server_dir: Path) -> tuple[tuning.TuningRow, ...]:
     """The card's rows. `current` is `None` for a key the file does not say, or no file."""
-    text = _read(server_dir / FILE)
+    return _rows_of(_read(server_dir / FILE))
+
+
+def _rows_of(text: str | None) -> tuple[tuning.TuningRow, ...]:
     return tuple(
         tuning.TuningRow(
             module_id=CARD[1],
@@ -163,10 +166,10 @@ def switches_for(server_dir: Path, running: Mapping[str, bool | None]) -> tuple[
     a switch that is off. A file that is not there, or a key it does not carry, is off, which is
     what the module itself starts with.
     """
-    unreadable = (server_dir / FILE).is_file() and _read(server_dir / FILE) is None
+    text, unreadable = _read_state(server_dir / FILE)
     return tuple(
         Switch(_RUNNING_LINES[row.key][0], running[row.key], None if unreadable else is_on(row))
-        for row in rows(server_dir)
+        for row in _rows_of(text)
     )
 
 
@@ -226,3 +229,18 @@ def _read(path: Path) -> str | None:
             return handle.read()
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def _read_state(path: Path) -> tuple[str | None, bool]:
+    """`(text, unreadable)` from ONE read.
+
+    A file that is not there is `(None, False)`: off, as the module starts. One that is there and
+    cannot be read or decoded is `(None, True)`, which is not the same as off.
+    """
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return handle.read(), False
+    except FileNotFoundError:
+        return None, False
+    except (OSError, UnicodeDecodeError):
+        return None, True

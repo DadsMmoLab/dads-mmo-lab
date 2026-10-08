@@ -266,3 +266,28 @@ def test_a_conf_that_is_there_and_unreadable_is_unknown_not_off(tmp_path: Path) 
     got = unbound_settings.switches(tmp_path, ALL_ON_LOG)
 
     assert [(s.running, s.conf) for s in got] == [(True, None)] * 3
+
+
+def test_the_switches_read_the_file_once_so_a_save_in_between_cannot_make_them_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial: readability and the values came from two reads of the same file."""
+    put(tmp_path, DIST.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1"))
+    reads: list[Path] = []
+    real = Path.open
+
+    def counting(self: Path, *a: object, **k: object):  # type: ignore[no-untyped-def]
+        reads.append(self)
+        return real(self, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", counting)
+
+    got = unbound_settings.switches_for(tmp_path, dict.fromkeys(KEYS, False))
+
+    assert [s.conf for s in got] == [True, False, False]
+    assert reads == [tmp_path / CONF], "the settings file was read more than once"
+
+
+def test_a_conf_that_is_not_there_is_off_not_unknown(tmp_path: Path) -> None:
+    got = unbound_settings.switches_for(tmp_path, dict.fromkeys(KEYS, False))
+    assert [s.conf for s in got] == [False] * 3
