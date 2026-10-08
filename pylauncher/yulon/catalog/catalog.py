@@ -3310,7 +3310,7 @@ class CatalogEntry(_Strict):
             )
         return self
 
-    def _published_host_ports(self) -> dict[int, str]:
+    def published_host_ports(self) -> dict[int, str]:
         """Every host port this entry binds, each with what it is for (T552)."""
         found: dict[int, str] = {}
         native = self.install.native
@@ -3427,8 +3427,8 @@ class Catalog(_Strict):
             for second in self.games[i + 1 :]:
                 if {first.ports.auth, first.ports.world} & {second.ports.auth, second.ports.world}:
                     continue
-                taken = first._published_host_ports()
-                for number, what in second._published_host_ports().items():
+                taken = first.published_host_ports()
+                for number, what in second.published_host_ports().items():
                     if number in taken:
                         raise ValueError(
                             f"{first.id} and {second.id} can run at the same time (their auth "

@@ -101,6 +101,15 @@ before asking.
 
 
 @dataclass(frozen=True)
+class PortBlock:
+    """A host port the install publishes that the OS would not let us bind (T574)."""
+
+    port: int
+    what: str
+    kind: Literal["reserved", "in_use"]
+
+
+@dataclass(frozen=True)
 class Facts:
     """What could be established about this machine. `None` means "not established".
 
@@ -148,6 +157,8 @@ class Facts:
     bind_mount: bool | None = None
     port_conflicts: tuple[str, ...] = ()
     ports_in_use: tuple[int, ...] = ()
+    port_blocks: tuple[PortBlock, ...] = ()
+    """Ports a BIND was refused on, a definite fact (T574); `ports_in_use` is only a connect."""
     selinux_enforcing: bool | None = None
     server_fs_type: str | None = None
     client_checks: tuple[Check, ...] = ()
@@ -322,6 +333,7 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
+    bind_port: Callable[[str, int], platform.PortBind] | None = None,
     selinux: Callable[[], bool | None] | None = None,
     fs_type: Callable[[Path], str | None] | None = None,
     in_wsl: Callable[[], bool] | None = None,
@@ -372,6 +384,8 @@ def gather(
         # would have started that `rust-prior-art.md` §4 warns about.
         if probe_port("127.0.0.1", port).status == "open":
             listening.append(port)
+    targets = bind_targets(entry, server_dir)
+    blocks = _bind_blocks(targets, bind_port, here == "windows") if ready else ()
     # SELinux is a Linux fact. Off Linux the questions are not asked, so the
     # check below can tell "not applicable" from "could not read it".
     #
@@ -455,6 +469,7 @@ def gather(
         bind_mount=bind,
         port_conflicts=tuple(conflicts()) if ready else (),
         ports_in_use=tuple(listening),
+        port_blocks=blocks,
         selinux_enforcing=enforcing,
         server_fs_type=server_fs,
         client_checks=client_checks,
@@ -515,6 +530,66 @@ def _default_conflicts(
     spec = entry.container_spec()
     project = composegen.project_name(entry.id, server_dir, platform_id=platform_id)
     return lambda: docker.foreign_port_conflicts(spec, project)
+
+
+_LOOPBACK = "127.0.0.1"
+_ALL_INTERFACES = "0.0.0.0"
+_PORT_OVERRIDES = {
+    "auth port": "DOCKER_AUTH_EXTERNAL_PORT",
+    "world port": "DOCKER_WORLD_EXTERNAL_PORT",
+    "database port": "DOCKER_DB_EXTERNAL_PORT",
+}
+
+
+def bind_targets(entry: CatalogEntry, server_dir: Path) -> list[tuple[str, int, str]]:
+    """`(address, port, what)` for every host port compose will publish (T574).
+
+    The set is `CatalogEntry.published_host_ports()`, the one T552's collision
+    rule uses, so the database port counts when the entry omits it. The address
+    is the one the base file gives each mapping: the game's own auth and world
+    ports on every interface, the database and the SOAP/command channel on
+    loopback. A `.env` that overrides a port (the port-conflict remedy writes
+    `DOCKER_DB_EXTERNAL_PORT`) moves the bind with it, and a released channel
+    (`127.0.0.1:0`) publishes nothing.
+    """
+    found: list[tuple[str, int, str]] = []
+    for number, what in entry.published_host_ports().items():
+        host = _ALL_INTERFACES if what in ("auth port", "world port") else _LOOPBACK
+        var = _PORT_OVERRIDES.get(what)
+        if var is not None:
+            given = composegen.dotenv_value(server_dir, var)
+            if given is not None and given.isdigit():
+                number = int(given)
+        elif what in ("SOAP port", "command-channel port"):
+            given = composegen.dotenv_value(server_dir, composegen.CHANNEL_PORT_VAR)
+            if given:
+                address, _, port_text = given.rpartition(":")
+                host = address or host
+                number = int(port_text) if port_text.isdigit() else number
+        if number > 0 and not any(port == number and at == host for at, port, _ in found):
+            found.append((host, number, what))
+    return found
+
+
+def _bind_blocks(
+    targets: Sequence[tuple[str, int, str]],
+    bind_port: Callable[[str, int], platform.PortBind] | None,
+    windows: bool,
+) -> tuple[PortBlock, ...]:
+    """Bind each target; a definite refusal becomes a `PortBlock`.
+
+    `unknown` (any other error) is dropped, like a refused connect.
+    """
+    bind = bind_port if bind_port is not None else platform.bind_tcp
+    blocks: list[PortBlock] = []
+    for host, port, what in targets:
+        got = bind(host, port)
+        if got.status in ("reserved", "in_use"):
+            blocks.append(PortBlock(port, what, got.status))
+            logger.info(f"preflight: binding {host}:{port} ({what}) answered {got.status}")
+        else:
+            logger.debug(f"preflight: binding {host}:{port} answered {got.status}")
+    return tuple(blocks)
 
 
 def free_bytes(path: Path) -> int | None:
@@ -1648,6 +1723,18 @@ def _port_check(facts: Facts) -> Check:
             "refuse",
             f"{', '.join(facts.port_conflicts)} already publish the ports this server needs",
             "Stop that server first (or remove its containers), then try again.",
+        )
+    if facts.port_blocks:
+        windows = facts.platform_id == "windows"
+        return Check(
+            "the server's ports",
+            "refuse",
+            " ".join(
+                docker.blocked_port_sentence(
+                    block.port, block.kind, windows=windows, what=block.what
+                )
+                for block in facts.port_blocks
+            ),
         )
     if facts.ports_in_use:
         ports = ", ".join(str(port) for port in facts.ports_in_use)

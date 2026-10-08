@@ -28,6 +28,20 @@ GIB = preflight.GIB
 SERVER_DIR = Path("/home/user/wow")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_port_questions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`gather()` binds real ports unless told otherwise.
+
+    T574 added it. A test that wants it passes its own seam; the rest must
+    not depend on whether this machine happens to run a MySQL on 3306.
+    """
+    monkeypatch.setattr(
+        platform_module,
+        "bind_tcp",
+        lambda host, port, **_kw: platform_module.PortBind(host, port, "free", ""),
+    )
+
+
 def facts(**overrides: object) -> preflight.Facts:
     """A machine that passes everything, minus whatever the test breaks.
 
@@ -715,6 +729,126 @@ def test_a_publisher_docker_will_not_name_an_owner_for_still_refuses(
     monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: ["ac-worldserver"])
     monkeypatch.setattr(docker, "container_project", lambda _name, **_kw: docker.UNREADABLE)
     assert _gather(tmp_path).port_conflicts == ("ac-worldserver",)
+
+
+# --- T574: a port Windows reserved is found by BINDING it, before the build ---------
+
+
+def _free(host: str, port: int) -> platform_module.PortBind:
+    return platform_module.PortBind(host, port, "free", "")
+
+
+def _gather_with(tmp_path: Path, **seams: object) -> preflight.Facts:
+    """`gather()` on a macOS-shaped box with the bind and ownership seams under test."""
+    base: dict[str, object] = dict(
+        platform_id=lambda: "windows",
+        docker_ready=lambda: True,
+        compose_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        bind_port=_free,
+    )
+    base.update(seams)
+    return preflight.gather(ENTRY, tmp_path, **base)  # type: ignore[arg-type]
+
+
+def test_gather_binds_every_published_port_on_the_address_compose_uses(tmp_path: Path) -> None:
+    """Auth and world only was the gap: 3306 (and the SOAP port) were never asked."""
+    asked: dict[int, str] = {}
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked[port] = host
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert set(asked) == set(ENTRY.published_host_ports())
+    assert asked[3306] == "127.0.0.1"
+    assert asked[ENTRY.ports.auth] == "0.0.0.0"
+    assert asked[ENTRY.ports.world] == "0.0.0.0"
+    assert asked[NATIVE.soap_port] == "127.0.0.1"
+
+
+def test_a_database_port_windows_reserved_is_refused_before_the_build(tmp_path: Path) -> None:
+    """The Discord report: WSAEACCES on 127.0.0.1:3306, found after 3 h 20 min."""
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        if port == 3306:
+            return platform_module.PortBind(host, port, "reserved", "WinError 10013")
+        return _free(host, port)
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    report = preflight.evaluate(ENTRY, tmp_path, facts_)
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert "3306" in said and "database" in said
+    assert "Windows has reserved" in said
+    assert "netsh interface ipv4 show excludedportrange protocol=tcp" in said
+    assert "net stop winnat" in said and "net start winnat" in said
+
+
+def test_a_port_another_program_holds_is_refused_in_plain_words(tmp_path: Path) -> None:
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        if port == ENTRY.ports.world:
+            return platform_module.PortBind(host, port, "in_use", "WinError 10048")
+        return _free(host, port)
+
+    report = preflight.evaluate(ENTRY, tmp_path, _gather_with(tmp_path, bind_port=bind))
+    assert verdict(report, "the server's ports") == "refuse"
+    said = report.message()
+    assert str(ENTRY.ports.world) in said
+    assert "another program" in said.lower()
+    assert "winnat" not in said
+
+
+def test_a_reserved_port_off_windows_does_not_offer_the_winnat_remedy(tmp_path: Path) -> None:
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        return (
+            platform_module.PortBind(host, port, "reserved", "denied")
+            if port == 3306
+            else _free(host, port)
+        )
+
+    facts_ = _gather_with(tmp_path, bind_port=bind, platform_id=lambda: "linux")
+    said = preflight.evaluate(ENTRY, tmp_path, facts_).message()
+    assert "3306" in said
+    assert "winnat" not in said and "Windows" not in said
+
+
+def test_a_bind_that_could_not_be_tried_is_not_a_refusal(tmp_path: Path) -> None:
+    """Same discipline as T552's connect: only a DEFINITE answer refuses."""
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        return platform_module.PortBind(host, port, "unknown", "OSError: odd")
+
+    facts_ = _gather_with(tmp_path, bind_port=bind)
+    assert facts_.port_blocks == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, facts_), "the server's ports") == "pass"
+
+
+def test_a_refused_connect_is_still_not_proof_a_port_is_in_use(tmp_path: Path) -> None:
+    facts_ = _gather_with(
+        tmp_path,
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", "refused"),
+    )
+    assert facts_.ports_in_use == () and facts_.port_blocks == ()
+
+
+def test_the_dotenv_port_overrides_are_the_ports_that_get_bound(tmp_path: Path) -> None:
+    """The port-conflict remedy writes DOCKER_DB_EXTERNAL_PORT; compose then binds THAT."""
+    (tmp_path / ".env").write_text("DOCKER_DB_EXTERNAL_PORT=13306\n", encoding="utf-8")
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform_module.PortBind:
+        asked.append(port)
+        return _free(host, port)
+
+    _gather_with(tmp_path, bind_port=bind)
+    assert 13306 in asked and 3306 not in asked
 
 
 def test_the_windows_volume_branch_is_reachable_without_running_on_windows() -> None:

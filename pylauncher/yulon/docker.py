@@ -5102,6 +5102,41 @@ def foreign_port_conflicts(
     return [name for name in conflicts if container_project(name, wsl_distro=wsl_distro) != project]
 
 
+NETSH_RESERVED_RANGES = "netsh interface ipv4 show excludedportrange protocol=tcp"
+"""What shows the port ranges Windows has set aside (Hyper-V, WinNAT, Docker Desktop)."""
+
+
+def blocked_port_sentence(
+    port: int, kind: Literal["reserved", "in_use"], *, windows: bool, what: str = ""
+) -> str:
+    """Plain words for a host port that cannot be bound: the reason, then what to do (T574).
+
+    One sentence builder for the two places that learn it: the preflight bind
+    probe, before the build, and the daemon's own `ports are not available`
+    error from `up`, which covers a range reserved between the two (a reboot).
+    `kind` is a definite fact in both; a refused or timed-out connect is not.
+    """
+    named = f"port {port} ({what})" if what else f"port {port}"
+    if kind == "in_use":
+        return (
+            f"Another program on this computer already uses {named}, so the server cannot "
+            "start. Close that program or stop its service, then try again."
+        )
+    if windows:
+        return (
+            f"Windows has reserved {named}, so no program can use it and the server cannot "
+            f"start. To see the reserved ranges, run this in a Command Prompt: "
+            f"{NETSH_RESERVED_RANGES}. To free the port, open a Command Prompt as "
+            "administrator, run net stop winnat and then net start winnat, and try again. "
+            "A Windows service that holds the port for itself gives the same message; "
+            "stop that service if there is one."
+        )
+    return (
+        f"This computer will not let a program use {named} (permission denied), so the "
+        "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
 def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:
     """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
 
