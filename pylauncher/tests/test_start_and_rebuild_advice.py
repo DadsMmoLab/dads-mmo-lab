@@ -15,6 +15,7 @@ The fakes are Docker's own CLI (`runner.run`); every check runs through the real
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,10 @@ class _ImageDocker(_DbDocker):
         super().__init__(TORTOISE)
         self.present: set[str] | None = set()
         self.silent = False
+        # What `compose config` reports as each service's image; None = the real fake's answer.
+        self.config_images: dict[str, str] | None = None
+        self.config_rc = 0
+        self.config_text: str | None = None
 
     def __call__(
         self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
@@ -71,6 +76,15 @@ class _ImageDocker(_DbDocker):
             return subprocess.CompletedProcess(
                 cmd, 1, "", f"Error response from daemon: No such image: {cmd[-1]}\n"
             )
+        if "compose" in cmd and "config" in cmd and "--format" in cmd:
+            self.calls.append(cmd)
+            if self.config_rc:
+                return subprocess.CompletedProcess(cmd, self.config_rc, "", "yaml: line 3: bad")
+            if self.config_text is not None:
+                return subprocess.CompletedProcess(cmd, 0, self.config_text, "")
+            if self.config_images is not None:
+                services = {svc: {"image": img} for svc, img in self.config_images.items()}
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"services": services}), "")
         return super().__call__(cmd, cwd, timeout)
 
 
@@ -380,8 +394,9 @@ def test_restart_and_recreate_leave_a_running_server_alone_when_its_build_is_gon
 ) -> None:
     _new_stack(tmp_path)
     _running_here(box)
-    with pytest.raises(StartRefused):
+    with pytest.raises(StartRefused) as refused:
         getattr(_view(tmp_path), press)()
+    assert "build is gone from Docker" in str(refused.value)
     assert _stops(box) == []
     assert not [c for c in box.calls if c[:3] == ["docker", "compose", "down"] or "rm" in c[:3]]
 
@@ -401,3 +416,74 @@ def test_the_sentence_after_a_compose_failure_does_not_say_nothing_was_started(
     assert "Nothing was started" in str(
         pytest.raises(StartRefused, Controller(SPEC, tmp_path).start).value
     )
+
+
+# -- the images the folder's own compose files name -----------------------------------------
+
+NAMED = (
+    "yulon.local/cmangos-tortoise-server:native-feedf00d"  # not this path's hash, not a record's
+)
+
+
+def _compose_names(box: _ImageDocker, server: Path, image: str = NAMED) -> None:
+    """A folder whose compose files (on disk) name `image` for the world, as a moved one's do."""
+    (server / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    box.config_images = {
+        SPEC.compose_services()[0]: "mariadb:10.6",
+        SPEC.compose_services()[2]: image,
+    }
+
+
+def test_a_moved_folder_is_asked_about_the_image_its_compose_file_names(
+    box: _ImageDocker, tmp_path: Path
+) -> None:
+    """Moved since it was made: the new path hashes to another id; the files name the old (T627)."""
+    _new_stack(tmp_path)
+    _record(tmp_path)  # a record carrying yet another id: the compose file is what is started
+    _compose_names(box, tmp_path)
+    box.present = {NAMED}
+    Controller(SPEC, tmp_path).start()
+    assert any(SPEC.world in c for c in _ups(box))
+
+
+def test_a_compose_file_naming_an_image_that_is_gone_refuses(
+    box: _ImageDocker, tmp_path: Path
+) -> None:
+    _new_stack(tmp_path)
+    _compose_names(box, tmp_path)
+    box.present = set(composegen.built_image_refs(TORTOISE, tmp_path))  # the path's own name only
+    with pytest.raises(StartRefused) as refused:
+        Controller(SPEC, tmp_path).start()
+    assert "build is gone from Docker" in str(refused.value)
+    assert _ups(box) == []
+
+
+def test_a_distro_folder_is_asked_about_the_image_its_compose_file_names(
+    distro_docker: _ImageDocker, tmp_path: Path
+) -> None:
+    _new_stack(tmp_path)
+    _compose_names(distro_docker, tmp_path, ELSEWHERE_IMAGE)
+    distro_docker.present = {ELSEWHERE_IMAGE}
+    Controller(SPEC, tmp_path, wsl_distro="Ubuntu").refuse_a_missing_image()
+
+
+def test_only_the_images_this_app_builds_are_asked_about(box: _ImageDocker, tmp_path: Path) -> None:
+    """A database image compose would pull is not a gone build."""
+    _new_stack(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    box.config_images = {svc: "mariadb:10.6" for svc in SPEC.compose_services()}
+    Controller(SPEC, tmp_path).refuse_a_missing_image()
+    assert not [c for c in box.calls if "image" in c and "inspect" in c]
+
+
+@pytest.mark.parametrize("trouble", ["failing", "not-json"])
+def test_a_compose_file_that_cannot_be_read_does_not_refuse(
+    box: _ImageDocker, tmp_path: Path, trouble: str
+) -> None:
+    _new_stack(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: [\n", encoding="utf-8")
+    if trouble == "failing":
+        box.config_rc = 1
+    else:
+        box.config_text = "not json at all"
+    Controller(SPEC, tmp_path).refuse_a_missing_image()

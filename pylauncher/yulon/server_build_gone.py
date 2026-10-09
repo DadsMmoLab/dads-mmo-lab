@@ -118,21 +118,48 @@ def refusal_before_start(
     images_built: Callable[[Sequence[str]], bool | None],
     *,
     wsl_distro: str | None = None,
+    services: Sequence[str] = (),
+    compose_images: Callable[[], dict[str, str] | None] | None = None,
 ) -> str | None:
-    """The sentence for a Start whose one built image is not in Docker, else None (T627).
+    """The sentence for a Start whose built image is not in Docker, else None (T627).
 
-    `images_built` answers None when Docker would not say, which is not "gone": the
-    Start goes on. Only a one-image entry is asked (that image is the whole
-    build); a name this folder cannot work out is not asked either.
+    The images asked about are the ones the folder's own compose files name for the
+    `services` Start brings up and this app builds (`image_prefix`): that is what compose
+    will start, whatever the folder's path is now (a moved folder, a server made inside a
+    distro). Only where there is no compose file to read are the names worked out: the id
+    the install's record carries, else the folder's hash. A compose file that cannot be
+    read or parsed, a distro folder with no usable record, a name Docker will not answer
+    for, or a folder with no such image named is no refusal: the Start goes on as it did.
     """
-    if entry is None or not _one_image_build(entry):
+    native_block = entry.install.native if entry is not None else None
+    if entry is None or native_block is None or not _one_image_build(entry):
         return None
-    # The id the engine names the images after: a server inside a WSL distro carries the one
-    # Yu'lon recorded there (its Windows spelling hashes to another); any other is its folder's.
+    refs: tuple[str, ...]
     try:
-        recorded = native.recorded_install_id(server_dir) if wsl_distro is not None else None
-        refs = composegen.built_image_refs(entry, server_dir, install_id=recorded)
-    except (composegen.ComposeGenError, InstallerError, OSError):
+        if (server_dir / composegen.BASE_FILE).is_file():
+            found = compose_images() if compose_images is not None else None
+            if found is None:
+                return None
+            refs = tuple(
+                sorted(
+                    {
+                        image
+                        for service in services
+                        if (image := found.get(service, "")).startswith(native_block.image_prefix)
+                    }
+                )
+            )
+            if not refs:
+                return None
+        else:
+            try:
+                recorded: str | None = native.recorded_install_id(server_dir)
+            except InstallerError:
+                if wsl_distro is not None:
+                    return None  # its Windows spelling names nothing there; a guess would refuse
+                recorded = None
+            refs = composegen.built_image_refs(entry, server_dir, install_id=recorded)
+    except (composegen.ComposeGenError, OSError):
         return None
     if images_built(refs) is not False:
         return None

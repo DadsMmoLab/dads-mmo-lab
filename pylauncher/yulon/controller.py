@@ -379,6 +379,10 @@ class Controller:
             self.server_dir,
             lambda refs: docker.images_built(refs, wsl_distro=self.wsl_distro),
             wsl_distro=self.wsl_distro,
+            services=self.spec.compose_services(),
+            compose_images=lambda: docker.compose_service_images(
+                self.server_dir, self.spec.compose_services(), wsl_distro=self.wsl_distro
+            ),
         )
         if reason:
             logger.warning(f"start() refused: {reason}")
