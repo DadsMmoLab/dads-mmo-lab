@@ -16,12 +16,13 @@ from PySide6.QtCore import Signal, SignalInstance
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from yulon.ui.widgets.flow_layout import flow_bar
 
 ADDON_BOX_TITLE = "Game add-ons you bring"
 
@@ -34,6 +35,10 @@ ADDON_BOX_NOTE = (
 ADDON_LINK_LABEL = "Add-on from link…"
 ADDON_FOLDER_LABEL = "Add-on from folder…"
 ADDON_ZIP_LABEL = "Add-on from zip…"
+WHOLE_LABELS = (ADDON_LINK_LABEL, ADDON_FOLDER_LABEL, ADDON_ZIP_LABEL)
+COMPACT_LABELS = ("Add from link…", "Add from folder…", "Add from zip…")
+"""The presses' words on a short tab: the same three, a word shorter, so they stay on one line."""
+
 ADDON_UPDATE_LABEL = "Update"
 ADDON_REMOVE_LABEL = "Remove"
 ADDON_LIST_LABEL = "Added by Yu'lon:"
@@ -69,7 +74,11 @@ class ClientAddonsBox(QGroupBox):
         self.note.setWordWrap(True)
         column.addWidget(self.note)
 
-        presses = QHBoxLayout()
+        # One flowing row: the three presses, then the list's chooser and its two. It is
+        # one line where the window is wide, wraps where it is not, and so the compact
+        # form (no sentence) costs the tab a title and one line at 960 wide.
+        self.bar = flow_bar(self)
+        flow = self.bar.flow()
         self.link_button = QPushButton(ADDON_LINK_LABEL, self)
         self.folder_button = QPushButton(ADDON_FOLDER_LABEL, self)
         self.zip_button = QPushButton(ADDON_ZIP_LABEL, self)
@@ -80,29 +89,55 @@ class ClientAddonsBox(QGroupBox):
         ):
             button.setToolTip(tip)
             button.clicked.connect(lambda _checked=False, s=signal: s.emit())
-            presses.addWidget(button)
-        presses.addStretch(1)
-        column.addLayout(presses)
-
-        self.list_row = QWidget(self)
-        listing = QHBoxLayout(self.list_row)
-        listing.setContentsMargins(0, 0, 0, 0)
-        self.list_label = QLabel(ADDON_LIST_LABEL, self.list_row)
-        self.choice = QComboBox(self.list_row)
+            flow.addWidget(button)
+        self.list_label = QLabel(ADDON_LIST_LABEL, self)
+        self.choice = QComboBox(self)
         self.choice.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        self.choice.setMinimumContentsLength(24)
-        self.update_button = QPushButton(ADDON_UPDATE_LABEL, self.list_row)
-        self.remove_button = QPushButton(ADDON_REMOVE_LABEL, self.list_row)
+        self.choice.setMinimumContentsLength(9)
+        self.update_button = QPushButton(ADDON_UPDATE_LABEL, self)
+        self.remove_button = QPushButton(ADDON_REMOVE_LABEL, self)
         self.update_button.clicked.connect(lambda: self._chosen(self.update_pressed))
         self.remove_button.clicked.connect(lambda: self._chosen(self.remove_pressed))
-        listing.addWidget(self.list_label)
-        listing.addWidget(self.choice, 1)
-        listing.addWidget(self.update_button)
-        listing.addWidget(self.remove_button)
-        column.addWidget(self.list_row)
-        self.list_row.setVisible(False)
+        self._listed = (self.list_label, self.choice, self.update_button, self.remove_button)
+        for widget in self._listed:
+            flow.addWidget(widget)
+            widget.setVisible(False)
+        column.addWidget(self.bar)
+
+    @property
+    def list_row(self) -> QWidget:
+        """The chooser's first widget: shown exactly while there are add-ons listed."""
+        return self.list_label
+
+    def set_compact(self, compact: bool) -> None:
+        """Leave out the sentence (the presses and the list stay), for a tab short of height."""
+        if self.note.isHidden() != compact:
+            self.note.setVisible(not compact)
+            labels = COMPACT_LABELS if compact else WHOLE_LABELS
+            for button, text in zip(
+                (self.link_button, self.folder_button, self.zip_button), labels
+            ):
+                button.setText(text)
+            self.list_label.setVisible(not compact and self.choice.count() > 0)
+
+    def minimum_for(self, width: int, whole: bool) -> int:
+        """The height this box needs at `width` with its sentence (`whole`) or without.
+
+        Asked whichever form is on screen, so the tab's fit can bill the form it is
+        deciding about rather than the one showing (the card's `card_minimum()` reason).
+        """
+        layout = self.layout()
+        assert layout is not None
+        frame = self.contentsMargins()
+        margins = layout.contentsMargins()
+        inside = max(1, width - frame.left() - frame.right() - margins.left() - margins.right())
+        need = frame.top() + frame.bottom() + margins.top() + margins.bottom()
+        need += self.bar.flow().heightForWidth(inside)
+        if whole:
+            need += self.note.heightForWidth(inside) + layout.spacing()
+        return int(need)
 
     def _chosen(self, signal: SignalInstance) -> None:
         item_id = self.choice.currentData()
@@ -118,7 +153,9 @@ class ClientAddonsBox(QGroupBox):
         index = self.choice.findData(keep)
         if index >= 0:
             self.choice.setCurrentIndex(index)
-        self.list_row.setVisible(bool(rows))
+        for widget in self._listed:
+            widget.setVisible(bool(rows))
+        self.list_label.setVisible(bool(rows) and not self.note.isHidden())
         self._apply()
 
     def set_busy(self, busy: bool) -> None:

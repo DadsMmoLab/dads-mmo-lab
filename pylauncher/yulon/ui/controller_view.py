@@ -6375,8 +6375,11 @@ class _TabFit(QObject):
         card: QWidget,
         card_line: QWidget,
         rows_floor: int,
+        addon_box: ClientAddonsBox | None = None,
     ) -> None:
         super().__init__(tab)
+        # T613: the add-on box keeps its sentence exactly where the card keeps its own.
+        self._addon_box = addon_box
         self._tab = tab
         self._log = log
         self._report = report
@@ -6519,6 +6522,7 @@ class _TabFit(QObject):
             rows = height - self._owed(log_open=False, report_open=False, list_floor=0)
             card_whole = rows >= self._rows_floor
             self._show_the_card(whole=card_whole)
+            self._show_the_addon_sentence(card_whole)
             spare = height - self._owed(
                 log_open=log_room, report_open=report_room, card_whole=card_whole
             )
@@ -6557,6 +6561,11 @@ class _TabFit(QObject):
             return
         self._card.setVisible(whole)
         self._card_line.setVisible(not whole)
+
+    def _show_the_addon_sentence(self, whole: bool) -> None:
+        """The add-on box's sentence goes with the card's: one rung, decided once."""
+        if self._addon_box is not None:
+            self._addon_box.set_compact(not whole)
 
     def _inner_width(self) -> int:
         """The width the tab's layout gives its children: the tab less its margins."""
@@ -6658,7 +6667,9 @@ class _TabFit(QObject):
             if not widget.isVisible():
                 continue
             shown += 1
-            if widget is self._log:
+            if widget is self._addon_box:
+                owed += self._addon_box.minimum_for(inner, card_whole)
+            elif widget is self._log:
                 owed += self._log.open_minimum() if log_open else self._log.folded_minimum()
             elif widget is self._listing:
                 owed += list_floor
@@ -17327,6 +17338,7 @@ class ControllerView(QWidget):
             custom,
             self.custom_module_line,
             MODULE_LIST_ROWS_HEIGHT,
+            self.addon_box,
         )
         self._add_panel_tab(tab, "modules", "Modules")
         # The first reading, taken once the widgets it writes into exist. One
