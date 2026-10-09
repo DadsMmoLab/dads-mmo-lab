@@ -1271,13 +1271,15 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
 def failed_start_after_laying(
     tmp_path: Path, installers: Path
 ) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]]]:
-    rec, server_dir, said, seen, _error = failed_start_after_laying_with_error(tmp_path, installers)
+    rec, server_dir, said, seen, _error, _made = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
     return rec, server_dir, said, seen
 
 
 def failed_start_after_laying_with_error(
     tmp_path: Path, installers: Path
-) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]], str]:
+) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]], str, AzerothCoreInstaller]:
     """An update whose new checkout changes one script and adds one; the new world never comes up.
 
     The old world is stopped, the new scripts are laid, the new build fails its ready
@@ -1309,7 +1311,7 @@ def failed_start_after_laying_with_error(
     with pytest.raises(InstallerError) as raised:
         for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
             said.append(line)
-    return rec, server_dir, said, seen, str(raised.value)
+    return rec, server_dir, said, seen, str(raised.value), made
 
 
 def test_a_failed_start_after_laying_puts_the_old_scripts_back_with_the_servers_down(
@@ -1742,7 +1744,9 @@ def test_a_rollback_that_cannot_lay_the_old_scripts_leaves_the_old_build_stopped
 
     monkeypatch.setattr(scriptdeploy, "_publish", fourth_script_fails)
 
-    _rec, server_dir, said, seen, error = failed_start_after_laying_with_error(tmp_path, installers)
+    _rec, server_dir, said, seen, error, made = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
 
     rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
     back = next(line for line in said if "back on their old commits, but" in line)
@@ -1753,6 +1757,14 @@ def test_a_rollback_that_cannot_lay_the_old_scripts_leaves_the_old_build_stopped
     assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA), ("stop", NEW_LUA)], seen
     assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
     assert "STOPPED" in error and rebuild in error, error
+    # A later Start is refused too, not only this rollback's own start...
+    assert made.start_refusal(server_dir) == native.SCRIPTS_NOT_BACK_REFUSAL
+    # ...until a Rebuild, once the disk works again, lays the old set from the sources.
+    monkeypatch.setattr(scriptdeploy, "_publish", real)
+    list(made.rebuild(InstallOptions(server_dir=server_dir)))
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not (server_dir / LUA_DEST / "extra.lua").exists()
+    assert made.start_refusal(server_dir) is None
 
 
 @pytest.mark.parametrize(
@@ -1778,7 +1790,7 @@ def test_a_rollback_whose_re_lay_raises_a_plain_error_also_leaves_the_old_build_
 
     monkeypatch.setattr(scriptdeploy, "lay", third_lay_fails)
 
-    _rec, server_dir, _said, seen, error = failed_start_after_laying_with_error(
+    _rec, server_dir, _said, seen, error, _made = failed_start_after_laying_with_error(
         tmp_path, installers
     )
 

@@ -2666,6 +2666,22 @@ it, and the Rebuild press is not refused by it. Only the sentence differs, becau
 tags are mixed" is false here -- every one names the new build."""
 
 
+SCRIPTS_NOT_BACK = "scripts"
+"""`START_REFUSED_FILE`'s `why` when a rollback could not lay the old Lua scripts again (T562)."""
+
+SCRIPTS_NOT_BACK_REFUSAL = (
+    "This server's Lua scripts are not the ones its build was made with: an update or rebuild "
+    "laid the new ones, and the old ones could not be put back. A Start would run the old "
+    "build on them, so it must be rebuilt first: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` says `scripts` (T562).
+
+The record and the clearing are the mixed tags' own: only a Rebuild that succeeds removes
+it (it lays the scripts from the sources the folder is on), and the Rebuild press is not
+refused by it."""
+
+
 def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
     """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
 
@@ -2687,7 +2703,11 @@ def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | N
         why = json.loads(text).get("why")
     except (ValueError, AttributeError):
         why = None
-    return UNTESTED_BUILD_REFUSAL if why == UNTESTED_BUILD else REBUILD_OWED_REFUSAL
+    if why == UNTESTED_BUILD:
+        return UNTESTED_BUILD_REFUSAL
+    if why == SCRIPTS_NOT_BACK:
+        return SCRIPTS_NOT_BACK_REFUSAL
+    return REBUILD_OWED_REFUSAL
 
 
 def owe_start(server_dir: Path, *, why: str = "rebuild") -> str:
@@ -9127,6 +9147,11 @@ class StagedInstaller:
                     said = [source_not_back(s.repo, dest, old, why) for s, dest, old, why in failed]
                     if scripts_problem:
                         said.append(scripts_not_back_sentence(scripts_problem))
+                        # Durable, like a source that did not go back: a later Start must
+                        # not run the old build on the new scripts either.
+                        warned = owe_start(server_dir, why=SCRIPTS_NOT_BACK)
+                        if warned:
+                            yield warned
                     raise LeaveStopped(" ".join([*said, copy_problem]).strip())
                 if copy_problem:
                     raise LeaveStopped(copy_problem)
