@@ -202,6 +202,32 @@ def test_sql_step_needs_exactly_one_body() -> None:
             parse_manifest({**README_EXAMPLE, "sql": [{"db": "world", **body}]})
 
 
+def test_a_migration_module_rides_only_on_one_direct_file() -> None:
+    """T596: `migration_module` records a file in the server's own `migrations` table.
+
+    A ledger row is ONE file's hash, so the step must name one file this app runs
+    itself: not a glob (which file would the row be for?), not an inline statement
+    (no file, no hash the server's updater could ever match), not a `then` chain
+    (several files, one row) and not a `db-import` step (the server's updater would
+    write its own row).
+    """
+    step = {"db": "characters", "path": "data/sql/character/a.sql", "migration_module": "pkg"}
+    ok = parse_manifest({**README_EXAMPLE, "sql": [step]})
+    assert ok.sql[0].migration_module == "pkg"
+    assert parse_manifest(README_EXAMPLE).sql[0].migration_module is None
+    for bad in (
+        {**step, "path": "data/sql/character/*.sql"},
+        {"db": "world", "statement": "UPDATE x SET y = 1", "migration_module": "pkg"},
+        {**step, "then": ["b.sql"]},
+        {**step, "applied_by": "db-import"},
+        {**step, "migration_module": ""},
+        {**step, "migration_module": "a'b"},
+        {**step, "precondition": _ROSTER_PRECONDITION},
+    ):
+        with pytest.raises(ValidationError):
+            parse_manifest({**README_EXAMPLE, "sql": [bad]})
+
+
 _ROSTER_PRECONDITION: dict[str, Any] = {
     "db": "playerbots",
     "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",

@@ -16,6 +16,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
+- On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
+- Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
@@ -23,6 +25,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
 - Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
 - A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
+- On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
 
 ### Changed
 

@@ -621,7 +621,7 @@
     },
     "SqlStep": {
       "additionalProperties": false,
-      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.\n\n`precondition` and `verify` are T63's two halves of one problem: a direct\nstep whose ORDER cannot be satisfied inside a single press. `mod-city-bots`\nimports its 400-citizen roster into `acore_playerbots`, and that file writes\n`playerbots_account_type` \u2014 a table mod-playerbots creates on the world\nserver's FIRST start, which is necessarily after the rebuild this install\nonly reports. So the step can be right and still be too early, and the two\nhonest answers to that are *say so and do nothing* and *prove it worked*:\n\n* `precondition` \u2014 asked before the file is opened. No row (or a database\n  that cannot be asked at all, which is what a schema that does not exist\n  yet looks like) means the step is SKIPPED with `missing` in the report and\n  not one row written. Install again after the missing thing exists; the\n  import is idempotent by construction (the roster file drops and recreates\n  its own table), so a repeat is a repair.\n* `verify` \u2014 asked after, once per entry, and each entry says its own\n  sentence. No row RAISES: the file ran, so \"skipped\" would be a lie, and a\n  module reported installed whose roster is half there is exactly the defect\n  wow-manage's `city_bots_import_roster` verified 400/400 to catch.\n\nBoth are `direct`-only. A `db-import` step is handed to another program on a\nlater boot and nothing here is in a position to check either end of it, so\ndeclaring one there would be a field nothing reads.",
+      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.\n\n`precondition` and `verify` are T63's two halves of one problem: a direct\nstep whose ORDER cannot be satisfied inside a single press. `mod-city-bots`\nimports its 400-citizen roster into `acore_playerbots`, and that file writes\n`playerbots_account_type` \u2014 a table mod-playerbots creates on the world\nserver's FIRST start, which is necessarily after the rebuild this install\nonly reports. So the step can be right and still be too early, and the two\nhonest answers to that are *say so and do nothing* and *prove it worked*:\n\n* `precondition` \u2014 asked before the file is opened. No row (or a database\n  that cannot be asked at all, which is what a schema that does not exist\n  yet looks like) means the step is SKIPPED with `missing` in the report and\n  not one row written. Install again after the missing thing exists; the\n  import is idempotent by construction (the roster file drops and recreates\n  its own table), so a repeat is a repair.\n* `verify` \u2014 asked after, once per entry, and each entry says its own\n  sentence. No row RAISES: the file ran, so \"skipped\" would be a lie, and a\n  module reported installed whose roster is half there is exactly the defect\n  wow-manage's `city_bots_import_roster` verified 400/400 to catch.\n\nBoth are `direct`-only. A `db-import` step is handed to another program on a\nlater boot and nothing here is in a position to check either end of it, so\ndeclaring one there would be a field nothing reads.\n\n`migration_module` (T596) is for a server whose own updater keeps a\n`migrations(Name, Module, Hash, AppliedAt)` table in each database (the\nTortoise core, `AutoUpdater.cpp:135-170`). The app runs the file itself and\nwrites the row the updater would have written, so neither runs it twice; a\nfile whose hash the table already holds under that Module is not sent again.",
       "properties": {
         "applied_by": {
           "default": "direct",
@@ -642,6 +642,20 @@
           ],
           "title": "Db",
           "type": "string"
+        },
+        "migration_module": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]{1,255}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Record the file in the server's own `migrations` table under this Module name and skip it when that table already holds its hash. One direct file only.",
+          "title": "Migration Module"
         },
         "note": {
           "anyOf": [

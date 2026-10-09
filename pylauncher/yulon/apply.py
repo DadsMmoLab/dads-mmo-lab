@@ -717,6 +717,17 @@ def _kept(cause: BaseException, message: str) -> ApplyError:
     return refusal
 
 
+class CompletionRefused(ApplyRefusal):
+    """A `Completer` will not finish this manifest from what landed (T596).
+
+    Its sentence says why and nothing more: what became of the folder is the
+    applier's to add, because only the applier knows whether there was one
+    before this press. On a first install the folder is taken back and the
+    sentence ends "Nothing was changed."; over a folder that was already there,
+    it says the folder now holds what was fetched.
+    """
+
+
 class PutBackRefused(ApplyRefusal):
     """`Applier.put_back()` refused before it changed anything (T557).
 
@@ -1880,6 +1891,24 @@ class SqlRunner(Protocol):
     def run_statement(self, db: Db, statement: str) -> None: ...
 
 
+class SqlBackup(Protocol):
+    """A backup taken before an item's database changes, and its name afterwards (T596, E2).
+
+    `before()` is asked once per press, after the database is up and before the
+    first statement, with the databases the press will write. It returns the
+    report's line naming what it wrote, or None when this item takes no backup
+    (a shipped mod with an undo of its own). Raising refuses the press with
+    nothing sent.
+
+    `named()` is asked by Remove, which keeps an item's database changes: the
+    sentence naming the backup taken before them, or None.
+    """
+
+    def before(self, manifest: Manifest, dbs: tuple[Db, ...]) -> str | None: ...
+
+    def named(self, manifest: Manifest) -> str | None: ...
+
+
 class DbcCopier(Protocol):
     """Copy DBC files from a host directory into the server's `data/dbc/` volume."""
 
@@ -1988,7 +2017,14 @@ class DockerSql:
     def run_statement(self, db: Db, statement: str) -> None:
         # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
         # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
-        proc = self._mysql(db, statement=statement)
+        #
+        # UTF-8 and told to the client (T596 review, 2026-10-09). The script goes
+        # as BYTES (see `_mysql()`), so it reaches mysql as written on every
+        # platform, and `--default-character-set=utf8mb4` makes the client read
+        # those bytes as what they are: `run_file()` passes no flag and trusts the
+        # client's default, which a MariaDB client in a container with no locale
+        # does not make UTF-8.
+        proc = self._mysql(db, statement=statement, extra=_STATEMENT_CHARSET)
         _check_sql(proc, f"inline → {self._schema(db)}")
 
     def query(self, db: Db, statement: str) -> str:
@@ -2047,24 +2083,42 @@ class DockerSql:
         """
         argv = self._argv(db, extra=extra)
         try:
-            return subprocess.run(
+            # BYTES in and out, never `text=True` (T596 review, 2026-10-09). Text mode
+            # encodes stdin with the LOCALE codec and turns `\n` into `\r\n` on
+            # Windows: an accent arrived as a cp1252 byte, a line break inside a
+            # string literal was stored as CRLF, a letter outside cp1252 raised
+            # `UnicodeEncodeError` -- and a migrations ledger row recorded the SHA1 of
+            # the file's own bytes over content that was different. `run_file()` has
+            # always sent bytes; this is the same road for a string.
+            script = None if statement is None else statement.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            # Raised before any process exists, so it IS proof nothing was sent.
+            raise SqlNotSent(
+                f"the SQL cannot be written as UTF-8 ({exc.reason} at character {exc.start}), "
+                "so none of it was sent"
+            ) from exc
+        try:
+            raw = subprocess.run(
                 argv,
                 stdin=stdin,
-                input=statement,
+                input=script,
                 capture_output=True,
-                text=True,
-                # Not the default strict decode. `text=True` alone raises
-                # UnicodeDecodeError out of here on any byte mysql emits that is
-                # not UTF-8 -- a binary column selected as text, or a latin1
-                # error message -- and that type is neither `ApplyError` nor the
-                # `AccountError` that `accounts.create_account` documents as the
-                # only one a caller has to handle. `runner.py` already decodes
-                # this way. Found by a live query against a real server
-                # (2026-08-23).
-                errors="replace",
                 check=False,
                 env=runner.child_env(self._env()),
                 creationflags=runner.creationflags(),
+            )
+            # Decoded here, as UTF-8 and not strictly. Text mode raised
+            # UnicodeDecodeError out of this method on any byte mysql emits that is
+            # not UTF-8 -- a binary column selected as text, or a latin1 error
+            # message -- and that type is neither `ApplyError` nor the `AccountError`
+            # that `accounts.create_account` documents as the only one a caller has
+            # to handle (found live, 2026-08-23). Universal newlines are kept, as
+            # text mode gave them: one `\n` per line whatever the platform wrote.
+            return subprocess.CompletedProcess(
+                raw.args,
+                raw.returncode,
+                _decoded(raw.stdout),
+                _decoded(raw.stderr),
             )
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a
@@ -2201,6 +2255,23 @@ class ComposeDbc:
                     f"could not copy {path.name} into the server's data volume through "
                     f"{self.service}: {reason}"
                 )
+
+
+_STATEMENT_CHARSET = ("--default-character-set=utf8mb4",)
+"""The client flag a script sent over stdin carries: its bytes are UTF-8, so say so."""
+
+
+def _decoded(output: bytes | str | None) -> str:
+    """What a `docker exec` wrote, as text: UTF-8, undecodable bytes replaced, `\\n` newlines.
+
+    Accepts a `str` as well because a caller that stubs `subprocess.run` (the tests of
+    this seam do) hands back what a text-mode run would have.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    return output.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
@@ -2367,6 +2438,8 @@ class _Log:
     client_left_behind: list[str] = field(default_factory=list)
     kept_folders: list[str] = field(default_factory=list)
     """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
+    kept_database: list[str] = field(default_factory=list)
+    """A Remove's line naming the backup taken before the database changes it kept (T596)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -2377,6 +2450,10 @@ class _Log:
     # T476. Set by `_check_exists()` when IT had to start the database alone:
     # `Applier._says_the_database_is_up()` then names it if the install stops early.
     database_started: bool = False
+    # T596. Set by `_sql()` just before it hands anything to the SQL runner:
+    # from then on a failed first install keeps its folder (and its record),
+    # because the database may hold part of what it sent.
+    sql_attempted: bool = False
 
 
 def take_back_file(
@@ -2969,8 +3046,12 @@ class Applier:
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
+        sql_backup: SqlBackup | None = None,
     ) -> None:
         self.server_dir = server_dir
+        # T596 (E2): the backup an outside item's SQL is preceded by. Absent, no
+        # press takes one, which is every applier but Tortoise's.
+        self.sql_backup = sql_backup
         # T181: the player's own client folder(s) when `client_dir` is a
         # ready-to-play client built from one. A receipt that names a file in
         # one of them is taken back from `client_dir` instead (`rebased()`).
@@ -3311,6 +3392,9 @@ class Applier:
         # before `_record_client_copies()` wrote the new ones (round 1 review).
         previous_copies = read_client_copies(clone, item_id=manifest.id)
         log.previous_copies = previous_copies
+        # T596: nothing at the path before this press, so a completion refused
+        # below can take the folder back and "Nothing was changed" stays true.
+        first = not os.path.lexists(clone)
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -3457,24 +3541,37 @@ class Applier:
                     include.touch()
                     log.done.append("touch include.sh")
         if complete is not None:
-            manifest = self._completed(manifest, clone, complete)
-        self._refuse_checkout_links(manifest, clone, "install", vals)
-        self._refuse_a_clash(manifest, clone)
-        self._refuse_links(manifest, clone)
-        self._deploy(manifest, clone, log)
-        self._folders(manifest, log)
-        self._patches(manifest, clone, vals, "install", log)
-        # Both SQL passes are refused as one, BEFORE either runs: the guard's
-        # own sentence says no rows were written, and after the install-time
-        # pass that would be false of the configure-time one.
-        if first_configure_sql:
-            self._refuse_direct_sql_into_a_running_world(manifest, "configure")
+            try:
+                manifest = self._completed(manifest, clone, complete)
+            except BaseException as exc:
+                self._take_back_a_first_install(clone, first, exc, completing=True)
+                raise
         sent = log.sql_sent
-        if restore is None:
-            self._sql(manifest, clone, vals, "install", log, undo=undo)
-        elif restore.sql:
-            # D5: nothing is undone in the database, and the report says so.
-            log.skipped.append(PUT_BACK_KEPT_SQL)
+        try:
+            self._refuse_checkout_links(manifest, clone, "install", vals)
+            self._refuse_a_clash(manifest, clone)
+            self._refuse_links(manifest, clone)
+            self._deploy(manifest, clone, log)
+            self._folders(manifest, log)
+            self._patches(manifest, clone, vals, "install", log)
+            # Both SQL passes are refused as one, BEFORE either runs: the guard's
+            # own sentence says no rows were written, and after the install-time
+            # pass that would be false of the configure-time one.
+            if first_configure_sql:
+                self._refuse_direct_sql_into_a_running_world(manifest, "configure")
+            if restore is None:
+                self._sql(manifest, clone, vals, "install", log, undo=undo)
+            elif restore.sql:
+                # D5: nothing is undone in the database, and the report says so.
+                log.skipped.append(PUT_BACK_KEPT_SQL)
+        except BaseException as exc:
+            # T596 (Codex review): a FIRST install from a link or a folder that is
+            # refused before any SQL was sent -- a link in the checkout, a clash,
+            # the running-world guard, an unreadable ledger, a failed backup --
+            # takes its new folder back, so the next press starts clean.
+            if first and complete is not None and not log.sql_attempted:
+                self._take_back_a_first_install(clone, first, exc, completing=False)
+            raise
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "install", log)
             if moving:
@@ -4408,6 +4505,14 @@ class Applier:
         self._sql(manifest, clone, vals, "remove", log)
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "remove", log)
+        if self.sql_backup is not None and any(
+            step.when == "install" and step.applied_by == "direct" for step in manifest.sql
+        ):
+            # T596 (owner, 2026-10-08): Remove keeps an outside item's database
+            # changes and names the backup taken before them; there is no undo.
+            named = self.sql_backup.named(manifest)
+            if named:
+                log.kept_database.append(named)
         if settings_only(manifest):
             # T380: the settings are back, so the receipt that said they were
             # changed goes, and a removed mark (T392) is left in its place so
@@ -4537,6 +4642,38 @@ class Applier:
                 f"the item that was installed there. Nothing further was changed."
             )
         return finished
+
+    def _take_back_a_first_install(
+        self, clone: Path, first: bool, exc: BaseException, *, completing: bool
+    ) -> None:
+        """Take a first install's folder back, and say so in the refusal (T596).
+
+        Only a FIRST install's: a folder that was there before this press held
+        the player's earlier install of the same item, and deleting it would be a
+        Remove nobody pressed. Its claim and receipts went with the folder, so
+        nothing else of this press is left behind. A `CompletionRefused` sentence
+        is finished here ("Nothing was changed."); any other refusal gets a
+        clause saying the folder went back.
+        """
+        rel = _rel(self.server_dir, clone)
+        ending = f"{rel} now holds what was just fetched; nothing else was changed."
+        if not completing:
+            ending = f"{rel}, which this press had just made, was taken back."
+        if first and os.path.lexists(clone):
+            try:
+                rmtree.remove_tree(clone)
+                if completing:
+                    ending = "Nothing was changed."
+            except OSError as gone:
+                ending = (
+                    f"{rel}, which this press made, could not be removed ({gone}); delete it "
+                    "before trying again."
+                )
+                logger.warning(f"could not take back {clone} after a refused completion: {gone}")
+        elif first and completing:
+            ending = "Nothing was changed."
+        if isinstance(exc, CompletionRefused) or (not completing and isinstance(exc, ApplyError)):
+            exc.args = (f"{exc} {ending}", *exc.args[1:])
 
     # -- the answers -------------------------------------------------------
 
@@ -5323,6 +5460,7 @@ class Applier:
         first.
         """
         plan = self._plan_sql(manifest, clone, vals, when)
+        migrations = self._plan_migrations(manifest, clone, vals, when)
         if self._refuse_direct_sql_into_a_running_world(manifest, when):
             log.world_stopped = True
         # Second, and never first: a press against a live world is refused above
@@ -5351,11 +5489,19 @@ class Applier:
             # than rows written under a live world.
             if self._refuse_direct_sql_into_a_running_world(manifest, when):
                 log.world_stopped = True
+        # T596. With the database up and before anything is sent: which ledgered
+        # files the server already has, then the backup of what is left to write.
+        ledgered = self._already_in_the_ledger(manifest, migrations)
+        if self._back_up_before_sql(manifest, when, ledgered, log):
+            # The backup can take minutes: the ledger is read again for what is
+            # sent (Codex review), so a row written meanwhile is not sent over.
+            ledgered = self._already_in_the_ledger(manifest, migrations)
         if (
             when in ("install", "remove")
             and reapplies_on_top(manifest)
             and not reapply_steps_problem(manifest)
         ):
+            log.sql_attempted = True
             self._run_relative(manifest, vals, when, undo, log)
             return
         for index, step in enumerate(manifest.sql):
@@ -5371,9 +5517,20 @@ class Applier:
             # neither of them asks — is this step's turn yet? Skipping here and
             # not inside `_run_sql()` keeps that function what it is (it writes),
             # and keeps the skip in the same list the user already reads.
+            if index in ledgered:
+                log.skipped.append(
+                    f"{_step_name(step)}: already applied — the database's own migrations "
+                    f"ledger holds these exact bytes under {step.migration_module} (or an "
+                    "earlier file of this press has them), so it was not sent again"
+                )
+                continue
             if not self._precondition_met(step, log):
                 continue
-            self._run_sql(step, clone, vals, log, plan.get(index))
+            log.sql_attempted = True
+            if index in migrations:
+                self._run_migration(step, migrations[index], log)
+            else:
+                self._run_sql(step, clone, vals, log, plan.get(index))
             log.sql_sent += 1
             self._verify_sql(manifest, step, log)
 
@@ -5626,6 +5783,211 @@ class Applier:
         if refusals:
             raise ApplyRefusal(f"{manifest.id}: nothing was run. " + " ".join(refusals))
         return plan
+
+    def _plan_migrations(
+        self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When
+    ) -> dict[int, _Migration]:
+        """Read every ledgered file of this press, hash it and build what will be sent (T596).
+
+        Before the database is asked anything, like `_plan_sql()`: the bytes the
+        hash is taken of are the bytes sent, read once. A file that is missing
+        was already refused by `_plan_sql()`, which runs first.
+
+        The hash is the server's own: SHA1 of the file's bytes as upper-case hex
+        (`Util.cpp` `ByteArrayToHexStr`, `%02X`), the Name its stem
+        (`AutoUpdater.cpp` `path().stem()`). A file that can go inside one
+        transaction is sent with its row as ONE text, so the row exists exactly
+        when the file's statements do; one that cannot (DDL commits by itself, or
+        it is not UTF-8) runs alone and its row follows only if it ran.
+        """
+        if self.sql is None:
+            return {}
+        found: dict[int, _Migration] = {}
+        refusals: list[str] = []
+        for index, step in enumerate(manifest.sql):
+            if step.migration_module is None or step.when != when or step.path is None:
+                continue
+            name = _render(step.path, vals, "sql path")
+            path = clone / name
+            if not path.is_file():
+                continue
+            _look_again(clone, name)
+            data = path.read_bytes()
+            digest = hashlib.sha1(data).hexdigest().upper()
+            record = (
+                f"INSERT INTO `{MIGRATIONS_TABLE}` (`Name`, `Module`, `Hash`, `AppliedAt`) "
+                f"VALUES ({_sql_string(PurePosixPath(name).stem)}, "
+                f"{_sql_string(step.migration_module)}, {_sql_string(digest)}, NOW());"
+            )
+            try:
+                text = data.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                refusals.append(
+                    f"{name}: not UTF-8 text ({exc.reason} at byte {exc.start}), and Yu'lon "
+                    "sends a package's SQL as text"
+                )
+                continue
+            body = text if text.endswith("\n") else text + "\n"
+            alone = transaction_refusal(name, text)
+            if alone:
+                # Still ONE script: `mysql` stops at the first error, so the row
+                # is written only when every statement of the file succeeded.
+                found[index] = _Migration(
+                    name, digest, record, MIGRATIONS_TABLE_DDL + body + record + "\n", alone
+                )
+                continue
+            found[index] = _Migration(
+                name,
+                digest,
+                record,
+                MIGRATIONS_TABLE_DDL + "START TRANSACTION;\n" + body + record + "\nCOMMIT;\n",
+                "",
+            )
+        if refusals:
+            raise ApplyRefusal(f"{manifest.id}: nothing was run. " + " ".join(refusals))
+        return found
+
+    def _already_in_the_ledger(
+        self, manifest: Manifest, migrations: Mapping[int, _Migration]
+    ) -> frozenset[int]:
+        """The ledgered steps whose file the database's `migrations` table already holds (T596).
+
+        Asked per database and Module, once, before the first statement of the
+        press. Compared exactly, as the server's updater compares `Module:Hash`
+        in a C++ map: a row in another case or under another Module is a
+        different migration to it, so it is one here too.
+
+        No table at all is a real answer -- a world that has never started, whose
+        updater makes the table on its first run -- and means nothing is applied.
+        Anything that cannot be READ refuses the press: "could not ask" sent as
+        "nothing applied" is how a file runs twice.
+        """
+        if not migrations:
+            return frozenset()
+        reader = self.sql if isinstance(self.sql, SqlReader) else None
+        held: dict[tuple[Db, str], set[str]] = {}
+        done: set[int] = set()
+        for index, migration in migrations.items():
+            step = manifest.sql[index]
+            assert step.migration_module is not None
+            key = (step.db, step.migration_module)
+            if key not in held:
+                held[key] = self._ledger_hashes(manifest, reader, *key)
+            if migration.digest in held[key]:
+                done.add(index)
+            # Two files with the same bytes are ONE migration to the updater
+            # (its map is keyed `Module:Hash`): the first is sent, the rest are
+            # done once it is (Codex review). `migrations` is in step order.
+            held[key].add(migration.digest)
+        return frozenset(done)
+
+    def _ledger_hashes(
+        self, manifest: Manifest, reader: SqlReader | None, db: Db, module: str
+    ) -> set[str]:
+        why = "this install has no database reader"
+        if reader is not None:
+            try:
+                table = reader.query(
+                    db,
+                    "SELECT COUNT(*) FROM information_schema.TABLES WHERE "
+                    f"TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{MIGRATIONS_TABLE}'",
+                )
+                if table.strip() in ("", "0"):
+                    return set()
+                rows = reader.query(
+                    db,
+                    # BINARY: the column is `utf8_general_ci`, and the updater's
+                    # `Module:Hash` key is compared case-sensitively (Codex review).
+                    f"SELECT Hash FROM `{MIGRATIONS_TABLE}` "
+                    f"WHERE BINARY Module = {_sql_string(module)}",
+                )
+                return {line.strip() for line in rows.splitlines() if line.strip()}
+            except Exception as exc:  # noqa: BLE001 - every failure is "could not read"
+                why = f"{type(exc).__name__}: {exc}"
+        raise ApplyRefusal(
+            f"{manifest.id}: Yu'lon could not read the {db} database's migrations ledger "
+            f"({why}), so it cannot tell which of this item's files the database already has. "
+            "No SQL was run and no rows were written."
+        )
+
+    def _back_up_before_sql(
+        self, manifest: Manifest, when: When, ledgered: Set[int], log: _Log
+    ) -> bool:
+        """E2 (T596): the backup of the databases this press will write, before the first write.
+
+        Only those databases (owner, 2026-10-08), so a press that sends nothing
+        -- every file already in the ledger -- takes none. A backup that fails
+        refuses the press with nothing sent. It can take minutes, so the
+        running-world guard is asked again after it, as after the database start.
+        Returns whether a backup was taken, so the caller reads the ledger again.
+        """
+        if self.sql_backup is None or self.sql is None:
+            return False
+        dbs = tuple(
+            sorted(
+                {
+                    step.db
+                    for index, step in enumerate(manifest.sql)
+                    if step.when == when and step.applied_by == "direct" and index not in ledgered
+                }
+            )
+        )
+        if not dbs:
+            return False
+        try:
+            line = self.sql_backup.before(manifest, dbs)
+        except Exception as exc:  # noqa: BLE001 - any failure to back up is one answer here
+            refused = ApplyRefusal(
+                f"{manifest.id}: a backup of the {', '.join(dbs)} database could not be taken "
+                f"before its database changes, so none were sent. {exc}"
+            )
+            refused.detail = getattr(exc, "detail", "") or ""
+            raise refused from exc
+        if not line:
+            return False
+        log.done.append(line)
+        if self._refuse_direct_sql_into_a_running_world(manifest, when):
+            log.world_stopped = True
+        return True
+
+    def _run_migration(self, step: SqlStep, migration: _Migration, log: _Log) -> None:
+        """Send a ledgered file and its row as ONE script: in a transaction when it can be.
+
+        Either way the row is the script's last statement and `mysql` stops at the
+        first error, so the row exists only when the whole file ran. A file that
+        cannot be one transaction (DDL commits by itself) can still be left part
+        applied by a failure, and the error says so.
+        """
+        assert self.sql is not None
+        where = f"recorded in its migrations ledger as {step.migration_module}"
+        try:
+            try:
+                self.sql.run_statement(step.db, migration.text)
+            except ApplyError:
+                raise
+            except (OSError, ValueError) as exc:
+                # An encode error or a broken pipe is not an `ApplyError`, so it used to
+                # skip the words below and the caller's handling of one (review,
+                # 2026-10-09). `UnicodeError` is a `ValueError`.
+                raise ApplyError(f"{migration.name}: sending it failed ({exc})") from exc
+        except ApplyError as exc:
+            if migration.alone:
+                exc.args = (
+                    f"{exc}. {migration.name} could not run inside one transaction "
+                    f"({migration.alone}), so the statements before the failing one may have "
+                    "stayed applied, and its row in the migrations ledger was not written: "
+                    "check the database before installing again, which sends the whole file "
+                    "again.",
+                    *exc.args[1:],
+                )
+            raise
+        if migration.alone:
+            log.done.append(
+                f"sql {migration.name} → {step.db}, then {where} (not one transaction: "
+                f"{migration.alone})"
+            )
+        else:
+            log.done.append(f"sql {migration.name} → {step.db} ({where})")
 
     def _run_transaction(
         self, step: SqlStep, planned: tuple[tuple[str, ...], str], log: _Log
@@ -6823,7 +7185,12 @@ class Applier:
             ),
             pending_sql=tuple(log.pending_sql),
             left_behind=(
-                _left_behind(manifest, (*log.client_left_behind, *log.kept_folders))
+                # The backup's name last, after the database changes it was taken
+                # before (T596 live check: first, it read as the thing left behind).
+                (
+                    *_left_behind(manifest, (*log.client_left_behind, *log.kept_folders)),
+                    *log.kept_database,
+                )
                 if action == "remove"
                 else ()
             ),
@@ -6892,6 +7259,48 @@ def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
         return None
     matches = sorted(clone.glob(path)) if _is_glob(path) else [clone / path]
     return tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
+
+
+MIGRATIONS_TABLE = "migrations"
+"""The Tortoise core's per-database ledger, `AutoUpdater::MigrationTable` (T596)."""
+
+MIGRATIONS_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS `{MIGRATIONS_TABLE}` ("
+    "`Id` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, "
+    "`Name` VARCHAR(255) NOT NULL DEFAULT '0' COLLATE 'utf8_general_ci', "
+    "`Module` VARCHAR(255) NOT NULL DEFAULT '' COLLATE 'utf8_general_ci', "
+    "`Hash` VARCHAR(128) NOT NULL DEFAULT '0' COLLATE 'utf8_general_ci', "
+    "`AppliedAt` DATETIME NOT NULL, "
+    "PRIMARY KEY(`Id`) USING BTREE"
+    ") COLLATE = 'utf8_general_ci' ENGINE = InnoDB;\n"
+)
+"""The updater's own `CREATE TABLE IF NOT EXISTS`, column for column (`AutoUpdater.cpp:135-145`).
+
+Sent before a ledgered file so a world that has never started -- whose updater
+has not yet made the table -- still gets its row, in the table the updater will
+then find and keep.
+"""
+
+
+@dataclass(frozen=True)
+class _Migration:
+    """One ledgered file, read and hashed before the database is asked anything (T596)."""
+
+    name: str
+    """The clone-relative path, as the report names it."""
+    digest: str
+    """SHA1 of the bytes, upper-case hex: the server updater's own `Hash`."""
+    record: str
+    """The `INSERT` of its ledger row."""
+    text: str
+    """The table's DDL, the file and its row as ONE script: one transaction when it can be."""
+    alone: str
+    """Why it cannot be one transaction; empty when it can."""
+
+
+def _sql_string(value: str) -> str:
+    """`value` as a MySQL string literal: quotes doubled, backslashes escaped."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 _TRANSACTION_SAFE = frozenset({"UPDATE", "INSERT", "REPLACE", "DELETE", "SELECT", "SET"})

@@ -10,6 +10,7 @@ particular module does; that is all in `manifests/wow-wotlk/` (§3).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
@@ -163,6 +164,11 @@ def complete(manifest: Manifest, clone: Path) -> Manifest:
     return completed
 
 
+def _recorded(manifest: Manifest) -> bool:
+    """Whether the user layer already holds a record of this item (T596)."""
+    return module_source.recorded(user_manifests_dir(), manifest)
+
+
 def forget(manifest: Manifest, game: str = GAME) -> bool:
     """Drop `manifest` from `game`'s user layer; `True` if there was one to drop.
 
@@ -212,9 +218,28 @@ def install_custom(applier: Applier) -> CustomInstall:
 
     def install(manifest: Manifest, folder: Path | None, *, replacing: bool = False) -> ApplyReport:
         source = FolderSource(folder, copy_folder) if folder is not None else None
-        return applier.install(
-            manifest, None, folder=source, complete=complete, replacing=replacing
-        )
+        first = not os.path.lexists(applier.clone_dir(manifest))
+        recorded = _recorded(manifest)
+        persisted: list[Manifest] = []
+
+        def finish(derived: Manifest, clone: Path) -> Manifest:
+            persisted.append(complete(derived, clone))
+            return persisted[-1]
+
+        try:
+            return applier.install(
+                manifest, None, folder=source, complete=finish, replacing=replacing
+            )
+        except BaseException:
+            # T596: the applier takes a refused FIRST install's folder back, so the
+            # record THIS press's completion wrote goes too -- never one that was
+            # there before it (Codex review): a row with nothing behind it would
+            # offer an Install of a folder that is gone.
+            if persisted and first and not recorded:
+                if not os.path.lexists(applier.clone_dir(manifest)):
+                    # Its own game's layer: WoW Unbound's records are its own (T554).
+                    forget(manifest, game=manifest.game)
+            raise
 
     return install
 
