@@ -1014,13 +1014,14 @@ def test_a_shipped_item_is_never_read_again_by_the_outside_hook(tmp_path: Path) 
     server, client = tmp_path / "server", tmp_path / "client"
     server.mkdir()
     applier = _tortoise_applier(
-        server, _Clone({"TortoiseBotsManager.toc": "## Interface: 11200\n"}), _Db(), client
+        server, _Clone({"TortoiseGMManager.toc": "## Interface: 11200\n"}), _Db(), client
     )
 
     def boom(manifest: Manifest, clone: Path) -> Manifest:
         raise AssertionError("a shipped item was read by the outside hook")
 
     applier.recomplete = boom
-    shipped = tortoise_modules.store().load("mod", "tortoise-bots-manager")
+    shipped = tortoise_modules.store().load("mod", "tortoise-gm-manager")
     assert shipped.origin is None and shipped.source is not None
     applier.install(shipped, None)
+    assert (server / "sql_scripts" / "clones" / "tortoise-gm-manager").is_dir()

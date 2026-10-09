@@ -69,10 +69,12 @@ from yulon.apply import (
     ApplyError,
     ApplyReport,
     Completer,
+    CompletionRefused,
     FolderSource,
     LastUpdate,
     SqlBackup,
     SqlRunner,
+    UncheckedApproval,
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
@@ -589,6 +591,46 @@ class GuardedApplier(Applier):
                 complete=self._recompleter_for(manifest),
             ),
             note,
+        )
+
+    def update(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        approved: UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        """`Applier.update()`, and a server module the new code makes unacceptable goes back (T596).
+
+        An outside item is read again once its clone is on the new commit
+        (`recomplete`). When that refuses -- a settings file with no `[Section]`,
+        one another module owns -- the checkout is already on the rejected commit,
+        and a Rebuild would compile it without the settings file it needs. So the
+        clone is put back on the commit it was on, through the update's own record,
+        and the refusal says so.
+        """
+        try:
+            return super().update(manifest, values, approved=approved)
+        except CompletionRefused as refused:
+            refused.args = (f"{refused} {self._put_back_a_refused_update(manifest)}".rstrip(),)
+            raise
+
+    def _put_back_a_refused_update(self, manifest: Manifest) -> str:
+        if manifest.type != "module" or manifest.origin is None:
+            return ""
+        last = self.last_update(manifest)
+        if last is None:
+            return ""
+        try:
+            self.put_back(manifest, last=last, automatic=True)
+        except (ApplyError, OSError) as exc:
+            return (
+                f"Yu'lon could not put it back on the version it was on ({exc}), so the next "
+                "rebuild would build the version that was just fetched."
+            )
+        return (
+            "Yu'lon put it back on the version it was on, so the next rebuild builds that one, "
+            "and the version it refused is not offered again."
         )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
