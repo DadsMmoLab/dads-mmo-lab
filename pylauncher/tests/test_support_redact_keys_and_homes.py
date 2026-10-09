@@ -126,6 +126,32 @@ def test_a_bare_80_digit_hex_is_a_session_key_and_other_digests_are_not() -> Non
     assert key not in out and out.count(MASK) == 1, out
 
 
+def test_a_digest_header_loses_every_parameter() -> None:
+    response = _hex(16)
+    for name in ("Authorization", "Proxy-Authorization"):
+        line = f'{name}: Digest username="bob", nonce="{_hex(8)}", response="{response}"'
+        out = Redactor.build([]).redact(line)
+        assert response not in out and out == f"{name}: Digest {MASK}", out
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "Authorization: Bearer ***{s}",
+        "api_key=***{s}",
+        "password: ***{s}",
+        "Ra.Password = ***{s}",
+        "cookie: sid=***{s}; Path=/",
+        "token: ***{s}",
+        ".account create BOB ***{s}",
+    ],
+)
+def test_a_secret_that_merely_starts_with_the_mask_is_still_a_secret(template: str) -> None:
+    secret = "Zq" + secrets.token_hex(8) + "Wv"
+    out = Redactor.build([]).redact(template.format(s=secret))
+    assert secret not in out, out
+
+
 def test_a_cookie_line_keeps_its_names_and_attributes_and_loses_every_value() -> None:
     secret = "Zq" + secrets.token_hex(10) + "Wv"
     out = Redactor.build([]).redact(f"Set-Cookie: sid={secret}; Path=/x; Expires=Fri; Secure")

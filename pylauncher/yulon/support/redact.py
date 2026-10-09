@@ -301,6 +301,11 @@ _SQL_HEX = re.compile(r"(?i)(?P<pre>\bX['\"]|['\"])[0-9a-f]{32,}(?P<post>['\"])|
 """Inside a realmd/auth `UPDATE`/`INSERT` line: the SRP and session columns by name, and any
 quoted or `0x` hex blob of 32 digits or more (a SHA-1 hash, a session key, `v`, `s`) by shape."""
 
+_AUTH_DIGEST = re.compile(
+    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*[\"']?"
+    r"digest[ \t]+)(?P<value>[^\r\n]+)"
+)
+"""A Digest header is a list (`username=..., nonce=..., response=...`): all of it goes."""
 _AUTH_HEADER = re.compile(
     r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*[\"']?"
     r"(?:(?:basic|bearer|digest|token|negotiate)[ \t]+)?)(?P<value>[^\s\"',;]+)"
@@ -364,6 +369,7 @@ _COOKIE_ATTRIBUTES = frozenset(
 the names and the attributes (`Path`, `Expires`, ...) stay so the line still reads."""
 
 _HEAD_VALUE = (
+    _AUTH_DIGEST,
     _AUTH_HEADER,
     _BEARER,
     _BASIC,
@@ -381,8 +387,16 @@ _HEAD_VALUE = (
 )
 
 
+def _is_masked(value: str) -> bool:
+    """`value` is what a mask leaves: `***`, with at most the closing brackets that were
+    after the secret (`"password": "x"}` leaves `***}`). A secret that merely STARTS with
+    `***` is not masked: `***hunter2` is a password."""
+    bare = value.strip("\"'\\")
+    return bare == MASK or (bare.startswith(MASK) and not bare[len(MASK) :].strip("}])>"))
+
+
 def _mask_head_value(match: re.Match[str]) -> str:
-    if match.group("value").strip("\"'").startswith(MASK):
+    if _is_masked(match.group("value")):
         return match.group(0)  # already masked: a second pass must change nothing
     return match.group("head") + MASK
 
@@ -390,7 +404,7 @@ def _mask_head_value(match: re.Match[str]) -> str:
 def _mask_cookie_pair(match: re.Match[str]) -> str:
     name = match.group("head").rstrip("=").lstrip(";, \t").lower()
     value = match.group("value")
-    if name in _COOKIE_ATTRIBUTES or not value.strip() or value.strip().startswith(MASK):
+    if name in _COOKIE_ATTRIBUTES or not value.strip() or _is_masked(value.strip()):
         return match.group(0)
     return match.group("head") + MASK
 
@@ -402,7 +416,7 @@ def _mask_cookie(match: re.Match[str]) -> str:
 def _mask_keyed(match: re.Match[str]) -> str:
     value = match.group("value")
     bare = value.strip("\"'\\")
-    if not bare or bare.startswith(MASK):
+    if not bare or _is_masked(bare):
         return match.group(0)
     if match.group("strong") is None and len(bare) < WEAK_VALUE_FLOOR:
         return match.group(0)
@@ -455,7 +469,7 @@ def _mask_setting(match: re.Match[str], short: frozenset[str] = frozenset()) -> 
     """Mask the value, unless it is empty or MySQL's `YES`/`NO` -- and that is not a
     password this machine actually uses (`short`: the known values under `TOKEN_FLOOR`)."""
     value = match.group("value")
-    if value in ('""', "''") or value.startswith(MASK):
+    if value in ('""', "''") or _is_masked(value):
         return match.group(0)
     if value.upper() in _NOT_A_PASSWORD and value not in short:
         return match.group(0)
