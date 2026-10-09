@@ -768,3 +768,28 @@ def test_sql_stops_when_the_hold_is_lost_between_statements(tmp_path: Path) -> N
         applier.install(parse_manifest(STACKABLES))
     assert len(sql.statements) == 1 and sql.files == [], "SQL went on after the hold was lost"
     assert "stopped" in str(refused.value) and "no more SQL was sent" in str(refused.value)
+
+
+def test_a_relative_sql_text_is_not_sent_once_the_hold_is_lost(tmp_path: Path) -> None:
+    """Codex review: a mob mod's one relative statement returns before the loop's check, and
+    it marks its record pending first. Neither happens under a lost hold.
+
+    Mutation this catches: the check missing from `_run_relative()`.
+    """
+    from tests.test_mob_multiplier_rerun import _all, _Db, _mob
+    from yulon import module_answers
+
+    lost = threading.Event()
+    lost.set()
+
+    @contextmanager
+    def hold(press: str) -> Iterator[docker.ClaimHeld]:
+        yield docker.ClaimHeld("yulon-busy-x", lost)
+
+    db = _Db()
+    applier = Applier(tmp_path, sql=db, world_running=lambda: False, hold_server=hold)
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(_mob(), _all("2"))
+    assert "no more SQL was sent" in str(refused.value)
+    assert db.texts == [], "a relative statement went out under a lost hold"
+    assert not (tmp_path / module_answers.ANSWERS_FILE).exists(), "the record was marked pending"

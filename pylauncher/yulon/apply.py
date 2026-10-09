@@ -6700,6 +6700,9 @@ class Applier:
         if self.sql is None:
             log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
             return
+        # T568 (Codex review): the relative text is a sent statement too, and a record is
+        # marked pending before it; a hold another Yu'lon's Stop anyway ended sends neither.
+        self._refuse_if_the_hold_was_lost()
         db, text = self._relative_text(manifest, when, vals, undo)
         after = (
             {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}
