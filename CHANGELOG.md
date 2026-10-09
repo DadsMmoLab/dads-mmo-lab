@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- A database password typed inside escaped or joined quotes no longer slips into a support zip.
 
 ### Changed
 

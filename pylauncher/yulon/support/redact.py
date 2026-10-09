@@ -345,8 +345,20 @@ _DASH_PASSWORD = re.compile(r"(?P<head>(?<![\w-])--password[ \t]+)(?P<value>[^\s
 _ARGV_PASSWORD = re.compile(
     r"(?P<head>['\"](?:-p|--password|--pass|--pwd)['\"],[ \t]*['\"])(?P<value>[^'\"]+)"
 )
-# A password right after -p may be quoted (-p'x' / -p"x"): the quotes go with it.
-_QUOTED_OR_BARE = r"(?P<value>'[^'\r\n]+'|\"[^\"\r\n]+\"|[^\s\"',\]]+)"
+# A password right after -p may be quoted (-p'x' / -p"x"): the quotes go with it, and so do
+# the other spellings a log prints (T617): shell-joined quotes (-p'it'\''s'), a quote that
+# is itself escaped (JSON -p\"x\", a Python repr -p\'x\'), and a quote left open by a
+# cut-off line (the rest of the line is the password). Every gap is bounded.
+_QUOTED_OR_BARE = (
+    r"(?P<value>"
+    r"'[^'\r\n]*'(?:\\'(?:'[^'\r\n]*'|[^\s\"',\]\\]+)?){0,20}"  # 'a'\''b'
+    r"|\"[^\"\r\n]+\""
+    r"|\\{1,4}'[^\r\n]{1,200}?\\{1,4}'"  # \'a\'
+    r"|\\{1,4}\"[^\r\n]{1,200}?\\{1,4}\""  # \"a\"
+    r"|\\{1,4}['\"][^\r\n]*"  # \"a   (cut off)
+    r"|[^\s\"',\]]+"
+    r"|['\"][^\r\n]*)"  # 'a   (cut off)
+)
 _MYSQL_CLI = re.compile(
     r"(?P<head>\b(?i:mysql|mariadb|mysqldump|mysqladmin)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]-p)"
     + _QUOTED_OR_BARE

@@ -698,3 +698,74 @@ def test_an_http_client_user_and_password_argument_is_masked() -> None:
         out = redactor.checked(line)
         assert secret not in out and "alice" in out, out
     assert redactor.checked("docker exec -u 1000:1000 web") == "docker exec -u 1000:1000 web"
+
+
+# -- a mysql -p password inside ESCAPED quotes, shell-joined quotes, a cut-off line (T617) --
+
+_ESCAPED_Q = "\\" + '"'  # backslash + double quote: how a JSON string spells a quote
+_ESCAPED_S = "\\'"  # backslash + single quote: how a Python repr spells one
+
+
+def _escaped_shapes(secret: str) -> list[tuple[str, str]]:
+    """(log line, what the redactor must leave) for every escaped-quote spelling."""
+    dq, sq = _ESCAPED_Q, _ESCAPED_S
+    return [
+        (
+            '{"cmd": "mysql -uroot -p' + dq + secret + dq + ' acore"}',
+            '{"cmd": "mysql -uroot -p*** acore"}',
+        ),
+        ("['mysql', '-p" + sq + secret + sq + "']", "['mysql', '-p***']"),
+        (
+            "['mysql', '-uroot', '-p" + sq + secret + sq + "', 'acore']",
+            "['mysql', '-uroot', '-p***', 'acore']",
+        ),
+        (
+            '{"cmd": "mysql -uroot -p' + "\\\\" + dq + secret + "\\\\" + dq + ' acore"}',
+            '{"cmd": "mysql -uroot -p*** acore"}',
+        ),
+        ('{"cmd": "mysql -uroot -p' + dq + secret + dq + '"}', '{"cmd": "mysql -uroot -p***"}'),
+    ]
+
+
+def test_a_mysql_password_in_escaped_quotes_is_masked_whole() -> None:
+    secret = "Zq" + secrets.token_hex(6) + "Wv"
+    for line, expected in _escaped_shapes(secret):
+        out = Redactor.build([]).redact(line)
+        assert out == expected, (line, out)
+        assert Redactor.build([]).checked(line) == expected
+
+
+def test_a_shell_joined_quote_password_is_masked_to_its_tail() -> None:
+    head, tail = "Zq" + secrets.token_hex(4), secrets.token_hex(4) + "Wv"
+    for line, expected in (
+        (f"mysql -uroot -p'{head}'\\''{tail}' acore", "mysql -uroot -p*** acore"),
+        (f"mysql -uroot -p'{head}'\\'{tail} acore", "mysql -uroot -p*** acore"),
+        (f"mysql -uroot -p'{head}'\\''{tail}'", "mysql -uroot -p***"),
+    ):
+        out = Redactor.build([]).redact(line)
+        assert out == expected, (line, out)
+        assert Redactor.build([]).checked(line) == expected
+
+
+@pytest.mark.parametrize("opener", ["'", '"', _ESCAPED_Q, _ESCAPED_S])
+def test_a_cut_off_quoted_mysql_password_is_masked_to_the_end(opener: str) -> None:
+    secret = "Zq" + secrets.token_hex(6) + " Wv" + secrets.token_hex(3)
+    line = f"2026-10-09 ran mysql -uroot -p{opener}{secret}"
+    out = Redactor.build([]).redact(line)
+    assert out == "2026-10-09 ran mysql -uroot -p***", out
+    assert Redactor.build([]).checked(line) == out
+
+
+def test_the_quote_shapes_leave_the_text_around_a_password_alone() -> None:
+    redactor = Redactor.build([])
+    for line in (
+        "mysql -uroot -p'abc' -e 'SELECT 1'",
+        'mysql -uroot -p"abc" -e "SELECT 1"',
+        "['mysql', '-uroot', '-pabc', '-e', 'SELECT 1']",
+        "mysql -uroot -pabc acore",
+    ):
+        out = redactor.redact(line)
+        assert "abc" not in out and "SELECT 1" in out or "acore" in out, out
+    assert (
+        redactor.redact("mysql -uroot -p'abc' -e 'SELECT 1'") == "mysql -uroot -p*** -e 'SELECT 1'"
+    )
