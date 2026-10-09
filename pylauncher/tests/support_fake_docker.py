@@ -54,7 +54,9 @@ def attached(box):
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
-if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
+if args[:1] == ["run"] and "-i" in args and (
+    "yulon-claim-" in " ".join(args) or "yulon-busy-" in " ".join(args)
+):
     # T543: a folder claim, `docker run --rm -i --name yulon-claim-<id> ... cat`. The name
     # is taken atomically (the daemon's arbitration), refused with the daemon's Conflict
     # when it is in use; it runs until its stdin closes, and `--rm` then removes it.
@@ -67,6 +69,15 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
     if (state / "claim-no-daemon").exists():
         sys.stderr.write("docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
         sys.exit(125)
+    if (state / "missing-images").exists():
+        # T568: the image after `--entrypoint sh` is one the daemon does not have.
+        wanted = args[args.index("--entrypoint") + 2]
+        if wanted in (state / "missing-images").read_text(encoding="utf-8").split():
+            sys.stderr.write(f"docker: Error response from daemon: No such image: {{wanted}}\\n")
+            sys.exit(125)
+    (state / "claim-images.log").open("a", encoding="utf-8").write(
+        args[args.index("--entrypoint") + 2] + "\\n"
+    )
     while (state / "claim-slow").exists():  # the daemon takes its time (cold review of T543)
         time.sleep(0.02)
     labels = state / "labels"
@@ -179,15 +190,37 @@ if args[:1] == ["inspect"]:
         keys = [piece.split('"')[1] for piece in fmt.split(".Config.Labels ")[1:]]
         made = (state / "containers" / args[1]).read_text(encoding="utf-8")
         status = ["created" if made == "created" else "running"] if ".State.Status" in fmt else []
+        # T568: `{{{{.Created}}}}` is the daemon's own stamp (a `created-at` file, else fixed).
+        when = state / "created-at"
+        made_at = (
+            [when.read_text(encoding="utf-8").strip() if when.exists() else "2026-10-09T12:00:00Z"]
+            if ".Created" in fmt
+            else []
+        )
         sys.stdout.write(
-            "\\t".join([args[1] + "-id", *status, *(values.get(k, "") for k in keys)]) + "\\n"
+            "\\t".join([args[1] + "-id", *status, *made_at, *(values.get(k, "") for k in keys)])
+            + "\\n"
         )
         sys.exit(0)
+    if fmt == "{{{{.Image}}}}":
+        # T568: the image a container runs (`images/<container>` holds it), as the daemon
+        # answers for `docker inspect --format {{{{.Image}}}}`.
+        pinned = state / "images" / args[1]
+        if pinned.exists():
+            sys.stdout.write(pinned.read_text(encoding="utf-8").strip() + "\\n")
+            sys.exit(0)
+        sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
+        sys.exit(1)
     if (state / "containers" / args[1]).exists():
         sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
         sys.exit(0)
     sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
     sys.exit(1)
+if args[:2] == ["image", "ls"]:
+    # T568: `image ls --format {{{{.Repository}}}}:{{{{.Tag}}}}`: the refs in `images-listed`.
+    listed = state / "images-listed"
+    sys.stdout.write(listed.read_text(encoding="utf-8") if listed.exists() else "")
+    sys.exit(0)
 if args[:2] == ["buildx", "inspect"]:
     # T413: the builder a plain build would use, in buildx's own text shape:
     # the builder's Name and Driver first, then its nodes, each with a Name of

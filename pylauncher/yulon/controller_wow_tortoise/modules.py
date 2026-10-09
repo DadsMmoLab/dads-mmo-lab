@@ -46,6 +46,7 @@ worth writing down, and without the files the Modules tab prints
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from yulon import resources
@@ -116,6 +117,7 @@ def applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> GuardedApplier:
@@ -152,6 +154,7 @@ def applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
         git=git,
         client_dir=client_dir,
     )

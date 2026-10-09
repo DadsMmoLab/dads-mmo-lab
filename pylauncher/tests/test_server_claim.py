@@ -1,0 +1,274 @@
+"""T568: a server reservation across processes, made by the Docker daemon.
+
+Two Yu'lons on one daemon (a second OS user, or a Windows and a WSL one on Docker Desktop)
+can press Update, Rebuild, Start or Stop on one server folder at once. `docker.server_claim()`
+is T543's folder claim made per server: a container `yulon-busy-<folder id>` the daemon
+refuses a second of, that dies with its process, and that carries what the refused press
+says (which press, who, since when). The docker CLI is `support_fake_docker`'s.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import socket
+import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from tests.conftest import HANG_BOUND
+from tests.support_fake_docker import calls as fake_calls
+from tests.support_fake_docker import containers as fake_containers
+from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+from yulon import docker, platform
+
+IMAGE = "yulon.local/wotlk-server:native"
+
+
+@pytest.fixture
+def fake_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    cli, state = lay_fake_docker(tmp_path)
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    yield state
+    end_fake_containers(state)
+
+
+@pytest.fixture
+def server(tmp_path: Path) -> Path:
+    folder = tmp_path / "server"
+    folder.mkdir()
+    return folder
+
+
+def _name(server: Path) -> str:
+    ident = docker.folder_id(server)
+    assert ident is not None
+    return docker.SERVER_CLAIM_PREFIX + ident
+
+
+def _wait_for(state: Path, name: str, there: bool) -> None:
+    deadline = time.monotonic() + HANG_BOUND
+    while (name in fake_containers(state)) != there:
+        assert time.monotonic() < deadline, f"{name} {'never came' if there else 'never went'}"
+        time.sleep(0.02)
+
+
+def _runs(state: Path) -> list[str]:
+    return [line for line in fake_calls(state) if line.startswith("run ")]
+
+
+def _labels(state: Path, name: str) -> dict[str, str]:
+    text = (state / "labels" / name).read_text(encoding="utf-8")
+    return dict(line.split("=", 1) for line in text.splitlines())
+
+
+def _another_process_holds(
+    state: Path, name: str, *, owner: str, press: str = "Update the server to latest…"
+) -> subprocess.Popen[bytes]:
+    """Another Yu'lon's reservation: its own docker CLI with stdin held open."""
+    proc = subprocess.Popen(
+        [
+            str(state.parent / "fake-docker"),
+            "run", "--rm", "-i", "--name", name,
+            "--label", f"{docker.OWNER_LABEL}={owner}",
+            "--label", f"{docker.CLAIM_LABEL}=theirs",
+            "--label", f"{docker.PRESS_LABEL}={press}",
+            "--label", f"{docker.WHO_LABEL}=pk on THEIR-PC (Windows)",
+            "--label", f"{docker.PID_LABEL}=999",
+            "--entrypoint", "sh", IMAGE, "-c", "cat >/dev/null",
+        ],
+        stdin=subprocess.PIPE,
+    )  # fmt: skip
+    _wait_for(state, name, there=True)
+    return proc
+
+
+# ------------------------------------------------------------------ the reservation
+
+
+def test_the_reservation_is_a_named_container_with_the_facts_a_refused_press_reads(
+    fake_docker: Path, server: Path
+) -> None:
+    name = _name(server)
+    with docker.server_claim(server, press="Rebuild the server…", images=[IMAGE]) as held:
+        assert held.name == name
+        assert name in fake_containers(fake_docker)
+        labels = _labels(fake_docker, name)
+        assert labels[docker.PRESS_LABEL] == "Rebuild the server…"
+        assert labels[docker.PID_LABEL] == str(os.getpid())
+        assert labels[docker.OWNER_LABEL] == docker.owner_id()
+        assert socket.gethostname() in labels[docker.WHO_LABEL]
+    _wait_for(fake_docker, name, there=False)
+
+
+def test_a_nested_take_is_the_same_container_and_the_last_exit_releases_it(
+    fake_docker: Path, server: Path
+) -> None:
+    """Update -> Rebuild: the inner press reuses the outer's reservation (one `docker run`).
+
+    Mutation this catches: a nested take making a second container, which the daemon refuses.
+    """
+    name = _name(server)
+    with docker.server_claim(server, press="Update", images=[IMAGE]) as outer:
+        with docker.server_claim(server, press="Rebuild", images=[IMAGE]) as inner:
+            assert inner.lost is outer.lost
+            assert len(_runs(fake_docker)) == 1
+            assert _labels(fake_docker, name)[docker.PRESS_LABEL] == "Update"  # the outer's
+        time.sleep(0.2)
+        assert name in fake_containers(fake_docker), "the inner exit released the outer's hold"
+    _wait_for(fake_docker, name, there=False)
+    assert docker.reservation_held_here(server) is False
+
+
+def test_a_lost_reservation_is_lost_for_every_holder_in_the_process(
+    fake_docker: Path, server: Path
+) -> None:
+    name = _name(server)
+    with docker.server_claim(server, press="Update", images=[IMAGE]) as outer:
+        with docker.server_claim(server, press="Rebuild", images=[IMAGE]) as inner:
+            cli = int((fake_docker / "containers" / name).read_text(encoding="utf-8"))
+            os.kill(cli, signal.SIGKILL)  # the reservation's CLI ends from elsewhere
+            assert outer.lost.wait(HANG_BOUND)
+            assert inner.lost.is_set()
+            assert not inner.held()
+
+
+def test_another_process_holding_refuses_the_press_with_the_holders_facts(
+    fake_docker: Path, server: Path
+) -> None:
+    name = _name(server)
+    theirs = _another_process_holds(fake_docker, name, owner="someone-else")
+    try:
+        with pytest.raises(docker.ServerReserved) as refused:
+            with docker.server_claim(
+                server, press="Start", images=[IMAGE], label="WoW TBC", this_press="Start"
+            ):
+                pytest.fail("went ahead under another Yu'lon's reservation")
+        said = str(refused.value)
+        holder = refused.value.holder
+        assert holder.press == "Update the server to latest…"
+        assert holder.who == "pk on THEIR-PC (Windows)"
+        assert holder.ours is False and holder.here is False
+        assert "Another Yu'lon is working on WoW TBC right now" in said, said
+        assert "Update the server to latest…" in said and "THEIR-PC" in said, said
+        assert "Nothing was changed." in said and "docker rm" not in said, said
+        assert name in fake_containers(fake_docker), "another Yu'lon's reservation was removed"
+    finally:
+        theirs.kill()
+
+
+def test_a_leftover_of_this_users_own_is_named_with_its_command_and_never_removed(
+    fake_docker: Path, server: Path
+) -> None:
+    name = _name(server)
+    theirs = _another_process_holds(fake_docker, name, owner=docker.owner_id())
+    try:
+        with pytest.raises(docker.ServerReserved) as refused:
+            with docker.server_claim(server, press="Start", images=[IMAGE]):
+                pytest.fail("went ahead")
+        assert refused.value.holder.ours is True and refused.value.holder.here is False
+        said = str(refused.value)
+        assert said.splitlines()[-1] == f"docker rm -f {name}", said
+        assert "earlier run of this Yu'lon" in said, said
+        assert name in fake_containers(fake_docker)
+    finally:
+        theirs.kill()
+
+
+def test_no_image_to_run_it_from_is_an_unavailable_reservation_in_words(
+    fake_docker: Path, server: Path
+) -> None:
+    (fake_docker / "missing-images").write_text(IMAGE, encoding="utf-8")
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    said = str(refused.value)
+    assert "could not reserve" in said and "Nothing was changed." in said, said
+    assert "images this server runs from" in said, said
+    assert fake_containers(fake_docker) == []
+
+
+def test_the_image_comes_from_the_databases_container_before_a_built_ref(
+    fake_docker: Path, server: Path
+) -> None:
+    """Docker will not remove an image a container uses, so it is there when the server is.
+
+    Mutation this catches: the chain starting at the built refs (a missing one fails the take).
+    """
+    (fake_docker / "images").mkdir()
+    (fake_docker / "images" / "ac-database").write_text("sha256:dbimage", encoding="utf-8")
+    (fake_docker / "missing-images").write_text(IMAGE, encoding="utf-8")
+    spec = docker.ContainerSpec(db="ac-database", auth="ac-auth", world="ac-world", ports=(1,))
+    with docker.server_claim(server, press="Start", images=[IMAGE], spec=spec):
+        pass
+    assert (fake_docker / "claim-images.log").read_text(encoding="utf-8").split() == [
+        "sha256:dbimage"
+    ]
+
+
+def test_the_chain_falls_through_to_a_built_ref_then_to_a_listed_one(
+    fake_docker: Path, server: Path
+) -> None:
+    (fake_docker / "images-listed").write_text("yulon.local/other:native\n", encoding="utf-8")
+    (fake_docker / "missing-images").write_text(IMAGE, encoding="utf-8")
+    with docker.server_claim(server, press="Start", images=[IMAGE]):
+        pass
+    tried = (fake_docker / "claim-images.log").read_text(encoding="utf-8").split()
+    assert tried == ["yulon.local/other:native"]
+
+
+def test_a_distro_servers_reservation_is_made_on_that_distros_docker(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str | None] = []
+    real = platform.docker_prefix
+
+    def prefix(wsl_distro: str | None = None, **kw: object) -> tuple[str, ...] | None:
+        asked.append(wsl_distro)
+        return real(None)
+
+    monkeypatch.setattr(platform, "docker_prefix", prefix)
+    with docker.server_claim(server, press="Start", images=[IMAGE], wsl_distro="dml-arch"):
+        pass
+    assert "dml-arch" in asked
+
+
+def test_a_folder_that_will_not_take_the_id_file_is_unavailable(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "folder_id", lambda _folder: None)
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert docker.FOLDER_ID_FILE in str(refused.value)
+
+
+def test_the_folder_claim_is_unchanged(fake_docker: Path, server: Path) -> None:
+    """T543's argv stays byte for byte: no press/who labels on a data folder's claim."""
+    with docker.folder_claim(server, IMAGE):
+        (run,) = _runs(fake_docker)
+    assert docker.PRESS_LABEL not in run and docker.WHO_LABEL not in run
+    assert "--name yulon-claim-" in run
+
+
+def test_two_threads_of_one_process_share_one_reservation(fake_docker: Path, server: Path) -> None:
+    seen: list[threading.Event] = []
+    gate = threading.Barrier(2)
+
+    def take() -> None:
+        with docker.server_claim(server, press="p", images=[IMAGE]) as held:
+            seen.append(held.lost)
+            gate.wait(HANG_BOUND)
+
+    threads = [threading.Thread(target=take) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(HANG_BOUND)
+    assert len(seen) == 2 and seen[0] is seen[1]
+    assert len(_runs(fake_docker)) == 1

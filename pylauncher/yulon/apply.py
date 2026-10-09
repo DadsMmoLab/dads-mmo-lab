@@ -32,7 +32,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -2966,6 +2966,7 @@ class Applier:
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
@@ -3044,6 +3045,14 @@ class Applier:
         # is `PendingSql`'s closed bug wearing a different hat. Absent means the
         # behaviour every caller had before this landed, byte for byte.
         self._start_database = start_database
+        # T568: "reserve this server across processes while I send SQL" -- a seam for the
+        # same reason as the two above: the primitive is a Docker container
+        # (`docker.server_claim()`) and this module never touches Docker. Called with the
+        # press's name; the context it returns is held from the first running-world reading
+        # to the last statement and its check, so two Yu'lons on one server cannot both send
+        # one package's file (T599: the read-then-send of a ledger entry is inside it too).
+        # Absent means the behaviour every caller had before: no cross-process hold.
+        self._hold_server = hold_server
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -5306,6 +5315,36 @@ class Applier:
                 )
 
     def _sql(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        when: When,
+        log: _Log,
+        undo: Mapping[str, str] | None = None,
+    ) -> None:
+        """Run this action's SQL under the server's cross-process hold, when it sends any (T568).
+
+        The hold is taken only for an action with a direct SQL step (not `db-import`, which
+        the server's own importer applies), and covers `_sql_held()` whole: the world
+        readings, the database start, any ledger read, and every statement.
+        """
+        direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
+        hold = (
+            self._hold_server(f"{when.capitalize()} {manifest.name}")
+            if direct and self._hold_server is not None
+            else nullcontext()
+        )
+        with ExitStack() as held:
+            try:
+                held.enter_context(hold)
+            except SaidByYulon as refused:
+                # The holder's own sentence ("Another Yu'lon is working on ..."), shown as
+                # written; nothing was sent.
+                raise ApplyRefusal(str(refused)) from refused
+            self._sql_held(manifest, clone, vals, when, log, undo)
+
+    def _sql_held(
         self,
         manifest: Manifest,
         clone: Path,

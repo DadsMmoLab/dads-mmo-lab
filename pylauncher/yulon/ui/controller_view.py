@@ -83,6 +83,7 @@ from yulon import (
     dbreads,
     docker,
     docker_advice,
+    forgetting,
     install_wiring,
     logsnap,
     module_moves,
@@ -162,7 +163,7 @@ from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
-from yulon.ui import lines
+from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
@@ -3252,6 +3253,10 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            # T568: the SQL a Modules press sends is sent under this server's reservation.
+            hold_server=lambda press: docker.server_claim(
+                server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
             db_container=spec.db,
         )
         if entry.has_manifests
@@ -3636,6 +3641,10 @@ def _for_tbc(
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
                 ),
+                # T568: the SQL a Modules press sends is sent under this server's reservation.
+                hold_server=lambda press: docker.server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+                ),
             )
             if entry.has_manifests
             else None
@@ -3808,6 +3817,10 @@ def _for_vanilla(
                 world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+                # T568: the SQL a Modules press sends is sent under this server's reservation.
+                hold_server=lambda press: docker.server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
                 ),
             )
             if entry.has_manifests
@@ -4226,6 +4239,10 @@ def _for_tortoise(
                 world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+                # T568: the SQL a Modules press sends is sent under this server's reservation.
+                hold_server=lambda press: docker.server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
                 ),
                 # T30. `applier()` has taken this keyword since 8.7d and this
                 # factory was the one caller that swallowed it, so a manifest
@@ -4698,6 +4715,17 @@ STOP_ANYWAY_TIP = (
     "its last save."
 )
 """T158: the only way to end a load wait early, shown only while one is running."""
+
+STOP_OVER_ANOTHER_TITLE = "Another Yu'lon is working on this server"
+STOP_OVER_ANOTHER_BUTTON = "Stop anyway"
+CLEAR_RESERVATION_LABEL = "Clear it"
+CLEAR_RESERVATION_TIP = (
+    "Remove the reservation an earlier run of this Yu'lon left in Docker. Only offered "
+    "when no other Yu'lon of yours is running."
+)
+RESERVATION_CLEARED = "The leftover reservation was removed. Press it again."
+"""T568: a Stop asks once when another Yu'lon holds the server, then stops anyway; a leftover
+reservation of this user's own is cleared by a button, another user's by its command only."""
 
 STOPPING_FOR_REMOVAL = "Stopping the server first, then removing it from Yu'lon…"
 STOPPING_FOR_REMOVAL_WAIT = (
@@ -7683,6 +7711,8 @@ class ControllerView(QWidget):
         self._stop_forced = ""
         self._stop_forced_details = ""
         self._stop_words_shown = False
+        self._leftover: docker.ServerHolder | None = None  # T568: [Clear it]'s target
+        self._stop_asked = False  # T568: Stop asks once about another Yu'lon's hold
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
         self.dashboard_log: LogPanel | None = None
@@ -7995,6 +8025,10 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T568: shown only beside a refusal that names this user's own leftover reservation.
+        self.clear_reservation_button = QPushButton(CLEAR_RESERVATION_LABEL, tab)
+        self.clear_reservation_button.setToolTip(CLEAR_RESERVATION_TIP)
+        self.clear_reservation_button.setVisible(False)
         # T377: hidden until a Start or Rebuild is refused because Docker no
         # longer has the database. Nothing is imported until Repair is pressed:
         # the player may have meant to restore a backup instead.
@@ -8132,6 +8166,7 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.clear_reservation_button.clicked.connect(self.clear_the_leftover_reservation)
         self.repair_database_button.clicked.connect(self.repair_database)
         self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
@@ -8185,7 +8220,14 @@ class ControllerView(QWidget):
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
-        realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
+        realm_column.addWidget(
+            _bar(
+                realm,
+                self.stop_anyway_button,
+                self.stop_other_button,
+                self.clear_reservation_button,
+            )
+        )
         realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
         box.addWidget(realm)
 
@@ -9834,10 +9876,91 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._stop_forced = ""
         self._stop_forced_details = ""
+        self._stop_asked = False
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+
+    def _offer_to_stop_over_another(self, exc: object) -> bool:
+        """T568: another Yu'lon holds this server: ask once, then stop anyway if told to.
+
+        The owner's decision of 2026-10-09 ("Stop always stops"): the question names who is
+        doing what and since when, and says what stopping now ends. Yes removes that holder's
+        reservation by the id it was read with and stops here; the other Yu'lon's press ends
+        at its next check and says what it left. Only for a holder Docker could name, which
+        is not this process's own (that is T216's in-process rule). Asked once per press.
+        """
+        if not isinstance(exc, docker.ServerReserved) or self._stop_asked:
+            return False
+        holder = exc.holder
+        if holder.here or not holder.container:
+            return False
+        self._stop_asked = True
+        text = forgetting.server_busy_elsewhere(
+            self.entry.name, holder.press, holder.since(), holder.who, "Stop", anyway=True
+        )
+        if _ask_with(self, STOP_OVER_ANOTHER_TITLE, text, STOP_OVER_ANOTHER_BUTTON) != "yes":
+            return False
+        self._set_busy(True, "Stop")
+        self.status_label.setText("Stopping…")
+        self._hold_badge("stopping")
+        self._run(lambda: self._stop_over(holder), self._stop_done, self._stop_failed)
+        return True
+
+    def _stop_over(self, holder: docker.ServerHolder) -> bool:
+        """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
+        docker.end_reservation(holder)
+        return self.services.controller.stop()
+
+    def _offer_to_clear_a_leftover(self, exc: object) -> None:
+        """T568: a refusal naming this user's own leftover reservation offers [Clear it].
+
+        Only when it is this user's own, left by an earlier run (not a live process of this
+        one), and this Yu'lon holds the single-instance lock, so no other Yu'lon of this
+        user can be the one holding it. Another user's leftover shows its command only.
+        """
+        self.clear_reservation_button.setVisible(False)
+        self._leftover = None
+        if not isinstance(exc, docker.ServerReserved):
+            return
+        holder = exc.holder
+        if (
+            holder.ours
+            and not holder.here
+            and holder.container
+            and (single_instance.holds_the_lock())
+        ):
+            self._leftover = holder
+            self.clear_reservation_button.setEnabled(True)
+            self.clear_reservation_button.setVisible(True)
+
+    @Slot()
+    def clear_the_leftover_reservation(self) -> None:
+        """Remove the leftover reservation [Clear it] was offered for (by its container id)."""
+        holder = self._leftover
+        if holder is None or self._busy:
+            return
+        self.clear_reservation_button.setEnabled(False)
+        self._run(
+            lambda: docker.end_reservation(holder),
+            self._leftover_cleared,
+            self._leftover_clear_failed,
+        )
+
+    @Slot(object)
+    def _leftover_cleared(self, removed: object) -> None:
+        self.clear_reservation_button.setVisible(False)
+        self._leftover = None
+        self.problem_label.setText(
+            RESERVATION_CLEARED if removed else "Docker would not remove it."
+        )
+        self.refresh_status()
+
+    @Slot(object)
+    def _leftover_clear_failed(self, exc: object) -> None:
+        self.clear_reservation_button.setEnabled(True)
+        self.problem_label.setText(f"The reservation could not be removed: {exc}")
 
     @Slot()
     def restart_from_server_tab(self) -> None:
@@ -9886,6 +10009,7 @@ class ControllerView(QWidget):
         elif isinstance(exc, DatabaseMissing):
             self._start_failed(exc)  # refused before the Stop; Start's offer is the repair
         else:
+            self._stop_asked = True  # T568: a Restart is not a Stop; "Stop anyway" is Stop's
             self._stop_failed(exc)
 
     @Slot(object)
@@ -10131,6 +10255,7 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
+        self._offer_to_clear_a_leftover(exc)
         if isinstance(exc, DatabaseMissing):
             self._offer_to_repair_the_database(str(exc))
         raw = str(exc)
@@ -10495,8 +10620,11 @@ class ControllerView(QWidget):
         the silent bug it replaced looked like (review, 2026-08-22).
         """
         self._set_busy(False)
+        if self._offer_to_stop_over_another(exc):
+            return
         msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
+        self._offer_to_clear_a_leftover(exc)
         # T248: a refusal's command (`docker compose ls`) is under Details, not on the line.
         detail = self._stop_failure_detail(exc, msg)
         self.problem_details.set_text(detail)
@@ -12648,6 +12776,7 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
+        self.clear_reservation_button.setVisible(False)
         self._restore_plan = None
         self.restore_button.setEnabled(False)
         if not self._import_running:
@@ -19182,7 +19311,9 @@ class ControllerView(QWidget):
         controller = self.services.controller
         # T179, T377: before the stop, so a refusal leaves it running.
         controller.refuse_before_a_stop()
-        with docker.lifecycle(controller.server_dir):
+        with docker.lifecycle(
+            controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
+        ):
             was_up = controller.stop()
             if stopped is None:
                 controller.start()
@@ -19202,7 +19333,12 @@ class ControllerView(QWidget):
         # T179, T377: before the removal, so a refusal leaves it as it was.
         controller.refuse_before_a_stop()
         # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
-        with docker.lifecycle(controller.server_dir):
+        with docker.lifecycle(
+            controller.server_dir,
+            press="Remove the server's containers",
+            spec=controller.spec,
+            wsl_distro=controller.wsl_distro,
+        ):
             removed = controller.remove()
             controller.start()
         return removed

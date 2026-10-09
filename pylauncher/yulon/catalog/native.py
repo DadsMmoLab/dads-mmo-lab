@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import inspect
 import io
 import json
 import math
@@ -149,7 +150,12 @@ ERROR_RUN_REBUILD = "rebuild"
 """`InstallState.error_run` for a failure of any press on a remembered server (T207)."""
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
+OUR_OWN_FILES = (
+    STATE_FILE,
+    networking.INTENT_FILE,
+    module_answers.ANSWERS_FILE,
+    docker.FOLDER_ID_FILE,
+)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -581,6 +587,12 @@ Server tab, then press … again"* — and a refusal naming a button that does n
 exist under that name is the defect T7's ticket is titled after. One string, so
 a rename moves both.
 """
+
+INSTALL_PRESS = "Install"
+"""The install's name on its reservation, taken at the `start-db` stage (T568)."""
+
+REPAIR_DATABASE_PRESS = "Repair the database…"
+"""The Server tab's repair press, by the name its reservation carries (T568)."""
 
 ADOPT_CONSEQUENCE = (
     "Yu'lon will treat these databases as a finished import from now on. It cannot check that "
@@ -6185,6 +6197,10 @@ class Seams:
 
     What it yields is a `docker.ClaimHeld` (T549: whether the claim was lost mid-press);
     a stand-in that yields anything else is a claim nobody watches."""
+    server_claim: Callable[..., AbstractContextManager[docker.ClaimHeld]] = docker.server_claim
+    """T568: a press's reservation of its server across processes (`docker.server_claim()`).
+
+    A server inside a WSL distro binds it to that distro's Docker (`in_wsl()`)."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -6396,6 +6412,7 @@ class Seams:
             fs_type=lambda _path: None,
             run_container=refused("Running an install container"),
             folder_claim=refused("Claiming a server folder for an extraction"),
+            server_claim=on(docker.server_claim, wsl_distro=distro),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
@@ -6436,6 +6453,35 @@ def recorded_install_id(server_dir: Path) -> str:
             "server inside the distro is named after that id. Nothing was started."
         )
     return ident
+
+
+def _reserving(
+    press: str | Callable[[Mapping[str, Any]], str],
+) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
+    """Decorate a press (a generator method) so it holds its server's reservation (T568).
+
+    The reservation is taken when the press starts running, after the player's Yes and
+    before its own re-reads, so the checks that ask "has anything changed since the dialog"
+    are exclusive across processes and not only true at one moment. Held to the press's last
+    line, including its ready wait, put-backs and `after_update`; a press it calls (Update ->
+    Rebuild) shares the one reservation. `press` is the player's own name for the press, or a
+    function of the call's arguments that says it (Update and Return to the pin are one method).
+    """
+
+    def decorate(method: Callable[..., Iterator[str]]) -> Callable[..., Iterator[str]]:
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Iterator[str]:
+            given = signature.bind(self, *args, **kwargs).arguments
+            options = given.get("options") or InstallOptions()
+            named = press if isinstance(press, str) else press(given)
+            with self._reservation(self.server_dir(options), named, given.get("cancel")):
+                yield from method(self, *args, **kwargs)
+
+        return reserved
+
+    return decorate
 
 
 class StagedInstaller:
@@ -6644,6 +6690,44 @@ class StagedInstaller:
 
     # -- the contract ----------------------------------------------------
 
+    @contextmanager
+    def _reservation(
+        self,
+        server_dir: Path,
+        press: str,
+        cancel: threading.Event | None = None,
+        *,
+        images: Sequence[str] | None = None,
+    ) -> Iterator[None]:
+        """This server's reservation across processes, for a press; a refusal is a sentence.
+
+        Only for a folder Yu'lon has a record of: a press on any other folder refuses by
+        itself, and reserving it would write an id file into somebody else's folder. The
+        server's own database container's image runs the reservation, then the build's
+        refs (`docker.server_claim()`). Refused, the press is an `InstallerError` carrying
+        the holder's sentence and nothing was changed.
+        """
+        if not (server_dir / STATE_FILE).is_file():
+            yield
+            return
+        refs = self.image_refs_at(server_dir) if images is None else tuple(images)
+        stack = ExitStack()
+        try:
+            stack.enter_context(
+                self._seams.server_claim(
+                    server_dir,
+                    press=press,
+                    images=refs,
+                    spec=self.entry.container_spec(),
+                    cancel=cancel,
+                    label=self.entry.name,
+                )
+            )
+        except docker.ServerHeldError as refused:
+            raise InstallerError(str(refused)) from refused
+        with stack:
+            yield
+
     def server_dir(self, options: InstallOptions) -> Path:
         """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""
         if options.server_dir is not None:
@@ -6795,12 +6879,28 @@ class StagedInstaller:
         the current state, and after this change that is exactly one function.
         """
         state = ctx.state
+        # T568: an install has no database, and no containers to race on, until `start-db`;
+        # from there to the last stage another Yu'lon's Start, Stop or SQL would race it.
+        # Not before: WotLK's `clone-core` empties the server folder, which would change the
+        # folder id under a held reservation.
+        reservation = ExitStack()
+        reserved = False
         try:
-            with self._held_awake() as note:
+            with reservation, self._held_awake() as note:
                 if note:
                     yield note
                 for number, stage in enumerate(stages, start=1):
                     self._check_cancel(ctx.cancel)
+                    if stage.name == "start-db" and not reserved:
+                        reserved = True
+                        reservation.enter_context(
+                            self._reservation(
+                                ctx.server_dir,
+                                INSTALL_PRESS,
+                                ctx.cancel,
+                                images=self.image_refs_at(ctx.server_dir),
+                            )
+                        )
                     # WHERE THE USER IS, on its own line and never folded into
                     # the `--- <name>` marker. A format everything greps is not
                     # a place to add fields.
@@ -7008,6 +7108,7 @@ class StagedInstaller:
             self.update_files(self._update_context(server_dir, None)),
         )
 
+    @_reserving(UPDATES_BUTTON_LABEL)
     def update_databases(
         self,
         options: InstallOptions | None = None,
@@ -7105,6 +7206,7 @@ class StagedInstaller:
             for name in ("start-db", "import", "up", "ready")
         )
 
+    @_reserving(REPAIR_DATABASE_PRESS)
     def repair_database(
         self,
         options: InstallOptions | None = None,
@@ -7283,6 +7385,7 @@ class StagedInstaller:
             self.entry, server_dir, check.offered, files, check.withheld, check.stuck
         )
 
+    @_reserving(CORRECTIONS_BUTTON_LABEL)
     def apply_corrections(
         self,
         check: CorrectionCheck,
@@ -7710,6 +7813,7 @@ class StagedInstaller:
             )
         return adopt_confirmation(self.entry, self.server_dir(options or InstallOptions()), row)
 
+    @_reserving(ADOPT_BUTTON_LABEL)
     def adopt_as_imported(
         self,
         options: InstallOptions | None = None,
@@ -8095,6 +8199,7 @@ class StagedInstaller:
                 ) from exc
         yield "The containers were replaced."
 
+    @_reserving(server_build_presses.REBUILD)
     def rebuild(
         self,
         options: InstallOptions | None = None,
@@ -8854,6 +8959,13 @@ class StagedInstaller:
         """
         return iter(())
 
+    @_reserving(
+        lambda given: (
+            server_build_presses.RETURN_TO_PIN
+            if given.get("to_pin")
+            else server_build_presses.UPDATE_TO_LATEST
+        )
+    )
     def update_to_latest(
         self,
         options: InstallOptions | None = None,

@@ -96,6 +96,68 @@ NETWORK_RUNNING = (
 )
 
 
+# T568: what a press refused by another Yu'lon's reservation of the server says
+# (`docker.server_claim()`). Each leads with who holds it and ends with what to do.
+PRESS_START = "Start"
+PRESS_STOP = "Stop"
+"""The two press names the reservation's own lifecycle commands carry; the sentence below
+says "starting" and "stopping" for them and quotes any other press by name."""
+
+
+def _doing(press: str, label: str) -> str:
+    if press == PRESS_START:
+        return f"is starting {label} right now"
+    if press == PRESS_STOP:
+        return f"is stopping {label} right now"
+    return f"is working on {label} right now: \u201c{press or 'a job'}\u201d"
+
+
+def server_busy_elsewhere(
+    label: str, press: str, since: str, who: str, this_press: str, *, anyway: bool = False
+) -> str:
+    """The refusal when another Yu'lon's reservation holds the server (T568 section 6).
+
+    `since` is what the daemon's own creation stamp reads as ("14:02 (3 minutes ago)"), or
+    empty when it could not be read; `who` is "user@host (OS)". `anyway` is the Stop's own
+    question: it asks instead of refusing, and says what stopping now ends.
+    """
+    started = f", started {since}" if since else ""
+    by = f" by {who}" if who else ""
+    if anyway:
+        return (
+            f"Another Yu'lon {_doing(press, label)}{started}{by}. Stopping now ends that too, "
+            "wherever it is. A database file it is running may be left part-done, and that "
+            "Yu'lon will say what it left."
+        )
+    return (
+        f"Another Yu'lon {_doing(press, label)}{started}{by}. Nothing was changed. Wait "
+        f"for it to finish, then press \u201c{this_press}\u201d again."
+    )
+
+
+def server_reservation_left(label: str, name: str, this_press: str) -> str:
+    """This user's own reservation, left in Docker by a crash Docker kept (T568 section 6)."""
+    return (
+        f"An earlier run of this Yu'lon left its reservation of {label} in Docker ({name}), "
+        f"so nothing was changed. Remove it with the command below, then press "
+        f"\u201c{this_press}\u201d again.\ndocker rm -f {name}"
+    )
+
+
+def server_reservation_unsaid(label: str, name: str, this_press: str) -> str:
+    """Docker refused the name and then would not say whose it is (T543's wording, per server)."""
+    return (
+        f"{label} is reserved in Docker ({name}), and Docker would not say by whom. Nothing "
+        "was changed. Wait for any other Yu'lon's job on it to finish, then press "
+        f"\u201c{this_press}\u201d again."
+    )
+
+
+def server_reservation_unavailable(label: str, said: str) -> str:
+    """No reservation could be made at all: no Docker, no image, a daemon that would not answer."""
+    return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."
+
+
 def module_running(what: str) -> str:
     """The Modules tab's job, by the name its own report line gives it ("install mod-ah-bot")."""
     return (
