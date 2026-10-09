@@ -87,3 +87,30 @@ def test_an_update_the_new_code_does_not_refuse_is_kept(tmp_path: Path) -> None:
     applier.update(listed["mod-pb"])
 
     assert _git(server / "modules" / "mod-pb", "rev-parse", "HEAD") == second
+
+
+def test_a_put_back_that_is_itself_refused_keeps_the_first_refusal_and_says_what_is_built(
+    tmp_path: Path,
+) -> None:
+    """Codex review: PutBackRefused is an ApplyError, so it is caught, and said, not swapped in."""
+    from yulon.apply import PutBackRefused
+
+    applier, origin, server = _rig(tmp_path)
+    _publish(origin, "[Pb]\nOn = 1\n", "v1")
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    second = _publish(origin, "On = 1\n", "v2")
+
+    def refuses(*args: object, **kwargs: object) -> object:
+        raise PutBackRefused("it has been changed since its last update.", edited=False)
+
+    applier.put_back = refuses  # type: ignore[method-assign]
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    with pytest.raises(CompletionRefused) as refused:
+        applier.update(listed["mod-pb"])
+
+    said = str(refused.value)
+    assert said.startswith("mod-pb's settings file conf/mod-pb.conf.dist has no [Section] line")
+    assert "could not put it back on the version it was on" in said
+    assert "it has been changed since its last update" in said
+    assert "the version that was just fetched" in said
+    assert _git(server / "modules" / "mod-pb", "rev-parse", "HEAD") == second
