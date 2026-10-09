@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   notify:
+    if: github.repository == 'DadsMmoLab/dads-mmo-lab'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

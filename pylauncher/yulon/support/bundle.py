@@ -48,7 +48,7 @@ from yulon import __version__
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.support import sources as src
-from yulon.support.redact import TOKEN_FLOOR, Redactor
+from yulon.support.redact import TOKEN_FLOOR, Redactor, Unredactable
 from yulon.support.sources import InstallFacts, LiveLog, Sources
 
 logger = get_logger(__name__)
@@ -83,6 +83,9 @@ _CUTTABLE = frozenset({"live", "app", "conf", "runs"})
 
 Of the runs, only the newest is ever cut (`_cut_tier`); the rest are left out whole.
 """
+
+LEFT_OUT = "left out: Yu'lon could not be sure every secret in it was removed"
+"""Why a file is missing when the redactor could not vouch for it (T595): never included raw."""
 
 SilentTargets = set[str | None]
 """The dockers (`None` = this machine's, else a WSL distro) that already ran into a bound."""
@@ -148,17 +151,32 @@ class _Collector:
     """Members and skips, every string through the redactor on the way in."""
 
     def __init__(self, redactor: Redactor) -> None:
-        self._redact = redactor.redact
+        self._checked = redactor.checked
         self.members: list[_Member] = []
         self.skipped: list[tuple[str, str]] = []
         self._names: set[str] = set()
 
+    def _line(self, text: str, withheld: str) -> str:
+        """`text` through the checked redactor, or `withheld` when it cannot be trusted."""
+        try:
+            return self._checked(text)
+        except Unredactable:
+            return withheld
+
     def skip(self, name: str, why: str) -> None:
-        self.skipped.append((self._redact(name), self._redact(why)))
+        self.skipped.append(
+            (self._line(name, "[a name withheld]"), self._line(why, "[a reason withheld]"))
+        )
 
     def text(self, name: str, text: str, group: str, mtime: float = 0.0) -> None:
-        data = self._redact(text).encode("utf-8")
-        name = self._unique(self._redact(name))
+        """Add a member. A text the redactor cannot vouch for is left out, and says so (T595)."""
+        try:
+            data = self._checked(text).encode("utf-8")
+            safe_name = self._checked(name)
+        except Unredactable:
+            self.skip(name, LEFT_OUT)
+            return
+        name = self._unique(safe_name)
         raw = text if group in _CUTTABLE else None
         self.members.append(_Member(name, data, group, mtime, raw=raw))
 
@@ -257,7 +275,11 @@ def save(
     and its `short` places as `build()`'s `short`.
     """
     known = src.gather_known(sources)
-    redactor = Redactor.build(known.values, home=home if home is not None else Path.home())
+    redactor = Redactor.build(
+        known.values,
+        home=home if home is not None else Path.home(),
+        also_home=src.other_homes(sources.installs),
+    )
     return build(
         dest,
         sources,
@@ -318,7 +340,7 @@ def build(
         text = _manifest_text(stamp, fit, collector.skipped, gaps, short, cap_bytes, over=over)
         return _Member("MANIFEST.txt", redactor.redact(text).encode("utf-8"), "manifest")
 
-    fit, data = _fit(collector.members, cap_bytes, manifest, redactor.redact)
+    fit, data = _fit(collector.members, cap_bytes, manifest, redactor.checked)
     _write_atomically(dest, data)
     logger.info(f"support file written: {len(fit.kept)} files, {len(data)} bytes")
     return BundleReport(
@@ -367,14 +389,11 @@ def _manifest_text(
             "longer password.",
             "",
             f"Passwords Yu'lon knows of that are {TOKEN_FLOOR} characters or longer, anything",
-            "shaped like a password, and your home folder were replaced with *** and ~",
-            "before this file was written.",
+            "shaped like a password, login session keys and",
+            *_PROMISE[1:],
         ]
     else:
-        lines += [
-            "Every password Yu'lon knows of, anything shaped like one, and your home folder",
-            "were replaced with *** and ~ before this file was written.",
-        ]
+        lines += _PROMISE
     lines += ["", "Included:"]
     lines += [
         f"  {m.name}  ({_WHAT[m.group]}{', cut shorter' if m.name in fit.cuts else ''}, "
@@ -403,6 +422,17 @@ def _manifest_text(
         lines += ["", "Noticed while gathering the passwords to remove (the patterns still ran):"]
         lines += [f"  {gap}" for gap in gaps]
     return "\n".join(lines) + "\n"
+
+
+_PROMISE = [
+    "Every password Yu'lon knows of, anything shaped like one, the login session keys and",
+    "tokens it recognises by name or shape, and your home folder in every spelling a path",
+    "takes in a log were replaced with *** and ~ before this file was written.",
+    "Account names and IP addresses are not removed, and neither is a secret in a form",
+    "Yu'lon does not know. A file Yu'lon could not be sure about was left out, and is named below.",
+]
+"""What the file promises (T595). Its first line is the long form's start; the short-password
+warning joins it from the second line on, so the two never drift apart."""
 
 
 def _estimate(member: _Member) -> int:
@@ -543,7 +573,12 @@ def _fit(
         index = _next_cut(fit.kept, weight, newest_runs)
         if index is None:
             return False
-        shorter = _shorter(fit.kept[index], redact)
+        try:
+            shorter = _shorter(fit.kept[index], redact)
+        except Unredactable:
+            # The cut text cannot be vouched for: it goes, whole, rather than raw (T595).
+            fit.dropped.append(fit.kept.pop(index))
+            return True
         fit.kept[index] = shorter
         weight[shorter.name] = _estimate(shorter)
         fit.cuts[shorter.name] = _raw_size(shorter)

@@ -2876,6 +2876,24 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "original; `refresh()` refuses a folder without the marker, or an original other "
         "than the one it names, before it lists anything"
     ),
+    ("addon_layout.py", "_visible"): (
+        "T613. Lists a folder of a client add-on source -- a staging folder Yu'lon unpacked, a "
+        "folder the player chose, or a clone -- to find the add-on folders in it and to name "
+        "what it holds in a refusal. Read-only: the reader never writes, and it decides only "
+        "which folders are add-ons and under which names; the copy into the game client is "
+        "the installer's, behind the applier's own guards. A link is never entered"
+    ),
+    ("addon_layout.py", "_tocs"): (
+        "T613. Lists one candidate add-on folder for its `.toc` files, never through a link. "
+        "Read-only; it decides an add-on's name and which toc counts, never a write"
+    ),
+    ("addon_archive.py", "check_folder"): (
+        "T613. Walks a folder the player chose (or a clone) with `links.walk`, `.git` aside, "
+        "to hold it to the zip's caps and rules before it is copied: a link, a program file, "
+        "too deep, too many files or too many bytes refuses the whole folder. It decides a "
+        "REFUSAL and never a write. A folder that cannot be listed is passed over, as "
+        "`links.walk` does, and the copy that follows then fails on it with its own sentence"
+    ),
     ("client_packs.py", "_numbered_parts"): (
         "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
         "its `<name>.zip.partNN` pieces, which are then READ and joined into a `.joining` "

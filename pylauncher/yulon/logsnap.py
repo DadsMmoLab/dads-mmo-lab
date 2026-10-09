@@ -156,6 +156,9 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
     from yulon.support.redact import Redactor
 
     values: frozenset[str] = frozenset()
+    homes: list[str] = sources.other_homes(
+        [sources.InstallFacts("", "", server_dir, wsl_distro, None)]
+    )
     try:
         from yulon.catalog.catalog import load_catalog
 
@@ -182,7 +185,7 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
         ).values
     except Exception as exc:  # noqa: BLE001 - redaction must never stop a stop
         logger.warning(f"could not gather this install's passwords for the snapshot: {exc}")
-    return Redactor.build(values, home=Path.home()).redact(text)
+    return Redactor.build(values, home=Path.home(), also_home=homes).redact(text)
 
 
 class Recorder:

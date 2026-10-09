@@ -92,6 +92,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,
@@ -594,8 +595,10 @@
         }
       },
       "client": {
+        "addon_interface": 20400,
         "version": "2.4.3",
         "build": 8606,
+        "required_build": 8606,
         "notes": [
           "A Vanilla client is the wrong version — the installer checks for this."
         ]
@@ -1036,8 +1039,14 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.12.1",
         "build": 5875,
+        "required_build": 5875,
+        "also_builds": [
+          6005,
+          6141
+        ],
         "notes": [
           "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
         ]
@@ -1252,6 +1261,7 @@
                     "AutoHonorRestart": "0",
                     "AutoRestart.MaxServerUptime": "0",
                     "Console.Enable": "1",
+                    "LogFilter_SQLText": "1",
                     "SOAP.Enabled": "1",
                     "SOAP.IP": "0.0.0.0",
                     "SOAP.Port": "7878"
@@ -1444,8 +1454,11 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.18.1",
         "build": 7272,
+        "required_build": 5875,
+        "foreign_data_dies_after": "Loading transport templates...",
         "notes": [
           "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
         ]
@@ -1491,7 +1504,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "6c6472c3b6aeb89169d7d49c45af7f7eab326743"
+            "rev": "4948d1a9290cb1046eede1dbf289789200ea050e"
           }
         ]
       },
@@ -1628,12 +1641,15 @@
             },
             "mmaps": {
               "argv": [
+                "stdbuf",
+                "-oL",
                 "/opt/trinitycore/bin/mmaps_generator",
                 "--threads",
                 "{{THREADS}}"
               ],
               "min_files": 500,
               "background": true,
+              "generation": 2,
               "tile_header": {
                 "length": 20,
                 "magic": 1296908624,
@@ -1890,6 +1906,7 @@
         "local_address_column": "localAddress"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12342,
         "required_build": 12340,
@@ -2556,6 +2573,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,

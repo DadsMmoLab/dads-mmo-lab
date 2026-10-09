@@ -22,8 +22,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from yulon import client_names
-from yulon.catalog.catalog import ClientSpec, MpqDepth
+from yulon import client_build, client_names, steam
+from yulon.catalog.catalog import Client, ClientSpec, MpqDepth
 from yulon.catalog.preflight import GIB, Check
 from yulon.log import get_logger
 
@@ -38,6 +38,7 @@ MPQ_CHECK = "the client's archives"
 LOCALE_CHECK = "the client's locale"
 REPACK_CHECK = "the client's origin"
 SPACE_CHECK = "free space next to the client"
+BUILD_CHECK = "the client's version"
 
 REPACK_FILE = "realmlist.wtf"
 """A pre-configured client ships one at the root; a retail install keeps it under Data/<locale>/."""
@@ -147,6 +148,34 @@ def validate(
         return tuple(checks)
     checks.extend(_warnings(client_dir, data, spec, free_bytes))
     return tuple(checks)
+
+
+def build_check(client_dir: Path, client: Client) -> Check | None:
+    """The verdict on the build of the client's game program (T594): a refusal, or a pass row.
+
+    Asked of the entry's `client.required_build` and `also_builds`, never of a game id, so a
+    new game is checked by filling its catalog entry. None: the entry names no build, the
+    folder has no exe to read yet (the folder rules say that), or the exe carries no readable
+    version -- an unknown client is never blocked, only a build that was read. A build that
+    was read and is right is a `pass` row, so the install log shows it was looked at.
+    """
+    said = client_build.refusal(
+        steam.client_executable(client_dir),
+        version=client.version,
+        build=client.required_build,
+        also=client.also_builds,
+    )
+    if said is None:
+        found = client_build.read_version(steam.client_executable(client_dir))
+        if found is None or client.required_build is None:
+            return None
+        return Check(BUILD_CHECK, "pass", f"the game program is {found}")
+    return Check(
+        BUILD_CHECK,
+        "refuse",
+        said,
+        "Press Install again once a client of that version is picked.",
+    )
 
 
 def _named_in_another_case(client_dir: Path, found: Path, required: str) -> Check:

@@ -30065,6 +30065,46 @@ def test_picking_a_stock_3_3_5a_client_folder_is_accepted(qapp: object, tmp_path
     assert fake.written == [stock]
 
 
+VANILLA = load_catalog().get("wow-vanilla")
+
+
+def _vanilla_client(folder: Path, *parts: int) -> Path:
+    """A folder the Vanilla rules take (`Data/dbc.MPQ`, enough archives); Wow.exe is `parts`."""
+    client = _client_build(folder, *parts)
+    for name in ("dbc", "base", "misc", "model", "patch", "patch-2", "terrain", "texture", "wmo"):
+        (client / "Data" / f"{name}.MPQ").write_bytes(b"MPQ")
+    return client
+
+
+@pytest.mark.parametrize("parts", [(1, 12, 1, 5875), (1, 12, 2, 6005), (1, 12, 3, 6141)])
+def test_picking_any_build_the_vanilla_server_takes_is_accepted_t594(
+    qapp: object, tmp_path: Path, parts: tuple[int, ...]
+) -> None:
+    """The world server takes 1.12.1, 1.12.2 and 1.12.3; `client.also_builds` carries the last two
+    to the Server tab's pick (T594 review: dropping it left every other test green)."""
+    client = _vanilla_client(tmp_path / "client", *parts)
+    view, fake = _client_dir_view(VANILLA, tmp_path / "server", pick_client_dir=lambda *_: client)
+
+    view.change_client_dir()
+
+    assert fake.written == [client]
+
+
+def test_picking_a_tbc_client_for_vanilla_is_refused_naming_both_builds_t594(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", lambda *a, **k: None)
+    client = _vanilla_client(tmp_path / "client", 2, 4, 3, 8606)
+    view, fake = _client_dir_view(VANILLA, tmp_path / "server", pick_client_dir=lambda *_: client)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == []
+    assert failures and "2.4.3 (8606)" in failures[0] and "5875" in failures[0]
+
+
 def test_picking_an_exe_with_no_version_resource_is_accepted(qapp: object, tmp_path: Path) -> None:
     unknown = _game_client(tmp_path / "unknown")  # a Wow.exe that is not a PE file
     view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: unknown)
