@@ -16,6 +16,7 @@ The fakes are Docker's own CLI (`runner.run`); every check runs through the real
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -462,8 +463,10 @@ def test_a_distro_folder_is_asked_about_the_image_its_compose_file_names(
     distro_docker: _ImageDocker, tmp_path: Path
 ) -> None:
     _new_stack(tmp_path)
-    _compose_names(distro_docker, tmp_path, ELSEWHERE_IMAGE)
-    distro_docker.present = {ELSEWHERE_IMAGE}
+    _record(tmp_path)  # another id: only the compose file's name lets this pass
+    _compose_names(distro_docker, tmp_path)
+    distro_docker.present = {NAMED}
+    assert NAMED != ELSEWHERE_IMAGE
     Controller(SPEC, tmp_path, wsl_distro="Ubuntu").refuse_a_missing_image()
 
 
@@ -478,7 +481,7 @@ def test_only_the_images_this_app_builds_are_asked_about(box: _ImageDocker, tmp_
 
 @pytest.mark.parametrize("trouble", ["failing", "not-json"])
 def test_a_compose_file_that_cannot_be_read_does_not_refuse(
-    box: _ImageDocker, tmp_path: Path, trouble: str
+    box: _ImageDocker, tmp_path: Path, trouble: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     _new_stack(tmp_path)
     (tmp_path / composegen.BASE_FILE).write_text("services: [\n", encoding="utf-8")
@@ -487,3 +490,5 @@ def test_a_compose_file_that_cannot_be_read_does_not_refuse(
     else:
         box.config_text = "not json at all"
     Controller(SPEC, tmp_path).refuse_a_missing_image()
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("did not check that its build is in Docker" in m for m in warned), warned

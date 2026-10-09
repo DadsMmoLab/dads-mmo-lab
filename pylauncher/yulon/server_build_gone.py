@@ -34,6 +34,9 @@ from yulon import server_build_presses
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
 
 RETIRED_BOTS_MODULE = "mod-playerbots"
 """The retired fork's bots, in `<core>/modules/`; today's stack has `TortoiseBots` there."""
@@ -139,6 +142,11 @@ def refusal_before_start(
         if (server_dir / composegen.BASE_FILE).is_file():
             found = compose_images() if compose_images is not None else None
             if found is None:
+                logger.warning(
+                    f"{server_dir}: compose would not say which images this server runs (it "
+                    "failed, timed out or answered nothing readable), so Start did not check "
+                    "that its build is in Docker"
+                )
                 return None
             refs = tuple(
                 sorted(
