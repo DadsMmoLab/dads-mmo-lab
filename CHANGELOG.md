@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Account, character and settings changes wait for another Yu'lon working on the server, and say who holds it.
+- Saving settings no longer freezes the window; Network **Apply**, uninstall and the time zone wait for another Yu'lon.
 - Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
 - Modules, Party links, channel setup and bot rebuilds refuse while another Yu'lon works on the server.
 - **Stop** no longer waits long on a slow Docker to reserve the server; it goes ahead after a few seconds.

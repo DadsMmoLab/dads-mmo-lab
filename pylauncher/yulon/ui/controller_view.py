@@ -1797,9 +1797,9 @@ class ControllerServices:
     hold_server: Callable[[str], contextlib.AbstractContextManager[None]] | None = None
     """Reserves this server across processes for a write the view makes itself (T610).
 
-    The Tuning tab saves and reverts its conf files on the GUI thread and takes this around the
-    write; the account and character writes take it inside their own seams. `None` (a harness)
-    holds nothing.
+    The Tuning tab saves and reverts its conf files as jobs (T622) and takes this around the
+    write, on the job's thread; the account and character writes take it inside their own seams.
+    `None` (a harness) holds nothing.
     """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
@@ -2853,7 +2853,8 @@ def _assemble(
             "Create an account",
             create_account,
         ),
-        # The Tuning tab's saves run on the GUI thread, so this one's wait is bounded.
+        # The Tuning tab's saves are jobs (T622); the take is still bounded, so one that cannot
+        # be made says so in 15 s and not after a press's full minute.
         hold_server=_server_hold_for(
             entry, server_dir, spec, wsl_distro=wsl_distro, budget=docker.GUI_HOLD_BUDGET_SECONDS
         ),
@@ -6592,6 +6593,33 @@ TUNING_FILE_SAVED = "Wrote {file}. A backup of it as it was is beside it at {bac
 
 TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
 
+TUNING_WRITE_RUNNING = (
+    "Wait: the earlier change to the settings is still being written. Press it again once it "
+    "has finished."
+)
+"""T622: a second Save or Revert while one is on the job runner."""
+TUNING_WRITE_BROKE = "The settings were not written. Details below says why."
+"""T622: a Save or Revert job that broke (a bug: refusals are answers, not exceptions)."""
+
+
+@dataclass(frozen=True)
+class TuningWrite:
+    """What a Tuning save or revert job did, for the view to show on the GUI thread (T622).
+
+    The job holds the server, checks and writes; it touches no widget. This is everything the
+    view then does, in the order the synchronous slots did it: the report, the backup that arms
+    Revert, the files that now owe a restart, the failure for the app log, the file reopened in
+    the editor and the cards read again.
+    """
+
+    report: str
+    failed: str = ""
+    owed: tuple[str, ...] = ()
+    backup: str = ""
+    reopen: str = ""
+    reload: bool = False
+
+
 TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
 
 MODULE_ACTION_STEPS: dict[str, When] = {
@@ -7722,6 +7750,11 @@ class ControllerView(QWidget):
         # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
         # Undo the last reset); `run_restore()` refuses while it is, on Tortoise.
         self._put_back_running = False
+        # T622: a Tuning save or revert is on the job runner. One at a time (they share a file's
+        # backup), and the tab is not read again until it lands (`reload_tuning`).
+        self._tuning_writing = False
+        self._tuning_write_put_back = False
+        self._tuning_reload_asked = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -18913,6 +18946,12 @@ class ControllerView(QWidget):
         Reads files and nothing else -- no git, no docker, no database -- so it
         is cheap enough to run after every install and every save.
         """
+        if self._tuning_writing:
+            # A write is on the job runner (T622): the cards are drawn from the file when it has
+            # landed, not from the half it has written, and the pressed card keeps its mark.
+            self._tuning_reload_asked = True
+            self.tuning_panel.defer_pressed_card()
+            return
         if self._waits_for_the_distro("tuning", self.reload_tuning):
             # A card's Save or Revert that led here still redraws as that card's (T190).
             self.tuning_panel.defer_pressed_card()
@@ -20002,25 +20041,80 @@ class ControllerView(QWidget):
                         keys.setdefault(key.key, key)
         return keys
 
-    @contextlib.contextmanager
-    def _writing_to_the_server(self, press: str) -> Iterator[bool]:
-        """Hold the server across processes for a conf write; True inside, False if refused (T610).
+    def _tuning_write_refused(self) -> bool:
+        """Refuse a Save or Revert while an earlier one is still being written (T622)."""
+        if self._tuning_writing:
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
+        return False
 
-        When another Yu'lon holds the server the tab says that Yu'lon's sentence and the caller
-        returns before it has written, or taken a backup of, anything. A view with no hold wired
-        (a harness) holds nothing.
+    def _write_tuning(
+        self, press: str, body: Callable[[], TuningWrite], *, put_back: bool = False
+    ) -> None:
+        """Hand a conf write to the job runner, inside the server's cross-process hold (T610/T622).
+
+        `body` runs on the job's thread with the hold taken: it must touch no widget and read no
+        state of the view, only what the press captured. When another Yu'lon holds the server the
+        answer is that Yu'lon's sentence and `body` never runs, so nothing is written or backed
+        up. A view with no hold wired (a harness) holds nothing. Taking the hold costs a Docker
+        round trip or more, which is why none of it happens on the thread that paints.
         """
         hold = self.services.hold_server
-        with contextlib.ExitStack() as held:
-            if hold is not None:
-                try:
-                    held.enter_context(hold(press))
-                except docker.ServerHeldError as refused:
-                    self.tuning_report.setPlainText(str(refused))
-                    self.action_failed.emit(str(refused))
-                    yield False
-                    return
-            yield True
+
+        def work() -> TuningWrite:
+            if hold is None:
+                return body()
+            try:
+                with hold(press):
+                    return body()
+            except docker.ServerHeldError as refused:
+                return TuningWrite(report=str(refused), failed=str(refused))
+
+        self._tuning_writing = True
+        self._tuning_write_put_back = put_back
+        if put_back:
+            self._put_back_running = True  # `run_restore()` refuses while this runs (T145)
+        # The card whose button was pressed keeps its mark through the redraw that lands later.
+        self.tuning_panel.defer_pressed_card()
+        self._run(work, self._tuning_write_done, self._tuning_write_failed)
+
+    def _tuning_write_ended(self) -> None:
+        self._tuning_writing = False
+        if self._tuning_write_put_back:
+            self._tuning_write_put_back = False
+            self._put_back_running = False
+
+    @Slot(object)
+    def _tuning_write_done(self, result: object) -> None:
+        """Show what the job did, in the order the synchronous slots did it."""
+        self._tuning_write_ended()
+        asked = self._tuning_reload_asked
+        self._tuning_reload_asked = False
+        if not isinstance(result, TuningWrite):
+            return
+        self.tuning_report.setPlainText(result.report)
+        if result.backup:
+            # The backup's name on the tab and not only in the report, because it is what arms
+            # Revert beside Save file (T44 item 15).
+            self.tuning_panel.set_backup(result.backup)
+        for file in result.owed:
+            self._note_tuning_owed(file)
+        if result.failed:
+            self.action_failed.emit(result.failed)
+        if result.reopen:
+            self.open_tuning_file(result.reopen)
+        if result.reload or asked:
+            self.reload_tuning()
+
+    @Slot(object)
+    def _tuning_write_failed(self, exc: object) -> None:
+        """Only a bug reaches here: a refusal or a failed write is a `TuningWrite`."""
+        self._tuning_write_ended()
+        self._tuning_reload_asked = False
+        self.tuning_report.setPlainText(TUNING_WRITE_BROKE)
+        self.tuning_details.set_text(str(exc))
+        self.action_failed.emit(str(exc))
+        self.reload_tuning()
 
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
@@ -20044,7 +20138,6 @@ class ControllerView(QWidget):
         for row in card.card.rows:
             if row.key in edits:
                 per_file.setdefault(row.file, {})[row.key] = edits[row.key]
-        said: list[str] = []
         server_dir = self.services.controller.server_dir
         # Every file's values FIRST, across the whole card, before any of them is
         # opened. `tuning.write()` makes the same promise per file, which is not
@@ -20075,12 +20168,17 @@ class ControllerView(QWidget):
                 self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
                 self.action_failed.emit(str(exc))
                 return
-        with self._writing_to_the_server("Save settings") as held:
-            if not held:
-                return
-            for file, values in per_file.items():
+        if self._tuning_write_refused():
+            return
+        pairs = tuple((file, dict(values)) for file, values in per_file.items())
+        is_unbound = (family, module_id) == unbound_settings.CARD
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file, values in pairs:
                 try:
-                    if (family, module_id) == unbound_settings.CARD:
+                    if is_unbound:
                         # Only `0` and `1` reach the file: a switch flipped from a hand-edited
                         # `true`/`false` is written back as the module's own 1/0
                         # (`unbound_settings.write`). Its file's path was checked above, with
@@ -20095,20 +20193,20 @@ class ControllerView(QWidget):
                     # every value on the card. Kept because `tuning.write()` is a
                     # public seam with its own refusals and a caller that assumed
                     # otherwise would be the next half-applied save.
-                    self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                    return TuningWrite(
+                        TUNING_REFUSED.format(module=module_id, why=exc),
+                        failed=str(exc),
+                        owed=tuple(owed),
                     )
-                    self.action_failed.emit(str(exc))
-                    return
                 except OSError as exc:
-                    self.tuning_report.setPlainText(
+                    return TuningWrite(
                         TUNING_REFUSED.format(
                             module=module_id, why=f"{file} could not be written: {exc}"
-                        )
+                        ),
+                        failed=str(exc),
+                        owed=tuple(owed),
                     )
-                    self.action_failed.emit(str(exc))
-                    return
-                self._note_tuning_owed(file)
+                owed.append(file)
                 said.append(
                     TUNING_SAVED.format(
                         module=module_id,
@@ -20118,24 +20216,26 @@ class ControllerView(QWidget):
                         rule=tuning.apply_sentence(tuning.file_rule(file)),
                     )
                 )
-            self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Save settings", body)
 
     @Slot(str, str)
     def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         try:
             card = self.tuning_panel.card((family, module_id))
         except KeyError:
             return
         server_dir = self.services.controller.server_dir
-        said: list[str] = []
-        with self._writing_to_the_server("Put settings back") as held:
-            if not held:
-                return
-            for file in card.card.files:
+        files = tuple(card.card.files)
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file in files:
                 path = server_dir / file
                 backups = tuning.backups_of(path)
                 if not backups:
@@ -20146,7 +20246,7 @@ class ControllerView(QWidget):
                 except (OSError, tuning.TuningError) as exc:
                     said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                     continue
-                self._note_tuning_owed(file)
+                owed.append(file)
                 said.append(
                     TUNING_REVERTED.format(
                         module=module_id,
@@ -20157,8 +20257,9 @@ class ControllerView(QWidget):
                 )
                 if note:
                     said.append(note)
-            self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Put settings back", body, put_back=True)
 
     def _put_back_refused(self, press: str) -> bool:
         """Refuse a put-back of a Tuning backup now, saying why. True if refused (T145 round 6).
@@ -20284,7 +20385,7 @@ class ControllerView(QWidget):
         very change the user is trying to undo. `tuning.restore()` copies
         rather than moves, so a second Revert still has something to restore.
         """
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
         if not file or tuning.is_one_of(
@@ -20300,28 +20401,25 @@ class ControllerView(QWidget):
             gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
             self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
-        with self._writing_to_the_server("Put a setting file back") as held:
-            if not held:
-                return
+        newest = backups[-1]
+
+        def body() -> TuningWrite:
             try:
-                note = self._put_back(backups[-1], path)
+                note = self._put_back(newest, path)
             except tuning.TuningError as exc:
-                self.tuning_report.setPlainText(str(exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
-                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
             said = TUNING_REVERTED_FILE.format(
                 file=file,
-                backup=backups[-1].name,
+                backup=newest.name,
                 rule=tuning.apply_sentence(tuning.file_rule(file)),
             )
-        self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
-        self._note_tuning_owed(file)
-        self.open_tuning_file(file)
-        self.reload_tuning()
+            return TuningWrite(
+                f"{said}\n{note}" if note else said, owed=(file,), reopen=file, reload=True
+            )
+
+        self._write_tuning("Put a setting file back", body, put_back=True)
 
     @Slot(str)
     def save_tuning_file(self, text: str) -> None:
@@ -20353,36 +20451,34 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        if self._tuning_write_refused():
+            return
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        with self._writing_to_the_server("Save a setting file") as held:
-            if not held:
-                return
+        original = self._tuning_raw
+
+        def body() -> TuningWrite:
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
                 made = tuning.backup(path, root=server_dir)
                 with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(tuning.save_text(self._tuning_raw, text))
+                    handle.write(tuning.save_text(original, text))
             except tuning.TuningError as exc:
-                self.tuning_report.setPlainText(str(exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
-                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-                self.action_failed.emit(str(exc))
-                return
-        self.tuning_report.setPlainText(
-            TUNING_FILE_SAVED.format(
-                file=file,
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            return TuningWrite(
+                TUNING_FILE_SAVED.format(
+                    file=file,
+                    backup=made.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                ),
                 backup=made.name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
+                owed=(file,),
+                reload=True,
             )
-        )
-        # The backup's name on the tab and not only in the report, because it
-        # is what arms Revert beside Save file (T44 item 15).
-        self.tuning_panel.set_backup(made.name)
-        self._note_tuning_owed(file)
-        self.reload_tuning()
+
+        self._write_tuning("Save a setting file", body)
 
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)

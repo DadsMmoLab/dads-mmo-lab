@@ -490,7 +490,7 @@ def test_a_revert_is_written_inside_the_hold(qapp: object, ps: _Ps, tmp_path: Pa
 
 
 def test_every_controller_view_method_that_writes_a_conf_takes_the_hold() -> None:
-    """Mutation: call `tuning.write` / `tuning.backup` / `_put_back` from a method with no hold."""
+    """Mutation: call `tuning.write` / `tuning.backup` / `_put_back` outside `_write_tuning`."""
     source = Path(resources.__file__).parent.joinpath("ui", "controller_view.py")
     tree = ast.parse(source.read_text(encoding="utf-8"))
     view = next(
@@ -511,7 +511,7 @@ def test_every_controller_view_method_that_writes_a_conf_takes_the_hold() -> Non
             continue
         calls = {ast.unparse(n.func) for n in ast.walk(method) if isinstance(n, ast.Call)}
         if calls & writers:
-            found[method.name] = "self._writing_to_the_server" in calls
+            found[method.name] = "self._write_tuning" in calls
     assert set(found) >= {"save_tuning", "save_tuning_file", "revert_tuning", "revert_tuning_file"}
     assert [name for name, held in found.items() if not held] == []
 
