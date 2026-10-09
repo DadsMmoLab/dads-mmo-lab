@@ -33,7 +33,8 @@ world keeps sending to an address nobody listens on until it restarts, which is
 harmless; the tab offers the restart.
 
 **After an update** the image is rebuilt from the module the update moved
-(`after_update()`), the binary picked again for the module's new commit. If that rebuild fails after the module moved, the old
+(`after_update()`), the binary picked again for the module's new commit. If that
+rebuild fails after the module moved, the old
 container is removed rather than left running: its daemon speaks the old
 module's datagram protocol and nothing on either side says so (T162, measured
 on TortoiseBots 632e1b63 -> ad9d71fb, protocol 4 -> 5: the daemon never reads
