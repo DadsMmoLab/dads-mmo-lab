@@ -399,6 +399,54 @@ def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:
     return tuple(steps)
 
 
+_DERIVED_FIELDS = frozenset(
+    {"schema_version", "id", "name", "type", "game", "description", "source", "origin"}
+    | {"build", "notes", "conf", "sql"}
+)
+"""The fields a derivation (`_manifest()`) and its completion (`complete()`) ever set."""
+_CONF_STEM = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+
+
+def beyond_derived_shape(manifest: Manifest) -> str | None:
+    """The first field of `manifest` that no derivation produces, or None when it is plain.
+
+    A description that arrives from outside (a move package) is somebody's file: a crafted one
+    can carry patches, client files, deploys, NPCs, server DBCs, folders, prompts, requires or
+    conflicts, and the install would act on them. A derived manifest sets only the fields in
+    `_DERIVED_FIELDS`, and `complete()` fills `conf` and `sql` in ONE shape, checked here step
+    by step; anything else is named so the caller can refuse it.
+    """
+    for name, field in Manifest.model_fields.items():
+        if name not in _DERIVED_FIELDS and getattr(manifest, name) != field.get_default(
+            call_default_factory=True
+        ):
+            return name
+    for step in manifest.conf:
+        template = step.template or ""
+        stem = template[len("conf/") : -len(_CONF_DIST_SUFFIX)]
+        if (
+            template != f"conf/{stem}{_CONF_DIST_SUFFIX}"
+            or not _CONF_STEM.fullmatch(stem)
+            or step.file != f"{_MODULE_CONF_DIR}/{stem}.conf"
+            or step.keys
+        ):
+            return "conf"
+    for sql in manifest.sql:
+        found = re.fullmatch(r"data/sql/([a-z_-]+)/\*\*/\*\.sql", sql.path or "")
+        if (
+            found is None
+            or sql
+            != SqlStep(
+                db=_SQL_DBDIRS.get(found.group(1), "world"),
+                path=sql.path,
+                applied_by="db-import",
+            )
+            or found.group(1) not in _SQL_DBDIRS
+        ):
+            return "sql"
+    return None
+
+
 def _basename(text: str) -> str:
     """A repository basename with `.git` stripped once, case kept (a layout decides case)."""
     return text[: -len(".git")] if text.endswith(".git") else text

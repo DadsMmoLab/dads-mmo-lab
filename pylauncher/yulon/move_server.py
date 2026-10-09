@@ -31,10 +31,10 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Literal, Protocol
 
-from yulon import apply, module_answers, move, reset_defaults
+from yulon import apply, module_answers, module_source, move, reset_defaults
 from yulon.catalog.catalog import (
     LUA_SCRIPTS_DIR,
     CatalogEntry,
@@ -200,42 +200,104 @@ def _folder_module_members(manifest: Manifest, folder: Path) -> list[PackFile]:
     )
     members: list[PackFile] = []
     total = 0
-    for root, dirs, names, linked in links.walk(folder):
-        dirs[:] = [d for d in dirs if d != ".git"]
-        here = Path(root)
-        for name in linked:
-            if name == ".git":
-                continue
-            path = here / name
-            raise MoveError(
-                f"{manifest.name} has a link in its folder ({path.relative_to(folder).as_posix()} "
-                f"points to {os.path.realpath(path)}), and Yu'lon packs only real files: a link "
-                "could bring a file from elsewhere on this computer into the package. Remove "
-                f"the link, then pack again. {_NOT_PACKED}"
-            )
-        for name in names:
-            path = here / name
-            if not stat.S_ISREG(path.lstat().st_mode):
-                continue
-            rel = path.relative_to(folder).as_posix()
-            if apply.CLAIM_FILE == name or move.NEVER_PACKED.search(rel):
-                continue
-            total += path.stat().st_size
-            if len(members) >= FOLDER_MODULE_MAX_FILES or total > FOLDER_MODULE_MAX_BYTES:
-                raise too_big
-            members.append(
-                PackFile(
-                    kind="module",
-                    target=f"{manifest.type}/{manifest.id}/{rel}",
-                    data=path.read_bytes(),
+    try:
+        for root, dirs, names, linked in links.walk(folder):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            here = Path(root)
+            for name in linked:
+                if name == ".git":
+                    continue
+                path = here / name
+                raise MoveError(
+                    f"{manifest.name} has a link in its folder "
+                    f"({path.relative_to(folder).as_posix()} points to {os.path.realpath(path)}), "
+                    "and Yu'lon packs only real files: a link could bring a file from elsewhere "
+                    "on this computer into the package. Remove the link, then pack again. "
+                    f"{_NOT_PACKED}"
                 )
-            )
+            for name in names:
+                path = here / name
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    continue
+                rel = path.relative_to(folder).as_posix()
+                if name == ".git" or apply.CLAIM_FILE == name or move.NEVER_PACKED.search(rel):
+                    continue  # a submodule's or worktree's `.git` FILE is skipped like the folder
+                total += path.stat().st_size
+                if len(members) >= FOLDER_MODULE_MAX_FILES or total > FOLDER_MODULE_MAX_BYTES:
+                    raise too_big
+                try:
+                    member = PackFile(
+                        kind="module",
+                        target=f"{manifest.type}/{manifest.id}/{rel}",
+                        data=b"",
+                    )
+                except ValueError as exc:
+                    logger.info(f"{manifest.id}: {rel!r} cannot be a package member: {exc}")
+                    raise MoveError(
+                        f"{manifest.name} has a file Yu'lon cannot put in a package "
+                        f"({_shown(rel)}): its name or place is not one a package can carry. "
+                        f"Rename or remove it, then pack again. {_NOT_PACKED}"
+                    ) from exc
+                try:
+                    data = path.read_bytes()
+                except OSError as exc:
+                    raise MoveError(
+                        f"{manifest.name} has a file Yu'lon could not read ({_shown(rel)}): "
+                        f"{exc.strerror or exc}. Fix it or remove it, then pack again. "
+                        f"{_NOT_PACKED}"
+                    ) from exc
+                members.append(PackFile(kind="module", target=member.target, data=data))
+    except OSError as exc:
+        raise MoveError(
+            f"{manifest.name}'s folder could not be read: {exc.strerror or exc}. Fix it, then "
+            f"pack again. {_NOT_PACKED}"
+        ) from exc
     if not members:
         raise MoveError(
             f"{manifest.name} has no files in its folder, so there is nothing to pack. Remove it "
             f"or add it again on the Modules tab, then pack again. {_NOT_PACKED}"
         )
+    clash = _case_clash([m.target[len(f"{manifest.type}/{manifest.id}/") :] for m in members])
+    if clash:
+        raise MoveError(
+            f"{manifest.name} holds two files whose names differ only in capital letters "
+            f"({clash[0]} and {clash[1]}), which one Windows folder cannot keep apart. Rename "
+            f"one, then pack again. {_NOT_PACKED}"
+        )
     return members
+
+
+def _shown(rel: str) -> str:
+    """A file name for a sentence: as it is, unless it holds a character that cannot be shown."""
+    return rel if rel.isprintable() and "\\" not in rel else ascii(rel)
+
+
+def _case_clash(paths: Iterable[str]) -> tuple[str, str] | None:
+    """The first two paths that are one path on a case-insensitive disk, sorted, or None."""
+    seen: dict[str, str] = {}
+    for path in sorted(paths):
+        key = path.casefold()
+        if key in seen:
+            return seen[key], path
+        seen[key] = path
+    return None
+
+
+def lands_inside(root: PurePath, target: str) -> bool:
+    """Whether `target` (a package path) joined onto `root` stays inside it, in root's flavour.
+
+    The join the writer does, checked lexically for Windows paths as well as POSIX ones: on
+    Windows a part such as `C:..` resets the drive, and an absolute or rooted part replaces
+    everything before it. Written against `PurePath` so a test can ask both flavours.
+    """
+    try:
+        joined = root.joinpath(*PurePosixPath(target).parts)
+    except ValueError:
+        return False
+    parts = PurePosixPath(target).parts
+    if any(part in ("..", "") or ":" in part or "\\" in part for part in parts):
+        return False
+    return joined.is_relative_to(root) and joined != root
 
 
 def _relative(path: Path, server_dir: Path) -> str:
@@ -343,6 +405,13 @@ def gather_server_facts(
         )
     except OSError as exc:
         raise MoveError(f"Yu'lon could not read the server's files: {exc}. {_NOT_PACKED}") from exc
+    except ValueError as exc:
+        logger.info(f"a server file cannot be a package member: {exc}")
+        raise MoveError(
+            "A file in the server has a name or place a package cannot carry (a colon, a "
+            "backslash, a device name such as CON, a name ending in a dot or space, or a "
+            f"control character). Rename or remove it, then pack again. {_NOT_PACKED}"
+        ) from exc
     if secret_password:
         needle = secret_password.encode("utf-8")
         for packed in files:
@@ -645,8 +714,51 @@ class ServerImportPlan:
         return "\n".join(lines)
 
 
+def _beyond_a_derivation(packed: PackedModule, manifest: Manifest, game: str) -> str | None:
+    """A refusal sentence when a carried description is for another game or has install steps."""
+    if manifest.game != game:
+        return (
+            f"The package's description of {packed.id} is for another game, so Yu'lon will not "
+            "install it. Pack again on the old computer."
+        )
+    field = module_source.beyond_derived_shape(manifest)
+    if field is not None:
+        route = "folder" if packed.origin == "folder" else "link"
+        return (
+            f"The package's description of {packed.id} asks for more than a module added from a "
+            f"{route} can ask for ({field}), so Yu'lon will not install it. Pack again on the "
+            "old computer."
+        )
+    return None
+
+
+def folder_module_problem(name: str, members: Sequence[move.FileMember], prefix: str) -> str | None:
+    """A sentence when a folder module's members are past the bound or collide; read nothing.
+
+    Run on the DECLARED sizes in the manifest, at the plan and again before the run stages a
+    byte: the pack's own bound is not a promise a package made elsewhere keeps.
+    """
+    if (
+        len(members) > FOLDER_MODULE_MAX_FILES
+        or sum(m.bytes for m in members) > FOLDER_MODULE_MAX_BYTES
+    ):
+        return (
+            f"{name} holds more than Yu'lon brings in from a folder module (the limit is "
+            f"{FOLDER_MODULE_MAX_BYTES // 1024**2} MB and {FOLDER_MODULE_MAX_FILES} files), so "
+            "nothing was brought in. Pack it again on the old computer with less in it."
+        )
+    clash = _case_clash(m.target[len(prefix) :] for m in members)
+    if clash:
+        return (
+            f"{name} holds two files whose names differ only in capital letters "
+            f"({clash[0]} and {clash[1]}), which one Windows folder cannot keep apart, so "
+            "nothing was brought in. Pack again on the old computer."
+        )
+    return None
+
+
 def _module_plans(
-    package: move.Package, lookup: ModuleLookup
+    package: move.Package, lookup: ModuleLookup, game: str
 ) -> tuple[list[ModuleToInstall], list[str]]:
     server = package.manifest.server
     if server is None:
@@ -684,6 +796,10 @@ def _module_plans(
             ):
                 refusals.append(damaged)
                 continue
+            said = _beyond_a_derivation(packed, described, game)
+            if said:
+                refusals.append(said)
+                continue
             prefix = f"{packed.type}/{packed.id}/"
             folder_files = tuple(
                 sorted(
@@ -695,6 +811,10 @@ def _module_plans(
                 refusals.append(
                     f"The package holds no files for {packed.id}. Pack again on the old computer."
                 )
+                continue
+            too_much = folder_module_problem(packed.id, folder_files, prefix)
+            if too_much:
+                refusals.append(too_much)
                 continue
             plans.append(
                 ModuleToInstall(packed=packed, manifest=described, folder_files=folder_files)
@@ -739,6 +859,10 @@ def _module_plans(
                     f"The package's description of {packed.id} is missing or damaged. "
                     "Pack again on the old computer."
                 )
+                continue
+            said = _beyond_a_derivation(packed, manifest, game)
+            if said:
+                refusals.append(said)
                 continue
             carried = manifest
         if manifest.source is None or manifest.source.repo.lower() != packed.repo.lower():
@@ -864,7 +988,7 @@ def plan_server_import(
         refusals.append(said)
     else:
         pinned = pinned_entry(entry, manifest.server.sources)
-    modules, module_refusals = _module_plans(package, lookup_for(entry))
+    modules, module_refusals = _module_plans(package, lookup_for(entry), entry.id)
     refusals.extend(module_refusals)
     server_dir = server_dir_for(entry)
     refusal, resuming = folder_refusal(server_dir, package_digest(manifest))
@@ -1029,6 +1153,7 @@ class MovedInInstall:
     ) -> None:
         if not plan.allowed or plan.manifest is None or plan.pinned is None:
             raise MoveError(" ".join(plan.refusals) or "This file cannot be brought in.")
+        self._left_over: list[str] = []
         self.plan = plan
         self.entry = plan.pinned
         self._engine = engine
@@ -1194,7 +1319,11 @@ class MovedInInstall:
             try:
                 if planned.folder_files:
                     assert server.install_folder is not None
-                    report = self._install_from_folder(server, server_dir, planned)
+                    try:
+                        report = self._install_from_folder(server, server_dir, planned)
+                    finally:
+                        yield from self._left_over
+                        self._left_over.clear()
                 else:
                     report = server.applier.install(manifest, values)
             except apply.ApplyError as exc:
@@ -1215,24 +1344,40 @@ class MovedInInstall:
     ) -> apply.ApplyReport:
         """A folder module's files into a staging folder, installed through the folder route.
 
-        The package is read again here (its members were verified at the plan, and the zip
-        hashes each as it is read). The staging folder is beside the server's top-level files,
-        never inside `modules/` (the folder route refuses a source there), and removed whatever
-        the install did.
+        The package is read again here and the bound is checked again on its declared sizes
+        BEFORE any member is read. The staging folder is beside the server's top-level files,
+        never inside `modules/` (the folder route refuses a source there). One a killed run left
+        behind is swept first, and one that will not go is said (`self._left_over`).
         """
         assert server.install_folder is not None
         package = self._reopen()
         prefix = f"{planned.packed.type}/{planned.packed.id}/"
+        too_much = folder_module_problem(planned.packed.id, planned.folder_files, prefix)
+        if too_much:
+            raise MoveError(too_much)
+        for stale in server_dir.glob(".yulon-move-folder-*"):
+            self._remove_staging(stale)
         staging = Path(tempfile.mkdtemp(prefix=".yulon-move-folder-", dir=server_dir))
         try:
             root = staging / planned.packed.id
             for member in planned.folder_files:
-                _write_bytes(
-                    _inside(root, member.target[len(prefix) :]), package.file_bytes(member)
-                )
+                rel = member.target[len(prefix) :]
+                target = _inside(root, rel)
+                _write_bytes(target, package.file_bytes(member))
             return server.install_folder(planned.manifest, root)
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            self._remove_staging(staging)
+
+    def _remove_staging(self, staging: Path) -> None:
+        try:
+            shutil.rmtree(staging)
+        except OSError as exc:
+            logger.warning(f"could not remove {staging}: {exc}")
+        if staging.exists():
+            self._left_over.append(
+                f"!! Yu'lon could not remove {staging} (it holds a copy of a module's files); "
+                "delete that folder by hand."
+            )
 
     def _closing(self, server_dir: Path) -> Iterator[str]:
         manifest = self.plan.manifest
@@ -1299,6 +1444,11 @@ def _write_bytes(target: Path, data: bytes) -> None:
 
 
 def _inside(server_dir: Path, target: str) -> Path:
+    if not lands_inside(server_dir, target):
+        raise MoveError(
+            f"{target} would be written outside {server_dir}, so Yu'lon will not write it. "
+            "Nothing was written there."
+        )
     path = server_dir.joinpath(*PurePosixPath(target).parts)
     for parent in path.parents:
         if parent == server_dir:

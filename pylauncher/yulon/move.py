@@ -77,6 +77,12 @@ _SCHEMA = re.compile(r"[A-Za-z0-9_]{1,64}")
 _CHANNEL_ACCOUNT = re.compile(r"YULON_[A-Z0-9]{1,64}")
 _BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _DRIVE = re.compile(r"^[A-Za-z]:")
+_DEVICE = re.compile(
+    r"^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$", re.IGNORECASE
+)
+"""A Windows device name: `CON`, `NUL.txt` and `COM1.x` open the device, not a file."""
+MAX_FILE_MEMBER_BYTES = 256 * 1024**2
+"""The most one non-database member may declare: a conf, a script or a module file is read whole."""
 
 
 class MovePackageError(MaintenanceError):
@@ -124,7 +130,7 @@ ANSWERS_TARGET = ".yulon-module-answers.json"
 """The one Yu'lon record that travels: it describes the databases, which travel too."""
 
 NEVER_PACKED = re.compile(
-    r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)"
+    r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)", re.IGNORECASE
 )
 """Paths no file member may name: Yu'lon's records (the install claim, the folder id T568
 says a copy must make again), the database password, the channel credentials."""
@@ -551,8 +557,10 @@ class Package:
     def file_bytes(self, member: FileMember) -> bytes:
         """One small file member, checked again as it is read."""
         try:
-            with zipfile.ZipFile(self.path) as archive:
-                data = archive.read(member.file)
+            with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as fh:
+                # One byte more than the list says: a member that grew since it was checked is
+                # refused without being read whole.
+                data = fh.read(member.bytes + 1)
         except (OSError, KeyError, zipfile.BadZipFile) as exc:
             raise MovePackageError(_changed(self.path.name)) from exc
         if hashlib.sha256(data).hexdigest() != member.sha256 or len(data) != member.bytes:
@@ -616,12 +624,25 @@ def _changed(name: str) -> str:
 
 
 def _unsafe_name(name: str) -> bool:
-    """A member name a zip can use to write somewhere it was not asked to."""
+    """A member name a zip can use to write somewhere it was not asked to.
+
+    Checked as Windows reads it too, because a package travels between systems: a `:` in ANY
+    part (`sub/C:../x` is drive-relative to `C:` once joined there), a trailing dot or space
+    (Windows drops them, so `x.` and `x` are one file), a device name (`CON`, `NUL.txt`), a
+    backslash, and every control character.
+    """
     if not name or name.startswith(("/", "\\")) or "\\" in name or _DRIVE.match(name):
         return True
     if "\x00" in name:
         return True
-    return any(part in ("..", ".", "") for part in name.split("/"))
+    for part in name.split("/"):
+        if part in ("..", ".", ""):
+            return True
+        if ":" in part or any(ord(c) < 32 or ord(c) == 127 for c in part):
+            return True
+        if part.endswith((".", " ")) or _DEVICE.match(part.split(".", 1)[0].rstrip(" ")):
+            return True
+    return False
 
 
 def read_package(path: Path) -> Package:
@@ -682,6 +703,8 @@ def read_package(path: Path) -> Package:
         checked: list[tuple[str, str, int]] = [
             (m.file, m.sha256, m.bytes) for m in manifest.databases
         ] + [(f.file, f.sha256, f.bytes) for f in extra]
+        if any(f.bytes > MAX_FILE_MEMBER_BYTES for f in extra):
+            raise MovePackageError(NOT_A_PACKAGE)
         for file, sha256, length in checked:
             if file not in names:
                 raise MovePackageError(
@@ -690,7 +713,7 @@ def read_package(path: Path) -> Package:
                 )
             try:
                 with archive.open(file, mode="r") as fh:
-                    digest, size = _hash_stream(fh)
+                    digest, size = _hash_stream(fh, limit=length)
             except (OSError, zipfile.BadZipFile) as exc:
                 raise MovePackageError(_changed(path.name)) from exc
             if digest != sha256 or size != length:
@@ -698,12 +721,15 @@ def read_package(path: Path) -> Package:
     return Package(path=path, manifest=manifest)
 
 
-def _hash_stream(fh: IO[bytes]) -> tuple[str, int]:
+def _hash_stream(fh: IO[bytes], limit: int | None = None) -> tuple[str, int]:
+    """SHA-256 and length of a stream; with `limit`, it stops one byte past it (a lying header)."""
     digest = hashlib.sha256()
     size = 0
     while chunk := fh.read(_CHUNK):
         digest.update(chunk)
         size += len(chunk)
+        if limit is not None and size > limit:
+            break
     return digest.hexdigest(), size
 
 
