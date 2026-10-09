@@ -546,3 +546,50 @@ def test_a_first_install_refused_after_its_record_was_written_drops_that_record(
     assert route.installed() == []
     assert not route.applier.clone_dir(prepared.manifest).exists()
     assert elsewhere.read_text() == "not yours\n"
+
+
+def test_an_install_without_a_completion_reads_an_add_on_again_through_the_hook(
+    tmp_path: Path,
+) -> None:
+    """`update()` reinstalls with no completion of its own: the applier's hook reads the clone.
+
+    The repository gained a second add-on since it was added; without the read the
+    record keeps one step and the new folder never reaches the client.
+    """
+    git = _Git({"pfUI/pfUI.toc": TOC})
+    applier = Applier(
+        tmp_path / "server",
+        client_dir=tmp_path / "client",
+        git=git,  # type: ignore[arg-type]
+        # The checkout's own answers, as git gives them for a clean clone of that link.
+        remote_url=lambda clone: "https://github.com/shagu/pfUI",
+        unmodified=lambda clone, rel: True,
+        no_local_commits=lambda clone, branch: True,
+    )
+    route, addons = _route(tmp_path, applier=applier, git=git)
+    route.applier.recomplete = route.completer
+    route.install(route.from_link("https://github.com/shagu/pfUI"))
+    (manifest,) = route.installed()
+    git.files = {"pfUI/pfUI.toc": TOC, "pfUI_Config/pfUI_Config.toc": TOC}
+
+    route.applier.install(manifest, replacing=True)
+
+    assert (addons / "pfUI_Config" / "pfUI_Config.toc").is_file()
+    (again,) = route.installed()
+    assert sorted(c.name or "" for c in again.client) == ["pfUI", "pfUI_Config"]
+
+
+def test_the_hook_is_not_asked_for_a_shipped_manifest(tmp_path: Path) -> None:
+    asked: list[str] = []
+    applier = Applier(tmp_path / "server", client_dir=tmp_path / "client", git=_Git())  # type: ignore[arg-type]
+
+    def hook(manifest: Manifest, clone: Path) -> Manifest:
+        asked.append(manifest.id)
+        return manifest
+
+    applier.recomplete = hook
+    shipped = _carrying(origin=None, source={"repo": "shagu/pfUI"})
+
+    applier.install(shipped)
+
+    assert asked == []

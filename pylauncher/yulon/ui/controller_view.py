@@ -2457,8 +2457,18 @@ def _with_client_addons(
     if applier is None:
         # T30's rule, as on Tortoise: only a folder that holds the game's own
         # `Interface/` is a client an add-on may be written into.
+        # The two 8.7a seams every applier carries (T7), over this install's own
+        # world: this one runs no SQL (its guard refuses a manifest with any), and
+        # the audit that every applier the app builds has them holds for it too.
+        spec = entry.container_spec()
+        distro = services.controller.wsl_distro
         applier = client_addons.AddonOnlyApplier(
-            server_dir, client_dir=_client_dir_for_addons(client_dir)
+            server_dir,
+            client_dir=_client_dir_for_addons(client_dir),
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=distro),
+            start_database=lambda: docker.start_database(
+                spec, server_dir, because="no SQL was run", wsl_distro=distro
+            ),
         )
         applier.client_origins = origins
         applier.client_game = entry.id if origins else ""
@@ -2475,6 +2485,10 @@ def _with_client_addons(
         shipped=client_addons.shipped_addons(shipped),
         shipped_ids=tuple(m.id for m in shipped),
     )
+    if applier.recomplete is None:
+        # T613 PR-2: an Update of an add-on from a link reads its clone again, as
+        # Tortoise's own hook does there (which is kept: it reads Tortoise's kinds).
+        applier.recomplete = route.completer
     if own and isinstance(services.uninstall, purge.Uninstaller):
         services.uninstall.take_back_client_files = applier.take_back_everything
     return replace(

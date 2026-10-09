@@ -3177,6 +3177,12 @@ class Applier:
         # is left for that server on an outside add-on's Remove. Bound by `main.py`
         # beside `ControllerServices.other_server_dirs`; None, no other is known.
         self.other_server_dirs: Callable[[], Sequence[Path]] | None = None
+        # T596 (Tortoise) and T613 PR-2 (every game): reads an outside item's clone
+        # again when an Install or Update puts it on new code, handed no completion
+        # of its own (`update()` reinstalls with none). Set by `modules.applier()` on
+        # Tortoise and by `for_entry()` from the add-on route elsewhere; None, no item
+        # is read again. Asked only for an item with an `origin` and a `source`.
+        self.recomplete: Completer | None = None
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -3332,6 +3338,12 @@ class Applier:
                 "Modules tab. Nothing was changed."
             )
 
+    def _recompleter_for(self, manifest: Manifest) -> Completer | None:
+        """`recomplete`, for an item brought from a link (T596, T613 PR-2); None for any other."""
+        if manifest.origin is not None and manifest.source is not None:
+            return self.recomplete
+        return None
+
     def clone_dir(self, manifest: Manifest) -> Path:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
@@ -3381,6 +3393,8 @@ class Applier:
         """
         self._refuse_a_server_source(manifest)
         log = _Log()
+        if complete is None:
+            complete = self._recompleter_for(manifest)
         with self._says_the_database_is_up(log):
             return self._install(
                 manifest,

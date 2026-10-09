@@ -205,3 +205,24 @@ def test_a_record_of_another_game_is_not_listed() -> None:
 
     assert list(centurion_modules.store().load_all("mod")) == []
     assert "pfui" not in [m.id for m in tbc_modules.store().load_all("mod")]
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-centurion"])
+def test_the_routes_completion_is_the_appliers_hook_where_it_had_none(
+    game: str, tmp_path: Path
+) -> None:
+    services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / "s")
+
+    assert services.client_addons is not None
+    assert services.client_addons.applier.recomplete == services.client_addons.completer
+
+
+def test_tortoise_keeps_its_own_hook(tmp_path: Path) -> None:
+    from yulon.controller_wow_tortoise.autoupdate import GuardedApplier
+
+    services = ControllerServices.for_entry(CATALOG.get("wow-tortoise"), tmp_path / "s")
+
+    assert isinstance(services.applier, GuardedApplier)
+    assert services.applier.recomplete is not None
+    assert services.client_addons is not None
+    assert services.applier.recomplete != services.client_addons.completer

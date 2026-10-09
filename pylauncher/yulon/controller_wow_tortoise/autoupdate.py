@@ -490,20 +490,11 @@ class GuardedApplier(Applier):
         self.arming = arming
         self.world_running = world_running
         self.settings_for = settings_for
-        self.recomplete: Completer | None = None
-        """Reads an outside item's clone again when an Install or Update puts it on new code.
-
-        Set by `modules.applier()` (T596). An upstream update can add or rename a
-        `conf/*.conf.dist`, add SQL or an add-on, and the manifest persisted at the first
-        install knows none of them: a server module whose new settings file is not put in
-        place stops the world from starting after the next Rebuild (Codex review).
-        """
-
-    def _recompleter_for(self, manifest: Manifest) -> Completer | None:
-        """`recomplete`, for an item brought from a link (T596); None for any other."""
-        if manifest.origin is not None and manifest.source is not None:
-            return self.recomplete
-        return None
+        # `recomplete` (the base's, since T613 PR-2) is set by `modules.applier()`
+        # (T596). An upstream update can add or rename a `conf/*.conf.dist`, add SQL or
+        # an add-on, and the manifest persisted at the first install knows none of
+        # them: a server module whose new settings file is not put in place stops the
+        # world from starting after the next Rebuild (Codex review).
 
     def _guard(self, manifest: Manifest, action: When) -> str:
         check_manifest(manifest)
