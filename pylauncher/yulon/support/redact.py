@@ -43,6 +43,7 @@ Line endings are never touched -- no pattern consumes `\\r` or `\\n`.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -301,15 +302,13 @@ _SQL_HEX = re.compile(r"(?i)(?P<pre>\bX['\"]|['\"])[0-9a-f]{32,}(?P<post>['\"])|
 """Inside a realmd/auth `UPDATE`/`INSERT` line: the SRP and session columns by name, and any
 quoted or `0x` hex blob of 32 digits or more (a SHA-1 hash, a session key, `v`, `s`) by shape."""
 
-_AUTH_DIGEST = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*[\"']?"
-    r"digest[ \t]+)(?P<value>[^\r\n]+)"
-)
-"""A Digest header is a list (`username=..., nonce=..., response=...`): all of it goes."""
 _AUTH_HEADER = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*[\"']?"
-    r"(?:(?:basic|bearer|digest|token|negotiate)[ \t]+)?)(?P<value>[^\s\"',;]+)"
+    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
 )
+"""An `Authorization` header: the scheme and everything after it, whatever the scheme is
+(Basic, Bearer, Digest's whole parameter list, NTLM, a scheme invented tomorrow). A quoted
+value ends at its quote, so a JSON log line keeps its other fields."""
 _BEARER = re.compile(r"(?i)(?<![\w-])(?P<head>bearer[ \t]+)(?P<value>[A-Za-z0-9._~+/=-]{12,})")
 _BASIC = re.compile(
     r"(?<![\w-])(?P<head>[Bb]asic[ \t]+)"
@@ -359,17 +358,19 @@ The console commands the app itself sends (`commands.py`), an XML element a SOAP
 or request carries, and the command lines that put a password on an argv."""
 
 _COOKIE = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?:set-)?cookie[\"']?[ \t]*[=:][ \t]*)(?P<value>[^\r\n]+)"
+    r"(?i)(?<![\w-])(?P<head>(?P<set>set-)?cookie[\"']?[ \t]*[=:][ \t]*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
 )
 _COOKIE_PAIR = re.compile(r"(?P<head>(?:^|[;,][ \t]*)[^=;,\s]+=)(?P<value>[^;,\r\n]*)")
 _COOKIE_ATTRIBUTES = frozenset(
     {"path", "domain", "expires", "max-age", "samesite", "secure", "httponly", "version"}
 )
-"""A `Cookie:` / `Set-Cookie:` line carries a login session: every value in it is masked,
-the names and the attributes (`Path`, `Expires`, ...) stay so the line still reads."""
+"""A `Cookie:` / `Set-Cookie:` line carries a login session. In `Cookie:` EVERY pair is a
+cookie (`path` is a valid cookie name there) and every value is masked. In `Set-Cookie:` the
+first pair is the cookie and the later `Path`, `Expires`, ... are attributes, which stay so
+the line still reads. A quoted value (a JSON field) ends at its quote."""
 
 _HEAD_VALUE = (
-    _AUTH_DIGEST,
     _AUTH_HEADER,
     _BEARER,
     _BASIC,
@@ -401,16 +402,24 @@ def _mask_head_value(match: re.Match[str]) -> str:
     return match.group("head") + MASK
 
 
-def _mask_cookie_pair(match: re.Match[str]) -> str:
-    name = match.group("head").rstrip("=").lstrip(";, \t").lower()
-    value = match.group("value")
-    if name in _COOKIE_ATTRIBUTES or not value.strip() or _is_masked(value.strip()):
-        return match.group(0)
-    return match.group("head") + MASK
-
-
 def _mask_cookie(match: re.Match[str]) -> str:
-    return match.group("head") + _COOKIE_PAIR.sub(_mask_cookie_pair, match.group("value"))
+    value = match.group("value")
+    quoted = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
+    inner = value[1:-1] if quoted else value
+    set_cookie = match.group("set") is not None
+    seen = itertools.count()
+
+    def pair(found: re.Match[str]) -> str:
+        position = next(seen)
+        name = found.group("head").rstrip("=").lstrip(";, \t").lower()
+        cookie_value = found.group("value")
+        attribute = set_cookie and position > 0 and name in _COOKIE_ATTRIBUTES
+        if attribute or not cookie_value.strip() or _is_masked(cookie_value.strip()):
+            return found.group(0)
+        return found.group("head") + MASK
+
+    masked = _COOKIE_PAIR.sub(pair, inner)
+    return match.group("head") + (f"{value[0]}{masked}{value[0]}" if quoted else masked)
 
 
 def _mask_keyed(match: re.Match[str]) -> str:

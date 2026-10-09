@@ -131,7 +131,34 @@ def test_a_digest_header_loses_every_parameter() -> None:
     for name in ("Authorization", "Proxy-Authorization"):
         line = f'{name}: Digest username="bob", nonce="{_hex(8)}", response="{response}"'
         out = Redactor.build([]).redact(line)
-        assert response not in out and out == f"{name}: Digest {MASK}", out
+        assert response not in out and out == f"{name}: {MASK}", out
+
+
+def test_an_authorization_header_of_any_scheme_loses_its_credential() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    for line in (
+        f"Authorization: NTLM {secret}",
+        f"Authorization: Negotiate {secret}",
+        f"Authorization: AWS4-HMAC-SHA256 Credential={secret}/x, Signature={secret}",
+        f"Authorization: {secret}",
+    ):
+        assert secret not in Redactor.build([]).redact(line), line
+    json_line = f'{{"Authorization": "Bearer {secret}", "url": "/status"}}'
+    assert Redactor.build([]).redact(json_line) == f'{{"Authorization": {MASK}, "url": "/status"}}'
+
+
+def test_a_request_cookie_named_like_an_attribute_is_still_a_cookie() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    for name in ("path", "domain", "secure", "version", "expires", "samesite", "httponly"):
+        out = Redactor.build([]).redact(f"Cookie: {name}={secret}; theme=dark")
+        assert secret not in out, (name, out)
+        out = Redactor.build([]).redact(f"Set-Cookie: {name}={secret}; Path=/")
+        assert secret not in out and "Path=/" in out, (name, out)
+
+
+def test_a_cookie_in_a_json_line_keeps_the_rest_of_the_line() -> None:
+    line = '{"Cookie": "sid=abcdef123456", "url": "/status"}'
+    assert Redactor.build([]).redact(line) == f'{{"Cookie": "sid={MASK}", "url": "/status"}}'
 
 
 @pytest.mark.parametrize(
