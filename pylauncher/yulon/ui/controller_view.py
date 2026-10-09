@@ -10952,7 +10952,9 @@ class ControllerView(QWidget):
             # T627: compose tried to pull this server's `yulon.local` image because Docker has
             # lost it (the check before Start missed it, or Docker was not asked). The player
             # is told what is gone and what moves it on; Docker's words stay under Details.
-            msg = server_build_gone.gone_sentence(self.entry, self.services.controller.server_dir)
+            msg = server_build_gone.gone_sentence(
+                self.entry, self.services.controller.server_dir, after_an_attempt=True
+            )
             why = raw
         elif not _said_by_yulon(exc):
             # T214: something broke -- Docker's or the system's own words. The

@@ -60,7 +60,7 @@ class _ImageDocker(_DbDocker):
     def __call__(
         self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
-        if cmd[:3] == ["docker", "image", "inspect"]:
+        if "image" in cmd and "inspect" in cmd and cmd[-1].startswith("yulon.local/"):
             self.calls.append(cmd)
             if self.silent:
                 return subprocess.CompletedProcess(
@@ -268,3 +268,136 @@ def test_a_pull_error_that_only_says_it_could_not_resolve_the_image_is_a_gone_bu
     assert "No such image" not in only_resolve
     view = _view_failed(qapp, tmp_path, _compose_error(only_resolve))
     assert "build is gone from Docker" in view.problem_label.text()
+
+
+# -- the id the images are named after, and every press that stops first ----------------------
+
+RECORDED = "0123abcd"
+ELSEWHERE_IMAGE = (
+    f"yulon.local/cmangos-tortoise-server:native-{RECORDED}"  # spelled out, not derived
+)
+
+
+def _record(server: Path, ident: str = RECORDED) -> None:
+    """The record Yu'lon wrote inside a distro: its id is not the hash of this folder's path."""
+    (server / native.STATE_FILE).write_text(
+        '{"version": 1, "game_id": "wow-tortoise", "family": "cmangos", '
+        f'"install_id": "{ident}", "completed": []}}',
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def distro_docker(box: _ImageDocker, monkeypatch: pytest.MonkeyPatch) -> _ImageDocker:
+    """Docker as a distro's own answers it: there is no `wsl.exe` on this machine to prefix with."""
+
+    def ask(
+        argv: list[str], cwd: Path | None = None, timeout: float | None = None, **_k: Any
+    ) -> Any:
+        return box(["docker", *argv], cwd, timeout)
+
+    monkeypatch.setattr(docker, "_docker", ask)
+    return box
+
+
+def test_a_server_in_a_distro_is_asked_about_the_image_its_record_names(
+    distro_docker: _ImageDocker, tmp_path: Path
+) -> None:
+    """Its images carry the recorded id; the folder's own hash names nothing there (T627 review)."""
+    _new_stack(tmp_path)
+    _record(tmp_path)
+    distro_docker.present = {ELSEWHERE_IMAGE}
+    assert composegen.built_image_refs(TORTOISE, tmp_path) != (ELSEWHERE_IMAGE,)
+    Controller(SPEC, tmp_path, wsl_distro="Ubuntu").refuse_a_missing_image()
+
+
+def test_a_server_in_a_distro_whose_recorded_image_is_gone_is_refused(
+    distro_docker: _ImageDocker, tmp_path: Path
+) -> None:
+    _new_stack(tmp_path)
+    _record(tmp_path)
+    distro_docker.present = set(
+        composegen.built_image_refs(TORTOISE, tmp_path)
+    )  # the path-hash name only
+    with pytest.raises(StartRefused):
+        Controller(SPEC, tmp_path, wsl_distro="Ubuntu").refuse_a_missing_image()
+
+
+def test_a_distro_record_with_no_usable_id_does_not_refuse(
+    distro_docker: _ImageDocker, tmp_path: Path
+) -> None:
+    _new_stack(tmp_path)
+    Controller(SPEC, tmp_path, wsl_distro="Ubuntu").refuse_a_missing_image()
+
+
+def _running_here(box: _ImageDocker) -> None:
+    box.names = "".join(f"{name}\n" for name in SPEC.compose_services())
+
+
+@pytest.fixture
+def nothing_may_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A press that gets past the refusal fails at once instead of waiting on a real stop."""
+
+    def forbidden(*_a: object, **_k: object) -> None:
+        raise AssertionError("the press went on to stop or start something")
+
+    for name in ("stop", "start", "remove", "stop_conflicting"):
+        monkeypatch.setattr(Controller, name, forbidden)
+
+
+def _stops(box: _ImageDocker) -> list[list[str]]:
+    return [
+        c
+        for c in box.calls
+        if c[:2] == ["docker", "stop"] or c[:3] == ["docker", "compose", "stop"]
+    ]
+
+
+@pytest.mark.parametrize("press", ["refuse_before_a_stop", "stop_conflicting_and_start"])
+def test_a_press_that_stops_first_is_refused_before_it_stops_anything(
+    box: _ImageDocker, nothing_may_stop: None, tmp_path: Path, press: str
+) -> None:
+    _new_stack(tmp_path)
+    _running_here(box)
+    with pytest.raises(StartRefused) as refused:
+        getattr(Controller(SPEC, tmp_path), press)()
+    assert "build is gone from Docker" in str(refused.value)
+    assert _stops(box) == [] and _ups(box) == []
+
+
+def _view(tmp_path: Path) -> Any:
+    from tests.test_controller_view import _services
+    from yulon.ui.controller_view import ControllerView
+
+    services = _services(_ImageDocker(), tmp_path, [])
+    services.controller = Controller(SPEC, tmp_path)
+    return ControllerView(TORTOISE, services, status_poll_ms=0)
+
+
+@pytest.mark.parametrize("press", ["_do_restart", "_do_recreate"])
+def test_restart_and_recreate_leave_a_running_server_alone_when_its_build_is_gone(
+    qapp: object, box: _ImageDocker, nothing_may_stop: None, tmp_path: Path, press: str
+) -> None:
+    _new_stack(tmp_path)
+    _running_here(box)
+    with pytest.raises(StartRefused):
+        getattr(_view(tmp_path), press)()
+    assert _stops(box) == []
+    assert not [c for c in box.calls if c[:3] == ["docker", "compose", "down"] or "rm" in c[:3]]
+
+
+def test_the_sentence_after_a_compose_failure_does_not_say_nothing_was_started(
+    qapp: object, box: _ImageDocker, tmp_path: Path
+) -> None:
+    """The database may be up and the realm row written by then: PARTLY UP (T627)."""
+    _new_stack(tmp_path)
+    view = _view_failed(qapp, tmp_path, _compose_error(COMPOSE_SAID))
+    said = view.problem_label.text()
+    assert "Nothing was started" not in said and "may have started" in said
+    assert REBUILD in said
+    _old_fork(tmp_path)
+    view = _view_failed(qapp, tmp_path, _compose_error(COMPOSE_SAID))
+    assert "Nothing was started" not in view.problem_label.text()
+    assert "Nothing was started" in str(
+        pytest.raises(StartRefused, Controller(SPEC, tmp_path).start).value
+    )

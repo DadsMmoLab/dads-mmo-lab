@@ -31,8 +31,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from yulon import server_build_presses
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.installer import InstallerError
 
 RETIRED_BOTS_MODULE = "mod-playerbots"
 """The retired fork's bots, in `<core>/modules/`; today's stack has `TortoiseBots` there."""
@@ -89,17 +90,24 @@ def rebuild_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
     )
 
 
-def gone_sentence(entry: CatalogEntry, server_dir: Path) -> str:
-    """What the player reads when the server's build is gone from Docker, by what moves it on."""
+def gone_sentence(entry: CatalogEntry, server_dir: Path, *, after_an_attempt: bool = False) -> str:
+    """What the player reads when the server's build is gone from Docker, by what moves it on.
+
+    `after_an_attempt`: said after compose already ran, so the database may be up and the
+    realm row already written; "Nothing was started" is true only of the refusal before.
+    """
+    said = (
+        "Part of the server may have started first." if after_an_attempt else "Nothing was started."
+    )
     if retired_fork_tree(entry, server_dir):
         return (
             "The server's build is gone from Docker, and this server was made from the retired "
-            "playerbots fork, which Yu'lon can no longer compile again. Nothing was started. "
+            f"playerbots fork, which Yu'lon can no longer compile again. {said} "
             f"{NEW_FOLDER_ADVICE}"
         )
     press = server_build_presses.under_server_build(server_build_presses.REBUILD)
     return (
-        "The server's build is gone from Docker, so it cannot start. Nothing was started. "
+        f"The server's build is gone from Docker, so it cannot start. {said} "
         f"Press {press} to compile it again."
     )
 
@@ -108,6 +116,8 @@ def refusal_before_start(
     entry: CatalogEntry | None,
     server_dir: Path,
     images_built: Callable[[Sequence[str]], bool | None],
+    *,
+    wsl_distro: str | None = None,
 ) -> str | None:
     """The sentence for a Start whose one built image is not in Docker, else None (T627).
 
@@ -117,9 +127,12 @@ def refusal_before_start(
     """
     if entry is None or not _one_image_build(entry):
         return None
+    # The id the engine names the images after: a server inside a WSL distro carries the one
+    # Yu'lon recorded there (its Windows spelling hashes to another); any other is its folder's.
     try:
-        refs = composegen.built_image_refs(entry, server_dir)
-    except (composegen.ComposeGenError, OSError):
+        recorded = native.recorded_install_id(server_dir) if wsl_distro is not None else None
+        refs = composegen.built_image_refs(entry, server_dir, install_id=recorded)
+    except (composegen.ComposeGenError, InstallerError, OSError):
         return None
     if images_built(refs) is not False:
         return None

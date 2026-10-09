@@ -378,6 +378,7 @@ class Controller:
             entry,
             self.server_dir,
             lambda refs: docker.images_built(refs, wsl_distro=self.wsl_distro),
+            wsl_distro=self.wsl_distro,
         )
         if reason:
             logger.warning(f"start() refused: {reason}")
@@ -614,7 +615,8 @@ class Controller:
     def refuse_before_a_stop(self) -> None:
         """Every refusal a start would make, asked by a press that stops something first.
 
-        `refuse_start()`, then the database (T377): Restart, Recreate, the bots
+        `refuse_start()`, then the image (T627), then the database (T377):
+        Restart, Recreate, the bots
         restart and "stop the other server" each stop something before their
         start, and a database Docker no longer has must refuse before that stop,
         not after it. Its world may well be up -- on the empty database compose
@@ -623,6 +625,7 @@ class Controller:
         the database again, after the stop: a second look, never a different rule.
         """
         self.refuse_start()
+        self.refuse_a_missing_image()
         self.refuse_a_missing_database()
         self._ask_before_the_servers()
 
@@ -651,6 +654,7 @@ class Controller:
             wsl_distro=self.wsl_distro,
         ):
             self.refuse_start()
+            self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             asked = not self.port_conflicts()
             if asked:
