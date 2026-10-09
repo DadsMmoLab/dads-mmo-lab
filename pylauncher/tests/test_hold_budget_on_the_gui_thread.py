@@ -85,15 +85,21 @@ def test_the_tuning_saves_hold_gives_up_inside_its_budget_on_a_slow_docker(
     assert isinstance(outcome[0], docker.ServerHeldError), "the take ran out: nothing is written"
 
 
-def _channel(tmp_path: Path, server: Path) -> setup.InstallChannel:
-    """A channel whose hold is the controller's own and has no budget of its own."""
+def _channel(
+    tmp_path: Path, server: Path, written: list[str] | None = None
+) -> setup.InstallChannel:
+    """A channel whose hold is the controller's own and has no budget of its own.
+
+    `written` collects every account create or reset that reached the database.
+    """
+    seen = written if written is not None else []
     return setup.InstallChannel(
         WOTLK,
         server,
         templates_root=resources.installers_dir(),
         install_id=INSTALL,
-        create=lambda *_a: None,
-        reset=lambda *_a: None,
+        create=lambda *_a: seen.append("create"),
+        reset=lambda *_a: seen.append("reset"),
         channel_for=lambda _e: _Scripted(["no"]),
         config_dir=tmp_path / "config",
         hold_server=cv._server_hold_for(WOTLK, server, WOTLK.container_spec(), wsl_distro=None),
@@ -125,8 +131,14 @@ def test_the_channels_repair_gives_up_inside_the_budget_on_a_slow_docker(
     """The Server tab's Repair button calls it on the GUI thread. Mutation: no budget in repair."""
     _save(tmp_path, password="stale")
     server = _installed(tmp_path)
-    channel = _channel(tmp_path, server)
+    written: list[str] = []
+    channel = _channel(tmp_path, server, written)
     channel.check()
     states: list[Any] = []
     assert _within(lambda: states.append(channel.repair())) < LIMIT
     assert states, "the repair did not answer"
+    # Ran out of time, not finished: the could-not-reserve sentence, and the account untouched.
+    assert isinstance(states[0], setup.Refused), states[0]
+    assert "could not reserve" in states[0].reason, states[0].reason
+    assert "Nothing was changed." in states[0].reason
+    assert written == [], "the account was written although the take ran out"

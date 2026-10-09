@@ -243,6 +243,14 @@ if args[:2] == ["image", "ls"]:
     listed = state / "images-listed"
     sys.stdout.write(listed.read_text(encoding="utf-8") if listed.exists() else "")
     sys.exit(0)
+if args[:2] == ["image", "inspect"]:
+    # T622: `image inspect <ref> --format {{{{.Id}}}}`: the id in `image-ids/<ref, / and : as _>`.
+    known = state / "image-ids" / args[2].replace("/", "_").replace(":", "_")
+    if known.exists():
+        sys.stdout.write(known.read_text(encoding="utf-8").strip() + "\\n")
+        sys.exit(0)
+    sys.stderr.write(f"Error: No such image: {{args[2]}}\\n")
+    sys.exit(1)
 if args[:2] == ["buildx", "inspect"]:
     # T413: the builder a plain build would use, in buildx's own text shape:
     # the builder's Name and Driver first, then its nodes, each with a Name of

@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, assert_never, cast
+from typing import Any, NamedTuple, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -1806,9 +1806,9 @@ class ControllerServices:
     hold_server: Callable[[str], contextlib.AbstractContextManager[None]] | None = None
     """Reserves this server across processes for a write the view makes itself (T610).
 
-    The Tuning tab saves and reverts its conf files on the GUI thread and takes this around the
-    write; the account and character writes take it inside their own seams. `None` (a harness)
-    holds nothing.
+    The Tuning tab saves and reverts its conf files as jobs (T622) and takes this around the
+    write, on the job's thread; the account and character writes take it inside their own seams.
+    `None` (a harness) holds nothing.
     """
     shelf: backup_shelf.Seam | None = None
     """This install's backups folder as the tab lists, deletes from and cleans up (T604).
@@ -2856,31 +2856,47 @@ def _server_hold_for(
     *,
     wsl_distro: str | None,
     budget: float | None = None,
-) -> Callable[[str], contextlib.AbstractContextManager[None]]:
+    avoid_images: Sequence[str] = (),
+) -> docker.BudgetedHold:
     """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
 
     A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it. A
     caller may pass its own per call (`hold(press, budget=...)`): the channel's roll-back does.
     """
 
-    def hold(press: str, budget: float | None = budget) -> contextlib.AbstractContextManager[None]:
+    def hold(
+        press: str, *, budget: float | None = budget
+    ) -> contextlib.AbstractContextManager[None]:
         return docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
+            server_dir,
+            press,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            label=entry.name,
+            budget=budget,
+            avoid_images=avoid_images,
         )
 
     return hold
 
 
+_R = TypeVar("_R")
+
+
 def _under_the_hold(
     hold: Callable[[str], contextlib.AbstractContextManager[None]],
     press: str,
-    call: Callable[[str, str, int], wotlk_accounts.AccountResult],
-) -> Callable[[str, str, int], wotlk_accounts.AccountResult]:
-    """`call` run inside the server's hold; a held server raises its sentence, nothing written."""
+    call: Callable[..., _R],
+) -> Callable[..., _R]:
+    """`call` run inside the server's hold; a held server raises its sentence, nothing written.
 
-    def held(name: str, password: str, level: int) -> wotlk_accounts.AccountResult:
+    The sentence is `docker.ServerHeldError`'s, raised before `call` runs (T610, T622). For the
+    seams a job runs: the wait for the hold is then off the GUI thread.
+    """
+
+    def held(*args: Any, **kwargs: Any) -> _R:
         with hold(press):
-            return call(name, password, level)
+            return call(*args, **kwargs)
 
     return held
 
@@ -2952,7 +2968,12 @@ def _assemble(
         network_plan=lambda mode: networking.plan(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
-        network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        # T622: the realmlist row and the applied mode's file are written under the server's hold.
+        network_apply=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Apply the network plan",
+            lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        ),
         # T610: the account row is written under the server's cross-process hold, in the shared
         # half so that every game's factory gets it (five of them pass their own writer).
         create_account=_under_the_hold(
@@ -2960,7 +2981,8 @@ def _assemble(
             "Create an account",
             create_account,
         ),
-        # The Tuning tab's saves run on the GUI thread, so this one's wait is bounded.
+        # The Tuning tab's saves are jobs (T622); the take is still bounded, so one that cannot
+        # be made says so in 15 s and not after a press's full minute.
         hold_server=_server_hold_for(
             entry, server_dir, spec, wsl_distro=wsl_distro, budget=docker.GUI_HOLD_BUDGET_SECONDS
         ),
@@ -2999,7 +3021,16 @@ def _assemble(
         # would all have to pass as None is a keyword that says nothing. What
         # the WotLK factory passes instead is spelled there, next to the
         # `import_service` it is conditional on.
-        module_sql=module_sql,
+        # T622: the importer's `compose run` writes the world database and is no Applier path.
+        module_sql=(
+            None
+            if module_sql is None
+            else _under_the_hold(
+                _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                "Apply module SQL",
+                module_sql,
+            )
+        ),
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
@@ -3073,7 +3104,12 @@ def _assemble(
         # T94. HERE for the rebuild's reason: the file set and how each default
         # is made are catalog facts every game's tab reads the same way. The
         # WSL refusal lives in the route, where the distro is known.
-        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T622: written under the server's hold, as the Tuning saves are.
+        reset_settings=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Put settings back to how they were",
+            reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        ),
         # T106. Here for the rebuild's reason: which installs are offered it is a
         # fact of `catalog.json` (the family) and of the install (its distro),
         # both answered in `install_wiring`.
@@ -3099,10 +3135,18 @@ def _assemble(
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
-        bot_population=botpop.bot_count_route(entry, server_dir),
+        bot_population=botpop.bot_count_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T171. HERE for T99's reason: the file and the services are catalog
         # facts, and it is files only, so a server inside a WSL distro is served.
-        time_zone=server_time_zone.time_zone_route(entry, server_dir),
+        time_zone=server_time_zone.time_zone_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T179. HERE for T171's reason: whether a server makes its movement maps
         # in the background is a catalog fact (`mmaps.background_block`).
         pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
@@ -3512,6 +3556,14 @@ def _for_wotlk(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
@@ -3996,6 +4048,14 @@ def _for_vanilla(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
@@ -4172,6 +4232,14 @@ def _for_centurion(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         controller=centurion_controller.CenturionController(
             entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -6775,6 +6843,33 @@ TUNING_FILE_SAVED = "Wrote {file}. A backup of it as it was is beside it at {bac
 
 TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
 
+TUNING_WRITE_RUNNING = (
+    "Wait: the earlier change to the settings is still being written. Press it again once it "
+    "has finished."
+)
+"""T622: a second Save or Revert while one is on the job runner."""
+TUNING_WRITE_BROKE = "The settings were not written. Details below says why."
+"""T622: a Save or Revert job that broke (a bug: refusals are answers, not exceptions)."""
+
+
+@dataclass(frozen=True)
+class TuningWrite:
+    """What a Tuning save or revert job did, for the view to show on the GUI thread (T622).
+
+    The job holds the server, checks and writes; it touches no widget. This is everything the
+    view then does, in the order the synchronous slots did it: the report, the backup that arms
+    Revert, the files that now owe a restart, the failure for the app log, the file reopened in
+    the editor and the cards read again.
+    """
+
+    report: str
+    failed: str = ""
+    owed: tuple[str, ...] = ()
+    backup: str = ""
+    reopen: str = ""
+    reload: bool = False
+
+
 TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
 
 MODULE_ACTION_STEPS: dict[str, When] = {
@@ -7958,6 +8053,12 @@ class ControllerView(QWidget):
         # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
         # Undo the last reset); `run_restore()` refuses while it is, on Tortoise.
         self._put_back_running = False
+        # T622: a Tuning save or revert is on the job runner. One at a time (they share a file's
+        # backup), and the tab is not read again until it lands (`reload_tuning`).
+        self._tuning_writing = False
+        self._tuning_write_put_back = False
+        self._tuning_write_card: tuple[str, str] | None = None
+        self._tuning_reload_asked = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -15009,6 +15110,9 @@ class ControllerView(QWidget):
             or self._bot_count_writing
         ):
             return
+        if self._tuning_writing:  # the bot card's Save writes the same conf (T622)
+            self.bot_count_report.setText(TUNING_WRITE_RUNNING)
+            return
         n = self.bot_count_box.value()
         if not self._confirm(BOT_COUNT_TITLE, botpop.question(self.entry, reading, n)):
             return
@@ -15040,7 +15144,11 @@ class ControllerView(QWidget):
     def _bot_count_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and the box read again."""
         self._bot_count_writing = False
-        self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.bot_count_report.setText(str(exc))
+        else:
+            self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
         self.action_failed.emit(str(exc))
         self._look_up_bot_count()
 
@@ -15284,6 +15392,9 @@ class ControllerView(QWidget):
             or self._time_zone_writing
         ):
             return
+        if self._tuning_writing:  # a Save writes the compose override too (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         if not self._confirm(TIME_ZONE_TITLE, server_time_zone.question(self.entry, reading, zone)):
             return
         self._time_zone_writing = True
@@ -15312,7 +15423,10 @@ class ControllerView(QWidget):
     def _time_zone_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
         self._time_zone_writing = False
-        if isinstance(exc, server_time_zone.TimeZoneSettingError):
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.tuning_report.setPlainText(str(exc))
+        elif isinstance(exc, server_time_zone.TimeZoneSettingError):
             self.tuning_report.setPlainText(f"The time zone was not changed: {exc}")
         else:  # T214: a bug's words are Details' and the log's
             self.tuning_report.setPlainText(TIME_ZONE_BROKE)
@@ -19627,6 +19741,11 @@ class ControllerView(QWidget):
         Reads files and nothing else -- no git, no docker, no database -- so it
         is cheap enough to run after every install and every save.
         """
+        if self._tuning_writing:
+            # A write is on the job runner (T622): the cards are drawn from the file when it has
+            # landed, not from the half it has written, and the pressed card keeps its mark.
+            self._tuning_reload_asked = True
+            return
         if self._waits_for_the_distro("tuning", self.reload_tuning):
             # A card's Save or Revert that led here still redraws as that card's (T190).
             self.tuning_panel.defer_pressed_card()
@@ -20081,6 +20200,9 @@ class ControllerView(QWidget):
         """
         if self._busy:
             return
+        if self._tuning_writing:  # it writes the confs and the compose files too (T622)
+            self.problem_label.setText(TUNING_WRITE_RUNNING)
+            return
         if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
             return
@@ -20465,6 +20587,9 @@ class ControllerView(QWidget):
         route = self.services.reset_settings
         if route is None or self._busy or not files:
             return
+        if self._tuning_writing:  # a Save or Revert writes these files now (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         chosen = tuple(files)
         # Owner decision 5: the keys installed modules keep in these files,
         # from this tab's OWN rows (`tuning.rows_for`), whose `file` is the
@@ -20532,6 +20657,9 @@ class ControllerView(QWidget):
         route = self.services.reset_settings
         if route is None or self._busy:
             return
+        if self._tuning_writing:  # a Save began while the facts were read (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         facts = answer.facts
         if not self._confirm(
             TUNING_RESET_LABEL, reset_defaults.question(chosen, modules, facts=facts)
@@ -20588,6 +20716,12 @@ class ControllerView(QWidget):
         self._reset_running = False
         self._put_back_running = False
         self._set_busy(False)
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): nothing was written, so the last reset's
+            # record stands, the Undo stays on offer, and there is nothing to read again.
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         self.tuning_report.setPlainText(TUNING_RESET_BROKE)
         self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
@@ -20665,12 +20799,18 @@ class ControllerView(QWidget):
         self._put_back_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
+        undo = partial(
+            _undo_still_undoable,
+            self.services.controller.server_dir,
+            items,
+            self.services.bot_pool_rebuild,
+        )
+        hold = self.services.hold_server
         self._run(
-            partial(
-                _undo_still_undoable,
-                self.services.controller.server_dir,
-                items,
-                self.services.bot_pool_rebuild,
+            (
+                undo
+                if hold is None
+                else _under_the_hold(hold, "Put back what the last reset replaced", undo)
             ),
             self._undo_done,
             self._reset_failed,
@@ -20783,25 +20923,96 @@ class ControllerView(QWidget):
                         keys.setdefault(key.key, key)
         return keys
 
-    @contextlib.contextmanager
-    def _writing_to_the_server(self, press: str) -> Iterator[bool]:
-        """Hold the server across processes for a conf write; True inside, False if refused (T610).
+    def _tuning_write_refused(self) -> bool:
+        """Refuse a Save or Revert while a write to the same files is still going (T622).
 
-        When another Yu'lon holds the server the tab says that Yu'lon's sentence and the caller
-        returns before it has written, or taken a backup of, anything. A view with no hold wired
-        (a harness) holds nothing.
+        An earlier Save or Revert, a Reset to default or its Undo, a bot count or a time zone:
+        all write the confs and the compose override, and inside one process the server hold is
+        shared, so only this keeps them from overlapping.
+        """
+        if (
+            self._tuning_writing
+            or self._reset_running
+            or self._bot_count_writing
+            or self._time_zone_writing
+        ):
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
+        return False
+
+    def _write_tuning(
+        self, press: str, body: Callable[[], TuningWrite], *, put_back: bool = False
+    ) -> None:
+        """Hand a conf write to the job runner, inside the server's cross-process hold (T610/T622).
+
+        `body` runs on the job's thread with the hold taken: it must touch no widget and read no
+        state of the view, only what the press captured. When another Yu'lon holds the server the
+        answer is that Yu'lon's sentence and `body` never runs, so nothing is written or backed
+        up. A view with no hold wired (a harness) holds nothing. Taking the hold costs a Docker
+        round trip or more, which is why none of it happens on the thread that paints.
         """
         hold = self.services.hold_server
-        with contextlib.ExitStack() as held:
-            if hold is not None:
-                try:
-                    held.enter_context(hold(press))
-                except docker.ServerHeldError as refused:
-                    self.tuning_report.setPlainText(str(refused))
-                    self.action_failed.emit(str(refused))
-                    yield False
-                    return
-            yield True
+
+        def work() -> TuningWrite:
+            if hold is None:
+                return body()
+            try:
+                with hold(press):
+                    return body()
+            except docker.ServerHeldError as refused:
+                return TuningWrite(report=str(refused), failed=str(refused))
+
+        self._tuning_writing = True
+        self._tuning_write_put_back = put_back
+        if put_back:
+            self._put_back_running = True  # `run_restore()` refuses while this runs (T145)
+        # The card whose button was pressed: marked for the redraw only if the job changes the file.
+        self._tuning_write_card = self.tuning_panel.pressed_card()
+        self._run(work, self._tuning_write_done, self._tuning_write_failed)
+
+    def _tuning_write_ended(self) -> None:
+        self._tuning_writing = False
+        if self._tuning_write_put_back:
+            self._tuning_write_put_back = False
+            self._put_back_running = False
+
+    @Slot(object)
+    def _tuning_write_done(self, result: object) -> None:
+        """Show what the job did, in the order the synchronous slots did it."""
+        self._tuning_write_ended()
+        asked = self._tuning_reload_asked
+        self._tuning_reload_asked = False
+        card, self._tuning_write_card = self._tuning_write_card, None
+        if not isinstance(result, TuningWrite):
+            return
+        self.tuning_report.setPlainText(result.report)
+        if result.backup:
+            # The backup's name on the tab and not only in the report, because it is what arms
+            # Revert beside Save file (T44 item 15).
+            self.tuning_panel.set_backup(result.backup)
+        for file in result.owed:
+            self._note_tuning_owed(file)
+        if result.failed:
+            self.action_failed.emit(result.failed)
+        if result.reopen:
+            self.open_tuning_file(result.reopen)
+        if result.reload:
+            # The file changed: the pressed card is drawn from it, not from what was typed. A
+            # refusal or a failed write leaves the typing for the redraw that comes next.
+            self.tuning_panel.owe_redraw(card)
+        if result.reload or asked:
+            self.reload_tuning()
+
+    @Slot(object)
+    def _tuning_write_failed(self, exc: object) -> None:
+        """Only a bug reaches here: a refusal or a failed write is a `TuningWrite`."""
+        self._tuning_write_ended()
+        self._tuning_reload_asked = False
+        self._tuning_write_card = None
+        self.tuning_report.setPlainText(TUNING_WRITE_BROKE)
+        self.tuning_details.set_text(str(exc))
+        self.action_failed.emit(str(exc))
+        self.reload_tuning()
 
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
@@ -20825,7 +21036,6 @@ class ControllerView(QWidget):
         for row in card.card.rows:
             if row.key in edits:
                 per_file.setdefault(row.file, {})[row.key] = edits[row.key]
-        said: list[str] = []
         server_dir = self.services.controller.server_dir
         # Every file's values FIRST, across the whole card, before any of them is
         # opened. `tuning.write()` makes the same promise per file, which is not
@@ -20856,12 +21066,17 @@ class ControllerView(QWidget):
                 self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
                 self.action_failed.emit(str(exc))
                 return
-        with self._writing_to_the_server("Save settings") as held:
-            if not held:
-                return
-            for file, values in per_file.items():
+        if self._tuning_write_refused():
+            return
+        pairs = tuple((file, dict(values)) for file, values in per_file.items())
+        is_unbound = (family, module_id) == unbound_settings.CARD
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file, values in pairs:
                 try:
-                    if (family, module_id) == unbound_settings.CARD:
+                    if is_unbound:
                         # Only `0` and `1` reach the file: a switch flipped from a hand-edited
                         # `true`/`false` is written back as the module's own 1/0
                         # (`unbound_settings.write`). Its file's path was checked above, with
@@ -20876,20 +21091,20 @@ class ControllerView(QWidget):
                     # every value on the card. Kept because `tuning.write()` is a
                     # public seam with its own refusals and a caller that assumed
                     # otherwise would be the next half-applied save.
-                    self.tuning_report.setPlainText(
-                        TUNING_REFUSED.format(module=module_id, why=exc)
+                    return TuningWrite(
+                        TUNING_REFUSED.format(module=module_id, why=exc),
+                        failed=str(exc),
+                        owed=tuple(owed),
                     )
-                    self.action_failed.emit(str(exc))
-                    return
                 except OSError as exc:
-                    self.tuning_report.setPlainText(
+                    return TuningWrite(
                         TUNING_REFUSED.format(
                             module=module_id, why=f"{file} could not be written: {exc}"
-                        )
+                        ),
+                        failed=str(exc),
+                        owed=tuple(owed),
                     )
-                    self.action_failed.emit(str(exc))
-                    return
-                self._note_tuning_owed(file)
+                owed.append(file)
                 said.append(
                     TUNING_SAVED.format(
                         module=module_id,
@@ -20899,24 +21114,26 @@ class ControllerView(QWidget):
                         rule=tuning.apply_sentence(tuning.file_rule(file)),
                     )
                 )
-            self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Save settings", body)
 
     @Slot(str, str)
     def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         try:
             card = self.tuning_panel.card((family, module_id))
         except KeyError:
             return
         server_dir = self.services.controller.server_dir
-        said: list[str] = []
-        with self._writing_to_the_server("Put settings back") as held:
-            if not held:
-                return
-            for file in card.card.files:
+        files = tuple(card.card.files)
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file in files:
                 path = server_dir / file
                 backups = tuning.backups_of(path)
                 if not backups:
@@ -20927,7 +21144,7 @@ class ControllerView(QWidget):
                 except (OSError, tuning.TuningError) as exc:
                     said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                     continue
-                self._note_tuning_owed(file)
+                owed.append(file)
                 said.append(
                     TUNING_REVERTED.format(
                         module=module_id,
@@ -20938,8 +21155,9 @@ class ControllerView(QWidget):
                 )
                 if note:
                     said.append(note)
-            self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Put settings back", body, put_back=True)
 
     def _put_back_refused(self, press: str) -> bool:
         """Refuse a put-back of a Tuning backup now, saying why. True if refused (T145 round 6).
@@ -20951,6 +21169,9 @@ class ControllerView(QWidget):
         aiplayerbot.conf off on its worker (`_restore_with_the_bot_request`),
         the very file a put-back writes. Other games' restores write no conf.
         """
+        if self._tuning_writing:
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
         if self._busy:
             self.tuning_report.setPlainText(TUNING_PUT_BACK_WHILE_BUSY.format(press=press))
             return True
@@ -21065,7 +21286,7 @@ class ControllerView(QWidget):
         very change the user is trying to undo. `tuning.restore()` copies
         rather than moves, so a second Revert still has something to restore.
         """
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
         if not file or tuning.is_one_of(
@@ -21081,28 +21302,25 @@ class ControllerView(QWidget):
             gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
             self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
-        with self._writing_to_the_server("Put a setting file back") as held:
-            if not held:
-                return
+        newest = backups[-1]
+
+        def body() -> TuningWrite:
             try:
-                note = self._put_back(backups[-1], path)
+                note = self._put_back(newest, path)
             except tuning.TuningError as exc:
-                self.tuning_report.setPlainText(str(exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
-                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
             said = TUNING_REVERTED_FILE.format(
                 file=file,
-                backup=backups[-1].name,
+                backup=newest.name,
                 rule=tuning.apply_sentence(tuning.file_rule(file)),
             )
-        self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
-        self._note_tuning_owed(file)
-        self.open_tuning_file(file)
-        self.reload_tuning()
+            return TuningWrite(
+                f"{said}\n{note}" if note else said, owed=(file,), reopen=file, reload=True
+            )
+
+        self._write_tuning("Put a setting file back", body, put_back=True)
 
     @Slot(str)
     def save_tuning_file(self, text: str) -> None:
@@ -21134,36 +21352,34 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        if self._tuning_write_refused():
+            return
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        with self._writing_to_the_server("Save a setting file") as held:
-            if not held:
-                return
+        original = self._tuning_raw
+
+        def body() -> TuningWrite:
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
                 made = tuning.backup(path, root=server_dir)
                 with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(tuning.save_text(self._tuning_raw, text))
+                    handle.write(tuning.save_text(original, text))
             except tuning.TuningError as exc:
-                self.tuning_report.setPlainText(str(exc))
-                self.action_failed.emit(str(exc))
-                return
+                return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
-                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-                self.action_failed.emit(str(exc))
-                return
-        self.tuning_report.setPlainText(
-            TUNING_FILE_SAVED.format(
-                file=file,
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            return TuningWrite(
+                TUNING_FILE_SAVED.format(
+                    file=file,
+                    backup=made.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                ),
                 backup=made.name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
+                owed=(file,),
+                reload=True,
             )
-        )
-        # The backup's name on the tab and not only in the report, because it
-        # is what arms Revert beside Save file (T44 item 15).
-        self.tuning_panel.set_backup(made.name)
-        self._note_tuning_owed(file)
-        self.reload_tuning()
+
+        self._write_tuning("Save a setting file", body)
 
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)
@@ -21270,6 +21486,12 @@ class ControllerView(QWidget):
     def _apply_failed(self, exc: object) -> None:
         """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon is working on this server (T622): its own sentence, nothing applied.
+            self.network_text.appendPlainText("\n" + str(exc))
+            self.action_failed.emit(str(exc))
+            self.apply_button.setEnabled(True)
+            return
         self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
         plan = self._plan
         held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]

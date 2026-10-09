@@ -33,12 +33,12 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
+from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
 from yulon import (
     ansi,
@@ -561,6 +561,7 @@ def _reserved_for(
     wsl_distro: str | None,
     label: str | None = None,
     budget: float | None = None,
+    avoid_images: Sequence[str] = (),
 ) -> Iterator[None]:
     """The cross-process reservation for a Backup or Restore block (T568), when it has a spec.
 
@@ -581,6 +582,7 @@ def _reserved_for(
                     wsl_distro=wsl_distro,
                     label=label,
                     up_timeout=budget,
+                    avoid_images=avoid_images,
                 )
             )
         except ServerReservationUnavailable as exc:
@@ -588,6 +590,19 @@ def _reserved_for(
                 raise
             logger.warning(f"{press} on {server_dir} without a reservation: {exc}")
         yield
+
+
+class BudgetedHold(Protocol):
+    """A server hold that may be asked to bound its take: `hold(press)` or `hold(press, budget=)`.
+
+    What `ui.controller_view._server_hold_for` builds and the command channel is handed (T610): a
+    hold that takes only `press` would fail only when a budget is set, so a mis-wired one is a
+    type error instead.
+    """
+
+    def __call__(
+        self, press: str, *, budget: float | None = ...
+    ) -> contextlib.AbstractContextManager[None]: ...
 
 
 GUI_HOLD_BUDGET_SECONDS = 15.0
@@ -603,6 +618,7 @@ def server_hold(
     wsl_distro: str | None = None,
     label: str | None = None,
     budget: float | None = None,
+    avoid_images: Sequence[str] = (),
 ) -> contextlib.AbstractContextManager[None]:
     """Reserve the server across processes for a block that writes to it (T607).
 
@@ -617,8 +633,12 @@ def server_hold(
     `budget` (seconds) bounds the take and, as a Stop's does, the release: for a block run on
     the GUI thread (T610), which must not wait out a press's full 60 s take. Without one the
     take waits as long as it needs.
+
+    `avoid_images` (T622) names images the block is about to remove, by reference: the
+    reservation container is run from another image if Docker has one, because `docker image rm`
+    refuses an image a running container uses. The uninstall passes its own built refs.
     """
-    return _reserved_for(server_dir, press, spec, wsl_distro, label, budget)
+    return _reserved_for(server_dir, press, spec, wsl_distro, label, budget, avoid_images)
 
 
 @contextmanager
@@ -8617,6 +8637,43 @@ def _reservation_images(
     images: Sequence[str],
     wsl_distro: str | None,
     budget_end: float | None = None,
+    avoid: Sequence[str] = (),
+) -> Iterator[str]:
+    """`_candidate_images`, with the images in `avoid` (and their ids) tried last (T622).
+
+    The uninstall is about to remove its own images and `docker image rm` refuses one a running
+    container uses, so its reservation must not be run from one. If Docker has nothing else, an
+    avoided image is still used: a broken install must be removable, at the price of the image
+    being reported left behind.
+    """
+    if not avoid:
+        yield from _candidate_images(spec, images, wsl_distro, budget_end)
+        return
+    refused = set(avoid)
+    for ref in avoid:
+        proc = _docker(
+            ["image", "inspect", ref, "--format", "{{.Id}}"],
+            timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+            wsl_distro=wsl_distro,
+        )
+        _docker_must_answer(proc)
+        if proc.returncode == 0 and proc.stdout.strip():
+            refused.add(proc.stdout.strip())
+    last_resort: list[str] = []
+    for image in _candidate_images(spec, images, wsl_distro, budget_end, refused):
+        if image in refused:
+            last_resort.append(image)
+        else:
+            yield image
+    yield from last_resort
+
+
+def _candidate_images(
+    spec: ContainerSpec | None,
+    images: Sequence[str],
+    wsl_distro: str | None,
+    budget_end: float | None = None,
+    later: Collection[str] = (),
 ) -> Iterator[str]:
     """The images a reservation may run from, best first (T568 section 3).
 
@@ -8656,7 +8713,11 @@ def _reservation_images(
     _docker_must_answer(proc)
     if proc.returncode == 0:
         listed = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-        for ref in [r for r in listed if "<none>" not in r][:_LISTED_IMAGES]:
+        # The ones in `later` go after the rest, so a long list of an install's own images does not
+        # use up the cap before another image is reached (T622).
+        usable = [r for r in listed if "<none>" not in r]
+        usable = [r for r in usable if r not in later] + [r for r in usable if r in later]
+        for ref in usable[:_LISTED_IMAGES]:
             if ref not in seen:
                 seen.add(ref)
                 yield ref
@@ -8729,6 +8790,7 @@ def server_claim(
     label: str | None = None,
     this_press: str | None = None,
     up_timeout: float | None = None,
+    avoid_images: Sequence[str] = (),
 ) -> Iterator[ClaimHeld]:
     """Reserve this server across processes while inside; a press goes ahead only inside one (T568).
 
@@ -8789,7 +8851,16 @@ def server_claim(
             reservation.count += 1
         else:
             reservation = _new_reservation(
-                name, press, this, name_of, images, spec, wsl_distro, cancel, budget_end
+                name,
+                press,
+                this,
+                name_of,
+                images,
+                spec,
+                wsl_distro,
+                cancel,
+                budget_end,
+                avoid_images,
             )
             _RESERVATIONS[name] = reservation
     finally:
@@ -8863,6 +8934,7 @@ def _new_reservation(
     wsl_distro: str | None,
     cancel: threading.Event | None,
     budget_end: float | None,
+    avoid_images: Sequence[str] = (),
 ) -> _Reservation:
     """Make the container `name`; the daemon's refusal of a second one is the exclusion."""
     labels = [
@@ -8873,7 +8945,7 @@ def _new_reservation(
     ]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
-    chain = _reservation_images(spec, images, wsl_distro, budget_end)
+    chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
     while True:
         try:
@@ -8931,7 +9003,7 @@ def _new_reservation(
                     wsl_distro,
                     None if budget_end is None else max(0.0, budget_end - time.monotonic()),
                 ):
-                    chain = _reservation_images(spec, images, wsl_distro, budget_end)
+                    chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
                     continue
             holder = _server_holder(
                 name,

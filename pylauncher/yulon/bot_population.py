@@ -44,6 +44,8 @@ them on its job runner.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -531,16 +533,30 @@ class BotPopulationRoute:
 
     entry: CatalogEntry
     server_dir: Path
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None
+    """The server's cross-process hold (T622), taken for the write and not the read; see
+    `server_time_zone.TimeZoneRoute`."""
 
     def read(self) -> Reading:
         return read(self.entry, self.server_dir)
 
     def write(self, n: int) -> Written:
-        return write(self.entry, self.server_dir, n)
+        if self.hold_server is None:
+            return write(self.entry, self.server_dir, n)
+        with self.hold_server(HOLD_PRESS):
+            return write(self.entry, self.server_dir, n)
 
 
-def bot_count_route(entry: CatalogEntry, server_dir: Path) -> BotPopulationRoute | None:
+HOLD_PRESS = "Set the number of random bots"
+
+
+def bot_count_route(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+) -> BotPopulationRoute | None:
     """This install's route, or `None` for a game whose install writes no bot count."""
     if where(entry) is None:
         return None
-    return BotPopulationRoute(entry, server_dir)
+    return BotPopulationRoute(entry, server_dir, hold_server)

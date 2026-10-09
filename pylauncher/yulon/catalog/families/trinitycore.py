@@ -1577,6 +1577,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     # -- finishing a world update that did not finish (fix round 1) -----------------
 
+    @_reserving(FINISH_WORLD_BUTTON)
     def finish_world_reimport(
         self,
         options: InstallOptions | None = None,

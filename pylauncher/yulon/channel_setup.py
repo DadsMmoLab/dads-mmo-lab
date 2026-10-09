@@ -56,7 +56,7 @@ import re
 import secrets
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -1342,7 +1342,7 @@ class InstallChannel:
         exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
-        hold_server: Callable[..., AbstractContextManager[object]] | None = None,
+        hold_server: docker.BudgetedHold | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir

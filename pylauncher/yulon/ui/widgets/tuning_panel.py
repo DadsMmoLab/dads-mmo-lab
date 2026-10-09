@@ -1277,6 +1277,23 @@ class TuningPanel(QWidget):
         finally:
             self._pressed_card = None
 
+    def pressed_card(self) -> tuple[str, str] | None:
+        """The card whose Save or Revert is being handled now, or None (T622).
+
+        For a view that finishes the press later, on a job: it keeps the card and gives it back
+        to `owe_redraw` if the press ends in a redraw.
+        """
+        return self._pressed_card
+
+    def owe_redraw(self, card: tuple[str, str] | None) -> None:
+        """`card`'s press has ended in a redraw that is about to come: show it the file (T622).
+
+        Called only when the press changed the file. A press that changed nothing (refused,
+        failed) must not call it, or the card's typing is dropped by the next redraw.
+        """
+        if card is not None:
+            self._owed_cards.add(card)
+
     def defer_pressed_card(self) -> None:
         """The redraw a card's Save or Revert caused is put off; it still shows that card's file.
 
