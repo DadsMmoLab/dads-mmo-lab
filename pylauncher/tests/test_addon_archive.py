@@ -326,7 +326,7 @@ def test_a_program_file_by_its_suffix_is_refused(tmp_path: Path, _cache: Path, s
 
 
 def test_a_program_file_wearing_a_lua_suffix_is_refused(tmp_path: Path, _cache: Path) -> None:
-    path = _zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/core.lua": b"MZ\x90\x00rest"})
+    path = _zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/core.lua": _pe_stub()})
 
     said = _refusal(lambda: stage_zip(path))
 
@@ -358,7 +358,7 @@ def test_a_clean_folder_is_counted(tmp_path: Path) -> None:
 
 def test_a_folder_with_a_program_file_is_refused(tmp_path: Path) -> None:
     root = _folder(tmp_path / "src")
-    (root / "pfUI" / "x.lua").write_bytes(b"MZ\x90\x00")
+    (root / "pfUI" / "x.lua").write_bytes(_pe_stub())
 
     said = _refusal(lambda: check_folder(root))
 

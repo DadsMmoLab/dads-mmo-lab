@@ -23,17 +23,20 @@ the folder (`client_packs._clean_rel`), a link, two names that fold to one, a
 file where a folder is needed, a password, too deep, too many files, too large
 unpacked (the declared sizes are added up before a byte is unpacked, and the
 bytes are counted again while writing), a large member that compresses too well
-(a zip bomb), or a program file: by suffix, or by the `MZ` a Windows program
-starts with whatever its suffix. A zip inside the zip is copied as a file and
-never opened. A zip whose names hold no `/` at all was made by an old Windows
-tool, and its `\\` is read as the separator; a zip that mixes both is refused.
+(a zip bomb), or a program file: by suffix, or by its content whatever its
+suffix (a Windows PE header, ELF, Mach-O; `program_kind`). A zip inside the zip
+is copied as a file and never opened. A zip whose names hold no `/` at all was
+made by an old Windows tool, and its `\\` is read as the separator; a zip that
+mixes both is refused.
 """
 
 from __future__ import annotations
 
 import hashlib
+import lzma
 import os
 import re
+import stat
 import tempfile
 import urllib.error
 import urllib.parse
@@ -44,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from yulon import client_packs, links, rmtree
-from yulon.addon_layout import NOTHING_CHANGED
+from yulon.addon_layout import NOTHING_CHANGED, is_windows_device
 from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -81,17 +84,45 @@ BOMB_RATIO = 200
 
 PROGRAM_SUFFIXES = frozenset(
     {".exe", ".dll", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".scr", ".msi", ".sys", ".so"}
-    | {".dylib"}
+    | {".dylib", ".lnk", ".js", ".hta", ".reg", ".jar"}
 )
 """What a WoW add-on never carries: it is `.toc`, `.lua`, `.xml` and media.
 
 A `.dll` beside the client is how Centurion's own `client-tweaks` changes the
 game (`dinput8.dll`), which is exactly why a download must never place one."""
 
-PROGRAM_MAGIC = b"MZ"
-"""The first two bytes of every Windows program and library, whatever its name says."""
+HEAD_BYTES = 1024
+"""How much of each file's start is read to tell a program by its content, whatever its name."""
 
-_SEPARATORS = re.compile(r"[\\/]")
+_MACHO = frozenset(
+    {
+        bytes.fromhex(magic)[::order]
+        for magic in ("feedface", "feedfacf", "cafebabe")
+        for order in (1, -1)
+    }
+)
+"""Mach-O (32/64-bit) and universal-binary magic, in both byte orders."""
+
+
+def program_kind(head: bytes, size: int) -> str:
+    """What program `head` (a file's first `HEAD_BYTES`, of `size` in all) is, or empty.
+
+    A Windows program is `MZ` whose e_lfanew (the 4 bytes at 0x3C) points inside the
+    file at `PE\\0\\0`: `MZ` alone is not enough, since `MZ = 'Mozambique'` is Lua. A
+    header past the bytes read but inside the file is taken for a program, the
+    cautious answer: text cannot put one there without being hundreds of MB long.
+    """
+    if head.startswith(b"\x7fELF"):
+        return "a Linux program inside"
+    if head[:4] in _MACHO:
+        return "a macOS program inside"
+    if head.startswith(b"MZ") and len(head) >= 0x40:
+        pe = int.from_bytes(head[0x3C:0x40], "little")
+        if pe + 4 <= size and (pe + 4 > len(head) or head[pe : pe + 4] == b"PE\0\0"):
+            return "a Windows program inside"
+    return ""
+
+
 _WINDOWS_FORBIDDEN = frozenset('<>"|?*')
 """Characters Windows refuses in a name that `_clean_rel` does not already refuse (`:` and `\\`)."""
 
@@ -163,7 +194,7 @@ def _stage(path: Path, *, label: str, cancelled: Callable[[], bool]) -> Staged:
             except BaseException:
                 _remove(staging)
                 raise
-    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
+    except (zipfile.BadZipFile, zlib.error, lzma.LZMAError, EOFError, NotImplementedError) as exc:
         raise AddonRefusal(
             f"{label} is damaged or uses a kind of zip Yu'lon cannot read ({exc}). Download it "
             f"again, or unpack it yourself and choose the folder. {NOTHING_CHANGED}"
@@ -207,7 +238,7 @@ def _plan(archive: zipfile.ZipFile, label: str) -> list[_Member]:
                 f"{name!r} in the zip would land outside the add-on's folder. {NOTHING_CHANGED}"
             )
         if any(ch in _WINDOWS_FORBIDDEN or ord(ch) < 0x20 for ch in rel.as_posix()) or any(
-            part.split(".")[0].upper() in client_packs._WINDOWS_DEVICES for part in rel.parts
+            is_windows_device(part) for part in rel.parts
         ):
             raise AddonRefusal(
                 f"{name!r} in the zip has a name a game client's folder on Windows cannot hold. "
@@ -287,14 +318,19 @@ def _write_member(
     own = 0
     with archive.open(member.info) as source, target.open("xb") as out:
         head = b""
+        judged = False
         while chunk := source.read(client_packs.CHUNK_BYTES):
-            if len(head) < len(PROGRAM_MAGIC):
-                head += chunk[: len(PROGRAM_MAGIC)]
-                if head.startswith(PROGRAM_MAGIC):
-                    raise AddonRefusal(_program(member.rel.as_posix(), ""))
+            if not judged:
+                head += chunk[: HEAD_BYTES - len(head)]
+                if len(head) >= HEAD_BYTES:
+                    judged = True
+                    _refuse_program_content(member.rel.as_posix(), head, member.info.file_size)
             own += len(chunk)
             written += len(chunk)
             if own > member.info.file_size:
+                # Untested defence: CPython's reader stops at the declared size and ends a
+                # member that lied about it with "Bad CRC-32", so this cannot be reached
+                # through `zipfile` today; it stays for a reader that behaves otherwise.
                 raise AddonRefusal(
                     f"{member.info.orig_filename!r} in the zip unpacks to more than it says, "
                     f"which no add-on does. {NOTHING_CHANGED}"
@@ -306,6 +342,8 @@ def _write_member(
                     f"{NOTHING_CHANGED}"
                 )
             out.write(chunk)
+        if not judged:
+            _refuse_program_content(member.rel.as_posix(), head, own)
     return written
 
 
@@ -503,6 +541,8 @@ def check_folder(root: Path, *, label: str | None = None) -> Tree:
                 )
             for name in names:
                 path = here / name
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    continue  # a FIFO, socket or device: never opened (a FIFO blocks the read)
                 rel = path.relative_to(root)
                 if len(rel.parts) - 1 > MAX_DEPTH:
                     raise AddonRefusal(
@@ -510,11 +550,11 @@ def check_folder(root: Path, *, label: str | None = None) -> Tree:
                         f"add-ons up to {MAX_DEPTH} folders deep. {NOTHING_CHANGED}"
                     )
                 _refuse_program_name(rel.as_posix(), path.suffix)
+                length = path.stat().st_size
                 with path.open("rb") as handle:
-                    if handle.read(len(PROGRAM_MAGIC)) == PROGRAM_MAGIC:
-                        raise AddonRefusal(_program(rel.as_posix(), ""))
+                    _refuse_program_content(rel.as_posix(), handle.read(HEAD_BYTES), length)
                 files += 1
-                size += path.stat().st_size
+                size += length
                 if files > MAX_FILES or size > MAX_UNPACKED_BYTES:
                     raise AddonRefusal(_too_big(label, f"more than {_size(size)}", files))
     except OSError as exc:
@@ -530,8 +570,14 @@ def _refuse_program_name(rel: str, suffix: str) -> None:
         raise AddonRefusal(_program(rel, suffix))
 
 
-def _program(rel: str, suffix: str) -> str:
-    kind = f"a {suffix} file" if suffix else "it starts the way a Windows program does"
+def _refuse_program_content(rel: str, head: bytes, size: int) -> None:
+    kind = program_kind(head, size)
+    if kind:
+        raise AddonRefusal(_program(rel, "", kind=kind))
+
+
+def _program(rel: str, suffix: str, *, kind: str = "") -> str:
+    kind = kind or f"a {suffix} file"
     return (
         f"{rel} is a program file ({kind}); WoW add-ons never carry one, so Yu'lon will not "
         f"put it in your game client. {NOTHING_CHANGED}"

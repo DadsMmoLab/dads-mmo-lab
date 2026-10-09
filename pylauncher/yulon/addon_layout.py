@@ -79,10 +79,22 @@ _WINDOWS_DEVICES = frozenset(
         "PRN",
         "AUX",
         "NUL",
-        *(f"COM{n}" for n in range(1, 10)),
-        *(f"LPT{n}" for n in range(1, 10)),
+        *(
+            f"{port}{n}"
+            for port in ("COM", "LPT")
+            for n in (*"123456789", "\u00b9", "\u00b2", "\u00b3")
+        ),
     }
 )
+"""Names Windows treats as devices whatever follows a dot, superscript ports too (COM\u00b9)."""
+
+
+def is_windows_device(part: str) -> bool:
+    """Whether a file or folder name is a Windows device: `CON.lua`, `CON .lua`, `com\u00b9`.
+
+    Windows drops trailing spaces before the extension, so `CON .lua` is `CON`.
+    """
+    return part.split(".")[0].strip(" ").upper() in _WINDOWS_DEVICES
 
 
 @dataclass(frozen=True)
@@ -288,6 +300,12 @@ def _choose(folder: Path, root: Path, client: int) -> tuple[Addon, str] | Refusa
             )
         mains = own
     main = mains[0]
+    if _is_utf16(main):
+        return Refusal(
+            f"{main.name} is saved as UTF-16, which the game client cannot read, so it would "
+            f"never load {main.stem}. Ask its author for a UTF-8 copy, or save the file as "
+            f"UTF-8 and choose it again. {NOTHING_CHANGED}"
+        )
     number = read_interface(main)
     verdict = _judge(main.stem, number, client)
     if not isinstance(verdict, Refusal):
@@ -298,7 +316,7 @@ def _choose(folder: Path, root: Path, client: int) -> tuple[Addon, str] | Refusa
         found = _VARIANT.match(toc.stem)
         if found is None or found["base"].casefold() != main.stem.casefold():
             continue
-        variant = read_interface(toc)
+        variant = None if _is_utf16(toc) else read_interface(toc)
         if variant is not None and low <= variant <= high:
             fitting.append((variant, toc))
     if not fitting:
@@ -399,7 +417,7 @@ def _name_refusal(name: str, shipped: Mapping[str, str]) -> str:
     if (
         any(ch in _FOLDER_FORBIDDEN or ord(ch) < 0x20 for ch in name)
         or name.endswith((".", " "))
-        or name.split(".")[0].upper() in _WINDOWS_DEVICES
+        or is_windows_device(name)
     ):
         return (
             f"{name}.toc names a folder the game client cannot hold on Windows, so Yu'lon cannot "
@@ -409,6 +427,12 @@ def _name_refusal(name: str, shipped: Mapping[str, str]) -> str:
 
 
 # ------------------------------------------------------------------ notes
+
+
+def _is_utf16(toc: Path) -> bool:
+    """A toc starting with a UTF-16 byte-order mark, which the old clients read as garbage."""
+    with toc.open("rb") as handle:
+        return handle.read(2) in (b"\xff\xfe", b"\xfe\xff")
 
 
 def _read_toc(toc: Path) -> str:
