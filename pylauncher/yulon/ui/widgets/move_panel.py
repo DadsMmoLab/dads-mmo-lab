@@ -50,6 +50,7 @@ EXPLAIN = (
     "stays where it is. The file holds login data: keep it private."
 )
 PACK_BUTTON = "Pack for another computer…"
+PACK_SERVER_BUTTON = "Pack the whole server…"
 BRING_IN_BUTTON = "Bring in accounts and characters…"
 PACK_FAILED = "Packing did not finish. Nothing was changed on this server."
 BRING_IN_FAILED = "Bringing in did not finish. The Details say what stopped it."
@@ -71,6 +72,27 @@ def pack_question(plan: ExportPlan) -> str:
         "the move is done. Passwords are not in it in plain words, but anyone who has the "
         "file can try to work them out.",
         "The world (custom items, NPCs, objects you placed) is not in it.",
+    ]
+    if plan.server_running:
+        lines += [
+            "",
+            "The server is running. It will be stopped while Yu'lon packs it, so the copy is "
+            "one consistent picture, and started again afterwards.",
+        ]
+    return "\n".join(lines)
+
+
+def whole_question(plan: ExportPlan) -> str:
+    """What the whole-server pack dialog says (level 2)."""
+    lines = [
+        "Pack the whole server into a file, to build it again on another computer?",
+        "",
+        "It holds every database (the world too, so custom items, NPCs and objects you placed "
+        "come along), the settings files, the module answers and which version of each module "
+        "and of the server it was built from. The other computer builds the server again at that "
+        "version from the Catalog (Bring from another computer…), then puts all of this in.",
+        "The file holds every account's login data, so keep it private and delete it once the "
+        "move is done. The database password and Yu'lon's command-channel login are not in it.",
     ]
     if plan.server_running:
         lines += [
@@ -174,15 +196,22 @@ class MovePanel(QGroupBox):
         )
         self.running = False
         self._plan: ImportPlan | None = None
+        self._whole = False
 
         explain = QLabel(EXPLAIN, self)
         explain.setWordWrap(True)
         self.pack_button = QPushButton(PACK_BUTTON, self)
         self.bring_in_button = QPushButton(BRING_IN_BUTTON, self)
+        self.pack_server_button: QPushButton | None = None
+        if services.export_server is not None:
+            self.pack_server_button = QPushButton(PACK_SERVER_BUTTON, self)
+            self.pack_server_button.clicked.connect(self.pack_server)
         self.pack_button.clicked.connect(self.pack)
         self.bring_in_button.clicked.connect(self.bring_in)
         presses = QHBoxLayout()
         presses.addWidget(self.pack_button)
+        if self.pack_server_button is not None:
+            presses.addWidget(self.pack_server_button)
         presses.addWidget(self.bring_in_button)
         presses.addStretch(1)
         box = QVBoxLayout(self)
@@ -195,12 +224,16 @@ class MovePanel(QGroupBox):
         self.running = True
         self.pack_button.setEnabled(False)
         self.bring_in_button.setEnabled(False)
+        if self.pack_server_button is not None:
+            self.pack_server_button.setEnabled(False)
         self._report(said)
 
     def _end(self) -> None:
         self.running = False
         self.pack_button.setEnabled(True)
         self.bring_in_button.setEnabled(True)
+        if self.pack_server_button is not None:
+            self.pack_server_button.setEnabled(True)
         self._changed()
 
     # ------------------------------------------------------------ pack
@@ -209,6 +242,15 @@ class MovePanel(QGroupBox):
     def pack(self) -> None:
         if self.running:
             return
+        self._whole = False
+        self._begin("Looking at the server…")
+        self._jobs(self._services.plan_export, self._pack_planned, self._pack_plan_failed)
+
+    @Slot()
+    def pack_server(self) -> None:
+        if self.running or self._services.export_server is None:
+            return
+        self._whole = True
         self._begin("Looking at the server…")
         self._jobs(self._services.plan_export, self._pack_planned, self._pack_plan_failed)
 
@@ -221,7 +263,11 @@ class MovePanel(QGroupBox):
             self._end()
             self._report("This cannot go ahead:\n" + "\n".join(f"  - {r}" for r in result.refusals))
             return
-        yes, _ = self._ask("Pack accounts and characters?", pack_question(result), None)
+        whole = self._whole
+        if whole:
+            yes, _ = self._ask("Pack the whole server?", whole_question(result), None)
+        else:
+            yes, _ = self._ask("Pack accounts and characters?", pack_question(result), None)
         if not yes:
             self._end()
             self._report("Nothing was packed.")
@@ -232,9 +278,11 @@ class MovePanel(QGroupBox):
             self._report("Nothing was packed: no folder was chosen.")
             return
         stop_allowed = result.server_running
+        export = self._services.export_server if whole else self._services.export
+        assert export is not None
         self._report("Packing… this can take a few minutes with many bots.")
         self._jobs(
-            lambda: self._services.export(folder, stop_allowed),
+            lambda: export(folder, stop_allowed),
             self._pack_done,
             self._pack_failed,
         )
@@ -321,4 +369,4 @@ def _realm_option(plan: ImportPlan) -> str | None:
     return f"Use the old realm name ({plan.manifest.realm_name})"
 
 
-__all__ = ["MovePanel", "bring_in_question", "pack_question", "plan_report"]
+__all__ = ["MovePanel", "bring_in_question", "pack_question", "plan_report", "whole_question"]

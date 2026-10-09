@@ -86,7 +86,9 @@ from yulon import (
     install_wiring,
     logsnap,
     module_moves,
+    move,
     move_flows,
+    move_server,
     networking,
     party,
     platform,
@@ -159,7 +161,7 @@ from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import Behind, RunnerGit, is_behind
 from yulon.log import get_logger
-from yulon.manifest import ConfKey, Manifest, Prompt, When
+from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
@@ -2706,6 +2708,7 @@ def _move_services(
     controller: Controller,
     *,
     wsl_distro: str | None,
+    store: ManifestStore | None = None,
 ) -> move_flows.MoveServices:
     """The Move group's four presses, over the same engine the Backup and Restore buttons use.
 
@@ -2727,6 +2730,26 @@ def _move_services(
         entry, server_dir, mysql, running=running, wsl_distro=wsl_distro
     )
     alone = _database_alone(entry.container_spec(), server_dir, wsl_distro=wsl_distro)
+
+    def load_manifest(kind: ManifestType, item_id: str) -> Manifest | None:
+        if store is None:
+            return None
+        try:
+            return store.load(kind, item_id)
+        except Exception as exc:  # noqa: BLE001 - not a module this tab can name: said by the pack
+            logger.info(f"no description of {kind}/{item_id} for the move: {exc}")
+            return None
+
+    def whole() -> move.ServerFacts:
+        """What a whole-server package holds besides the databases (T601 level 2)."""
+        generated = entry.install.password.mode == "generated"
+        return move_server.gather_server_facts(
+            entry,
+            server_dir,
+            load_manifest=load_manifest,
+            secret_password=entry.install.db_password(server_dir) if generated else None,
+        )
+
     return move_flows.services_for(
         move_flows.MoveWorld(
             entry=entry,
@@ -2744,7 +2767,8 @@ def _move_services(
             take_down=alone.take_down,
             channel_account=channel_setup.account_name(composegen.install_id(server_dir)),
             marker=bot_marker,
-        )
+        ),
+        whole=whole,
     )
 
 
@@ -2858,7 +2882,7 @@ def _assemble(
         # factory that never bound `play`.
         database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
         move=(
-            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro)
+            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro, store=store)
             if mysql is not None
             else None
         ),
@@ -4395,6 +4419,25 @@ def _knowing_its_server_sources(
         services.applier.server_sources = native.server_source_folders(entry)
         services.applier.server_name = entry.name
     return services
+
+
+def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
+    """The Modules tab's manifest store for a server of `entry`, as its factory builds it (T601).
+
+    For a whole server brought from another computer, whose modules are looked up before the
+    server (and so its tab) exists. The same calls the factories below make, by game.
+    """
+    if not entry.has_manifests:
+        return None
+    if _FACTORIES.get(entry.id) is _for_wotlk:
+        return wotlk_modules.store(user_game=entry.id)
+    stores: dict[str, Callable[[], ManifestStore]] = {
+        "wow-tbc": tbc_modules.store,
+        "wow-vanilla": vanilla_modules.store,
+        "wow-tortoise": tortoise_modules.store,
+    }
+    make = stores.get(entry.id)
+    return make() if make is not None else None
 
 
 _FACTORIES: dict[str, _Factory] = {
