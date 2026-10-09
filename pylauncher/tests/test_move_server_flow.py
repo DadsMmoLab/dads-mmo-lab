@@ -899,3 +899,23 @@ def test_a_rebuild_needed_with_no_rebuild_here_is_refused_not_skipped(tmp_path: 
     mv.server_for = lambda d, c: replace(original(d, c), rebuild=None)  # type: ignore[method-assign]
     with pytest.raises(MoveError, match="is not wired for WoW WotLK here"):
         mv.run()
+
+
+def test_a_clone_that_clears_the_folder_and_fails_silently_still_leaves_the_record(
+    tmp_path: Path,
+) -> None:
+    mv = Move(tmp_path)
+
+    def clears_then_fails(options: InstallOptions, **kw: object) -> Iterator[str]:
+        import shutil
+
+        shutil.rmtree(options.server_dir)  # type: ignore[arg-type]
+        options.server_dir.mkdir()  # type: ignore[union-attr]
+        (options.server_dir / native.STATE_FILE).write_text("{}", encoding="utf-8")  # type: ignore[operator]
+        raise native.InstallerError("git failed before printing anything")
+        yield ""  # pragma: no cover
+
+    mv.engine.run = clears_then_fails  # type: ignore[method-assign]
+    with pytest.raises(native.InstallerError):
+        mv.run()
+    assert plan_for(mv.path, mv.target.server_dir).resuming

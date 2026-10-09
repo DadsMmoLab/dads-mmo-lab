@@ -939,10 +939,14 @@ class MovedInInstall:
         # one "already holding a server". The core's clone into the server folder itself clears
         # the folder, so the record is put back after every line the install says.
         record.save()
-        for line in self._engine.run(options, cancel=cancel, ask=ask):
+        try:
+            for line in self._engine.run(options, cancel=cancel, ask=ask):
+                record.keep()
+                yield line
+        finally:
+            # Also when the install fails before it says anything after the clone cleared the
+            # folder: whatever the install left, this file carries on in it.
             record.keep()
-            yield line
-        record.keep()
         server = self._server_for(server_dir, options.client_dir)
         for step in STEPS:
             if step in record.done:

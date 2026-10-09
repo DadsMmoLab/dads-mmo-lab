@@ -178,3 +178,28 @@ def test_install_into_an_unfinished_move_sends_the_player_to_bring_in(
     built, _ = view(tmp_path, Mover(tmp_path))
     assert built.start_install(WOTLK) is False
     assert shown and BRING_FROM_ANOTHER in shown[0]
+
+
+def test_attaching_an_unfinished_move_sends_the_player_to_bring_in(
+    qapp: object, tmp_path: Path, monkeypatch: object
+) -> None:
+    import yulon.ui.catalog_view as cv
+    from yulon.catalog import native
+
+    shown: list[str] = []
+    monkeypatch.setattr(cv, "show_information", lambda _p, _t, text: shown.append(text))  # type: ignore[attr-defined]
+    folder = tmp_path / "half-moved"
+    folder.mkdir()
+    (folder / native.MOVE_IN_FILE).write_text("{}", encoding="utf-8")
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    built = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda _p, _t, _s: folder,
+        home=tmp_path,
+        move_in=Mover(tmp_path).move_in(),
+        platform_id=lambda: "linux",
+    )
+    assert built.attach_existing(WOTLK) is False
+    assert shown and BRING_FROM_ANOTHER in shown[0]
