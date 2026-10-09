@@ -103,6 +103,11 @@ def test_a_commit_hash_outside_sql_is_left_alone() -> None:
         "<password>{s}</password>",
         "<SessionKey>{s}</SessionKey>",
         "MYSQL_PWD={s}",
+        "Cookie: sessionid={s}",
+        "Set-Cookie: session={s}; Path=/; HttpOnly",
+        "cookie: a=1; auth={s}; theme=dark",
+        "SessionId = {s}",
+        "JSESSIONID={s}",
         "Session key: {s}",
         "{{'sessionkey': b'{s}'}}",
         "session_key_auth = {s}",
@@ -121,6 +126,12 @@ def test_a_bare_80_digit_hex_is_a_session_key_and_other_digests_are_not() -> Non
     assert key not in out and out.count(MASK) == 1, out
 
 
+def test_a_cookie_line_keeps_its_names_and_attributes_and_loses_every_value() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    out = Redactor.build([]).redact(f"Set-Cookie: sid={secret}; Path=/x; Expires=Fri; Secure")
+    assert out == f"Set-Cookie: sid={MASK}; Path=/x; Expires=Fri; Secure"
+
+
 def test_a_bearer_word_in_prose_survives() -> None:
     for text in ("Basic setup is done", "a token count of 3", "token: ok"):
         assert Redactor.build([]).redact(text) == text
@@ -134,10 +145,23 @@ def test_mysql_error_text_and_ordinary_settings_are_untouched() -> None:
 def test_secret_masking_is_linear_on_one_huge_line() -> None:
     import time
 
-    blob = "sessionkey " * 20000 + "docker login " * 5000 + "-uroot " * 5000
-    started = time.monotonic()
-    Redactor.build([]).redact(blob)
-    assert time.monotonic() - started < 3.0
+    blobs = [
+        "sessionkey " * 20000 + "docker login " * 5000 + "-uroot " * 5000,
+        "C:\\Users\\a b c d e f g " * 20000,
+        "C:/Users/" + "%41" * 100000,
+        "Set-Cookie: " + "a=b; " * 40000,
+        "UPDATE x " * 30000 + "\n" + "mysql " * 30000,
+        "\\\\" * 100000 + "wsl.localhost",
+        "\\" * 100000 + "zephyrin",
+        "C:\\Users\\" + "%41%20" * 100000,
+        "C:\\Users\\" * 100000,
+        "C:\\Users\\a " * 100000,
+    ]
+    redactor = Redactor.build(["Known12345"], home=Path(WIN_HOME), also_home=["/home/penguin"])
+    for blob in blobs:
+        started = time.monotonic()
+        redactor.redact(blob)
+        assert time.monotonic() - started < 4.0, blob[:30]
 
 
 # ---------------------------------------------------------------- the home folder
@@ -219,6 +243,43 @@ def test_a_user_name_with_a_space_or_accents_is_gone_url_encoded_and_escaped() -
     ):
         out = Redactor.build([], home=Path(home)).redact(f"x {form}\\f y")
         assert "Zo" not in out and "gard" not in out.lower() and "g%C3" not in out, (form, out)
+
+
+def _all_percent(text: str) -> str:
+    """Every byte as %HH, letters and digits too: a valid spelling nobody writes by hand."""
+    return "".join(f"%{byte:02X}" for byte in text.encode("utf-8"))
+
+
+def test_a_name_spelled_wholly_in_percent_escapes_is_gone() -> None:
+    redactor = Redactor.build([], home=Path("C:\\Users\\Alice Smith"))
+    sep = "%5C"
+    for form in (
+        f"C%3A{sep}Users{sep}{_all_percent('Alice Smith')}{sep}file",
+        f"C%3A{sep}Users{sep}%41lice%20Smith{sep}file",
+        f"C:\\Users\\{_all_percent('Alice Smith')}\\file",
+    ):
+        out = redactor.redact(form)
+        assert "lice" not in out and "41" not in out and "Smith" not in out, (form, out)
+    posix = Redactor.build([], home=Path("/home/alice"))
+    for form in ("%2Fhome%2F%61lice%2Ffile", "/home/%61%6C%69%63%65/file"):
+        out = posix.redact(form)
+        assert "61" not in out and "lice" not in out, (form, out)
+
+
+def test_another_account_is_masked_whole_with_several_spaces_or_escapes() -> None:
+    redactor = Redactor.build([], home=Path("/home/zephyrine"))
+    for text, gone in (
+        ("C:\\Users\\John van Doe\\x", ["van", "Doe", "John"]),
+        ("C:/Users/John van Doe/x", ["van", "Doe"]),
+        ("'C:\\Users\\Mary Ann Lee'", ["Ann", "Lee", "Mary"]),
+        ("C%3A%5CUsers%5CJohn%20van%20Doe%5Cx", ["van", "Doe"]),
+        ("C:\\Users\\%4Aohn\\x", ["ohn"]),
+    ):
+        out = redactor.redact(text)
+        for word in gone:
+            assert word not in out, (text, out)
+    # one word of prose after a bare profile is not swallowed
+    assert redactor.redact("C:\\Users\\Bob and then more").endswith("and then more")
 
 
 def test_the_short_8_3_alias_of_a_long_user_name_is_gone() -> None:
@@ -427,6 +488,24 @@ def test_a_whole_bundle_over_a_leaky_log_carries_no_key_and_no_escaped_home(
     for name, text in _read(dest).items():
         assert key not in text and key[-12:] not in text, name
         assert NAME not in text, name
+
+
+def test_a_whole_bundle_over_encoded_homes_and_cookies_carries_none(tmp_path: Path) -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    leak = (
+        "GET C%3A%5CUsers%5C%5A%65phyrine%5Cx\n"
+        "C:\\Users\\Other Person\\yulon\n"
+        f"Set-Cookie: sessionid={secret}; Path=/\n"
+    )
+    log = tmp_path / "yulon.log"
+    log.write_text(leak, encoding="utf-8")
+    dest = tmp_path / "s.zip"
+    redactor = Redactor.build([], home=Path(WIN_HOME))
+    bundle.build(dest, Sources(platform.config_dir(), log, ()), redactor, seams=_seams())
+    members = _read(dest)
+    text = "\n".join(members.values())
+    for needle in (secret, NAME, "Other", "Person", "%5A%65"):
+        assert needle not in text, needle
 
 
 def test_save_masks_the_home_given_and_the_one_the_install_folders_reveal(

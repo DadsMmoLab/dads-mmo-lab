@@ -425,10 +425,11 @@ def _manifest_text(
 
 
 _PROMISE = [
-    "Every password Yu'lon knows of, anything shaped like one, login session keys and",
-    "tokens, and your home folder in every spelling a path takes in a log were replaced",
-    "with *** and ~ before this file was written. Account names and IP addresses are not",
-    "removed. A file Yu'lon could not be sure about was left out, and is named below.",
+    "Every password Yu'lon knows of, anything shaped like one, the login session keys and",
+    "tokens it recognises by name or shape, and your home folder in every spelling a path",
+    "takes in a log were replaced with *** and ~ before this file was written.",
+    "Account names and IP addresses are not removed, and neither is a secret in a form",
+    "Yu'lon does not know. A file Yu'lon could not be sure about was left out, and is named below.",
 ]
 """What the file promises (T595). Its first line is the long form's start; the short-password
 warning joins it from the second line on, so the two never drift apart."""

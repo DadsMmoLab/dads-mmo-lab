@@ -120,10 +120,11 @@ class Unredactable(Exception):
 _SEP = r"(?:\\|/|%5[Cc]|%2[Ff])"
 """One path separator as a log writes it: a backslash, a slash, or either URL-encoded."""
 
-_SEPS = _SEP + "+"
-"""A run of them: a repr doubles every backslash, a repr of a repr quadruples it."""
+_SEPS = _SEP + "{1,16}"
+"""A run of them: a repr doubles every backslash, a repr of a repr quadruples it. Bounded, so a
+long run of backslashes costs a bounded scan from each position, not the rest of the run."""
 
-_UNC = rf"(?:{_SEP}{{2,}}(?:wsl\.localhost|wsl\$|wsl%24){_SEPS}[^\\/\s'\"<>|%]{{1,64}})"
+_UNC = rf"(?:{_SEP}{{2,16}}(?:wsl\.localhost|wsl\$|wsl%24){_SEPS}[^\\/\s'\"<>|%]{{1,64}})"
 """The `wsl.localhost` / `wsl$` network share Windows reaches a distro's disk through."""
 
 _DRIVE = r"(?:[A-Za-z](?::|%3[Aa])|" + _SEPS + r"[A-Za-z](?=" + _SEP + "))"
@@ -131,10 +132,18 @@ _MNT = rf"(?:{_UNC}?{_SEPS}mnt{_SEPS}[A-Za-z](?={_SEP}))"
 _SHARED_PROFILES = r"(?:Public|Default(?: User)?|All Users)"
 _NAME_CHAR = r"[^\\/\s'\"<>|:*?%]"
 
+_PROFILE_WORD = rf"(?:%(?!5[Cc]|2[Ff])[0-9A-Fa-f]{{2}}|{_NAME_CHAR})++"
+"""One word of a profile name. Possessive (Python 3.11+): it never gives characters back, so
+the words after it are tried once, not once per way of splitting the text."""
+_PROFILE_END = rf"{_SEP}|['\"<>|]"
+"""What may follow a profile name that has spaces in it: a separator or a closing quote. A name
+at the very end of a line is masked up to its first space, never over the words after it."""
 _OTHER_WINDOWS_HOME = re.compile(
     rf"(?:{_MNT}|{_DRIVE}){_SEPS}Users{_SEPS}"
     rf"(?!{_SHARED_PROFILES}(?![\w]))"
-    rf"(?:{_NAME_CHAR}|%20)+(?: {_NAME_CHAR}+(?={_SEP}))?",
+    rf"{_PROFILE_WORD}(?: {_PROFILE_WORD}){{1,3}}(?={_PROFILE_END})"
+    rf"|(?:{_MNT}|{_DRIVE}){_SEPS}Users{_SEPS}"
+    rf"(?!{_SHARED_PROFILES}(?![\w])){_PROFILE_WORD}",
     re.IGNORECASE,
 )
 """Some other Windows account's profile, seen by name from a path (T595).
@@ -197,7 +206,7 @@ def _char(ch: str) -> str:
     """One character of a name, as it may be spelled: literal, %XX, `\\uXXXX`, or `+`."""
     if ch.isascii():
         if ch.isalnum():
-            return ch
+            return f"(?:{ch}|%{ord(ch):02X})"  # %41 is "A": a name can be spelled all in escapes
         if ch == " ":
             return r"(?: |%20|\+)"
         return f"(?:{re.escape(ch)}|%{ord(ch):02X})"
@@ -262,8 +271,8 @@ def _home_patterns(
 
 
 _STRONG_KEY = (
-    r"session[ _-]?key|sha[_-]?pass(?:[_-]?hash)?|verifier|api[_-]?key|private[_-]?key|passwd"
-    r"|[_-]pwd|pwd[_-]"
+    r"session[ _-]?key|session[_-]?id|jsessionid|phpsessid|sha[_-]?pass(?:[_-]?hash)?|verifier"
+    r"|api[_-]?key|private[_-]?key|passwd|[_-]pwd|pwd[_-]"
 )
 _WEAK_KEY = r"token|secret|credentials?"
 _KEYED = re.compile(
@@ -344,6 +353,16 @@ costs a bounded scan each, not the rest of the line (`test_secret_masking_is_lin
 The console commands the app itself sends (`commands.py`), an XML element a SOAP reply
 or request carries, and the command lines that put a password on an argv."""
 
+_COOKIE = re.compile(
+    r"(?i)(?<![\w-])(?P<head>(?:set-)?cookie[\"']?[ \t]*[=:][ \t]*)(?P<value>[^\r\n]+)"
+)
+_COOKIE_PAIR = re.compile(r"(?P<head>(?:^|[;,][ \t]*)[^=;,\s]+=)(?P<value>[^;,\r\n]*)")
+_COOKIE_ATTRIBUTES = frozenset(
+    {"path", "domain", "expires", "max-age", "samesite", "secure", "httponly", "version"}
+)
+"""A `Cookie:` / `Set-Cookie:` line carries a login session: every value in it is masked,
+the names and the attributes (`Path`, `Expires`, ...) stay so the line still reads."""
+
 _HEAD_VALUE = (
     _AUTH_HEADER,
     _BEARER,
@@ -366,6 +385,18 @@ def _mask_head_value(match: re.Match[str]) -> str:
     if match.group("value").strip("\"'").startswith(MASK):
         return match.group(0)  # already masked: a second pass must change nothing
     return match.group("head") + MASK
+
+
+def _mask_cookie_pair(match: re.Match[str]) -> str:
+    name = match.group("head").rstrip("=").lstrip(";, \t").lower()
+    value = match.group("value")
+    if name in _COOKIE_ATTRIBUTES or not value.strip() or value.strip().startswith(MASK):
+        return match.group(0)
+    return match.group("head") + MASK
+
+
+def _mask_cookie(match: re.Match[str]) -> str:
+    return match.group("head") + _COOKIE_PAIR.sub(_mask_cookie_pair, match.group("value"))
 
 
 def _mask_keyed(match: re.Match[str]) -> str:
@@ -398,6 +429,7 @@ def mask_credentials(text: str) -> str:
     text = _SESSION_SHAPED.sub(MASK, text)
     text = _SQL_LINE.sub(_mask_sql_line, text)
     text = _KEYED.sub(_mask_keyed, text)
+    text = _COOKIE.sub(_mask_cookie, text)
     for pattern in _HEAD_VALUE:
         text = pattern.sub(_mask_head_value, text)
     return text
