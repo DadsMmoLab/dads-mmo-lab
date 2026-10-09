@@ -213,7 +213,8 @@ def _left_out_text(report: bundle.BundleReport) -> str:
         n = len(report.unvouched)
         it = "it" if n == 1 else "them"
         clauses.append(f"{_logs(n)} left out because the cleaner could not vouch for {it}")
-    return f" {', '.join(clauses)}; MANIFEST.txt names them." if clauses else ""
+    names = "it" if len(report.dropped) + len(report.unvouched) == 1 else "them"
+    return f" {', '.join(clauses)}; MANIFEST.txt names {names}." if clauses else ""
 
 
 def _logs(n: int) -> str:
