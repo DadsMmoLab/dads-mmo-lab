@@ -21,12 +21,11 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import Recorder
-
 from yulon import resources
 from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families import patch
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
-from yulon.catalog.families import patch
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-187af788"
 REL = Path("src") / "shared" / "Database" / "AutoUpdater.cpp"

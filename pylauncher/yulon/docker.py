@@ -4837,8 +4837,9 @@ def _logs(
     started; `until` ends it there (`docker logs --until`). `--tail` is not an
     alternative: the marker is printed once, so a tail window either misses it or
     slides past it. `timeout` bounds the call (a timeout is a non-zero answer, so `""`), for a
-    caller that polls inside a loop the person must be able to end. `tail` is for the opposite question, what a run's log ENDS on
-    (T600: a world stuck at a failed update), which a window answers exactly.
+    caller that polls inside a loop the person must be able to end. `tail` is for the opposite
+    question, what a run's log ENDS on (T600: a world stuck at a failed update), which a window
+    answers exactly.
     """
     argv = ["logs"]
     if this_run_only:

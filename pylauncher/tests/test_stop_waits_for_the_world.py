@@ -766,7 +766,7 @@ def test_the_failed_update_look_and_the_kill_are_each_bounded_like_the_other_loo
 def test_a_log_read_that_times_out_is_not_a_stuck_world_and_abandon_still_ends_the_wait(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A timed-out read is "not stuck": the wait goes on looking, and the person can still end it."""
+    """A timed-out read is "not stuck": the wait goes on, and the person can still end it."""
     fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
     fake.logs_time_out = True
     controller, control = _controller(fake, tmp_path)
