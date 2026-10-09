@@ -69,7 +69,7 @@ def test_a_refused_update_of_an_addon_is_put_back_and_not_offered_again(tmp_path
         applier.update(_installed(applier))  # type: ignore[arg-type]
 
     said = str(refused.value)
-    assert "made for another game version" in said
+    assert "is made for The Burning Crusade (Interface 20400)" in said
     assert "put it back on the version it was on" in said
     assert _git(clone, "rev-parse", "HEAD") == first, "the clone agrees with its record again"
     ledger = module_moves.read(server)
@@ -101,7 +101,7 @@ def test_a_put_back_that_cannot_be_made_says_what_the_clone_is_on(tmp_path: Path
         applier.update(_installed(applier))  # type: ignore[arg-type]
 
     said = str(refused.value)
-    assert "made for another game version" in said
+    assert "is made for The Burning Crusade (Interface 20400)" in said
     assert "could not put it back on the version it was on (disk full)" in said
     assert _git(server / "sql_scripts" / "clones" / "mobstats", "rev-parse", "HEAD") == second
 

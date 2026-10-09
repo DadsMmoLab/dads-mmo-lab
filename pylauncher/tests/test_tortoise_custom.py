@@ -292,7 +292,7 @@ def test_an_addon_in_a_top_folder_of_its_own_name_is_found(tmp_path: Path) -> No
         ({"Wotlk.toc": "## Interface: 30300\n"}, "30300"),
         ({"sql/only.sql": "DELETE FROM a;\n", "patches/core.patch": "x\n"}, "nothing in"),
         ({}, "nothing in"),
-        ({"TortoiseBotsManager.toc": "## Interface: 11200\n"}, "already ships"),
+        ({"TortoiseBotsManager.toc": "## Interface: 11200\n"}, "already installs for this server"),
     ],
 )
 def test_what_tortoise_cannot_take_is_refused_by_the_completion(
@@ -457,7 +457,9 @@ def test_a_module_cannot_carry_a_shipped_addon_either(tmp_path: Path) -> None:
         tmp_path / "c",
         {"src/a.cpp": "int x;\n", "TortoiseBotsManager.toc": "## Interface: 11200\n"},
     )
-    assert "already ships" in _refused_completion(_module_link("mod-fork"), clone)
+    assert "already installs for this server" in _refused_completion(
+        _module_link("mod-fork"), clone
+    )
 
 
 def test_the_module_manifest_survives_its_own_reload(tmp_path: Path) -> None:
@@ -617,7 +619,7 @@ def test_a_package_carrying_a_shipped_addon_is_refused_and_its_first_clone_taken
     manifest = tortoise_modules.derive_link("you/TortoiseBotsManager-fork")
     with pytest.raises(CompletionRefused) as refused:
         tortoise_modules.install_custom(applier)(manifest, None)
-    assert "already ships" in str(refused.value)
+    assert "already installs for this server" in str(refused.value)
     assert str(refused.value).endswith("Nothing was changed.")
     assert not (server / "sql_scripts" / "clones" / manifest.id).exists()
     assert manifest.id not in {m.id for m in tortoise_modules.store().load_all("mod")}
@@ -647,7 +649,9 @@ def test_a_folder_carrying_a_shipped_addon_is_refused_before_the_copy(tmp_path: 
     folder = _tree(tmp_path / "TBM-fork", {"TortoiseBotsManager.toc": "## Interface: 11200\n"})
     with pytest.raises(DeriveError) as refused:
         tortoise_modules.derive_folder(folder)
-    assert "already ships" in str(refused.value) and str(refused.value).endswith(NOTHING)
+    assert "already installs for this server" in str(refused.value) and str(refused.value).endswith(
+        NOTHING
+    )
 
 
 def test_a_first_install_refused_by_a_running_world_leaves_no_folder_and_no_record(
@@ -1037,3 +1041,90 @@ def test_a_src_link_is_not_searched_for_cpp(tmp_path: Path) -> None:
     package.mkdir()
     (package / "src").symlink_to(elsewhere, target_is_directory=True)
     assert not custom._has_cpp_in_src(package)
+
+
+# ------------------------------------------------------------------ T613 PR-2: the shared engine
+
+
+def test_a_github_archive_folder_installs_under_its_toc_name_not_its_folder_name(
+    tmp_path: Path,
+) -> None:
+    """`pfUI-master/pfUI.toc`: the client loads `pfUI`, so that is the add-on's name."""
+    clone = _tree(tmp_path / "c", {"pfUI-master/pfUI.toc": "## Interface: 11200\n"})
+    done = _complete(_link("you/pfui-pack"), clone)
+    assert [(c.src, c.dest, c.name) for c in done.client] == [("pfUI-master", "addons", "pfUI")]
+
+
+def test_a_classic_era_add_on_is_refused_though_its_number_is_under_twenty_thousand(
+    tmp_path: Path,
+) -> None:
+    clone = _tree(tmp_path / "c", {"Era.toc": "## Interface: 11507\n"})
+    sentence = _refused_completion(_link("you/era"), clone)
+    assert sentence == (
+        "Era is made for WoW Classic Era (Interface 11507); this server's client is 1.12 "
+        "(Interface 11200)."
+    )
+
+
+def test_only_the_first_interface_number_counts_as_the_old_client_reads_it(
+    tmp_path: Path,
+) -> None:
+    clone = _tree(tmp_path / "c", {"Multi.toc": "## Interface: 20400, 11200\n"})
+    sentence = _refused_completion(_link("you/multi"), clone)
+    assert sentence.startswith("Multi is made for The Burning Crusade (Interface 20400)")
+
+
+def test_a_byte_order_mark_does_not_hide_the_interface_line(tmp_path: Path) -> None:
+    clone = tmp_path / "c"
+    clone.mkdir()
+    (clone / "Bom.toc").write_bytes(b"\xef\xbb\xbf## Interface: 30300\n")
+    sentence = _refused_completion(_link("you/bom"), clone)
+    assert sentence.startswith("Bom is made for Wrath of the Lich King (Interface 30300)")
+
+
+def test_an_older_patch_installs_and_its_note_reaches_the_report_lines(tmp_path: Path) -> None:
+    clone = _tree(tmp_path / "c", {"Old.toc": "## Interface: 11100\n"})
+    done = _complete(_link("you/old"), clone)
+    assert [c.name for c in done.client] == ["Old"]
+    assert custom.addon_notes(done) == (
+        "Old is made for an older patch (Interface 11100), so the game may mark it out of "
+        'date: tick "Load out of date AddOns" in the AddOns list on the character screen.',
+    )
+
+
+def test_a_shipped_add_on_name_is_refused_in_the_engines_words(tmp_path: Path) -> None:
+    clone = _tree(tmp_path / "c", {"tortoisebotsmanager.toc": "## Interface: 11200\n"})
+    sentence = _refused_completion(_link("you/tbm-fork"), clone)
+    assert sentence == (
+        "tortoisebotsmanager is the name of an add-on Yu'lon already installs for this server "
+        "(TortoiseBots Manager (client addon)). Install that one from its row, or remove it "
+        "first."
+    )
+
+
+def test_an_outside_add_on_through_the_tortoise_box_is_noted_and_taken_back_by_receipt(
+    tmp_path: Path,
+) -> None:
+    """The live proof's shape: install from a link, the reader's note said, Remove by receipt."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    saved = client / "WTF" / "Account" / "ME" / "SavedVariables" / "OldBars.lua"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("OldBarsDB = {}\n", encoding="utf-8")
+    server.mkdir()
+    git = _Clone({"OldBars-main/OldBars.toc": "## Interface: 11100\n", "OldBars-main/a.lua": "x\n"})
+    applier = _tortoise_applier(server, git, _Db(), client)
+    manifest = tortoise_modules.derive_link("https://github.com/you/OldBars")
+
+    report = tortoise_modules.install_custom(applier)(manifest, None)
+
+    addon = client / "Interface" / "AddOns" / "OldBars"
+    assert (addon / "OldBars.toc").is_file() and (addon / "a.lua").is_file()
+    assert any("made for an older patch (Interface 11100)" in line for line in report.done)
+    listed = {m.id: m for m in tortoise_modules.store().load_all("mod")}
+
+    removed = applier.remove(listed["oldbars"])
+
+    assert not addon.exists()
+    assert f"took back 2 files of the OldBars add-on from {addon}" in removed.done
+    assert saved.read_text(encoding="utf-8") == "OldBarsDB = {}\n"

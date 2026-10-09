@@ -224,7 +224,12 @@ def install_custom(applier: Applier) -> CustomInstall:
             *(custom.unused(finished[-1]) if finished else ()),
             *kept,
         )
-        return replace(report, skipped=(*report.skipped, *left)) if left else report
+        if left:
+            report = replace(report, skipped=(*report.skipped, *left))
+        # T613 PR-2: what the add-on reader said (an older patch, a library the
+        # add-on needs) is part of what the press did, so the player reads it.
+        notes = custom.addon_notes(finished[-1]) if finished else ()
+        return replace(report, done=(*report.done, *notes)) if notes else report
 
     return install
 
