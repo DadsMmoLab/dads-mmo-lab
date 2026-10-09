@@ -25,6 +25,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -118,11 +120,25 @@ def _modules_of(
                 continue
             manifest = candidates[0]
             if manifest.origin is not None and manifest.origin.kind == "folder":
-                refusals.append(
-                    f"{manifest.name} was added from a folder on this computer, so there is "
-                    "nothing the new computer could fetch it from again. Remove it, or add it "
-                    f"from a link instead, then pack again. {_NOT_PACKED}"
+                try:
+                    members = _folder_module_members(manifest, server_dir / folder / item_id)
+                except MoveError as exc:
+                    refusals.append(str(exc))
+                    continue
+                modules.append(PackedModule(type=manifest.type, id=manifest.id, origin="folder"))
+                # The old computer's path means nothing on the new one, and is a path of
+                # the player's home folder: the description travels without it.
+                kept = manifest.model_copy(
+                    update={"origin": manifest.origin.model_copy(update={"path": None})}
                 )
+                files.append(
+                    PackFile(
+                        kind="manifest",
+                        target=f"{manifest.type}/{manifest.id}",
+                        data=kept.model_dump_json(indent=2).encode("utf-8"),
+                    )
+                )
+                files.extend(members)
                 continue
             if manifest.source is None:
                 refusals.append(
@@ -158,6 +174,68 @@ def _modules_of(
                     )
                 )
     return tuple(modules), files, refusals
+
+
+FOLDER_MODULE_MAX_BYTES = 50 * 1024**2
+FOLDER_MODULE_MAX_FILES = 5000
+"""What one folder module may weigh in the package: its files are read into memory to pack."""
+
+
+def _folder_module_members(manifest: Manifest, folder: Path) -> list[PackFile]:
+    """The files of a module added from a folder, as package members, or a `MoveError`.
+
+    What a clone leaves is not packed: `.git` (the new computer's copy is a snapshot, as the
+    folder route makes it), the clone claim and every other `.yulon-*` record (the new install
+    writes its own), and the password or credential files no package carries. A link anywhere
+    in the folder refuses the pack, never followed: it could bring any file on this computer
+    into a file that is then handed to someone. The weight is bounded and the refusal says so.
+    """
+    from yulon import links
+
+    too_big = MoveError(
+        f"{manifest.name} is bigger than Yu'lon packs from a folder module (the limit is "
+        f"{FOLDER_MODULE_MAX_BYTES // 1024**2} MB and {FOLDER_MODULE_MAX_FILES} files). Take out "
+        "what the module does not need, or copy it to the new computer by hand, then pack "
+        f"again. {_NOT_PACKED}"
+    )
+    members: list[PackFile] = []
+    total = 0
+    for root, dirs, names, linked in links.walk(folder):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        here = Path(root)
+        for name in linked:
+            if name == ".git":
+                continue
+            path = here / name
+            raise MoveError(
+                f"{manifest.name} has a link in its folder ({path.relative_to(folder).as_posix()} "
+                f"points to {os.path.realpath(path)}), and Yu'lon packs only real files: a link "
+                "could bring a file from elsewhere on this computer into the package. Remove "
+                f"the link, then pack again. {_NOT_PACKED}"
+            )
+        for name in names:
+            path = here / name
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+            rel = path.relative_to(folder).as_posix()
+            if apply.CLAIM_FILE == name or move.NEVER_PACKED.search(rel):
+                continue
+            total += path.stat().st_size
+            if len(members) >= FOLDER_MODULE_MAX_FILES or total > FOLDER_MODULE_MAX_BYTES:
+                raise too_big
+            members.append(
+                PackFile(
+                    kind="module",
+                    target=f"{manifest.type}/{manifest.id}/{rel}",
+                    data=path.read_bytes(),
+                )
+            )
+    if not members:
+        raise MoveError(
+            f"{manifest.name} has no files in its folder, so there is nothing to pack. Remove it "
+            f"or add it again on the Modules tab, then pack again. {_NOT_PACKED}"
+        )
+    return members
 
 
 def _relative(path: Path, server_dir: Path) -> str:
@@ -512,6 +590,9 @@ class ModuleToInstall:
     """The description, with its source pinned at the packed commit."""
     carried: Manifest | None = None
     """A link module's own description, to put in this computer's user layer first."""
+    folder_files: tuple[move.FileMember, ...] = ()
+    """A folder module's files, to be put in a staging folder and installed through the folder
+    route. Its description is `manifest`; the route persists it itself, so `carried` is None."""
 
 
 @dataclass(frozen=True)
@@ -574,6 +655,53 @@ def _module_plans(
     refusals: list[str] = []
     for packed in server.modules:
         carried: Manifest | None = None
+        folder_files: tuple[move.FileMember, ...] = ()
+        if packed.origin == "folder":
+            if lookup.shipped(packed.type, packed.id):
+                refusals.append(
+                    f"{packed.id} was added from a folder on the old computer, and this Yu'lon "
+                    "ships a module of that name, so the two cannot be told apart. Remove it on "
+                    "the old computer and pack again."
+                )
+                continue
+            damaged = (
+                f"The package's description of {packed.id} is missing or damaged. "
+                "Pack again on the old computer."
+            )
+            try:
+                member = package.file("manifest", f"{packed.type}/{packed.id}")
+                described = Manifest.model_validate_json(package.file_bytes(member))
+            except (move.MovePackageError, ValueError) as exc:
+                logger.info(f"the carried description of {packed.id} is not usable: {exc}")
+                refusals.append(damaged)
+                continue
+            if (
+                described.id != packed.id
+                or described.type != packed.type
+                or described.source is not None
+                or described.origin is None
+                or described.origin.kind != "folder"
+            ):
+                refusals.append(damaged)
+                continue
+            prefix = f"{packed.type}/{packed.id}/"
+            folder_files = tuple(
+                sorted(
+                    (f for f in package.files("module") if f.target.startswith(prefix)),
+                    key=lambda f: f.target,
+                )
+            )
+            if not folder_files:
+                refusals.append(
+                    f"The package holds no files for {packed.id}. Pack again on the old computer."
+                )
+                continue
+            plans.append(
+                ModuleToInstall(packed=packed, manifest=described, folder_files=folder_files)
+            )
+            continue
+        if packed.repo is None or packed.commit is None:  # the model says so; this is the type's
+            continue
         if packed.origin == "catalog":
             manifest = lookup.load(packed.type, packed.id)
             if manifest is None or manifest.origin is not None:
@@ -750,6 +878,8 @@ def plan_server_import(
             ):
                 refusals.append(gone_from_github(source.commit, source.repo, entry.name))
         for planned in modules:
+            if planned.packed.repo is None or planned.packed.commit is None:
+                continue  # a folder module has no repository to ask
             if commit_known(planned.packed.repo, planned.packed.commit) is False:
                 refusals.append(
                     gone_from_github(planned.packed.commit, planned.packed.repo, entry.name)
@@ -809,6 +939,8 @@ class MovedInServer:
     rebuild: Callable[[threading.Event | None], Iterator[str]] | None
     db_password: str | None
     persist_manifest: Callable[[Manifest], None]
+    install_folder: Callable[[Manifest, Path], apply.ApplyReport] | None = None
+    """The Modules tab's "Install from folder" route, for a module added from a folder."""
 
 
 def _module_key(planned: ModuleToInstall) -> str:
@@ -1033,7 +1165,10 @@ class MovedInInstall:
         if not self.plan.modules:
             yield "The old server had no module installed from a repository."
             return
-        if server.applier is None:
+        folder_route_missing = server.install_folder is None and any(
+            p.folder_files for p in self.plan.modules
+        )
+        if server.applier is None or folder_route_missing:
             raise MoveError(
                 f"{self.entry.name} has no module installer here, so no module was put back."
             )
@@ -1051,10 +1186,17 @@ class MovedInInstall:
                 server.persist_manifest(planned.carried)
             if manifest.build.rebuild:
                 record.need_rebuild()
-            yield f"Installing {manifest.name} at {planned.packed.commit[:7]}"
+            if planned.folder_files:
+                yield f"Installing {manifest.name} from the files in the package"
+            else:
+                yield f"Installing {manifest.name} at {(planned.packed.commit or '')[:7]}"
             values = module_answers.read_answers(server_dir, manifest) or None
             try:
-                report = server.applier.install(manifest, values)
+                if planned.folder_files:
+                    assert server.install_folder is not None
+                    report = self._install_from_folder(server, server_dir, planned)
+                else:
+                    report = server.applier.install(manifest, values)
             except apply.ApplyError as exc:
                 raise MoveError(
                     f"{manifest.name} could not be installed again: {exc} Press Bring from "
@@ -1067,6 +1209,30 @@ class MovedInInstall:
             if report.rebuild_required:
                 record.need_rebuild()
             record.module_done(_module_key(planned))
+
+    def _install_from_folder(
+        self, server: MovedInServer, server_dir: Path, planned: ModuleToInstall
+    ) -> apply.ApplyReport:
+        """A folder module's files into a staging folder, installed through the folder route.
+
+        The package is read again here (its members were verified at the plan, and the zip
+        hashes each as it is read). The staging folder is beside the server's top-level files,
+        never inside `modules/` (the folder route refuses a source there), and removed whatever
+        the install did.
+        """
+        assert server.install_folder is not None
+        package = self._reopen()
+        prefix = f"{planned.packed.type}/{planned.packed.id}/"
+        staging = Path(tempfile.mkdtemp(prefix=".yulon-move-folder-", dir=server_dir))
+        try:
+            root = staging / planned.packed.id
+            for member in planned.folder_files:
+                _write_bytes(
+                    _inside(root, member.target[len(prefix) :]), package.file_bytes(member)
+                )
+            return server.install_folder(planned.manifest, root)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def _closing(self, server_dir: Path) -> Iterator[str]:
         manifest = self.plan.manifest

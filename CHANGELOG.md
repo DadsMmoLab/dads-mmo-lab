@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
 - Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
+- **Pack the whole server…** now carries a module you added from a folder, and **Bring from another computer…** installs it.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.

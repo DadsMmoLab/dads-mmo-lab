@@ -290,3 +290,43 @@ def test_a_manifest_listing_one_file_twice_is_not_a_package(tmp_path: Path) -> N
     with pytest.raises(MovePackageError) as raised:
         read_package(rewrite(good, tmp_path / "bad.zip", manifest=raw))
     assert str(raised.value) == move.NOT_A_PACKAGE
+
+
+# ------------------------------------------------- a folder module's members (T624)
+
+
+def test_a_module_member_never_names_git_or_a_yulon_record_or_climbs() -> None:
+    from yulon.move import PackFile
+
+    for bad in (
+        "module/mod-mine/.git/config",
+        "module/mod-mine/sub/.GIT/HEAD",
+        "module/mod-mine/.yulon-clone.json",
+        "module/mod-mine/../x",
+        "module/mod-mine/.env",
+        "module/mod-mine/",
+        "module/Mod_Mine/a",
+    ):
+        with pytest.raises(ValueError):
+            PackFile(kind="module", target=bad, data=b"x")
+    PackFile(kind="module", target="module/mod-mine/src/a.cpp", data=b"x")
+
+
+def test_a_module_member_is_bounded_in_depth() -> None:
+    from yulon.move import MODULE_FILE_DEPTH, PackFile
+
+    deep = "/".join(["d"] * (MODULE_FILE_DEPTH + 1)) + "/f"
+    with pytest.raises(ValueError):
+        PackFile(kind="module", target=f"module/mod-mine/{deep}", data=b"x")
+
+
+def test_a_folder_module_names_no_repository_and_any_other_names_both() -> None:
+    from yulon.move import PackedModule
+
+    PackedModule(type="module", id="mod-mine", origin="folder")
+    with pytest.raises(ValueError):
+        PackedModule(type="module", id="mod-mine", origin="folder", repo="a/b", commit="a" * 40)
+    with pytest.raises(ValueError):
+        PackedModule(type="module", id="mod-mine", origin="catalog")
+    with pytest.raises(ValueError):
+        PackedModule(type="module", id="mod-mine", origin="link", repo="a/bc")

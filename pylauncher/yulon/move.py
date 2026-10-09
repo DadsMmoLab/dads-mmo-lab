@@ -109,7 +109,7 @@ Role = Literal["auth", "characters", "world", "playerbots", "ale"]
 Kind = Literal["characters", "server"]
 """What a package holds: accounts and characters (level 1), or the whole server (level 2)."""
 
-FileKind = Literal["conf", "answers", "manifest", "lua"]
+FileKind = Literal["conf", "answers", "manifest", "lua", "module"]
 """The non-database files of a whole-server package, each in its own folder of the zip."""
 
 FILE_FOLDERS: dict[str, str] = {
@@ -117,12 +117,13 @@ FILE_FOLDERS: dict[str, str] = {
     "answers": "answers/",
     "manifest": "manifests/",
     "lua": "lua/",
+    "module": "modfiles/",
 }
 
 ANSWERS_TARGET = ".yulon-module-answers.json"
 """The one Yu'lon record that travels: it describes the databases, which travel too."""
 
-_NEVER_PACKED = re.compile(
+NEVER_PACKED = re.compile(
     r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)"
 )
 """Paths no file member may name: Yu'lon's records (the install claim, the folder id T568
@@ -130,6 +131,9 @@ says a copy must make again), the database password, the channel credentials."""
 
 _SHA = r"^[0-9a-f]{40}$"
 _MANIFEST_TARGET = re.compile(r"(?:module|ale|mod|keg)/[a-z0-9]+(?:-[a-z0-9]+)*")
+_MODULE_FILE_TARGET = re.compile(r"((?:module|ale|mod|keg)/[a-z0-9]+(?:-[a-z0-9]+)*)/(.+)")
+MODULE_FILE_DEPTH = 16
+"""Folders above a file inside a folder module's package members."""
 
 
 class Member(_Strict):
@@ -203,7 +207,7 @@ def _safe_target(value: str) -> str:
     """A server-relative POSIX path that stays inside the server folder and is not a record."""
     if not value or len(value) > 400 or any(ord(c) < 32 for c in value) or _unsafe_name(value):
         raise ValueError("a file target is a relative path inside the server folder")
-    if _NEVER_PACKED.search(value):
+    if NEVER_PACKED.search(value):
         raise ValueError("a Yu'lon record, the database password or a credential never travels")
     return value
 
@@ -230,9 +234,18 @@ class PackedModule(_Strict):
 
     type: Literal["module", "ale", "mod", "keg"]
     id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
-    origin: Literal["catalog", "link"]
-    repo: str = Field(min_length=3, max_length=200)
-    commit: str = Field(pattern=_SHA)
+    origin: Literal["catalog", "link", "folder"]
+    repo: str | None = Field(default=None, min_length=3, max_length=200)
+    commit: str | None = Field(default=None, pattern=_SHA)
+    """Both None for a module added from a folder: it has no repository, its files travel."""
+
+    @model_validator(mode="after")
+    def _a_folder_module_has_no_repository_and_every_other_has(self) -> PackedModule:
+        if (self.origin == "folder") != (self.repo is None and self.commit is None):
+            raise ValueError("a folder module has no repository or commit, any other has both")
+        if self.origin != "folder" and (self.repo is None or self.commit is None):
+            raise ValueError("a catalog or link module names its repository and commit")
+        return self
 
 
 class FileMember(_Strict):
@@ -256,6 +269,16 @@ def _check_target(kind: str, target: str) -> None:
     if kind == "manifest":
         if not _MANIFEST_TARGET.fullmatch(target):
             raise ValueError("a manifest member is <type>/<id>")
+        return
+    if kind == "module":
+        found = _MODULE_FILE_TARGET.fullmatch(target)
+        if found is None:
+            raise ValueError("a module file member is <type>/<id>/<path inside the module>")
+        inside = found.group(2)
+        _safe_target(inside)
+        parts = inside.split("/")
+        if len(parts) - 1 > MODULE_FILE_DEPTH or any(p.casefold() == ".git" for p in parts):
+            raise ValueError("a module file is not inside .git and is not too deep")
         return
     if kind == "answers":
         if target != ANSWERS_TARGET:

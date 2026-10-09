@@ -136,22 +136,112 @@ def test_a_generated_password_in_a_database_line_is_taken_out_and_packs(tmp_path
     assert b"tbc-planted-secret" not in got.files[0].data
 
 
-def test_a_module_added_from_a_folder_refuses_the_pack(tmp_path: Path) -> None:
-    server = wotlk_server(tmp_path)
-    head(server / "modules" / "mod-mine", "d" * 40)
-    mine = Manifest(
+def folder_module(server: Path, files: dict[str, bytes] | None = None) -> Manifest:
+    """`mod-mine` as the folder route leaves it: files, a clone claim and a stray `.git`."""
+    folder = server / "modules" / "mod-mine"
+    folder.mkdir(parents=True, exist_ok=True)
+    if files is None:
+        files = {"src/mine.cpp": b"// mine\n", "conf/mine.conf.dist": b"A = 1\n"}
+    for rel, data in files.items():
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_bytes(data)
+    (folder / ".yulon-clone.json").write_text("{}", encoding="utf-8")
+    head(folder, "d" * 40)
+    return Manifest(
         id="mod-mine",
         name="My Module",
         type="module",
         game="wow-wotlk",
         origin=Origin(kind="folder", path="/home/me/mod-mine", added="2026-10-01"),
     )
+
+
+def pack_folder(server: Path, mine: Manifest) -> move_server.ServerFacts:
+    return facts(server, load_manifest=lookup(extra={("module", "mod-mine"): mine}))
+
+
+def test_a_module_added_from_a_folder_is_packed_as_its_files(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    got = pack_folder(server, folder_module(server))
+    mine = [m for m in got.spec.modules if m.id == "mod-mine"]
+    assert [(m.type, m.origin, m.repo, m.commit) for m in mine] == [
+        ("module", "folder", None, None)
+    ]
+    members = {f.target: f.data for f in got.files if f.kind == "module"}
+    assert members == {
+        "module/mod-mine/src/mine.cpp": b"// mine\n",
+        "module/mod-mine/conf/mine.conf.dist": b"A = 1\n",
+    }
+
+
+def test_a_folder_modules_description_travels_without_the_old_path(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    got = pack_folder(server, folder_module(server))
+    (carried,) = [f for f in got.files if f.kind == "manifest"]
+    described = Manifest.model_validate_json(carried.data)
+    assert described.origin is not None
+    assert (described.origin.kind, described.origin.path) == ("folder", None)
+    assert described.source is None
+
+
+def test_a_folder_module_never_packs_git_the_claim_or_a_yulon_record(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    mine = folder_module(
+        server, {"src/a.cpp": b"x", ".git/config": b"x", "sub/.yulon-note": b"x", ".env": b"x"}
+    )
+    got = pack_folder(server, mine)
+    assert [f.target for f in got.files if f.kind == "module"] == ["module/mod-mine/src/a.cpp"]
+
+
+def test_a_link_in_a_folder_module_refuses_the_pack(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    mine = folder_module(server)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("hunter2", encoding="utf-8")
+    (server / "modules" / "mod-mine" / "conf" / "x.conf.dist").symlink_to(secret)
     with pytest.raises(MoveError) as raised:
-        facts(server, load_manifest=lookup(extra={("module", "mod-mine"): mine}))
+        pack_folder(server, mine)
     assert str(raised.value) == (
-        "My Module was added from a folder on this computer, so there is nothing the new "
-        "computer could fetch it from again. Remove it, or add it from a link instead, then "
-        "pack again. Nothing was packed."
+        "My Module has a link in its folder (conf/x.conf.dist points to "
+        f"{secret}), and Yu'lon packs only real files: a link could bring a file from "
+        "elsewhere on this computer into the package. Remove the link, then pack again. "
+        "Nothing was packed."
+    )
+
+
+def test_a_folder_module_too_big_refuses_the_pack_and_says_so(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    mine = folder_module(server, {"a.txt": b"x"})
+    with (server / "modules" / "mod-mine" / "big.bin").open("wb") as big:
+        big.truncate(move_server.FOLDER_MODULE_MAX_BYTES + 1)  # sparse: nothing is written
+    with pytest.raises(MoveError) as raised:
+        pack_folder(server, mine)
+    assert str(raised.value) == (
+        "My Module is bigger than Yu'lon packs from a folder module (the limit is 50 MB and "
+        "5000 files). Take out what the module does not need, or copy it to the new computer "
+        "by hand, then pack again. Nothing was packed."
+    )
+
+
+def test_a_folder_module_with_too_many_files_refuses_the_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(move_server, "FOLDER_MODULE_MAX_FILES", 2)
+    server = wotlk_server(tmp_path)
+    mine = folder_module(server, {"a": b"1", "b": b"2", "c": b"3"})
+    with pytest.raises(MoveError) as raised:
+        pack_folder(server, mine)
+    assert "is bigger than Yu'lon packs" in str(raised.value)
+
+
+def test_a_folder_module_with_no_files_refuses_the_pack(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    mine = folder_module(server, {})
+    with pytest.raises(MoveError) as raised:
+        pack_folder(server, mine)
+    assert str(raised.value) == (
+        "My Module has no files in its folder, so there is nothing to pack. Remove it or add "
+        "it again on the Modules tab, then pack again. Nothing was packed."
     )
 
 
