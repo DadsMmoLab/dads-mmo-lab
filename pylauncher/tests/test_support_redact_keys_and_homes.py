@@ -589,3 +589,58 @@ def test_save_masks_the_home_given_and_the_one_the_install_folders_reveal(
     bundle.save(dest, sources, seams=_seams(), home=Path(WIN_HOME))
     text = _read(dest)["app/yulon.log"]
     assert "penguin" not in text and NAME not in text, text
+
+
+def test_a_json_authorization_record_stays_in_the_bundle_with_its_other_fields(
+    tmp_path: Path,
+) -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    leak = (
+        f'{{"Authorization": "Bearer {secret}", "url": "/status"}}\n'
+        f'{{\\"Authorization\\": \\"NTLM {secret}\\", \\"url\\": \\"/x\\"}}\n'
+        f'{{"authorization": null, "status": "failed"}}\n'
+    )
+    log = tmp_path / "yulon.log"
+    log.write_text(leak, encoding="utf-8")
+    dest = tmp_path / "s.zip"
+    report = bundle.build(
+        dest, Sources(platform.config_dir(), log, ()), Redactor.build([]), seams=_seams()
+    )
+    members = _read(dest)
+    assert not [name for name, why in report.skipped if "left out" in why], report.skipped
+    text = members["app/yulon.log"]
+    assert secret not in text and "/status" in text and '"failed"' in text, text
+
+
+def test_an_escaped_authorization_credential_of_any_scheme_is_masked() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    for scheme in ("NTLM", "Negotiate", "Digest", "Bearer", "Basic", "Made-Up"):
+        line = f'{{\\"Authorization\\": \\"{scheme} {secret}\\"}}'
+        out = Redactor.build([]).checked(line)
+        assert secret not in out, (scheme, out)
+
+
+def test_a_multi_word_profile_name_that_ends_the_line_is_masked_whole() -> None:
+    redactor = Redactor.build([], home=Path("/home/zephyrine"))
+    for text, gone in (
+        ("C:\\Users\\Mary Jane", ["Mary", "Jane"]),
+        ("opened C:\\Users\\Mary Jane Smith\r\n", ["Mary", "Jane", "Smith"]),
+        ("a\nC:\\Users\\Mary Jane Smith Brown", ["Jane", "Smith", "Brown"]),
+        ("/mnt/c/Users/Mary Jane", ["Mary", "Jane"]),
+    ):
+        out = redactor.redact(text)
+        for word in gone:
+            assert word not in out, (text, out)
+    assert redactor.redact("C:\\Users\\Bob and more") == "~ and more"
+
+
+def test_an_account_password_command_followed_by_log_text_settles_in_one_pass() -> None:
+    redactor = Redactor.build([])
+    for text in (
+        "account password bob secret then text",
+        "account set password bob secret secret then text",
+        "account password old new new then text",
+        "{'authorization': 'old new' tail",
+    ):
+        once = redactor.checked(text)  # raises if a second pass would change it
+        assert "secret" not in once and "old" not in once and "new" not in once, once

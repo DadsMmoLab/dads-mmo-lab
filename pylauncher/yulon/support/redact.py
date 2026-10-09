@@ -136,6 +136,10 @@ _NAME_CHAR = r"[^\\/\s'\"<>|:*?%]"
 _PROFILE_WORD = rf"(?:%(?!5[Cc]|2[Ff])[0-9A-Fa-f]{{2}}|{_NAME_CHAR})++"
 """One word of a profile name. Possessive (Python 3.11+): it never gives characters back, so
 the words after it are tried once, not once per way of splitting the text."""
+_CAPITAL_WORD = rf"(?-i:[A-Z])(?:%(?!5[Cc]|2[Ff])[0-9A-Fa-f]{{2}}|{_NAME_CHAR})*+"
+_LINE_END = r"\r|(?m:$)"
+"""A name that ends its line has no separator or quote to say where it stops, so its later
+words are taken only when each starts with a capital (`Mary Jane`), never prose after it."""
 _PROFILE_END = rf"{_SEP}|['\"<>|]"
 """What may follow a profile name that has spaces in it: a separator or a closing quote. A name
 at the very end of a line is masked up to its first space, never over the words after it."""
@@ -143,6 +147,9 @@ _OTHER_WINDOWS_HOME = re.compile(
     rf"(?:{_MNT}|{_DRIVE}){_SEPS}Users{_SEPS}"
     rf"(?!{_SHARED_PROFILES}(?![\w]))"
     rf"{_PROFILE_WORD}(?: {_PROFILE_WORD}){{1,3}}(?={_PROFILE_END})"
+    rf"|(?:{_MNT}|{_DRIVE}){_SEPS}Users{_SEPS}"
+    rf"(?!{_SHARED_PROFILES}(?![\w]))"
+    rf"{_PROFILE_WORD}(?: {_CAPITAL_WORD}){{1,3}}(?={_LINE_END})"
     rf"|(?:{_MNT}|{_DRIVE}){_SEPS}Users{_SEPS}"
     rf"(?!{_SHARED_PROFILES}(?![\w])){_PROFILE_WORD}",
     re.IGNORECASE,
@@ -303,8 +310,9 @@ _SQL_HEX = re.compile(r"(?i)(?P<pre>\bX['\"]|['\"])[0-9a-f]{32,}(?P<post>['\"])|
 quoted or `0x` hex blob of 32 digits or more (a SHA-1 hash, a session key, `v`, `s`) by shape."""
 
 _AUTH_HEADER = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization(?P<key_quote>[\"'])?[ \t]*[=:][ \t]*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'"
+    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization(?P<key_quote>\\{0,4}[\"'])?[ \t]*[=:][ \t]*)"
+    r"(?P<value>\\{1,4}[\"'][^\"'\\\r\n]*\\{1,4}[\"']|\"[^\"\r\n]*\"|'[^'\r\n]*'"
+    r"|(?(key_quote)\*\*\*(?![^\s,}\]])|(?!))"
     r"|(?(key_quote)(?:null|none|true|false|-?\d+(?:\.\d+)?)(?=[ \t]*(?:[,}\]]|$))|(?!))"
     r"|[^\r\n]+)"
 )
@@ -348,8 +356,12 @@ _ACCOUNT_CREATE = re.compile(
     r"(?i)(?P<head>\baccount[ \t]+create[ \t]+[^\s\"']+[ \t]+)(?P<value>[^\s\"']+)"
 )
 _ACCOUNT_PASSWORD = re.compile(
-    r"(?i)(?P<head>\baccount[ \t]+(?:set[ \t]+)?password[ \t]+(?:[^\s\"']+[ \t]+)?)"
-    r"(?P<value>[^\s\"']+(?:[ \t]+[^\s\"']+)?)"
+    r"(?i)(?P<head>\baccount[ \t]+set[ \t]+password[ \t]+[^\s\"']+[ \t]+)"
+    r"(?P<value>\*\*\*(?![^\s\"'])|[^\s\"']+(?:[ \t]+[^\s\"']+)?)"
+)
+_OWN_PASSWORD = re.compile(
+    r"(?i)(?P<head>\baccount[ \t]+password[ \t]+)"
+    r"(?P<value>\*\*\*(?![^\s\"'])|[^\s\"']+(?:[ \t]+[^\s\"']+){0,2})"
 )
 _XML_SECRET = re.compile(
     r"(?i)(?P<head><(?P<tag>[\w:.-]*(?:password|passwd|secret|token|session[_-]?key"
@@ -388,6 +400,7 @@ _HEAD_VALUE = (
     _USER_THEN_PASSWORD,
     _ACCOUNT_CREATE,
     _ACCOUNT_PASSWORD,
+    _OWN_PASSWORD,
     _XML_SECRET,
 )
 
