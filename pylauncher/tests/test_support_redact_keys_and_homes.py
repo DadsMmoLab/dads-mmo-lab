@@ -660,3 +660,23 @@ def test_a_cookie_in_an_escaped_json_record_and_a_bare_pwd_key_are_masked() -> N
         assert secret not in redactor.checked(line), line
     kept = redactor.checked(f'{{\\"Set-Cookie\\": \\"sid={secret}; Path=/x\\", \\"u\\": 1}}')
     assert "Path=/x" in kept and '\\"u\\": 1' in kept, kept
+
+
+def test_a_personal_access_token_is_masked_by_its_key_and_by_its_shape() -> None:
+    body = secrets.token_hex(18)
+    redactor = Redactor.build([])
+    for line in (
+        f"github_pat={body}",
+        f"GITHUB_PAT: {body}",
+        f"my-pat = {body}",
+        f"cloning with ghp_{body} now",
+        f"github_pat_{body}_{body}",
+        f"glpat-{body}",
+        f"AKIA{body[:16].upper()}",
+    ):
+        assert body not in redactor.checked(line).lower() and body[
+            :16
+        ].upper() not in redactor.checked(line), line
+    assert (
+        redactor.checked("a patch applied, pat on the back") == "a patch applied, pat on the back"
+    )

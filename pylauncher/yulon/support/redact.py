@@ -280,7 +280,7 @@ def _home_patterns(
 
 _STRONG_KEY = (
     r"session[ _-]?key|session[_-]?id|jsessionid|phpsessid|sha[_-]?pass(?:[_-]?hash)?|verifier"
-    r"|api[_-]?key|private[_-]?key|passwd|pwd"
+    r"|api[_-]?key|private[_-]?key|passwd|pwd|github[_-]?pat|[_-]pat(?![a-z])"
 )
 _WEAK_KEY = r"token|secret|credentials?"
 _KEYED = re.compile(
@@ -468,9 +468,17 @@ _SESSION_SHAPED = re.compile(r"(?<![\w])[0-9A-Fa-f]{80}(?![\w])")
 Not 40 (a commit, a SHA-1), 64 (a SHA-256 checksum) or 128 (SHA-512): those are read daily."""
 
 
+_PROVIDER_TOKEN = re.compile(
+    r"(?<![\w-])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{16,}"
+    r"|xox[abprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16})(?![\w-])"
+)
+"""A token a service issues, by its published prefix: GitHub, GitLab, Slack, AWS key ids."""
+
+
 def mask_credentials(text: str) -> str:
     """`text` with every login key, token and credential these patterns know taken out."""
     text = _SESSION_SHAPED.sub(MASK, text)
+    text = _PROVIDER_TOKEN.sub(MASK, text)
     text = _SQL_LINE.sub(_mask_sql_line, text)
     text = _KEYED.sub(_mask_keyed, text)
     text = _COOKIE.sub(_mask_cookie, text)
