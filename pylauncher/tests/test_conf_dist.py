@@ -438,6 +438,29 @@ def test_a_key_with_more_than_two_values_or_only_everyday_words_is_a_number(
     assert (item.default, item.type) == (default, "int"), name
 
 
+def test_a_negative_value_shown_only_under_default_makes_the_key_text() -> None:
+    """Codex review: `-1 - (Unlimited)` under `Default:` is a signed range the help leaves out.
+
+    The number check would read the key as a uint32 and refuse the -1 the module takes; a text
+    box refuses nothing. A key whose negative sits in the description stays a signed number.
+    """
+    text = (
+        "#    Mod.Cap\n"
+        "#        Description: Most items.\n"
+        "#        Default:     0\n"
+        "#                     -1 - (Unlimited)\n"
+        "Mod.Cap = 0\n"
+        "# 0 for off, -1 for no limit\n"
+        "Mod.Limit = 0\n"
+        "# 0 picks the first, -1 a random one\n"
+        "Mod.Pick = 0\n"
+    )
+    found = _by_key(text)
+    assert found["Mod.Cap"].type is None
+    assert found["Mod.Limit"].type == "int"
+    assert found["Mod.Pick"].type == "int", "`-1` is a third value, not a `1`: not a switch"
+
+
 def test_a_decimal_default_is_text() -> None:
     assert _by_key(BLOCK_ABOVE)["AOELoot.Range"].type is None
 

@@ -284,6 +284,8 @@ def _is_a_toggle(key: str, prose: str) -> bool:
     """
     if any(int(n) not in (0, 1) for n in _OTHER_NUMBER.findall(prose)) or _A_QUANTITY.search(prose):
         return False
+    if _NEGATIVE_IN_PROSE.search(prose):
+        return False  # `-1 - (Unlimited)` is a third value, not a `1`
     numbers = {int(n) for n in _OTHER_NUMBER.findall(prose)}
     return bool(_TOGGLE_IN_PROSE.search(prose) or numbers == {0, 1} or _TOGGLE_IN_NAME.search(key))
 
@@ -297,6 +299,8 @@ def _type_of(key: str, raw: str, words: str | None, whole: str = "") -> str | No
     if not _WHOLE.fullmatch(raw):
         return None
     prose = words or ""
+    if reads_unsigned(raw, prose) != reads_unsigned(raw, f"{whole} {prose}"):
+        return None  # a negative shown only under `Default:`: the save check could not see it
     smallest, largest = tuning.int_range(reads_unsigned(raw, prose))
     if not smallest <= int(raw) <= largest or _DECIMALISH.search(prose):
         return None
