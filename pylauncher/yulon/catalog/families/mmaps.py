@@ -75,6 +75,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -302,13 +303,20 @@ def _write_record(server_dir: Path, record: Record) -> None:
         MmapsError: it could not be written; the record on disk is the one before.
     """
     path = server_dir / RECORD_FILE
-    staged = path.with_name(path.name + ".yulon-new")
+    staged: Path | None = None
     try:
         fields = {key: value for key, value in asdict(record).items() if key != "unreadable"}
-        staged.write_text(json.dumps({"version": 1, **fields}, indent=2) + "\n", "utf-8")
+        # A temporary name of its own (T623): two processes write this record, and one fixed
+        # name let one's rename find its file gone, or take the other's half-written one.
+        handle, name = tempfile.mkstemp(dir=server_dir, prefix=path.name + ".", suffix=".yulon-new")
+        staged = Path(name)
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(json.dumps({"version": 1, **fields}, indent=2) + "\n")
+        os.chmod(staged, 0o644)  # `mkstemp` makes it 0600; the record was always an ordinary file
         os.replace(staged, path)
     except OSError as exc:
-        staged.unlink(missing_ok=True)
+        if staged is not None:
+            staged.unlink(missing_ok=True)
         raise MmapsError(
             f"{path} could not be written ({exc}); check that the server folder can be written."
         ) from exc
@@ -960,6 +968,25 @@ def _reconcile_pass(job: Job, run: Runner, now: Clock, *, held: bool) -> MmapsSt
     return _failed_status(job, record)
 
 
+def _save_progress(job: Job, seen: Record, moved: Record) -> None:
+    """Persist a still-running run's progress, unless the record is no longer what was read.
+
+    Re-read right before the write, and skipped unless the state, the finish stamp and the
+    container id are those `seen` had: a poll that holds nothing must never write over a
+    transition another Yu'lon recorded under the hold while this one waited on Docker.
+    """
+    now = read_record(job.server_dir)
+    if now is None or now.unreadable:
+        return
+    if (now.state, now.finished, now.container_id) != (
+        seen.state,
+        seen.finished,
+        seen.container_id,
+    ):
+        return
+    _write_record(job.server_dir, moved)
+
+
 def _reconcile_live(
     job: Job, record: Record, run: Runner, now: Clock, held: bool = True
 ) -> MmapsStatus:
@@ -990,12 +1017,15 @@ def _reconcile_live(
         moved = replace(
             latest, state="running", container_id=record.container_id or facts.container_id
         )
-        # T623: a progress write, never under the hold. It changes only the percentage, the
-        # map and the container's id of a run that is still running; a poll must not run a
-        # Docker reservation every few seconds, and a stale one is fail-safe: the next poll
-        # finds the container gone and records a failed run (under the hold).
+        # T623: the progress is written only if the record on disk is still the one this pass
+        # read (`_save_progress`). This pass holds nothing, and the log read above can be slow:
+        # another Yu'lon may have recorded the end (`done`, under the hold) meanwhile, and a
+        # blind write of `running` would overwrite it -- the next poll would then find no
+        # container for a "running" record and record a COMPLETE set as failed. What is
+        # still possible is a rival write in the instant between that re-read and the rename,
+        # no longer a Docker call's length; the shown status is the one just read either way.
         if moved != record:
-            _write_record(job.server_dir, moved)
+            _save_progress(job, record, moved)
         return _status_of(moved)
     if not held:
         raise _WriteNeeded(_status_of(latest))

@@ -312,6 +312,128 @@ def test_a_caller_with_no_hold_records_inline_as_before(server: Path) -> None:
     assert _state(server) == ("done", True)
 
 
+class _SlowLog(FakeMmapsDocker):
+    """A daemon whose log read is slow: `during` runs inside it, as another Yu'lon would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.during: Callable[[], None] | None = None
+
+    def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None:
+        tail = super().log_tail(name, lines, timeout=timeout)
+        if self.during is not None:
+            action, self.during = self.during, None
+            action()
+        return tail
+
+
+def test_a_slow_progress_read_never_writes_over_a_done_another_yulon_recorded(
+    server: Path,
+) -> None:
+    """B reads the run as running; A records `done` under the hold while B's log read is slow.
+
+    Mutation: persist the progress (state running, percent, map) from the unheld pass again."""
+    fake, clock = _SlowLog(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    theirs = Clock()
+
+    def finish_and_record() -> None:
+        fake.finish(0, tiles=MIN_FILES)
+        assert poll(server, fake, Probe(server), theirs).state == "done"
+
+    fake.during = finish_and_record
+    mine = poll(server, fake, Probe(server), clock)
+    assert mine.state == "running" and mine.percent == 12, "what it read, shown from memory"
+    assert _state(server) == ("done", True), "and the record is still A's"
+    assert poll(server, fake, Probe(server), clock).state == "done"
+    assert _state(server) == ("done", True)
+
+
+def test_a_polls_progress_is_still_saved_while_the_record_is_what_it_read(server: Path) -> None:
+    """The percentage survives a lost container or a Stop (T245). Mutation: never save it."""
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    assert poll(server, fake, None, clock).percent == 12
+    assert record(server)["percent"] == 12
+
+
+def test_a_progress_write_is_skipped_when_the_record_changed_since_it_was_read(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-read is the guard: a record that is no longer the one read is not written over.
+
+    Mutation: write `moved` without comparing the state, the finish stamp and the container id."""
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    seen = mmaps.read_record(server)
+    assert seen is not None
+    moved = dataclasses.replace(seen, percent=40)
+    for changed in (
+        dataclasses.replace(seen, state="done", finished="2026-10-02T15:30:00.000000Z"),
+        dataclasses.replace(seen, container_id="somebody-else"),
+    ):
+        mmaps._write_record(server, changed)
+        mmaps._save_progress(mmaps.job_for(server, ENTRY, INSTALL_ID), seen, moved)
+        assert mmaps.read_record(server) == changed
+    mmaps._write_record(server, seen)
+    mmaps._save_progress(mmaps.job_for(server, ENTRY, INSTALL_ID), seen, moved)
+    assert record(server)["percent"] == 40
+
+
+def test_two_writers_of_the_record_at_once_never_tear_it_or_fail(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One process's write lands between another's temp file and its rename.
+
+    A fixed temp name made the outer rename find its file gone (FileNotFoundError, reported as
+    "could not be written") or take the other's half. Mutation: stage to one fixed name again."""
+    import os
+
+    first = mmaps.Record("running", NAME, started="a", percent=1)
+    second = mmaps.Record("running", NAME, started="b", percent=2)
+    real = os.replace
+    nested = {"done": False}
+
+    def replace_after_a_rival(src: Any, dst: Any) -> None:
+        if not nested["done"]:
+            nested["done"] = True
+            mmaps._write_record(server, second)
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_after_a_rival)
+    mmaps._write_record(server, first)
+    monkeypatch.setattr(os, "replace", real)
+    saved = mmaps.read_record(server)
+    assert saved is not None and not saved.unreadable and saved.percent in (1, 2)
+    assert sorted(p.name for p in server.iterdir() if "mmaps" in p.name) == [mmaps.RECORD_FILE]
+
+
+def test_threads_writing_the_record_together_all_succeed(server: Path) -> None:
+    import threading
+
+    errors: list[BaseException] = []
+
+    def write(n: int) -> None:
+        try:
+            for i in range(40):
+                mmaps._write_record(
+                    server, mmaps.Record("running", NAME, percent=(n * 40 + i) % 100)
+                )
+        except BaseException as exc:  # noqa: BLE001 - the test reports what a writer met
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    saved = mmaps.read_record(server)
+    assert saved is not None and not saved.unreadable
+
+
 # ------------------------------------------------------------------ the Server tab's presses
 
 
