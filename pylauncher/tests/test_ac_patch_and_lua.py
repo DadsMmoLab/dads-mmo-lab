@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -1271,6 +1271,13 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
 def failed_start_after_laying(
     tmp_path: Path, installers: Path
 ) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]]]:
+    rec, server_dir, said, seen, _error = failed_start_after_laying_with_error(tmp_path, installers)
+    return rec, server_dir, said, seen
+
+
+def failed_start_after_laying_with_error(
+    tmp_path: Path, installers: Path
+) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]], str]:
     """An update whose new checkout changes one script and adds one; the new world never comes up.
 
     The old world is stopped, the new scripts are laid, the new build fails its ready
@@ -1299,10 +1306,10 @@ def failed_start_after_laying(
     made._seams = rec.seams(restore_rev=checkout_force, wait_ready=wait_ready)
     seen = watch_the_lua(rec, server_dir)
     said: list[str] = []
-    with pytest.raises(InstallerError):
+    with pytest.raises(InstallerError) as raised:
         for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
             said.append(line)
-    return rec, server_dir, said, seen
+    return rec, server_dir, said, seen, str(raised.value)
 
 
 def test_a_failed_start_after_laying_puts_the_old_scripts_back_with_the_servers_down(
@@ -1711,9 +1718,16 @@ def test_the_laying_failures_name_the_press_and_never_claim_the_server_was_not_s
         assert "would start without" not in str(raised.value), raised.value
 
 
-def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
+def test_a_rollback_that_cannot_lay_the_old_scripts_leaves_the_old_build_stopped(
     tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The old build never starts on the new build's scripts (T562 cold review).
+
+    The update laid the new set with the servers down, the new world failed its ready
+    wait, and the rollback's re-lay of the OLD set failed on the fourth script write.
+    The disk still holds the new scripts, so the old binary must not be started on
+    them: the servers stay stopped and the sentence names the press that lays them again.
+    """
     from yulon import server_build_presses
 
     real = scriptdeploy._publish
@@ -1728,11 +1742,50 @@ def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
 
     monkeypatch.setattr(scriptdeploy, "_publish", fourth_script_fails)
 
-    _rec, _server_dir, said, _seen = failed_start_after_laying(tmp_path, installers)
+    _rec, server_dir, said, seen, error = failed_start_after_laying_with_error(tmp_path, installers)
 
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
     back = next(line for line in said if "back on their old commits, but" in line)
-    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in back, back
+    assert rebuild in back, back
     assert "source patch" not in back and "not started" not in back, back
+    # The old world was never started: the only start after the new world's stop is
+    # none, and the new scripts are still the ones on the disk.
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA), ("stop", NEW_LUA)], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert "STOPPED" in error and rebuild in error, error
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError(28, "no space left"), InstallerError("the record would not save")]
+)
+def test_a_rollback_whose_re_lay_raises_a_plain_error_also_leaves_the_old_build_stopped(
+    tmp_path: Path,
+    installers: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    """The re-lay's other two failures (not a `SelfExplainedError`) are held to the same rule."""
+    from yulon import server_build_presses
+
+    real = scriptdeploy.lay
+    calls: list[int] = []
+
+    def third_lay_fails(*args: Any, **kwargs: Any) -> Iterator[str]:
+        calls.append(1)
+        if len(calls) >= 3:  # the install, the update's, then the rollback's
+            raise failure
+        yield from real(*args, **kwargs)
+
+    monkeypatch.setattr(scriptdeploy, "lay", third_lay_fails)
+
+    _rec, server_dir, _said, seen, error = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA), ("stop", NEW_LUA)], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert "STOPPED" in error and rebuild in error, error
 
 
 def test_a_pending_only_record_is_cleared_by_an_entry_with_no_scripts(tmp_path: Path) -> None:

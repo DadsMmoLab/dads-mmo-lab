@@ -3148,6 +3148,19 @@ def source_not_back(repo: str, dest: Path, old: str, reason: str) -> str:
     )
 
 
+def scripts_not_back_sentence(reasons: Sequence[str]) -> str:
+    """Why the old build was left stopped: its Lua scripts would not go back (T562).
+
+    The update laid the new build's scripts with the servers down; the rollback's
+    re-lay of the old set failed, so the folder still holds the new ones and the old
+    binary would start on them. Each reason already names what to press.
+    """
+    return (
+        "The old build was not started: the folder still holds the new build's Lua "
+        f"scripts. {' '.join(reasons)}"
+    )
+
+
 SOURCES_OFF_FILE = ".yulon-sources-off.json"
 """A rollback could not put a source folder back on the commit the running build came from.
 
@@ -9093,7 +9106,10 @@ class StagedInstaller:
 
             def back(stage_ctx: StageContext) -> Iterator[str]:
                 nonlocal sources_back
-                failed = yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                scripts_problem: list[str] = []
+                failed = yield from self._restore_the_folder(
+                    moved, server_dir, opts, state, press, scripts_not_back=scripts_problem
+                )
                 sources_back = True
                 sources_failed.extend(failed)
                 # The copy goes back even when a folder did not: with the servers
@@ -9103,10 +9119,14 @@ class StagedInstaller:
                     yield from self._put_copy_back(server_dir, copy)
                 except LeaveStopped as exc:
                     copy_problem = str(exc)
-                if failed:
+                if failed or scripts_problem:
                     # T217 (B3): the old build would read the new module's SQL from
                     # the folder that did not go back. It is not started.
+                    # T562: nor on the new build's Lua scripts, when the old set could
+                    # not be laid again with the servers down.
                     said = [source_not_back(s.repo, dest, old, why) for s, dest, old, why in failed]
+                    if scripts_problem:
+                        said.append(scripts_not_back_sentence(scripts_problem))
                     raise LeaveStopped(" ".join([*said, copy_problem]).strip())
                 if copy_problem:
                     raise LeaveStopped(copy_problem)
@@ -9516,11 +9536,16 @@ class StagedInstaller:
         opts: InstallOptions,
         state: InstallState,
         press: str,
+        scripts_not_back: list[str] | None = None,
     ) -> Generator[str, None, list[tuple[EmulatorSource, Path, str, str]]]:
         """Put the sources back AND write this app's own files into them again.
 
         `press` is the label of the press being put back (T163): the carried
         patch's sentence sends the player to it again.
+
+        `scripts_not_back` (T562): when given, the sentence of a script re-lay that
+        failed is appended to it. The update route's `back()` reads it: the old
+        build must not start on the new build's scripts.
 
         **Two halves, and the second is not tidying.** `restore_rev()` is a
         `checkout --force`: it puts the checkout on the old commit and, with it,
@@ -9550,6 +9575,7 @@ class StagedInstaller:
                 yield warned
         if not moved:
             return failed
+
         # T163: each half names the press that mends IT, and neither is
         # Rebuild. Upstream's compose file in the folder is one Rebuild refuses
         # (`_refuse_unless_rebuildable()`) and so does this same press, which
@@ -9564,6 +9590,36 @@ class StagedInstaller:
         # skipped); this same press writes the patch before it compiles. Neither
         # sentence says "nothing was compiled": this also runs after a compile
         # that `rebuild()` rolled back.
+        def lay_the_scripts() -> Generator[str, None, None]:
+            # T562: the scripts follow the sources back; laid with the servers down on
+            # a rollback, and a no-op before the compile (nothing was laid yet).
+            try:
+                yield from self.lay_scripts(server_dir, quiet=False)
+            except SelfExplainedError as exc:
+                # T563: a stage that already said what failed and what to do (a Lua
+                # link, a record that could not be saved) is passed through as it
+                # stands: "press again" does not mend every one of them.
+                logger.warning(f"could not lay the scripts back into {server_dir}: {exc}")
+                if scripts_not_back is not None:
+                    scripts_not_back.append(str(exc))
+                yield (
+                    f"The source folders are back on their old commits, but this app's own "
+                    f"files could not be put into them again. {exc}"
+                )
+            except (InstallerError, OSError) as exc:
+                logger.warning(f"could not lay the scripts back into {server_dir}: {exc}")
+                # Rebuild whatever press this was: the folder is back on the old
+                # commits, and Rebuild lays the scripts from them (an update would
+                # move the sources forward again first).
+                rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+                said = (
+                    f"The scripts could not be put back ({exc}). Once the reason is fixed, "
+                    f"press {rebuild}: it lays them from the old sources."
+                )
+                if scripts_not_back is not None:
+                    scripts_not_back.append(said)
+                yield said
+
         try:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
         except (InstallerError, OSError) as exc:
@@ -9577,12 +9633,10 @@ class StagedInstaller:
                 f"{composegen.BASE_FILE} is the repository's own. "
                 f"{compose_back_advice(server_dir)}"
             )
+            yield from lay_the_scripts()
             return failed
         try:
             yield from self.apply_carried_patches(server_dir)
-            # T562: the scripts follow the sources back; laid here, with the servers
-            # down on a rollback, and a no-op before the compile (nothing was laid yet).
-            yield from self.lay_scripts(server_dir, quiet=False)
         except SelfExplainedError as exc:
             # T563: a stage that already said what failed and what to do (a Lua
             # link, a record that could not be saved) is passed through as it
@@ -9600,6 +9654,7 @@ class StagedInstaller:
                 f"reason is fixed, press {server_build_presses.under_server_build(press)} "
                 "again: it writes the patch before it compiles."
             )
+        yield from lay_the_scripts()
         return failed
 
     def _put_sources_back(
