@@ -2017,7 +2017,14 @@ class DockerSql:
     def run_statement(self, db: Db, statement: str) -> None:
         # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
         # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
-        proc = self._mysql(db, statement=statement)
+        #
+        # UTF-8 and told to the client (T596 review, 2026-10-09). The script goes
+        # as BYTES (see `_mysql()`), so it reaches mysql as written on every
+        # platform, and `--default-character-set=utf8mb4` makes the client read
+        # those bytes as what they are: `run_file()` passes no flag and trusts the
+        # client's default, which a MariaDB client in a container with no locale
+        # does not make UTF-8.
+        proc = self._mysql(db, statement=statement, extra=_STATEMENT_CHARSET)
         _check_sql(proc, f"inline → {self._schema(db)}")
 
     def query(self, db: Db, statement: str) -> str:
@@ -2076,24 +2083,42 @@ class DockerSql:
         """
         argv = self._argv(db, extra=extra)
         try:
-            return subprocess.run(
+            # BYTES in and out, never `text=True` (T596 review, 2026-10-09). Text mode
+            # encodes stdin with the LOCALE codec and turns `\n` into `\r\n` on
+            # Windows: an accent arrived as a cp1252 byte, a line break inside a
+            # string literal was stored as CRLF, a letter outside cp1252 raised
+            # `UnicodeEncodeError` -- and a migrations ledger row recorded the SHA1 of
+            # the file's own bytes over content that was different. `run_file()` has
+            # always sent bytes; this is the same road for a string.
+            script = None if statement is None else statement.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            # Raised before any process exists, so it IS proof nothing was sent.
+            raise SqlNotSent(
+                f"the SQL cannot be written as UTF-8 ({exc.reason} at character {exc.start}), "
+                "so none of it was sent"
+            ) from exc
+        try:
+            raw = subprocess.run(
                 argv,
                 stdin=stdin,
-                input=statement,
+                input=script,
                 capture_output=True,
-                text=True,
-                # Not the default strict decode. `text=True` alone raises
-                # UnicodeDecodeError out of here on any byte mysql emits that is
-                # not UTF-8 -- a binary column selected as text, or a latin1
-                # error message -- and that type is neither `ApplyError` nor the
-                # `AccountError` that `accounts.create_account` documents as the
-                # only one a caller has to handle. `runner.py` already decodes
-                # this way. Found by a live query against a real server
-                # (2026-08-23).
-                errors="replace",
                 check=False,
                 env=runner.child_env(self._env()),
                 creationflags=runner.creationflags(),
+            )
+            # Decoded here, as UTF-8 and not strictly. Text mode raised
+            # UnicodeDecodeError out of this method on any byte mysql emits that is
+            # not UTF-8 -- a binary column selected as text, or a latin1 error
+            # message -- and that type is neither `ApplyError` nor the `AccountError`
+            # that `accounts.create_account` documents as the only one a caller has
+            # to handle (found live, 2026-08-23). Universal newlines are kept, as
+            # text mode gave them: one `\n` per line whatever the platform wrote.
+            return subprocess.CompletedProcess(
+                raw.args,
+                raw.returncode,
+                _decoded(raw.stdout),
+                _decoded(raw.stderr),
             )
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a
@@ -2230,6 +2255,23 @@ class ComposeDbc:
                     f"could not copy {path.name} into the server's data volume through "
                     f"{self.service}: {reason}"
                 )
+
+
+_STATEMENT_CHARSET = ("--default-character-set=utf8mb4",)
+"""The client flag a script sent over stdin carries: its bytes are UTF-8, so say so."""
+
+
+def _decoded(output: bytes | str | None) -> str:
+    """What a `docker exec` wrote, as text: UTF-8, undecodable bytes replaced, `\\n` newlines.
+
+    Accepts a `str` as well because a caller that stubs `subprocess.run` (the tests of
+    this seam do) hands back what a text-mode run would have.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    return output.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
@@ -5919,7 +5961,15 @@ class Applier:
         assert self.sql is not None
         where = f"recorded in its migrations ledger as {step.migration_module}"
         try:
-            self.sql.run_statement(step.db, migration.text)
+            try:
+                self.sql.run_statement(step.db, migration.text)
+            except ApplyError:
+                raise
+            except (OSError, ValueError) as exc:
+                # An encode error or a broken pipe is not an `ApplyError`, so it used to
+                # skip the words below and the caller's handling of one (review,
+                # 2026-10-09). `UnicodeError` is a `ValueError`.
+                raise ApplyError(f"{migration.name}: sending it failed ({exc})") from exc
         except ApplyError as exc:
             if migration.alone:
                 exc.args = (

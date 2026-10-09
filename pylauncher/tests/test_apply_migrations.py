@@ -267,6 +267,79 @@ def test_a_lone_file_that_fails_says_part_may_be_applied(tmp_path: Path) -> None
     assert "Duplicate entry" in said and "may have" in said and "was not written" in said
 
 
+ACCENTED = (
+    "UPDATE npc SET name = 'Caf\u00e9', text = 'it\u2019s',\n"
+    "  greeting = '\u041f\u0440\u0438\u0432\u0435\u0442\n  second line' WHERE id = 1;\n"
+)
+
+
+def test_the_file_reaches_mysql_with_its_own_bytes_so_the_ledger_hash_is_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of 2026-10-09: outside SQL went through a text-mode pipe on Windows.
+
+    cp1252 turned `\u00e9` into one byte and `\\n` into `\\r\\n`, so the row said "applied
+    this SHA1" over different content. Driven through the REAL `DockerSql` with only
+    `subprocess.run` replaced: the file's bytes must appear VERBATIM inside the
+    script handed to mysql, and the row must carry the SHA1 of those same bytes.
+    """
+    import subprocess
+
+    from yulon import apply as apply_module
+
+    monkeypatch.setattr(
+        apply_module.platform, "docker_prefix", lambda wsl_distro=None, **kw: ("docker",)
+    )
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
+    apply_module._client_cache.clear()
+    scripts: list[bytes] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        statement = kwargs["input"]
+        assert isinstance(statement, bytes), "a text-mode pipe re-encodes with the locale codec"
+        assert not kwargs.get("text") and not kwargs.get("encoding")
+        if b"information_schema" in statement:
+            return subprocess.CompletedProcess(argv, 0, b"1\n", b"")
+        if b"Module = " in statement:
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        scripts.append(statement)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    server = _server(tmp_path, {CHAR_FILE: ACCENTED})
+    sql = apply_module.DockerSql("tortoise-db", "hunter2", schemas={"characters": "tw_char"})
+    _applier(server, sql).install(_manifest(("characters", CHAR_FILE)))
+
+    assert len(scripts) == 1, scripts
+    assert ACCENTED.encode("utf-8") in scripts[0]
+    assert b"\r" not in scripts[0]
+    assert _sha1(ACCENTED).encode() in scripts[0]
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        UnicodeEncodeError("charmap", "\u041f", 0, 1, "character maps to <undefined>"),
+        BrokenPipeError(32, "Broken pipe"),
+    ],
+)
+def test_an_encode_or_pipe_error_on_a_lone_file_is_an_apply_error_that_says_part_may_be_applied(
+    tmp_path: Path, boom: Exception
+) -> None:
+    """Not a raw `UnicodeEncodeError` past every handler: the same words as any failed file."""
+
+    class _Breaks(_Ledger):
+        def run_statement(self, db: Db, statement: str) -> None:
+            raise boom
+
+    server = _server(tmp_path, {WORLD_FILE: WITH_DDL})
+    with pytest.raises(ApplyError) as failed:
+        _applier(server, _Breaks()).install(_manifest(("world", WORLD_FILE)))
+    said = str(failed.value)
+    assert "may have" in said and "was not written" in said, said
+    assert failed.value.__cause__ is boom
+
+
 def test_a_file_that_is_not_utf8_is_refused_before_anything_is_sent(tmp_path: Path) -> None:
     server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY})
     clone = server / "sql_scripts" / "clones" / ITEM
