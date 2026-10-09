@@ -56,6 +56,14 @@ tile away. Every run uses the entry's `threads`, a retry after a crash included:
 the owner's stopgap of one thread after a crash was dropped when one thread crashed
 at 16-17 % live too (2026-10-05), so it only made the retry hours slower.
 
+**A complete set from an older generator goes too (T244).** A `done` record is a complete set
+and the routes leave it alone -- unless the entry's `mmaps.generation` is higher than the one
+the record says it was made under (absent: 1). Centurion's generator crashed on every four-digit
+map id and, before CENTURION 4948d1a9, looked a map's tiles up under the wrong names, so a set
+made by it has the wrong tiles for maps 0, 1 and 30: Update to latest and Return to the tested
+pin (`clear`) switch pathfinding off, remove the tiles and forget the record
+(`_drop_outdated()`), and the next start makes the set again.
+
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
 through hooks in the install spine and in `purge`; the job is started again
@@ -76,7 +84,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from yulon import docker, platform, rmtree, server_build_presses
-from yulon.catalog import composegen, world_data
+from yulon.catalog import composegen, native, world_data
 from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, MmapTileHeader, TrinityCoreData
 from yulon.catalog.families import conf, extract
 from yulon.catalog.installer import InstallerError
@@ -234,6 +242,8 @@ class Record:
     """T209: failed or stopped with `kept` finished tiles left for the next run."""
     kept: int = 0
     """T209: how many whole tiles it left (`_keep_finished()`), or a resume started from."""
+    generation: int = 1
+    """T244: the entry's `mmaps.generation` when the run began (absent in older records: 1)."""
     unreadable: bool = False
     """Read off a file that could not be read or parsed: says nothing about the container.
     Never written."""
@@ -274,6 +284,7 @@ def read_record(server_dir: Path) -> Record | None:
             evidence=str(raw.get("evidence", "")),
             resumable=raw.get("resumable") is True,
             kept=_int_or_none(raw.get("kept")) or 0,
+            generation=_int_or_none(raw.get("generation")) or 1,
         )
     except (ValueError, KeyError, TypeError) as exc:
         return Record(
@@ -458,6 +469,12 @@ class Job:
     block: TrinityCoreData
     container: str
     world_container: str
+    generation: int = 1
+    """T589: the generation of the generator in the BUILT image: the entry's `mmaps.generation`
+    when the running build is known to be compiled from its pin or past it
+    (`native.build_on_its_pins()`), else 1. What a run is stamped with and what kept tiles must
+    match to be continued; `block.mmaps.generation` stays what a complete set is measured
+    against (`_drop_outdated()`)."""
 
     @property
     def data_dir(self) -> Path:
@@ -490,7 +507,22 @@ def job_for(server_dir: Path, entry: CatalogEntry, install_id: str) -> Job:
         block=block,
         container=container_name(entry, install_id),
         world_container=entry.containers.world,
+        generation=_built_generation(server_dir, entry, block),
     )
+
+
+def _built_generation(server_dir: Path, entry: CatalogEntry, block: TrinityCoreData) -> int:
+    """The generation of the generator the built image holds (T589); 1 when it is not known.
+
+    The catalog's `mmaps.generation` is the PIN's generator, and the generator that runs is
+    the one in the image this server was compiled into, which an update killed part way, or
+    an install older than the build record, does not match. A set stamped 1 is made again by
+    the next Update to latest or Return to the tested pin, which is the safe side.
+    """
+    wanted = block.mmaps.generation
+    if wanted <= 1:
+        return wanted
+    return wanted if native.build_on_its_pins(entry, server_dir) else 1
 
 
 def _install_id(server_dir: Path, platform_id: Callable[[], str] | None) -> str:
@@ -601,7 +633,14 @@ def start_mmaps(
         _remove_container(run, job.container)
         kept = _resume_or_clear(job, before, evidence)
         started = _stamp(now())
-        queued = Record("queued", job.container, started=started, evidence=evidence, kept=kept)
+        queued = Record(
+            "queued",
+            job.container,
+            started=started,
+            evidence=evidence,
+            kept=kept,
+            generation=job.generation,
+        )
         _write_record(server_dir, queued)
         spec = docker.ContainerRun(
             image=ref,
@@ -743,9 +782,9 @@ def stop_for_route(
         record = read_record(server_dir)
         if record is None:
             return None
-        if not record.unreadable and record.state == "done":
-            return None
         job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
+        if not record.unreadable and record.state == "done":
+            return _drop_outdated(job, record, route) if clear else None
         run = runner or DockerRunner()
         if not record.unreadable and record.state == "failed":
             # Its container should be gone already; removed again by the derived
@@ -769,8 +808,11 @@ def stop_for_route(
             # It ended since the last poll. A failure there kept its finished
             # tiles (`_fail`), which a route with `clear` must still remove.
             after = read_record(server_dir)
-            if clear and after is not None and not after.unreadable and after.state == "failed":
-                return _drop_kept(job, after, route)
+            if clear and after is not None and not after.unreadable:
+                if after.state == "failed":
+                    return _drop_kept(job, after, route)
+                if after.state == "done":
+                    return _drop_outdated(job, after, route)
             return None
         try:
             kept = _stop(job, run, keep=None if clear else f"it was stopped for {route}.")
@@ -805,6 +847,26 @@ def _drop_kept(job: Job, record: Record, route: str) -> str | None:
         f"The {record.kept} pathfinding tiles kept from an earlier run were removed "
         f"before {route}, which can change how they are made. It starts again from the "
         "beginning once the server has been rebuilt, or from the Server tab."
+    )
+
+
+def _drop_outdated(job: Job, record: Record, route: str) -> str | None:
+    """A complete set made under an older generator removed before `route` (T244); None if current.
+
+    A `done` record is a complete set and every route leaves it alone -- unless the catalog has
+    since raised the entry's `mmaps.generation`: the generator that made this set had a fault
+    the pin on the way in no longer has (Centurion: tiles under the wrong map's name, and a
+    crash on a four-digit map id). Then pathfinding is switched off first, the tiles go, and
+    the record is forgotten, so the next start makes the set again.
+    """
+    if record.generation >= job.block.mmaps.generation:
+        return None
+    _clear_output(job)
+    _forget_record(job.server_dir)
+    return (
+        f"The pathfinding data made earlier was removed before {route}: it was made by an older "
+        "version of the tool, which got some of it wrong. Pathfinding stays off and the data is "
+        "made again once the server has been rebuilt, or from the Server tab."
     )
 
 
@@ -1415,6 +1477,9 @@ def _why_it_begins_again(job: Job, record: Record) -> str:
     files took 55 ms on WSL (2026-10-05), once per poll and only while a failed run
     with kept tiles is shown.
     """
+    if record.generation != job.generation:
+        # T589: tiles of two generators must not make one set (T244: the navmesh origin moved).
+        return "it was made by another version of the pathfinding tool than the one built now"
     if not record.evidence:
         return "Yu'lon could not tell which map data it was made from"
     if _evidence(job) == record.evidence:
@@ -1440,6 +1505,13 @@ def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
     here, because files can change between the failure and the start.
     """
     resumable = _resumable(job, before)
+    if resumable and before is not None and before.generation != job.generation:
+        logger.warning(
+            f"the pathfinding run that stopped part-way in {job.data_dir} was made by another "
+            f"version of the generator than the one built now, so its {before.kept} finished "
+            "tiles were removed and the run starts again from the beginning"
+        )
+        resumable = False
     if resumable and before is not None and (not before.evidence or before.evidence != evidence):
         logger.warning(
             f"the map data in {job.data_dir} changed since the pathfinding run that stopped "

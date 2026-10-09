@@ -23,6 +23,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
+- Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
+- A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.
+- A new Tortoise server no longer fills its log with every database query; older ones get this with **Reset to defaults**.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
 - My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
@@ -44,6 +47,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
+- On Centurion, **Revive** works again after a server update, and pathfinding data no longer crashes while made.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
 - A world update whose file is gone can be skipped from **Apply database corrections…**; a renamed one is retried.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.

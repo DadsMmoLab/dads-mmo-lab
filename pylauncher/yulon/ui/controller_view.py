@@ -3897,7 +3897,11 @@ def _for_centurion(
         if entry.accounts.level is not None
         else None
     )
-    withheld = centurion_characters.withheld(entry)
+    # Revive is offered by what the checkout is on (T218): a server inside a WSL distro that is
+    # not running is not read, which would boot it (T133), so it is withheld until the tab is
+    # opened with the distro up.
+    readable = wsl_distro is None or wsl.may_read(wsl_distro)
+    withheld = centurion_characters.withheld(entry, server_dir if readable else None)
     characters_admin = (
         play_module.InstallPlay(
             entry,
@@ -10861,6 +10865,7 @@ class ControllerView(QWidget):
             steam_module.client_executable(client_dir),
             version=client.version,
             build=client.required_build,
+            also=client.also_builds,
         )
 
     def _client_dir_busy(self) -> bool:

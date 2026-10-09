@@ -3191,6 +3191,130 @@ def forget_sources_off(server_dir: Path) -> None:
         logger.warning(f"could not remove {path}: {exc}")
 
 
+BUILT_FROM_FILE = ".yulon-built-from.json"
+"""The commit each source's RUNNING build was compiled from (T589).
+
+The checkout cannot say it: Update to latest and Return to the tested pin move it before an
+hours-long compile, and a Yu'lon that dies in between (power loss, a forced reboot, an
+exception no handler knows) leaves the old binary beside a checkout on the new commit. So
+this is written only where the build is known to be the one the tags name: the install's
+compile once it returned 0 (`stage_build()`), and `rebuild()` once the press succeeded or
+kept the new build (T71). `rebuild()` forgets it before it changes anything, so a press that
+did not finish leaves no record, and a reader takes no record as "not known". Readers also
+require the checkout to be on the recorded commit, so sources moved by something that does
+not write it (an older Yu'lon) are not trusted either.
+
+A file of its own and not a key in `STATE_FILE`, for `BUILD_CACHE_FILE`'s reason: the spine
+and the update route write the install record from copies taken at their start, which would
+put a forgotten key back. `.yulon*`, so outside the build fingerprint (`build_context`).
+`{"version": 1, "sources": {"<repo>": "<full sha>"}}`.
+"""
+
+
+def source_heads(server_dir: Path, sources: Sequence[EmulatorSource]) -> dict[str, str]:
+    """`repo -> commit` for every source whose checkout says what it is on (`.git/HEAD`)."""
+    heads: dict[str, str] = {}
+    for source in sources:
+        try:
+            head = read_head_file(server_dir / source.dest)
+        except (OSError, ValueError) as exc:
+            logger.debug(f"could not read what {source.dest} is on: {exc}")
+            head = None
+        if head:
+            heads[source.repo] = head
+    return heads
+
+
+def remember_built_from(server_dir: Path, heads: Mapping[str, str]) -> None:
+    """Write `BUILT_FROM_FILE` (T589), or forget it when no checkout could be read. Never raises.
+
+    A record that cannot be written is logged and left absent, which readers take as "not
+    known": the cost is a button withheld, never one offered on the wrong build.
+    """
+    if not heads:
+        forget_built_from(server_dir)
+        return
+    path = server_dir / BUILT_FROM_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    record = {"version": 1, "sources": dict(sorted(heads.items()))}
+    try:
+        staged.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        logger.warning(f"{path} could not be written ({exc}); the build is taken as not known")
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        forget_built_from(server_dir)
+
+
+def forget_built_from(server_dir: Path) -> None:
+    """Remove `BUILT_FROM_FILE` (T589); a failure is logged, never raised."""
+    path = server_dir / BUILT_FROM_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not remove {path}: {exc}")
+
+
+def read_built_from(server_dir: Path) -> dict[str, str]:
+    """`BUILT_FROM_FILE` as `repo -> commit`; {} when there is none or it cannot be read."""
+    path = server_dir / BUILT_FROM_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); the build is taken as not known")
+        return {}
+    rows = raw.get("sources") if isinstance(raw, dict) else None
+    if not isinstance(rows, dict):
+        return {}
+    return {
+        repo: sha
+        for repo, sha in rows.items()
+        if isinstance(repo, str) and isinstance(sha, str) and sha
+    }
+
+
+def built_carries_pin(built: str, pin: str, row: SourceRev | None) -> bool:
+    """Was the commit a build was compiled from (`built`) the pin, or past it? (T589)
+
+    Past it means an Update to latest or a Return to the tested pin made while the catalog had
+    this `pin` landed on `built` (`row`, the install record's `source_revs` row for the repo).
+    """
+    if not built or not pin:
+        return False
+    if built == pin:
+        return True
+    if row is None or row.pin != pin:
+        return False
+    moved_to = row.built.split(git.VERSION_SEPARATOR)[0].strip()
+    return len(moved_to) >= _SHORT_SHA and built.startswith(moved_to)
+
+
+def build_on_its_pins(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Is the running build compiled from every moving source's pin, or past it? (T589)
+
+    For each source an update moves and the catalog pins: the record says what its build was
+    compiled from (`BUILT_FROM_FILE`), the checkout is on that commit, and the commit is the
+    pin or past it (`built_carries_pin()`). False when anything cannot be read.
+    """
+    pinned = [s for s in entry.emulator.sources if s.rev and not held_at_its_pin(s)]
+    if not pinned:
+        return False
+    built = read_built_from(server_dir)
+    heads = source_heads(server_dir, pinned)
+    state = read_state(server_dir, valid=())
+    for source in pinned:
+        sha = built.get(source.repo, "")
+        row = state.rev_for(source.repo) if state is not None else None
+        if heads.get(source.repo) != sha or not built_carries_pin(sha, source.rev or "", row):
+            return False
+    return True
+
+
 def source_off_its_build(dest: Path, head: str, built: str) -> str:
     """Rebuild's refusal of a folder off the commit its build came from (T217): one sentence.
 
@@ -8103,11 +8227,17 @@ class StagedInstaller:
         missing_images_ok: bool = False,
         servers_down: ServersDownWork | None = None,
         press: str = server_build_presses.REBUILD,
+        landed: Callable[[], None] | None = None,
     ) -> Iterator[str]:
         """Recompile this install and restart it on what was compiled. Yields output live.
 
         `press` is the "Server build ▾" entry that started this, named where a sentence
         says what pressing it again does (T223); the update route passes its own.
+
+        `landed` is the update route's record of where its sources landed (`source_revs`,
+        T589 cold review): called once the press has succeeded and the build record is
+        written, BEFORE `after_ready()`, which may start the movement-map job that stamps
+        its generation from both. Must not raise.
 
         `servers_down` is the update route's (T179): what the family does between
         the recreate's stop and its start, and again in a rollback's window before
@@ -8286,6 +8416,8 @@ class StagedInstaller:
         touched = False
         parking = _Parking()
         self._build_exit = None
+        compiled_from: dict[str, str] = {}
+        """T589: the commits the build stage compiled (or the kept build it used) came from."""
 
         def may_have_tagged() -> bool:
             """Whether this press ran something that moves the live tags (T225, cold review).
@@ -8299,6 +8431,7 @@ class StagedInstaller:
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
+            compiled_from.update(source_heads(server_dir, self.entry.emulator.sources))
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
             used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
@@ -8372,6 +8505,11 @@ class StagedInstaller:
         # must not run while it is rebuilt (T179's movement maps). A stop that
         # fails raises, and nothing was started.
         yield from self.before_rebuild(server_dir, "the rebuild")
+        # T589: from here on the image the tags name can change, and a press that does not
+        # finish (a failure, a Stop, Yu'lon killed) must leave "not known", never the old
+        # record beside a new build or a new record beside the old one. Written again below
+        # once the press is over.
+        forget_built_from(server_dir)
         refs = self.built_image_refs(ctx)
         # T225 (live): a build an earlier Stop left running may have landed since.
         yield from self._settle_stopped_build(server_dir, refs)
@@ -8436,6 +8574,8 @@ class StagedInstaller:
                 # server never came up at all is a build worth putting back, and
                 # that is the whole of what this subclass separates.
                 yield from self._release(kept)
+                # T589: the new build is what the tags name, and it started.
+                remember_built_from(server_dir, compiled_from)
                 # The new build started: as a success, the stopped build's record goes.
                 also = self._forget_the_stopped_build(server_dir)
                 kept_build = (
@@ -8586,6 +8726,11 @@ class StagedInstaller:
             yield left
         # T217: the build now running was made from the folders as they are.
         forget_sources_off(server_dir)
+        # T589: and from these commits. Before `after_ready()`, which may start the movement
+        # map job that stamps its generation from this record.
+        remember_built_from(server_dir, compiled_from)
+        if landed is not None:
+            landed()
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
@@ -9098,8 +9243,17 @@ class StagedInstaller:
                 did_not_come_back=lambda: self._old_build_down(copy),
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
+            releases = {repo: said.tag for repo, said in targets.items() if said.tag}
             try:
-                yield from self.rebuild(opts, cancel=cancel, servers_down=work, press=press)
+                # T589 cold review: the row is written inside `rebuild()`, after its success
+                # and before `after_ready()` starts the movement-map job, which reads it.
+                yield from self.rebuild(
+                    opts,
+                    cancel=cancel,
+                    servers_down=work,
+                    press=press,
+                    landed=lambda: self._record_source_revs(server_dir, state, moved, releases),
+                )
                 yield from work.done()
                 self._forget_older_copies(server_dir, copy)
             except WorldStoppedAfterReadyError as exc:
@@ -9258,12 +9412,6 @@ class StagedInstaller:
                 # T217: nor is the copy put back -- that needs a yield and a restore.
                 work.settle()
                 raise
-            self._record_source_revs(
-                server_dir,
-                state,
-                moved,
-                {repo: said.tag for repo, said in targets.items() if said.tag},
-            )
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )
@@ -9696,7 +9844,9 @@ class StagedInstaller:
     ) -> None:
         """Write where each moved source ended up into the install record.
 
-        LAST, after the rebuild succeeded, and that is the point of it: this key
+        LAST, after the rebuild succeeded (since T589's cold review from inside
+        `rebuild()`, as its `landed`, so the movement-map job its `after_ready()` may
+        start reads this row), and that is the point of it: this key
         is read by the tab's version line as "what the running server was built
         from", and a record written before the compile would describe a build
         that may never have happened. A press that fails writes nothing here at
@@ -12729,6 +12879,8 @@ class StagedInstaller:
         # T203: what the cache holds as this build starts, so the next press's
         # preflight can credit only what THIS build added to it -- or, after an
         # attempt that did not finish, what that one added (`BUILD_CACHE_FILE`).
+        # T589: what this compile is made from, read before it starts (the build context).
+        heads = source_heads(ctx.server_dir, self.entry.emulator.sources)
         yield BUILD_CACHE_ASKING
         baseline = build_cache_baseline_for(ctx.server_dir, self._seams.build_cache_bytes())
         write_build_cache_baseline(ctx.server_dir, baseline)
@@ -12799,6 +12951,11 @@ class StagedInstaller:
             )
         self._check_run(run, "the build", ctx.cancel, build_cancel_note(), from_build=True)
         write_build_cache_baseline(ctx.server_dir, baseline, finished=True)
+        if not ctx.force_build:
+            # T589: an install has no build from before to go back to, so the image this
+            # compile tagged is the server's build. A rebuild records it once the press is
+            # over (`rebuild()`), because until then a rollback can put the old one back.
+            remember_built_from(ctx.server_dir, heads)
         yield "The build finished."
 
     def stage_start_db(self, ctx: StageContext) -> Iterator[str]:
