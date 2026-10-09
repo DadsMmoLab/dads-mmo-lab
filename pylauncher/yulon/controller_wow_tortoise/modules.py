@@ -64,6 +64,7 @@ from yulon.apply import (
     CLONE_DIRS,
     Applier,
     ApplyReport,
+    CompletionRefused,
     CountingGit,
     FolderSource,
     ModuleUpdate,
@@ -199,7 +200,16 @@ def install_custom(applier: Applier) -> CustomInstall:
         source = FolderSource(folder, copy_folder) if folder is not None else None
         finished: list[Manifest] = []
 
+        kept: list[str] = []
+
         def finish(derived: Manifest, clone: Path) -> Manifest:
+            # Read first and persist after: a settings file another installed item
+            # already owns is refused before this press records anything.
+            found = custom.complete(derived, clone, shipped_addons=shipped_addons())
+            _refuse_a_shared_conf(applier, found)
+            kept.extend(
+                conf.file for conf in found.conf if (applier.server_dir / conf.file).exists()
+            )
             finished.append(complete(derived, clone))
             return finished[-1]
 
@@ -216,10 +226,41 @@ def install_custom(applier: Applier) -> CustomInstall:
                 if not os.path.lexists(applier.clone_dir(manifest)):
                     forget(manifest)
             raise
-        left = custom.unused(finished[-1]) if finished else ()
+        left = (
+            *(custom.unused(finished[-1]) if finished else ()),
+            *(
+                f"{file} was already there, so it was kept as it is (a settings file is never "
+                "replaced): the module reads what is in it, so check it is this module's"
+                for file in kept
+            ),
+        )
         return replace(report, skipped=(*report.skipped, *left)) if left else report
 
     return install
+
+
+def _refuse_a_shared_conf(applier: Applier, found: Manifest) -> None:
+    """Refuse a module whose settings file another installed item already puts at that path.
+
+    Two modules that ship the same `conf/<n>.conf.dist` would share one
+    `etc/modules/<n>.conf`, and an install never replaces a file that is there, so the
+    second would read the first's settings (Codex review). A file nobody here owns (a
+    hand-made one, or one an earlier Remove kept) is not refused: it is kept and said.
+    """
+    wanted = {conf.file for conf in found.conf}
+    if not wanted:
+        return
+    for kind in ("module", "mod"):
+        for other in store().load_all(kind):
+            if (other.type, other.id) == (found.type, found.id):
+                continue
+            clash = sorted(wanted & {conf.file for conf in other.conf})
+            if clash and os.path.lexists(applier.clone_dir(other)):
+                raise CompletionRefused(
+                    f"{found.name}'s settings file {clash[0]} is also the settings file of "
+                    f"{other.name}, which is installed: two modules cannot share one. Remove "
+                    f"{other.name} first, or ask the author of one of them to rename theirs."
+                )
 
 
 BACKUP_LABEL = "before-{id}"

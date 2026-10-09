@@ -797,3 +797,69 @@ def test_a_module_with_sql_is_backed_up_ledgered_and_conf_activated_in_one_press
         line.startswith("backed up tw_char before mod-twow-bot-gear") for line in report.done
     )
     assert (server / "etc" / "modules" / "mod-twow-bot-gear.conf").is_file()
+
+
+def test_a_module_whose_settings_file_another_installed_module_owns_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Codex review: two modules shipping the same `conf/<n>.conf.dist` would share one file."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    shared = {"src/a.cpp": "int x;\n", "conf/shared.conf.dist": "[Shared]\nOn = 1\n"}
+    first = _tortoise_applier(server, _Clone(shared), _Db(), client)
+    tortoise_modules.install_custom(first)(tortoise_modules.derive_link("you/mod-first"), None)
+
+    second = _tortoise_applier(server, _Clone(shared), _Db(), client)
+    with pytest.raises(CompletionRefused) as refused:
+        tortoise_modules.install_custom(second)(
+            tortoise_modules.derive_link("you/mod-second"), None
+        )
+
+    said = str(refused.value)
+    assert "etc/modules/shared.conf" in said and "mod-first" in said
+    assert said.endswith("Nothing was changed.")
+    assert not (server / "modules" / "mod-second").exists()
+    assert "mod-second" not in {m.id for m in tortoise_modules.store().load_all("module")}
+    assert (
+        (server / "etc" / "modules" / "shared.conf")
+        .read_text(encoding="utf-8")
+        .startswith("[Shared]")
+    )
+
+
+def test_removing_a_module_and_installing_it_again_keeps_its_edited_conf_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """Remove keeps the file, so the second install meets it: not a clash, and not silent."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    files = {"src/a.cpp": "int x;\n", "conf/mod-again.conf.dist": "[Again]\nOn = 1\n"}
+    applier = _tortoise_applier(server, _Clone(files), _Db(), client)
+    manifest = tortoise_modules.derive_link("you/mod-again")
+    tortoise_modules.install_custom(applier)(manifest, None)
+    conf = server / "etc" / "modules" / "mod-again.conf"
+    conf.write_text("[Again]\nOn = 0\n", encoding="utf-8")
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    applier.remove(listed["mod-again"])
+    tortoise_modules.forget(listed["mod-again"])
+
+    again = tortoise_modules.install_custom(applier)(
+        tortoise_modules.derive_link("you/mod-again"), None
+    )
+
+    assert conf.read_text(encoding="utf-8") == "[Again]\nOn = 0\n", "never replaced"
+    assert any("etc/modules/mod-again.conf was already there" in line for line in again.skipped)
+
+
+def test_a_settings_file_nobody_owns_is_kept_and_said(tmp_path: Path) -> None:
+    """A hand-made file, or one an earlier Remove kept: not a refusal, but never silent."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    (server / "etc" / "modules").mkdir(parents=True)
+    (server / "etc" / "modules" / "mod-x.conf").write_text("[Mine]\n", encoding="utf-8")
+    files = {"src/a.cpp": "int x;\n", "conf/mod-x.conf.dist": "[X]\n"}
+    applier = _tortoise_applier(server, _Clone(files), _Db(), client)
+    report = tortoise_modules.install_custom(applier)(
+        tortoise_modules.derive_link("you/mod-x"), None
+    )
+    assert (server / "etc" / "modules" / "mod-x.conf").read_text(encoding="utf-8") == "[Mine]\n"
+    assert any("was already there" in line and "never replaced" in line for line in report.skipped)
