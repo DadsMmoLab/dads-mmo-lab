@@ -1253,6 +1253,43 @@ def test_a_take_back_that_breaks_names_the_add_on_folders_the_note_lists(
     assert f"your own pfUI add-on folder that Yu'lon set aside is still at {aside}" in said
 
 
+def test_a_take_back_that_breaks_names_a_noted_aside_whose_entry_is_damaged(
+    tmp_path: Path,
+) -> None:
+    """Round 4: the checked reader drops such an entry; at Uninstall its path is still said.
+
+    Only paths in an Interface/AddOns folder with Yu'lon's aside name, so a damaged note
+    cannot make the warning point anywhere else.
+    """
+    import json
+
+    from yulon.apply import ADDON_ASIDES_FILE
+
+    rec = _recorder(tmp_path)
+    aside = "/c/Interface/AddOns/pfUI.yulon-addon-old"
+    (rec.server_dir / ADDON_ASIDES_FILE).write_text(
+        json.dumps(
+            [
+                {"item": "pfui", "addon": "../x", "target": "/c/pfUI", "aside": aside},
+                {"item": "pfui", "addon": "x", "target": "/x", "aside": "/home/me/secret"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def broken() -> tuple[list[str], list[str]]:
+        raise OSError("disk gone")
+
+    report = rec.uninstaller(take_back_client_files=broken).run(keep_characters=False)
+
+    said = " ".join(report.warnings)
+    assert (
+        f"an add-on folder of yours that Yu'lon set aside may still be at {aside} (its note "
+        "could not be checked)"
+    ) in said
+    assert "/home/me/secret" not in said
+
+
 # -- T219: a Windows Centurion's map-data volume ------------------------------------------
 
 CENTURION_PROJECT = "yulon-wow-centurion-c808c548"

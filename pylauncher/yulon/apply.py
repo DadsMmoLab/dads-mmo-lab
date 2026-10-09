@@ -1130,6 +1130,47 @@ def _read_addon_asides_checked(server_dir: Path) -> tuple[list[dict[str, str]], 
     return good, bad
 
 
+def unchecked_addon_aside_paths(server_dir: Path) -> list[str]:
+    """Aside paths the note lists in entries the checked reader leaves out (round 4).
+
+    For Uninstall's last words before the note is deleted with the server folder: a
+    damaged entry's folder is still the player's. Only a path Yu'lon could have made
+    is returned -- absolute and plain, in an `Interface/AddOns` folder, with Yu'lon's
+    aside name -- so a damaged note cannot make the warning point anywhere else.
+    """
+    try:
+        raw = json.loads((server_dir / ADDON_ASIDES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    checked = {_path_key(Path(e["aside"])) for e in read_addon_asides(server_dir)}
+    found: list[str] = []
+    for entry in raw:
+        aside = entry.get("aside") if isinstance(entry, dict) else None
+        if (
+            isinstance(aside, str)
+            and aside_path_could_be_ours(aside)
+            and _path_key(Path(aside)) not in checked
+            and aside not in found
+        ):
+            found.append(aside)
+    return found
+
+
+def aside_path_could_be_ours(aside: str) -> bool:
+    """Whether `aside` is a place Yu'lon puts a player's folder: `<...>/Interface/AddOns/
+    <name>.yulon-addon-old[.n]`, absolute and plain. What a warning may name (round 4)."""
+    if not _plain_absolute(aside):
+        return False
+    path = Path(aside)
+    return (
+        path.parent.name.casefold() == "addons"
+        and path.parent.parent.name.casefold() == "interface"
+        and FOLDER_ASIDE_SUFFIX in path.name.casefold()
+    )
+
+
 def _add_addon_aside(server_dir: Path, entry: Mapping[str, str]) -> list[dict[str, str]]:
     """Note one more aside, under the lock; the entries as they were before, to undo with."""
     with _ADDON_ASIDES_LOCK:
@@ -1195,12 +1236,25 @@ def is_route_item(manifest: Manifest) -> bool:
     return manifest.origin is not None and manifest.origin.addon
 
 
+_NOT_IN_A_FOLDER_NAME = frozenset('<>:"/\\|?*')
+"""What Windows refuses in a file or folder name; `:` also makes `D:x` drive-relative."""
+
+
 def _one_folder_name(value: object) -> bool:
-    """Whether `value` is one folder's name: a non-empty string, no separator, not `.`/`..`."""
+    """Whether `value` is one folder's name a game client on Windows can hold (T613 round 4).
+
+    Non-empty, not `.`/`..`, no separator, no character Windows refuses (`D:pfUI` is a
+    path relative to drive D, outside Interface/AddOns), no control character, not
+    ending in a dot or a space, and no device name (`CON`, `COM1.x`).
+    """
+    from yulon.addon_layout import is_windows_device
+
     return (
         isinstance(value, str)
         and value not in ("", ".", "..")
-        and not any(ch in value for ch in "/\\\0")
+        and not any(ch in _NOT_IN_A_FOLDER_NAME or ord(ch) < 0x20 for ch in value)
+        and not value.endswith((".", " "))
+        and not is_windows_device(value)
     )
 
 
@@ -7672,7 +7726,9 @@ class Applier:
             _path_key(Path(os.path.realpath(folder.parent))) != real_addons
             or _path_key(Path(os.path.realpath(moved.parent))) != real_addons
         ):
-            # Belt (round 3): the name checks above already keep both ends in AddOns.
+            # The last guard (round 4): the note's name rule keeps both ends in AddOns, and
+            # this is what holds when a name slips past it (a rule this platform's paths
+            # read otherwise); `test_the_real_parent_check_is_the_last_guard...` pins it.
             log.client_left_behind.append(
                 f"{moved} (it or its add-on's name is not in {addons} itself, so Yu'lon did "
                 "not move it)"

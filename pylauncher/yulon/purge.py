@@ -724,9 +724,18 @@ class Uninstaller:
         # aside is put back; what cannot be is named, never deleted (T262).
         # T613 round 3: the note of the player's add-on folders set aside lives in the
         # server folder, which goes below; read before the take-back, which may break.
-        from yulon.apply import read_addon_asides
+        from yulon.apply import (
+            aside_path_could_be_ours,
+            read_addon_asides,
+            unchecked_addon_aside_paths,
+        )
 
-        asides = read_addon_asides(self.server_dir)
+        asides = [
+            entry
+            for entry in read_addon_asides(self.server_dir)
+            if aside_path_could_be_ours(entry["aside"])
+        ]
+        unchecked = unchecked_addon_aside_paths(self.server_dir)
         try:
             took, kept_back = self.take_back_client_files()
         except (OSError, ValueError) as exc:
@@ -738,6 +747,11 @@ class Uninstaller:
                     f"your own {entry['addon']} add-on folder that Yu'lon set aside is still at "
                     f"{entry['aside']}; rename it back to {entry['addon']} when you want it again"
                     for entry in asides
+                ),
+                *(
+                    f"an add-on folder of yours that Yu'lon set aside may still be at {path} "
+                    "(its note could not be checked)"
+                    for path in unchecked
                 ),
             ]
         for line in took:

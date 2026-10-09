@@ -1105,3 +1105,70 @@ def test_two_threads_noting_asides_lose_neither(tmp_path: Path) -> None:
         apply_module._write_addon_asides = real  # type: ignore[assignment]
 
     assert sorted(e["item"] for e in apply_module.read_addon_asides(server)) == ["one", "two"]
+
+
+# ------------------------------------------------------------------ round 4 closes (44b0afc2)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "D:pfUI",
+        "pf<UI",
+        'pf"UI',
+        "pf|UI",
+        "pf?UI",
+        "pf*UI",
+        "pf\x01UI",
+        "pfUI.",
+        "pfUI ",
+        "CON",
+        "com1.x",
+    ],
+)
+def test_a_name_windows_cannot_hold_as_a_folder_is_not_one_folder_name(bad: str) -> None:
+    """`addons / "D:pfUI"` on Windows is drive-relative: outside Interface/AddOns."""
+    from yulon.apply import _one_folder_name
+
+    assert not _one_folder_name(bad)
+    assert _one_folder_name("pfUI") and _one_folder_name("Bagnon_Config-2.0")
+
+
+def test_a_note_naming_a_drive_relative_add_on_is_dropped(tmp_path: Path) -> None:
+    from yulon.apply import read_addon_asides
+
+    good = {
+        "item": "pfui",
+        "addon": "pfUI",
+        "target": "/c/pfUI",
+        "aside": "/c/pfUI.yulon-addon-old",
+    }
+    (tmp_path / ADDON_ASIDES_FILE).write_text(
+        json.dumps([good, {**good, "addon": "D:pfUI"}]), encoding="utf-8"
+    )
+
+    assert read_addon_asides(tmp_path) == [good]
+
+
+def test_the_real_parent_check_is_the_last_guard_when_a_name_slips_past(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 4: with the name rule gone, only the real-parent check keeps the folder in."""
+    import shutil
+
+    from yulon import apply as apply_module
+
+    applier, manifest, _own, aside = _replaced(tmp_path)
+    outside = tmp_path / "elsewhere" / "pfUI"
+    outside.parent.mkdir()
+    notes = _noted(applier.server_dir)
+    notes[0]["addon"] = str(outside)
+    (applier.server_dir / ADDON_ASIDES_FILE).write_text(json.dumps(notes), encoding="utf-8")
+    shutil.rmtree(applier.clone_dir(manifest))
+    monkeypatch.setattr(apply_module, "_one_folder_name", lambda value: isinstance(value, str))
+
+    _done, left = applier.take_back_everything()
+
+    assert not outside.exists()
+    assert aside.is_dir()
+    assert any("is not in" in line and "so Yu'lon did not move it" in line for line in left), left
