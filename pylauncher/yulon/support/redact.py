@@ -345,9 +345,11 @@ _DASH_PASSWORD = re.compile(r"(?P<head>(?<![\w-])--password[ \t]+)(?P<value>[^\s
 _ARGV_PASSWORD = re.compile(
     r"(?P<head>['\"](?:-p|--password|--pass|--pwd)['\"],[ \t]*['\"])(?P<value>[^'\"]+)"
 )
+# A password right after -p may be quoted (-p'x' / -p"x"): the quotes go with it.
+_QUOTED_OR_BARE = r"(?P<value>'[^'\r\n]+'|\"[^\"\r\n]+\"|[^\s\"',\]]+)"
 _MYSQL_CLI = re.compile(
     r"(?P<head>\b(?i:mysql|mariadb|mysqldump|mysqladmin)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]-p)"
-    r"(?P<value>[^\s\"',\]]+)"
+    + _QUOTED_OR_BARE
 )
 _HTTP_CLI_AUTH = re.compile(
     r"(?P<head>\b(?i:curl|wget|https?|xh)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]"
@@ -355,7 +357,7 @@ _HTTP_CLI_AUTH = re.compile(
     r"['\"]?[^\s:'\"]{0,64}:)(?P<value>[^\s'\",\]]+)"
 )
 _USER_THEN_PASSWORD = re.compile(
-    r"(?P<head>[ \t'\"]-u[^\s\"',]+['\"]?,?[ \t]*['\"]?-p)(?P<value>[^\s\"',\]]+)"
+    r"(?P<head>[ \t'\"]-u[^\s\"',]+['\"]?,?[ \t]*['\"]?-p)" + _QUOTED_OR_BARE
 )
 _ACCOUNT_CREATE = re.compile(
     r"(?i)(?P<head>\baccount[ \t]+create[ \t]+[^\s\"']+[ \t]+)(?P<value>[^\s\"']+)"
