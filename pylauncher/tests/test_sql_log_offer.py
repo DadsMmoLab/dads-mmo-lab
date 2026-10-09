@@ -46,7 +46,7 @@ def lay(server: Path, text: str = DIST, name: str = MANGOSD) -> Path:
 
 
 def with_realmd_key() -> CatalogEntry:
-    """What the catalog says once #435 adds the key to the login server's conf."""
+    """The catalog with the key set in the login server's conf, as #435 (T618) sets it."""
     entry = copy.deepcopy(tortoise())
     native = entry.install.native
     assert native is not None and native.cmangos is not None
@@ -226,7 +226,8 @@ def test_a_record_that_cannot_be_read_asks_again_and_is_replaced_by_the_next_ans
 def test_realmd_conf_is_offered_the_day_the_catalog_sets_the_key_there(tmp_path: Path) -> None:
     lay(tmp_path)
     lay(tmp_path, "LogFilter_SQLText = 0\n", REALMD)
-    assert [o.file for o in sql_log_offer.offers(tortoise(), tmp_path)] == [MANGOSD]
+    # Since #435 (T618) the shipped catalog sets the key under realmd.conf as well.
+    assert [o.file for o in sql_log_offer.offers(tortoise(), tmp_path)] == [MANGOSD, REALMD]
     assert [o.file for o in sql_log_offer.offers(with_realmd_key(), tmp_path)] == [MANGOSD, REALMD]
 
 
