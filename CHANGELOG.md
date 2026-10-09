@@ -37,6 +37,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Account, character and settings changes wait for another Yu'lon working on the server, and say who holds it.
 - The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
 - **Save logs for support…** now says how many logs it left out of the zip, and why, before you send it.
+- A Tortoise world that fails a database update now stops and names the file and error, instead of hanging.
 
 ### Changed
 

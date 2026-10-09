@@ -90,6 +90,10 @@ class _Docker:
         self.execs = 0
         # The bound each of a look's two commands was given, in order.
         self.timeouts: list[float | None] = []
+        # T600: the bound each log read and each kill was given, and a Docker that never answers.
+        self.log_timeouts: list[float | None] = []
+        self.kill_timeouts: list[float | None] = []
+        self.logs_time_out = False
         self.events: list[str] = []
         self.running = {spec.db, spec.auth, spec.world}
         self.present = set(self.running)
@@ -131,6 +135,12 @@ class _Docker:
                 return _completed(returncode=1)
             self._stopped({self.spec.world})
             return _completed()
+        if verb == ["kill", self.spec.world]:
+            self.kill_timeouts.append(timeout)
+            # T600: the world's own SIGKILL, for a run stuck at a failed update.
+            self.events.append("kill")
+            self.running -= {self.spec.world}
+            return _completed()
         if verb[:2] == ["ps", "-a"]:
             return _completed("".join(f"{n}\n" for n in sorted(self.present)))
         if verb[:1] == ["ps"]:
@@ -170,6 +180,10 @@ class _Docker:
             mask = self._frame()[2]
             return _completed(returncode=1) if mask is None else _completed(_status(mask))
         if verb[:1] == ["logs"] and verb[-1] == self.spec.world:
+            self.log_timeouts.append(timeout)
+            if self.logs_time_out:
+                # What `_docker()` hands back for a Docker that never answered.
+                return _completed(returncode=124)
             return _completed(self._frame()[1])
         return _completed()
 
@@ -630,3 +644,134 @@ def test_a_rebuild_panel_that_stops_reading_gives_the_wait_up_and_is_waited_for(
     assert next(lines) == docker.WORLD_STILL_LOADING
     lines.close()  # type: ignore[attr-defined]
     assert abandon.is_set() and ended.is_set()
+
+
+# -- T600: a world stuck at a failed update is not loading ----------------------------
+
+FAILED_UPDATE = (
+    "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+    "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+    "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+)
+
+
+def test_a_world_whose_log_ends_on_a_failed_update_is_stopped_at_once_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The core waits in a read on its console after `failed to apply.`: no signal handler, no
+    SOAP, no load going on (tortoise-wow `AutoUpdater.cpp:236-239`, measured as a stand-in on
+    m910q 2026-10-09: SIGTERM ignored for the whole grace, then SIGKILL). The wait would be
+    forever; the stop goes at once and kills, because the signal is ignored.
+
+    Mutation: remove the check from `world_load_steps()` and the world is looked at for ever
+    (the fake's own cap) instead of killed on the first look.
+    """
+    fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
+    said: list[str] = []
+    controller, _ = _controller(fake, tmp_path, said)
+
+    assert controller.stop() is True
+
+    assert fake.events == ["look 1", "look 2", "kill"]  # the second look re-checks the run
+    assert len(said) == 1
+    assert "20260903063722_world.sql" in said[0]
+    assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in said[0]
+    assert docker.WORLD_STILL_LOADING not in said
+
+
+def test_a_log_that_went_on_after_a_failed_update_line_is_still_a_load_to_wait_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a log that ENDS on the failure is stuck: output after it means the run lives on."""
+    later = FAILED_UPDATE + "Loading creature templates.\n"
+    fake = _install(
+        monkeypatch,
+        "wow-tortoise",
+        [("running", later, LOADING_MASK), ("running", later, LOADED_MASK)],
+    )
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert "kill" not in fake.events
+    assert fake.events[:2] == ["look 1", "look 2"]
+
+
+def test_a_healthy_tortoise_load_is_never_killed_for_its_migration_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log = (
+        "[DB Auto-Updater] Migration 20260918120000_world with hash 0123 for module TortoiseBots "
+        "exists in DB but not as file, old migration?\n"
+    )
+    fake = _install(
+        monkeypatch,
+        "wow-tortoise",
+        [("running", log, LOADING_MASK), ("running", log, LOADED_MASK)],
+    )
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert "kill" not in fake.events
+
+
+def test_the_update_failure_is_read_from_this_runs_tail_not_the_whole_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load of tens of thousands of lines is looked at every two seconds."""
+    seen: list[list[str]] = []
+
+    def fake(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        return _completed("x\n")
+
+    monkeypatch.setattr(runner, "run", fake)
+    docker._logs("tortoise-mangosd", this_run_only=True, since="2026-10-09T01:00:00Z", tail=20)
+    assert seen[0][seen[0].index("--tail") + 1] == "20"
+    assert "--since" in seen[0]
+
+
+def test_a_world_the_restart_policy_replaced_since_the_look_is_not_killed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The run the failure line was read from must still be the run that is killed.
+
+    Mutation: kill without the second `container_state()` and this kills the new run.
+    """
+    frames: list[Frame] = [
+        ("running", FAILED_UPDATE, LOADING_MASK),
+        ("running", LOADING, LOADING_MASK),
+        ("running", LOADED, LOADED_MASK),
+    ]
+    fake = _install(monkeypatch, "wow-tortoise", frames, started=[STARTED, RESTARTED, RESTARTED])
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert "kill" not in fake.events
+
+
+def test_the_failed_update_look_and_the_kill_are_each_bounded_like_the_other_looks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wedged Docker must not hold a Stop: both calls get the look timeout (T600 review).
+
+    Mutation: call `_logs()` or `kill_container()` without the timeout and a stop's loop can
+    block in a docker call that "Stop now anyway" and `abandon` are never asked in.
+    """
+    fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert fake.log_timeouts == [docker._LOAD_LOOK_TIMEOUT]
+    assert fake.kill_timeouts == [docker._LOAD_LOOK_TIMEOUT]
+
+
+def test_a_log_read_that_times_out_is_not_a_stuck_world_and_abandon_still_ends_the_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timed-out read is "not stuck": the wait goes on, and the person can still end it."""
+    fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
+    fake.logs_time_out = True
+    controller, control = _controller(fake, tmp_path)
+    fake.on_look = lambda: control.abandon.set() if fake.looks >= 3 else None
+    with pytest.raises(docker.StopAbandoned):
+        controller.stop()
+    assert "kill" not in fake.events
+    assert fake.log_timeouts and all(t == docker._LOAD_LOOK_TIMEOUT for t in fake.log_timeouts)

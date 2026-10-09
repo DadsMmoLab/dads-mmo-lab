@@ -866,3 +866,41 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "what it prints (`08d-world-run2.txt`), and it is asserted beside the fatal pattern "
         "because a change to one is usually a change to both"
     )
+
+
+def test_the_fatal_pattern_names_a_world_update_that_failed_to_apply_t600() -> None:
+    """A failed migration's lines are fatal, and the healthy migration lines are not.
+
+    Measured shapes (`.notes/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/
+    rehearsal.log:126-130`, and `AutoUpdater.cpp:236`, `World.cpp:1950` at the pin):
+
+        [1062] Duplicate entry '44070' for key 'PRIMARY'
+        [DB Auto-Updater] Migration 20260903063722_world with hash 34F8... failed to apply.
+        DB AutoUpdater FAILED, cancelling server.
+
+    On the build before T600's patch the world hangs after the first of the two
+    updater lines and never prints the second, so the first must match on its own;
+    on the patched build both print. Neither may match what a healthy start prints
+    about old or renamed migrations at info level, which is why the alternative is
+    anchored on `failed to apply` and not on `Migration`.
+    """
+    ready = _native().ready
+    assert ready.fatal is not None and ready.regex is True
+    for dying in (
+        "[DB Auto-Updater] Migration 20260903063722_world with hash "
+        "34F86966897E9206E13773D73C2232677DA2FFED failed to apply.",
+        "DB AutoUpdater FAILED, cancelling server.",
+    ):
+        assert re.search(ready.fatal, dying), f"the fatal pattern walks past {dying!r}"
+    for healthy in (
+        "[DB Auto-Updater] Migration 20260918120000_world with hash "
+        "0123456789abcdef0123456789abcdef01234567 for module TortoiseBots exists in DB but "
+        "not as file, old migration?",
+        "[DB Auto-Updater] Migration with hash 0123456789ABCDEF is migrated with name "
+        "20260918120000_world but now has name 20260918120001_world.",
+        "[DB Auto-Updater] Migration with hash 0123456789ABCDEF was migrated with name "
+        "20260918120000_world but now has name 20260918120001_world.",
+        "[DB Auto-Updater] Attempting to execute update 20261007161727_world, hash E8C9BA.",
+        "[DB Auto-Updater] Found 5 possible migrations for character.",
+    ):
+        assert not re.search(ready.fatal, healthy), f"it fires on a healthy line: {healthy!r}"

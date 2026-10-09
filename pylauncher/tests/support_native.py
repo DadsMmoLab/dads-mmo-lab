@@ -74,6 +74,9 @@ stdin is EOF, and the live Centurion press exited 255 (T241).
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
+TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-187af788"
+"""`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
+
 
 def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
     """An `on_clone` hook laying the pre-image of every patch `entry` carries under its source.
@@ -98,7 +101,9 @@ def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
             for hunk in patch.parse((root / spec.file).read_text(encoding="utf-8")):
                 target = dest.joinpath(*hunk.path.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]).read_bytes())
+                whole = TORTOISE_FIXTURE.joinpath(*hunk.path.split("/"))
+                source = whole if whole.is_file() else VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]
+                target.write_bytes(source.read_bytes())
 
     return on_clone
 

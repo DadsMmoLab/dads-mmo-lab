@@ -623,6 +623,8 @@ def test_a_tortoise_old_build_that_crash_loops_is_stopped_at_its_restart_with_it
         lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "SigCgt:\t0000000000000000\n", ""),
     )
     monkeypatch.setattr(docker, "_pause", lambda control, seconds: None)
+    # T600: a deaf world's log tail is read to see whether it ends on a failed update.
+    monkeypatch.setattr(docker, "_logs", lambda *_a, **_kw: "Loading maps...\n")
     rec, server_dir, make = _spine(tmp_path, TORTOISE)
     made = make(wait_ready=_asked_ready(rec, [False, False]))
     made._snapshot = FakeSnapshot(rec)
@@ -643,6 +645,52 @@ def test_a_tortoise_old_build_that_crash_loops_is_stopped_at_its_restart_with_it
     assert heard == [docker.WORLD_STILL_LOADING, docker.WORLD_RESTARTED_STOPPING]
     assert native.OLD_BUILD_WAIT_HINT in said
     assert said.index(native.OLD_BUILD_WAIT_HINT) == said.index(docker.WORLD_STILL_LOADING) + 1
+
+
+def test_the_stop_wait_of_a_world_stuck_at_a_failed_update_kills_it_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T600: the failed build's world sits in a read after a failed update and ignores the stop.
+
+    Every stop path (the rollback's included) used to say "still loading" until "Stop now
+    anyway"; now it says which update failed and what MariaDB said, kills the stuck world and
+    goes on.
+
+    Mutation: drop the `_stuck_at_a_failed_update()` check in `world_load_steps()`, and the
+    steps are the loading hint, again and again.
+    """
+    import subprocess
+
+    spec = TORTOISE.container_spec()
+    monkeypatch.setattr(
+        docker,
+        "container_state",
+        lambda name, **_kw: docker.ContainerState(
+            status="running", started_at="2026-10-05T01:00:00Z"
+        ),
+    )
+    monkeypatch.setattr(
+        docker,
+        "exec_output",
+        lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "SigCgt:\t0000000000000000\n", ""),
+    )
+    monkeypatch.setattr(docker, "_pause", lambda control, seconds: None)
+    monkeypatch.setattr(
+        docker,
+        "_logs",
+        lambda *_a, **_kw: (
+            "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+            "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+        ),
+    )
+    killed: list[str] = []
+    monkeypatch.setattr(docker, "kill_container", lambda name, **_kw: killed.append(name))
+
+    heard = list(docker.world_load_steps(spec, docker.StopControl()))
+
+    assert killed == [spec.world]
+    assert len(heard) == 1 and "20260903063722_world.sql" in heard[0]
+    assert docker.WORLD_STILL_LOADING not in heard
 
 
 def test_a_mixed_tags_record_refuses_the_update_before_anything_is_fetched(
