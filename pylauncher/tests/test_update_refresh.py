@@ -32,7 +32,7 @@ DAY = upstream.MAX_AGE_SECONDS
 
 
 def _sleeper() -> list[str]:
-    return [sys.executable, "-c", "import time; time.sleep(60)"]
+    return [sys.executable, "-c", "import time; time.sleep(15)"]
 
 
 def test_a_process_that_outlives_its_timeout_is_ended_and_says_so() -> None:
@@ -263,6 +263,22 @@ def test_a_cancel_during_a_fetch_stops_before_the_next_clone_and_keeps_the_half_
     follow = _Git([9, 9, 9])
     rows = apply_module.cached_module_updates(server, kind="module", git=follow, now=1_001)
     assert follow.fetches == 3 and [r.behind for r in rows] == [9, 9, 9]
+
+
+def test_a_cancelled_refresh_hands_back_nothing_even_for_the_clones_it_did_count(
+    tmp_path: Path,
+) -> None:
+    """The tab drops a cancelled run's answer; this is the seam's half: nothing to drop."""
+    server = _server(tmp_path, "mod-a", "mod-b")
+    cancel = threading.Event()
+    reader = _Git([1, 2])
+    reader.on_fetch.append(lambda: cancel.set() if reader.fetches == 2 else None)
+    assert _refresh(server, reader, 1_000, cancel=cancel) == ()
+    assert reader.fetches == 2
+    # What it did finish is kept for the next reader.
+    follow = _Git([7])
+    rows = apply_module.cached_module_updates(server, kind="module", git=follow, now=1_001)
+    assert follow.fetches == 1 and [r.behind for r in rows] == [1, 7]
 
 
 def test_with_no_host_git_the_refresh_asks_nothing(
