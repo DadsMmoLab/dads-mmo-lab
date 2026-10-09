@@ -350,36 +350,161 @@ def test_a_slow_progress_read_never_writes_over_a_done_another_yulon_recorded(
     assert _state(server) == ("done", True)
 
 
-def test_a_polls_progress_is_still_saved_while_the_record_is_what_it_read(server: Path) -> None:
-    """The percentage survives a lost container or a Stop (T245). Mutation: never save it."""
+def _sidecar(server_dir: Path) -> dict[str, Any] | None:
+    import json
+
+    path = server_dir / mmaps.PROGRESS_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def test_a_polls_progress_goes_to_its_own_file_and_never_to_the_record(server: Path) -> None:
+    """Mutation: write `moved` to the record again, or leave the sidecar unwritten."""
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    before = (server / mmaps.RECORD_FILE).read_text(encoding="utf-8")
+    fake.say("12% [Map 000] Building tile [01,02]")
+    now = poll(server, fake, None, clock)
+    assert now.state == "running" and now.percent == 12
+    assert (server / mmaps.RECORD_FILE).read_text(encoding="utf-8") == before
+    side = _sidecar(server)
+    assert side is not None and side["percent"] == 12 and side["map"] == 0
+    reread = mmaps.read_record(server)
+    assert reread is not None and reread.percent == 12, "what a later reader of the record sees"
+
+
+@pytest.mark.parametrize("hold", ["refused", "none-needed"])
+def test_the_part_of_a_poll_that_holds_nothing_can_reach_no_record_write(
+    server: Path, monkeypatch: pytest.MonkeyPatch, hold: str
+) -> None:
+    """Every state a poll can read, with the hold refused: nothing but the sidecar is written.
+
+    Mutation: let the read-only pass call `_write_record`, `_forget_record` or `_clear_output`."""
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("the record or the tiles were written without the hold")
+
     fake, clock = FakeMmapsDocker(), Clock()
     start(server, fake, clock)
     fake.say("12% [Map 000] Building tile [01,02]")
-    assert poll(server, fake, None, clock).percent == 12
-    assert record(server)["percent"] == 12
+    probe = Probe(server, refuse=_refusal() if hold == "refused" else None)
+    monkeypatch.setattr(mmaps, "_write_record", boom)
+    monkeypatch.setattr(mmaps, "_forget_record", boom)
+    monkeypatch.setattr(mmaps, "_clear_output", boom)
+    assert poll(server, fake, probe, clock).percent == 12  # running: progress only
+    assert probe.taken == []
+    if hold != "refused":
+        return
+    fake.finish(0, tiles=MIN_FILES)  # ended: a transition, refused
+    assert poll(server, fake, probe, clock).state == "running"
+    fake.vanish()  # gone: a transition, refused
+    assert poll(server, fake, probe, clock).state == "running"
 
 
-def test_a_progress_write_is_skipped_when_the_record_changed_since_it_was_read(
-    server: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("order", ["theirs-first", "ours-first"])
+def test_a_progress_write_at_either_side_of_a_recorded_done_leaves_the_done(
+    server: Path, monkeypatch: pytest.MonkeyPatch, order: str
 ) -> None:
-    """The re-read is the guard: a record that is no longer the one read is not written over.
+    """The progress write interleaved with A's held `done`, before it and after it.
 
-    Mutation: write `moved` without comparing the state, the finish stamp and the container id."""
+    Mutation: let the progress write go to the record."""
     fake, clock = FakeMmapsDocker(), Clock()
     start(server, fake, clock)
-    seen = mmaps.read_record(server)
-    assert seen is not None
-    moved = dataclasses.replace(seen, percent=40)
-    for changed in (
-        dataclasses.replace(seen, state="done", finished="2026-10-02T15:30:00.000000Z"),
-        dataclasses.replace(seen, container_id="somebody-else"),
-    ):
-        mmaps._write_record(server, changed)
-        mmaps._save_progress(mmaps.job_for(server, ENTRY, INSTALL_ID), seen, moved)
-        assert mmaps.read_record(server) == changed
-    mmaps._write_record(server, seen)
-    mmaps._save_progress(mmaps.job_for(server, ENTRY, INSTALL_ID), seen, moved)
-    assert record(server)["percent"] == 40
+    fake.say("12% [Map 000] Building tile [01,02]")
+    real = mmaps._write_progress
+    theirs = Clock()
+
+    def record_the_end() -> None:
+        fake.finish(0, tiles=MIN_FILES)
+        assert poll(server, fake, Probe(server), theirs).state == "done"
+
+    def write_progress(*args: Any, **kwargs: Any) -> None:
+        if order == "theirs-first":
+            record_the_end()
+            real(*args, **kwargs)
+        else:
+            real(*args, **kwargs)
+            record_the_end()
+
+    monkeypatch.setattr(mmaps, "_write_progress", write_progress)
+    poll(server, fake, Probe(server), clock)
+    monkeypatch.undo()
+    assert _state(server) == ("done", True)
+    after = poll(server, fake, Probe(server), clock)
+    assert after.state == "done" and after.percent == 100
+    reread = mmaps.read_record(server)
+    assert reread is not None and reread.state == "done" and reread.percent == 100
+
+
+def test_the_lost_container_sentence_still_says_how_far_it_had_got(server: Path) -> None:
+    """T245. Mutation: read the sidecar nowhere."""
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    poll(server, fake, None, clock)
+    fake.vanish()
+    lost = poll(server, fake, Probe(server), clock)
+    assert lost.state == "failed" and "it had reached 12 %" in lost.line()
+
+
+def test_the_stop_sentence_still_says_how_far_it_had_got(server: Path) -> None:
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    fake.write_tiles(3)
+    poll(server, fake, None, clock)
+    mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
+    stopped = poll(server, fake, None, clock)
+    assert stopped.state == "failed" and "it had reached 12 %" in stopped.line()
+
+
+def test_the_docker_unanswered_line_still_shows_the_last_percentage(server: Path) -> None:
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    poll(server, fake, None, clock)
+    fake.answers = False
+    quiet = poll(server, fake, None, clock)
+    assert quiet.docker_unanswered and "12 %" in quiet.line()
+
+
+def test_a_sidecar_from_an_older_run_is_ignored(server: Path) -> None:
+    """Mutation: take the sidecar's numbers without comparing the run (container id, start)."""
+    import json
+
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    saved = mmaps.read_record(server)
+    assert saved is not None
+    stale = {"container_id": "an-older-run", "started": saved.started, "percent": 77, "map": 530}
+    (server / mmaps.PROGRESS_FILE).write_text(json.dumps(stale), encoding="utf-8")
+    assert mmaps.read_record(server) == saved, "another run's container id"
+    stale = {
+        "container_id": saved.container_id,
+        "started": "2020-01-01T00:00:00.000000Z",
+        "percent": 77,
+    }
+    (server / mmaps.PROGRESS_FILE).write_text(json.dumps(stale), encoding="utf-8")
+    assert mmaps.read_record(server) == saved, "same container id, another start"
+    (server / mmaps.PROGRESS_FILE).write_text("{not json", encoding="utf-8")
+    assert mmaps.read_record(server) == saved, "unreadable, as if there were none"
+    assert poll(server, fake, None, clock).percent is None
+
+
+def test_a_transition_under_the_hold_takes_the_sidecar_away(server: Path) -> None:
+    """The record is written only under the hold, and writing it retires the sidecar.
+
+    Mutation: leave the sidecar where it is when the record is written or forgotten."""
+    fake, clock = FakeMmapsDocker(), Clock()
+    start(server, fake, clock)
+    fake.say("12% [Map 000] Building tile [01,02]")
+    poll(server, fake, None, clock)
+    assert _sidecar(server) is not None
+    fake.finish(0, tiles=MIN_FILES)
+    assert poll(server, fake, Probe(server), clock).state == "done"
+    assert _sidecar(server) is None
+    (server / mmaps.PROGRESS_FILE).write_text("{}", encoding="utf-8")
+    mmaps._forget_record(server)
+    assert _sidecar(server) is None
 
 
 def test_two_writers_of_the_record_at_once_never_tear_it_or_fail(
