@@ -34,7 +34,9 @@ import urllib.request
 
 MODEL = "claude-haiku-5-5"
 MAX_TOKENS = 2000
-MAX_INPUT_CHARS = 6000
+# Haiku reads this much easily; a release section runs to ~8000 characters and the
+# CHANGELOG section of v0.9.15 alone was 7559, so the old 6000 hid its end.
+MAX_INPUT_CHARS = 24000
 USER_AGENT = "Yulon-Discord-Notifier/1.0"
 TIMEOUT = 20
 
@@ -69,7 +71,7 @@ _KIND_RULES = {
         "sentences what problem or request it describes."
     ),
     "release": (
-        "The data is the CHANGELOG section and the merged pull request titles "
+        "The data is the merged pull request titles and the CHANGELOG section "
         "of a release. Write a short bullet list of 3-6 lines, each starting "
         "with '- ', saying what is new, fixed or changed for players and hosts."
     ),
@@ -692,10 +694,15 @@ def cmd_release(tag: str, only_release_channel: bool = False) -> int:
         log(f"Could not read CHANGELOG.md at {tag} ({type(exc).__name__}).")
     titles = _pr_titles_since(_previous_tag(tag), tag)
     raw = section or (release.get("body") or "").strip()
+    # The PR titles go first: if the section is ever longer than the cap, it is
+    # the changelog text that is cut, never the titles.
     text = raw
     if titles:
-        text += "\n\nPull requests merged since the last release:\n" + "\n".join(
-            f"- {t}" for t in titles
+        text = (
+            "Pull requests merged since the last release:\n"
+            + "\n".join(f"- {t}" for t in titles)
+            + "\n\nCHANGELOG section:\n"
+            + raw
         )
     summary = summarize("release", release.get("name") or tag, text)
     embed = {

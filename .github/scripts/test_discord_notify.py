@@ -339,7 +339,7 @@ def test_release_summary_input_has_changelog_and_pr_titles(world):
 
 
 def test_long_text_is_cut_and_the_prompt_says_so(world):
-    dn.summarize("pr", "Title", "Q" * 20000)
+    dn.summarize("pr", "Title", "Q" * (dn.MAX_INPUT_CHARS + 5000))
     sent = world.claude.user_text()
     assert sent.count("Q") == dn.MAX_INPUT_CHARS
     assert "cut" in sent.lower()
@@ -1197,3 +1197,57 @@ def test_the_footer_is_defused_too():
     )
     assert "@everyone" not in payload["embeds"][0]["footer"]["text"]
     assert "@here" not in payload["embeds"][0]["footer"]["text"]
+
+
+# --- T620: the release summary sees the whole section and the PR titles -------
+
+V0915_SECTION_CHARS = 7559  # the real v0.9.15 section was this long; the old cap was 6000
+
+
+def _long_release(world, body_chars: int, end_marker: str = "THE-LAST-LINE") -> None:
+    world.releases = [{"tag_name": "v1.1"}, {"tag_name": "v1.0"}]
+    world.compare_commits = ["Add the Y button (#12)", "Fix the Z crash (#13)"]
+    filler = "- " + "x" * 78 + "\n"
+    world.changelog = (
+        "## v1.1 - d\n"
+        + filler * (body_chars // len(filler))
+        + f"- {end_marker}\n"
+        + "## v1.0 - d\n- Old\n"
+    )
+
+
+def test_the_input_cap_holds_a_section_as_long_as_v0915s_with_room_to_spare():
+    assert dn.MAX_INPUT_CHARS >= 3 * V0915_SECTION_CHARS
+
+
+def test_release_summary_sees_the_end_of_a_section_longer_than_the_old_cap(world):
+    _long_release(world, V0915_SECTION_CHARS + 500)
+    assert dn.cmd_release("v1.1") == 0
+    sent = world.claude.user_text()
+    assert "THE-LAST-LINE" in sent
+    assert "Fix the Z crash (#13)" in sent
+    assert "cut" not in sent.lower()
+
+
+def test_release_pr_titles_come_before_the_changelog_text(world):
+    _long_release(world, 500)
+    assert dn.cmd_release("v1.1") == 0
+    sent = world.claude.user_text()
+    assert sent.index("Add the Y button (#12)") < sent.index("xxxx")
+
+
+def test_a_section_over_the_cap_is_cut_at_its_end_and_the_pr_titles_survive(world):
+    _long_release(world, dn.MAX_INPUT_CHARS * 2)
+    assert dn.cmd_release("v1.1") == 0
+    sent = world.claude.user_text()
+    assert "Add the Y button (#12)" in sent and "Fix the Z crash (#13)" in sent
+    assert "THE-LAST-LINE" not in sent
+    assert "cut" in sent.lower()
+
+
+def test_a_release_with_no_pr_titles_still_sends_the_section_alone(world):
+    world.releases = [{"tag_name": "v1.1"}]
+    world.changelog = "## v1.1 - d\n- Only line\n"
+    assert dn.cmd_release("v1.1") == 0
+    sent = world.claude.user_text()
+    assert "Only line" in sent and "Pull requests merged" not in sent
