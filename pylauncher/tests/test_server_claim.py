@@ -257,6 +257,12 @@ def test_the_folder_claim_is_unchanged(fake_docker: Path, server: Path) -> None:
 
 
 def test_two_threads_of_one_process_share_one_reservation(fake_docker: Path, server: Path) -> None:
+    """The reservation is per PROCESS, by design (plan section 3: "in-process rules stay exactly as
+    they are"): two worker threads of one Yu'lon share it, and T216's in-process holds
+    (`hold_the_server()`, `_IN_FLIGHT`) and each view's busy state keep them apart as before.
+    Codex's adversarial review called this a defect; it is the scope of the ticket, recorded
+    here so a change to it is made on purpose.
+    """
     seen: list[threading.Event] = []
     gate = threading.Barrier(2)
 
