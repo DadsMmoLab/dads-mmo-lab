@@ -31,7 +31,7 @@ from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.controller import Controller, StartRefused
 from yulon.ui import controller_view as controller_view_module
 
-pytestmark = pytest.mark.usefixtures("real_database_read")
+pytestmark = pytest.mark.usefixtures("real_database_read", "real_image_read")
 
 TORTOISE = load_catalog().get("wow-tortoise")
 SPEC = TORTOISE.container_spec()

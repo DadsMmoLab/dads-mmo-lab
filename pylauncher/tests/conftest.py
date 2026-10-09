@@ -1236,6 +1236,27 @@ def _no_unit_test_asks_whether_the_database_is_there(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(docker_module, "database_volume", lambda *_a, **_k: None)
 
 
+REAL_IMAGES_BUILT = docker_module.images_built
+"""The real `docker.images_built`, for the tests about Start's check of the built image (T627)."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_whether_the_image_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks Docker whether the built image is there (T627); a unit test hears nothing.
+
+    `None` is "Docker would not say", which lets the Start go on as it did before T627, so every
+    test written about something else keeps testing that. The tests about the question put the
+    real one back with `real_image_read`.
+    """
+    monkeypatch.setattr(docker_module, "images_built", lambda *_a, **_k: None)
+
+
+@pytest.fixture
+def real_image_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_whether_the_image_is_there` for a test about the question."""
+    monkeypatch.setattr(docker_module, "images_built", REAL_IMAGES_BUILT)
+
+
 @pytest.fixture
 def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo `_no_unit_test_asks_whether_the_database_is_there` for a test about the question."""

@@ -49,19 +49,25 @@ NEW_FOLDER_ADVICE = (
 )
 
 
+def _one_image_build(entry: CatalogEntry) -> bool:
+    """An entry whose build is ONE image, so that image is all of it (the CMaNGOS ones)."""
+    native = entry.install.native
+    return native is not None and len(native.images) == 1
+
+
 def retired_fork_tree(entry: CatalogEntry, server_dir: Path) -> bool:
     """Whether `server_dir` holds the retired fork's sources, which today's recipe cannot build.
 
-    CMaNGOS entries only (Tortoise is the one with a module source). True when a
+    One-image builds only, and not an entry whose own sources carry `mod-playerbots` (Tortoise is
+    the one with a module source). True when a
     module the catalog clones into the core's `modules/` is not there and the
     fork's `mod-playerbots` is. A folder with nothing in it, or with every module
     present, is not this.
     """
-    native = entry.install.native
-    if native is None or native.cmangos is None:
+    if not _one_image_build(entry):
         return False
     sources = entry.emulator.sources
-    if len(sources) < 2:
+    if len(sources) < 2 or any(source.dest.endswith(RETIRED_BOTS_MODULE) for source in sources):
         return False
     modules = server_dir / sources[0].dest / "modules"
     wanted = [server_dir / source.dest for source in sources[1:]]
@@ -106,10 +112,10 @@ def refusal_before_start(
     """The sentence for a Start whose one built image is not in Docker, else None (T627).
 
     `images_built` answers None when Docker would not say, which is not "gone": the
-    Start goes on. Only a CMaNGOS entry is asked (its one `server` image is the whole
+    Start goes on. Only a one-image entry is asked (that image is the whole
     build); a name this folder cannot work out is not asked either.
     """
-    if entry is None or entry.install.native is None or entry.install.native.cmangos is None:
+    if entry is None or not _one_image_build(entry):
         return None
     try:
         refs = composegen.built_image_refs(entry, server_dir)
