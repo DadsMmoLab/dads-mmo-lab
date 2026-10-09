@@ -63,7 +63,9 @@ UNBOUND_REV = "49b334be72d4f1837c712d4f9ec7bcca05742155"
 """The `mod-unbound` head that carries U1-U7 (the AzerothCore module layout, T556's fixes, the
 mana-regen patch) and M1 (the Mentor spawns), as DadsMmoLab/dads-mmo-lab says it. The five patch
 files here equal that head's `core-patch/` files byte for byte (checked when this was set)."""
-MOD_ALE_REV = "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+MOD_ALE_REV = "cead0cb2e58ec0f73676ba578eff26cddb79fc01"
+"""azerothcore/mod-ale master on 2026-10-09: one commit past #408 (54720135), which made its
+`Player:IsBot()` call `WorldSession::IsHeadless()`. Pinned, not tracked: it moves with the core."""
 DK_SENTENCE = "Death Knight can be your first class, not an added one."
 
 
@@ -124,10 +126,32 @@ def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> 
     assert probe is not None and reset is not None
 
 
-CORE_REV = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
-PLAYERBOTS_REV = "7bae1b5c58c76a0aa20381155edc08096d1485b2"
-"""Unbound's own core and bots pins. WotLK moved to f19a1879 / 037c0141 (T389); Unbound stays here
-by the owner's decision until T580, so these are literals and not wow-wotlk's."""
+CORE_REV = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
+PLAYERBOTS_REV = "037c01418b5d01506917a3db9b44fd56ac5f965c"
+"""Unbound's own core and bots pins. Unbound shipped on 7f12e89e / 7bae1b5c; T580 (2026-10-09)
+moved it to the pair T389 proved for wow-wotlk. They are literals, not read from wow-wotlk: the
+two entries move separately, and a move of Unbound's core re-checks its five patches."""
+
+BOT_SESSION_CALL: dict[tuple[str, str], str] = {
+    # mod-playerbots/azerothcore-wotlk src/server/game/Server/WorldSession.h
+    ("mod-playerbots/azerothcore-wotlk", "7f12e89ee5f467a50e62eba1d525eac7dc953d03"): "IsBot",
+    ("mod-playerbots/azerothcore-wotlk", "f19a18799a35f7c24bdcdc9ea399c601f166259b"): "IsHeadless",
+    # mod-playerbots src/Script/Playerbots.cpp
+    ("mod-playerbots/mod-playerbots", "7bae1b5c58c76a0aa20381155edc08096d1485b2"): "IsBot",
+    ("mod-playerbots/mod-playerbots", "037c01418b5d01506917a3db9b44fd56ac5f965c"): "IsHeadless",
+    # mod-ale src/LuaEngine/methods/PlayerMethods.h
+    ("azerothcore/mod-ale", "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"): "IsBot",
+    ("azerothcore/mod-ale", "cead0cb2e58ec0f73676ba578eff26cddb79fc01"): "IsHeadless",
+}
+"""The name of the core's "is this session a bot" call, as each source has it at a revision.
+
+Read with `git grep` on m910q 2026-10-09 (T580): the core declares `IsBot()` at 7f12e89e
+(WorldSession.h:1231) and `IsHeadless()` with no `IsBot()` at f19a1879 (WorldSession.h:1234,
+AzerothCore #27533); mod-playerbots calls `GetSession()->IsBot()` at 7bae1b5c (Playerbots.cpp:138)
+and `IsHeadless()` at 037c0141 (Playerbots.cpp:147); mod-ale calls `IsBot()` at 1cb86c96
+(PlayerMethods.h:5145) and `IsHeadless()` at cead0cb (PlayerMethods.h:5205, its #408). A core and
+a module that name it differently do not compile together (T389's user report). mod-unbound asks
+whichever the core has (its 456ce5b6), so it is not listed."""
 
 
 def test_it_builds_the_core_modules_ale_and_the_unbound_branch_at_pinned_commits() -> None:
@@ -142,6 +166,28 @@ def test_it_builds_the_core_modules_ale_and_the_unbound_branch_at_pinned_commits
     mine = sources["modules/mod-unbound"]
     assert (mine.repo, mine.branch, mine.rev) == (UNBOUND_REPO, UNBOUND_BRANCH, UNBOUND_REV)
     assert set(sources) == set(wotlk) | {"modules/mod-ale", "modules/mod-unbound"}
+
+
+def test_the_core_and_the_two_modules_that_call_it_agree_on_the_bot_call() -> None:
+    """T580: the three sources Unbound pins together name the bot call the same way.
+
+    A pin moved without reading the new revision fails here by name; so does a move of one of
+    the three alone onto a revision that spells the call the other way."""
+    sources = {s.repo: s.rev for s in unbound().emulator.sources}
+    said = {}
+    for repo in (
+        "mod-playerbots/azerothcore-wotlk",
+        "mod-playerbots/mod-playerbots",
+        "azerothcore/mod-ale",
+    ):
+        rev = sources[repo]
+        assert rev is not None, f"{repo} is not pinned"
+        assert (repo, rev) in BOT_SESSION_CALL, (
+            f"{repo} is pinned at {rev}, which was not read: git grep its bot call "
+            "(IsBot/IsHeadless) at that revision and add it to BOT_SESSION_CALL"
+        )
+        said[repo] = BOT_SESSION_CALL[(repo, rev)]
+    assert len(set(said.values())) == 1, f"the pins disagree on the bot call: {said}"
 
 
 def test_the_five_core_patches_are_applied_in_order_to_the_core() -> None:
@@ -288,8 +334,9 @@ def test_the_server_rates_card_reads_the_same_world_conf_and_keys_as_wotlk_at_it
 ) -> None:
     entry = unbound()
     wotlk_repo, wotlk_rev = server_rates.read_at(wotlk())  # type: ignore[misc]
+    # Unbound's own pin; since T580 it is wow-wotlk's again (the card cites the conf there).
     assert server_rates.read_at(entry) == (wotlk_repo, CORE_REV)
-    assert wotlk_rev != CORE_REV, "wow-wotlk moved on; Unbound keeps its own pin until T580"
+    assert wotlk_rev == CORE_REV
     assert server_rates.card_file(entry) == "env/dist/etc/worldserver.conf"
     assert list(server_rates.conf_keys(entry)) == list(server_rates.conf_keys(wotlk()))
     assert len(server_rates.conf_keys(entry)) == 11
