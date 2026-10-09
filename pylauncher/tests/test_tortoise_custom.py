@@ -849,6 +849,7 @@ def test_removing_a_module_and_installing_it_again_keeps_its_edited_conf_and_say
 
     assert conf.read_text(encoding="utf-8") == "[Again]\nOn = 0\n", "never replaced"
     assert any("etc/modules/mod-again.conf was already there" in line for line in again.skipped)
+    assert any("differs from this module's own" in line for line in again.skipped)
 
 
 def test_a_settings_file_nobody_owns_is_kept_and_said(tmp_path: Path) -> None:
@@ -863,6 +864,9 @@ def test_a_settings_file_nobody_owns_is_kept_and_said(tmp_path: Path) -> None:
     )
     assert (server / "etc" / "modules" / "mod-x.conf").read_text(encoding="utf-8") == "[Mine]\n"
     assert any("was already there" in line and "never replaced" in line for line in report.skipped)
+    assert any(
+        "differs from this module's own conf/mod-x.conf.dist" in line for line in report.skipped
+    )
 
 
 def test_a_recorded_module_whose_folder_is_gone_does_not_hold_its_settings_file(
@@ -882,3 +886,18 @@ def test_a_recorded_module_whose_folder_is_gone_does_not_hold_its_settings_file(
         tortoise_modules.derive_link("you/mod-second"), None
     )
     assert done.family == "module" and (server / "modules" / "mod-second").is_dir()
+
+
+def test_a_kept_settings_file_identical_to_the_modules_own_is_not_called_different(
+    tmp_path: Path,
+) -> None:
+    server, client = tmp_path / "server", tmp_path / "client"
+    (server / "etc" / "modules").mkdir(parents=True)
+    (server / "etc" / "modules" / "mod-x.conf").write_text("[X]\n", encoding="utf-8")
+    files = {"src/a.cpp": "int x;\n", "conf/mod-x.conf.dist": "[X]\n"}
+    applier = _tortoise_applier(server, _Clone(files), _Db(), client)
+    report = tortoise_modules.install_custom(applier)(
+        tortoise_modules.derive_link("you/mod-x"), None
+    )
+    said = [line for line in report.skipped if "was already there" in line]
+    assert len(said) == 1 and "differs" not in said[0] and "check it" not in said[0]

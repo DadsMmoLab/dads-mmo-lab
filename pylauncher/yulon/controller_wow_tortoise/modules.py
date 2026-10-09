@@ -207,9 +207,7 @@ def install_custom(applier: Applier) -> CustomInstall:
             # already owns is refused before this press records anything.
             found = custom.complete(derived, clone, shipped_addons=shipped_addons())
             _refuse_a_shared_conf(applier, found)
-            kept.extend(
-                conf.file for conf in found.conf if (applier.server_dir / conf.file).exists()
-            )
+            kept.extend(_kept_conf_lines(applier.server_dir, found, clone))
             finished.append(complete(derived, clone))
             return finished[-1]
 
@@ -228,15 +226,38 @@ def install_custom(applier: Applier) -> CustomInstall:
             raise
         left = (
             *(custom.unused(finished[-1]) if finished else ()),
-            *(
-                f"{file} was already there, so it was kept as it is (a settings file is never "
-                "replaced): the module reads what is in it, so check it is this module's"
-                for file in kept
-            ),
+            *kept,
         )
         return replace(report, skipped=(*report.skipped, *left)) if left else report
 
     return install
+
+
+def _kept_conf_lines(server_dir: Path, found: Manifest, clone: Path) -> list[str]:
+    """One skipped line per settings file that was already there and so is not written (T596).
+
+    A file an earlier Remove kept, or one made by hand, is read by the module as it is
+    (an install never replaces a settings file). When it differs from the module's own
+    template the line says so, because that is the case where it may be another
+    module's (Codex review): the player is told, not refused.
+    """
+    lines: list[str] = []
+    for conf in found.conf:
+        target = server_dir / conf.file
+        if not target.exists():
+            continue
+        template = clone / conf.template if conf.template else None
+        try:
+            same = template is not None and target.read_bytes() == template.read_bytes()
+        except OSError:
+            same = False
+        differs = "" if same else f" and differs from this module's own {conf.template}"
+        lines.append(
+            f"{conf.file} was already there{differs}, so it was kept as it is (a settings file "
+            "is never replaced): the module reads what is in it"
+            + ("" if same else ", so check it is this module's")
+        )
+    return lines
 
 
 def _refuse_a_shared_conf(applier: Applier, found: Manifest) -> None:
