@@ -98,6 +98,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def removable_images(built: Sequence[str]) -> tuple[str, ...]:
+    """Every image the uninstall removes for these built refs, with kept builds and rollbacks."""
+    return (
+        *built,
+        *(ref + PARKED_TAG_SUFFIX for ref in built),
+        *(ref + ROLLBACK_TAG_SUFFIX for ref in built),
+    )
+
+
 UNINSTALL_PRESS = "Uninstall the server"
 """The press name the uninstall's hold carries (T622)."""
 

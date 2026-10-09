@@ -273,3 +273,177 @@ def test_a_cards_revert_that_lands_later_still_redraws_that_card_from_the_file(
     card = view.tuning_panel.card("mod-npc-beastmaster")
     assert card.editors["BeastMaster.Enable"].control.isChecked() is True
     assert not card.edits()
+
+
+def test_a_refused_save_keeps_the_typing_through_the_next_redraw(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Before T622 a refusal kept the edits. Mutation: owe the card when the job is queued."""
+    view, queued = _queued_view(ps, tmp_path, _Hold(refuse=True))
+    card = _card_edit(view)
+    card.save_button.click()
+    _land(_writes(queued)[0])
+    assert HELD in view.tuning_report.toPlainText()
+    assert view.tuning_panel.card("mod-npc-beastmaster").edits(), "right after the refusal"
+    view.reload_tuning()  # any later redraw: Reload, another card's save
+    assert view.tuning_panel.card("mod-npc-beastmaster").edits(), "dropped by the next redraw"
+
+
+def test_a_save_that_fails_to_write_keeps_the_typing_through_the_next_redraw(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import tuning
+
+    def fail(*_a: Any, **_k: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tuning, "write", fail)
+    view, queued = _queued_view(ps, tmp_path, _Hold())
+    card = _card_edit(view)
+    card.save_button.click()
+    _land(_writes(queued)[0])
+    assert "disk full" in view.tuning_report.toPlainText()
+    view.reload_tuning()
+    assert view.tuning_panel.card("mod-npc-beastmaster").edits()
+
+
+# ---- the other presses that write the same files wait for a pending save (and the reverse)
+
+
+def _pending_save(ps: _Ps, tmp_path: Path) -> tuple[cv.ControllerView, list[Job]]:
+    view, queued = _queued_view(ps, tmp_path, _Hold())
+    object.__setattr__(view.services, "reset_settings", lambda *_a: None)
+    view._set_reset_button()
+    _a_backup_exists(view, tmp_path)
+    _press(view, "card_save")
+    assert view._tuning_writing and len(_writes(queued)) == 1
+    return view, queued
+
+
+def _reset_all(view: cv.ControllerView) -> None:
+    from tests.test_controller_view import TUNING_RESET_ALL, _menu_action
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+
+def _undo(view: cv.ControllerView) -> None:
+    view._undo_items = (object(),)  # type: ignore[assignment]
+    view.undo_last_reset()
+
+
+def _bot_count(view: cv.ControllerView) -> None:
+    view.apply_bot_count()
+
+
+def _time_zone(view: cv.ControllerView) -> None:
+    view.apply_time_zone()
+
+
+def _repair_files(view: cv.ControllerView) -> None:
+    view.repair_server_files()
+
+
+def _text_of(view: cv.ControllerView, which: str) -> str:
+    return {
+        "tuning": view.tuning_report.toPlainText,
+        "bots": view.bot_count_report.text,
+        "problem": view.problem_label.text,
+    }[which]()
+
+
+@pytest.mark.parametrize(
+    ("press", "where"),
+    [
+        (_reset_all, "tuning"),
+        (_undo, "tuning"),
+        (_repair_files, "problem"),
+    ],
+    ids=["reset", "undo", "repair-files"],
+)
+def test_a_press_that_writes_the_same_files_waits_for_a_pending_save(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: Any, where: str
+) -> None:
+    """Mutation: drop the `_tuning_writing` refusal from that press."""
+    from tests.test_controller_view import _reset_yes
+
+    view, queued = _pending_save(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    jobs = len(queued)
+    press(view)
+    assert _text_of(view, where) == cv.TUNING_WRITE_RUNNING or (
+        cv.TUNING_WRITE_RUNNING in _text_of(view, where)
+    )
+    assert len(queued) == jobs, "a second writer was handed to the runner"
+
+
+def test_the_bot_count_and_the_time_zone_wait_for_a_pending_save(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_controller_view import _reset_yes
+
+    view, queued = _pending_save(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    # Armed as a landed reading leaves them: the refusal must come from the pending save.
+    object.__setattr__(view.services, "bot_population", object())
+    view._bot_count_reading = type("R", (), {"problem": None})()  # type: ignore[assignment]
+    jobs = len(queued)
+    view.apply_bot_count()
+    assert view.bot_count_report.text() == cv.TUNING_WRITE_RUNNING
+    view._time_zone_reading = type("R", (), {"problem": None})()  # type: ignore[assignment]
+    view._time_zone_pending = False
+    view._chosen_time_zone = lambda: "UTC"  # type: ignore[method-assign]
+    view.apply_time_zone()
+    assert view.tuning_report.toPlainText() == cv.TUNING_WRITE_RUNNING
+    assert len(queued) == jobs
+
+
+@pytest.mark.parametrize("flag", ["_reset_running", "_bot_count_writing", "_time_zone_writing"])
+def test_a_save_waits_for_a_reset_a_bot_count_or_a_time_zone_write_that_is_running(
+    qapp: object, ps: _Ps, tmp_path: Path, flag: str
+) -> None:
+    """The other direction: those jobs write the same confs, and a save must not overlap them."""
+    view, queued = _queued_view(ps, tmp_path, _Hold())
+    setattr(view, flag, True)
+    _press(view, "card_save")
+    assert view.tuning_report.toPlainText() == cv.TUNING_WRITE_RUNNING
+    assert _writes(queued) == []
+    setattr(view, flag, False)
+    _press(view, "card_save")
+    assert len(_writes(queued)) == 1, "once it is over the save is taken"
+
+
+def test_those_presses_are_taken_again_once_the_save_has_landed(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_controller_view import _reset_yes
+
+    view, queued = _pending_save(ps, tmp_path)
+    _land(_writes(queued)[0])
+    _reset_yes(monkeypatch)
+    before = len(queued)
+    _reset_all(view)
+    assert len(queued) > before, "the reset was refused after the save had landed"
+
+
+def test_a_reset_whose_facts_land_after_a_save_began_is_not_run(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reset asks its question from facts a job reads; a save may begin meanwhile."""
+    from tests.test_controller_view import _reset_yes, _wotlk_server
+
+    _wotlk_server(tmp_path)
+    view, queued = _queued_view(ps, tmp_path, _Hold())
+    object.__setattr__(view.services, "reset_settings", lambda *_a: None)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.reset_to_default(("env/dist/etc/worldserver.conf",))
+    facts = [
+        j for j in queued if getattr(j[1], "__func__", None) is cv.ControllerView._press_facts_ready
+    ]
+    assert len(facts) == 1
+    _press(view, "card_save")
+    assert view._tuning_writing
+    jobs = len(queued)
+    _land(facts[0])
+    assert view.tuning_report.toPlainText() == cv.TUNING_WRITE_RUNNING
+    assert asked == [] and len(queued) == jobs, "the reset went ahead beside the save"

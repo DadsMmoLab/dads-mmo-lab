@@ -10,6 +10,7 @@ guard classifies every `ControllerServices` seam, so a new one has to say whethe
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
@@ -447,7 +448,10 @@ SEAMS: dict[str, tuple[str, str]] = {
         "held",
         f"{_SEAMS}.test_the_channels_account_is_not_created_while_another_yulon_holds_the_server",
     ),
-    "database_alone": ("lower", "starts the database only; a lifecycle command of docker.py"),
+    "database_alone": (
+        "open",
+        "T604: starts the database alone; held only where Backup/Restore call it, under theirs",
+    ),
     "bots": ("reads", "the Browse list"),
     "console_probe": ("reads", "asks the console"),
     "uninstall": (
@@ -473,7 +477,10 @@ SEAMS: dict[str, tuple[str, str]] = {
     ),
     "steam": ("outside", "Steam shortcuts, not the server"),
     "ready_after_start": ("reads", "waits for the world after a Start"),
-    "module_sql": ("lower", "an Applier route: the Applier holds"),
+    "module_sql": (
+        "held",
+        f"{_HERE}.test_apply_module_sql_is_run_under_the_hold_by_the_shared_assembly",
+    ),
     "module_updates": ("reads", "what could be updated"),
     "module_notes": ("reads", "notes"),
     "module_version": ("reads", "a version"),
@@ -514,12 +521,16 @@ SEAMS: dict[str, tuple[str, str]] = {
     "set_play_client_dir": ("outside", "the app's own state"),
     "other_server_dirs": ("reads", "a listing"),
     "pathfinding": ("open", "T623: the movement-map job writes data/mmaps and its record"),
-    "world_upkeep": ("lower", "re-extract and the world update are engine presses (reserved)"),
+    "world_upkeep": (
+        "lower",
+        "reextract and finish_world_reimport carry @_reserving "
+        "(test_the_world_update_and_the_map_extraction_are_presses_of_the_engine_that_reserve)",
+    ),
     "characters_withheld": ("reads", "a mapping of reasons"),
     "no_modules_note": ("reads", "a sentence"),
 }
 
-OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "pathfinding"}
+OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding"}
 """Pinned: closing one of these is an edit here, and a new one is a decision, not a drift."""
 
 
@@ -541,3 +552,151 @@ def test_every_held_seam_names_a_test_that_exists() -> None:
             continue
         module, _, test = where.rpartition(".")
         assert callable(getattr(importlib.import_module(module), test, None)), (name, where)
+
+
+# ------------------------------------------------------------ the uninstall's reservation image
+
+
+def _tried(state: Path) -> list[str]:
+    log = state / "claim-images.log"
+    return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+
+def _lay_images(state: Path, listed: list[str], ids: dict[str, str]) -> None:
+    (state / "images-listed").write_text("\n".join(listed) + "\n", encoding="utf-8")
+    known = state / "image-ids"
+    known.mkdir(exist_ok=True)
+    for ref, ident in ids.items():
+        (known / ref.replace("/", "_").replace(":", "_")).write_text(ident, encoding="utf-8")
+
+
+def _uninstall_refs(server: Path) -> tuple[str, ...]:
+    """What `Uninstaller` is built to remove, as the controller computes it (the real refs)."""
+    from yulon.catalog import composegen
+    from yulon.catalog.native import PARKED_TAG_SUFFIX, ROLLBACK_TAG_SUFFIX
+
+    built = composegen.built_image_refs(CATALOG_WOTLK, server)
+    return (
+        *built,
+        *(ref + PARKED_TAG_SUFFIX for ref in built),
+        *(ref + ROLLBACK_TAG_SUFFIX for ref in built),
+    )
+
+
+def test_an_uninstalls_reservation_does_not_run_from_an_image_the_uninstall_removes(
+    fake_docker: Path, server: Path
+) -> None:
+    """With no containers left a reservation could run from this install's own built image, and
+    `docker image rm` then refuses it. Mutation: ignore `avoid_images` in `_reservation_images`."""
+    refs = _uninstall_refs(server)
+    other = "yulon.local/some-other-install:native"
+    _lay_images(fake_docker, [*refs, other], {})
+    hold = _server_hold_with(server, refs)
+    with hold("Uninstall the server"):
+        pass
+    assert _tried(fake_docker)[0] == other, _tried(fake_docker)
+
+
+def test_an_image_the_uninstall_removes_is_avoided_by_id_too(
+    fake_docker: Path, server: Path
+) -> None:
+    """A container's `.Image` is an id: if it is the id of a ref about to go, it is not used."""
+    refs = _uninstall_refs(server)
+    other = "yulon.local/some-other-install:native"
+    _lay_images(fake_docker, [other], {refs[0]: "sha256:aaaa", other: "sha256:bbbb"})
+    (fake_docker / "images").mkdir(exist_ok=True)
+    spec = CATALOG_WOTLK.container_spec()
+    (fake_docker / "images" / spec.world).write_text("sha256:aaaa", encoding="utf-8")
+    (fake_docker / "images" / spec.db).write_text("sha256:cccc-db", encoding="utf-8")
+    # The database container's own (pulled) image is fine and first; remove it to test the world's.
+    (fake_docker / "images" / spec.db).unlink()
+    hold = _server_hold_with(server, refs)
+    with hold("Uninstall the server"):
+        pass
+    assert _tried(fake_docker)[0] == other, _tried(fake_docker)
+
+
+def test_when_only_the_installs_own_images_are_left_the_uninstall_is_still_reserved(
+    fake_docker: Path, server: Path
+) -> None:
+    """A broken install must still be removable: the last resort is its own image."""
+    refs = _uninstall_refs(server)
+    _lay_images(fake_docker, list(refs), {})
+    hold = _server_hold_with(server, refs)
+    with hold("Uninstall the server"):
+        pass
+    assert _tried(fake_docker)[0] in refs
+
+
+def _server_hold_with(server: Path, refs: tuple[str, ...]) -> Any:
+    from yulon.ui.controller_view import _server_hold_for
+
+    return _server_hold_for(
+        CATALOG_WOTLK,
+        server,
+        CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        avoid_images=refs,
+    )
+
+
+def test_every_uninstaller_hold_names_the_images_the_uninstall_removes() -> None:
+    """Mutation: build one `purge.Uninstaller(`'s hold without `avoid_images=`."""
+    path = Path(controller_view_module.__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("Uninstaller"):
+            hold = next((k.value for k in node.keywords if k.arg == "hold_server"), None)
+            assert hold is not None
+            found.append("avoid_images" in {k.arg for k in getattr(hold, "keywords", [])})
+    assert len(found) >= 3 and all(found), found
+
+
+# ------------------------------------------------------------------ the rows that said "lower"
+
+
+def test_apply_module_sql_is_run_under_the_hold_by_the_shared_assembly(
+    fake_docker: Path, server: Path
+) -> None:
+    """The importer's `compose run` is no Applier path. Mutation: pass `module_sql` unwrapped."""
+    ran: list[object] = []
+
+    def importer(output: Any) -> Any:
+        ran.append(output)
+        return "run"
+
+    services = controller_view_module._assemble(
+        CATALOG_WOTLK,
+        server,
+        client_dir=None,
+        wsl_distro=None,
+        controller=_Nothing(),  # type: ignore[arg-type]
+        sql=_Nothing(),  # type: ignore[arg-type]
+        send_console=lambda _c: None,  # type: ignore[arg-type,return-value]
+        create_account=lambda *_a: None,  # type: ignore[arg-type,return-value]
+        store=None,
+        applier=None,
+        backup=lambda: None,  # type: ignore[arg-type,return-value]
+        plan_restore=lambda *_a: None,  # type: ignore[arg-type,return-value]
+        restore=lambda _p: None,  # type: ignore[arg-type,return-value]
+        module_sql=importer,
+    )
+    assert services.module_sql is not None
+    assert services.module_sql(print) == "run" and ran == [print], "control: it runs unheld"
+    ran.clear()
+    theirs = _held_by_another_yulon(fake_docker, server)
+    try:
+        with pytest.raises(docker.ServerReserved, match="Apply module SQL"):
+            services.module_sql(print)
+    finally:
+        theirs.kill()
+    assert ran == []
+
+
+def test_the_world_update_and_the_map_extraction_are_presses_of_the_engine_that_reserve() -> None:
+    """`world_upkeep`'s two presses. Mutation: take `@_reserving` off `finish_world_reimport`."""
+    from yulon.catalog.families.trinitycore import TrinityCoreInstaller
+
+    for name in ("reextract", "finish_world_reimport"):
+        assert hasattr(getattr(TrinityCoreInstaller, name), "__wrapped__"), f"{name} is unreserved"

@@ -2740,6 +2740,7 @@ def _server_hold_for(
     *,
     wsl_distro: str | None,
     budget: float | None = None,
+    avoid_images: Sequence[str] = (),
 ) -> docker.BudgetedHold:
     """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
 
@@ -2751,7 +2752,13 @@ def _server_hold_for(
         press: str, *, budget: float | None = budget
     ) -> contextlib.AbstractContextManager[None]:
         return docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
+            server_dir,
+            press,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            label=entry.name,
+            budget=budget,
+            avoid_images=avoid_images,
         )
 
     return hold
@@ -2887,7 +2894,16 @@ def _assemble(
         # would all have to pass as None is a keyword that says nothing. What
         # the WotLK factory passes instead is spelled there, next to the
         # `import_service` it is conditional on.
-        module_sql=module_sql,
+        # T622: the importer's `compose run` writes the world database and is no Applier path.
+        module_sql=(
+            None
+            if module_sql is None
+            else _under_the_hold(
+                _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                "Apply module SQL",
+                module_sql,
+            )
+        ),
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
@@ -3410,7 +3426,14 @@ def _for_wotlk(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
-            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
@@ -3880,7 +3903,14 @@ def _for_vanilla(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
-            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
@@ -4052,7 +4082,14 @@ def _for_centurion(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
-            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         controller=centurion_controller.CenturionController(
             entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -7754,6 +7791,7 @@ class ControllerView(QWidget):
         # backup), and the tab is not read again until it lands (`reload_tuning`).
         self._tuning_writing = False
         self._tuning_write_put_back = False
+        self._tuning_write_card: tuple[str, str] | None = None
         self._tuning_reload_asked = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
@@ -14697,6 +14735,9 @@ class ControllerView(QWidget):
             or self._bot_count_writing
         ):
             return
+        if self._tuning_writing:  # the bot card's Save writes the same conf (T622)
+            self.bot_count_report.setText(TUNING_WRITE_RUNNING)
+            return
         n = self.bot_count_box.value()
         if not self._confirm(BOT_COUNT_TITLE, botpop.question(self.entry, reading, n)):
             return
@@ -14975,6 +15016,9 @@ class ControllerView(QWidget):
             or self._time_zone_pending
             or self._time_zone_writing
         ):
+            return
+        if self._tuning_writing:  # a Save writes the compose override too (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
             return
         if not self._confirm(TIME_ZONE_TITLE, server_time_zone.question(self.entry, reading, zone)):
             return
@@ -18950,7 +18994,6 @@ class ControllerView(QWidget):
             # A write is on the job runner (T622): the cards are drawn from the file when it has
             # landed, not from the half it has written, and the pressed card keeps its mark.
             self._tuning_reload_asked = True
-            self.tuning_panel.defer_pressed_card()
             return
         if self._waits_for_the_distro("tuning", self.reload_tuning):
             # A card's Save or Revert that led here still redraws as that card's (T190).
@@ -19330,6 +19373,9 @@ class ControllerView(QWidget):
         T170 `upstream` -- always goes first (cold review, round 2).
         """
         if self._busy:
+            return
+        if self._tuning_writing:  # it writes the confs and the compose files too (T622)
+            self.problem_label.setText(TUNING_WRITE_RUNNING)
             return
         if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
@@ -19715,6 +19761,9 @@ class ControllerView(QWidget):
         route = self.services.reset_settings
         if route is None or self._busy or not files:
             return
+        if self._tuning_writing:  # a Save or Revert writes these files now (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         chosen = tuple(files)
         # Owner decision 5: the keys installed modules keep in these files,
         # from this tab's OWN rows (`tuning.rows_for`), whose `file` is the
@@ -19781,6 +19830,9 @@ class ControllerView(QWidget):
         chosen, keys, modules = asking.files, asking.keys, asking.modules
         route = self.services.reset_settings
         if route is None or self._busy:
+            return
+        if self._tuning_writing:  # a Save began while the facts were read (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
             return
         facts = answer.facts
         if not self._confirm(
@@ -20042,8 +20094,18 @@ class ControllerView(QWidget):
         return keys
 
     def _tuning_write_refused(self) -> bool:
-        """Refuse a Save or Revert while an earlier one is still being written (T622)."""
-        if self._tuning_writing:
+        """Refuse a Save or Revert while a write to the same files is still going (T622).
+
+        An earlier Save or Revert, a Reset to default or its Undo, a bot count or a time zone:
+        all write the confs and the compose override, and inside one process the server hold is
+        shared, so only this keeps them from overlapping.
+        """
+        if (
+            self._tuning_writing
+            or self._reset_running
+            or self._bot_count_writing
+            or self._time_zone_writing
+        ):
             self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
             return True
         return False
@@ -20074,8 +20136,8 @@ class ControllerView(QWidget):
         self._tuning_write_put_back = put_back
         if put_back:
             self._put_back_running = True  # `run_restore()` refuses while this runs (T145)
-        # The card whose button was pressed keeps its mark through the redraw that lands later.
-        self.tuning_panel.defer_pressed_card()
+        # The card whose button was pressed: marked for the redraw only if the job changes the file.
+        self._tuning_write_card = self.tuning_panel.pressed_card()
         self._run(work, self._tuning_write_done, self._tuning_write_failed)
 
     def _tuning_write_ended(self) -> None:
@@ -20090,6 +20152,7 @@ class ControllerView(QWidget):
         self._tuning_write_ended()
         asked = self._tuning_reload_asked
         self._tuning_reload_asked = False
+        card, self._tuning_write_card = self._tuning_write_card, None
         if not isinstance(result, TuningWrite):
             return
         self.tuning_report.setPlainText(result.report)
@@ -20103,6 +20166,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(result.failed)
         if result.reopen:
             self.open_tuning_file(result.reopen)
+        if result.reload:
+            # The file changed: the pressed card is drawn from it, not from what was typed. A
+            # refusal or a failed write leaves the typing for the redraw that comes next.
+            self.tuning_panel.owe_redraw(card)
         if result.reload or asked:
             self.reload_tuning()
 
@@ -20111,6 +20178,7 @@ class ControllerView(QWidget):
         """Only a bug reaches here: a refusal or a failed write is a `TuningWrite`."""
         self._tuning_write_ended()
         self._tuning_reload_asked = False
+        self._tuning_write_card = None
         self.tuning_report.setPlainText(TUNING_WRITE_BROKE)
         self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
@@ -20271,6 +20339,9 @@ class ControllerView(QWidget):
         aiplayerbot.conf off on its worker (`_restore_with_the_bot_request`),
         the very file a put-back writes. Other games' restores write no conf.
         """
+        if self._tuning_writing:
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
         if self._busy:
             self.tuning_report.setPlainText(TUNING_PUT_BACK_WHILE_BUSY.format(press=press))
             return True
