@@ -54,8 +54,8 @@ import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from functools import lru_cache
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -199,9 +199,7 @@ def read_shelf(
     final: list[ShelfRow] = []
     for r in rows:
         reason = kept.get(r.name)
-        final.append(
-            replace(r, kept_because=reason, cannot_delete=_why_not(r, reason, refused))
-        )
+        final.append(replace(r, kept_because=reason, cannot_delete=_why_not(r, reason, refused)))
     final.sort(key=lambda r: (r.made_at, r.name), reverse=True)
     return Shelf(folder, tuple(final), refused, folder_id, game_id)
 
@@ -215,7 +213,9 @@ def _outside(folder: Path, server_dir: Path) -> str | None:
             f"what is in it and will not delete from it. {exc}"
         )
     except OSError as exc:
-        return f"Yu'lon could not look at the backups folder ({exc}), so it will not delete from it."
+        return (
+            f"Yu'lon could not look at the backups folder ({exc}), so it will not delete from it."
+        )
     return None
 
 
@@ -380,7 +380,9 @@ def _protections(
         latest = max(r.made_at for r in updates)
         for r in updates:
             if r.made_at == latest:
-                keep(r.name, "it is the copy the last update took, kept so the update can be undone.")
+                keep(
+                    r.name, "it is the copy the last update took, kept so the update can be undone."
+                )
 
     # 3. the restore marker
     record = maintenance.interrupted_restore(server_dir) if marker is _UNSET else marker
@@ -394,8 +396,7 @@ def _protections(
                 )
         else:
             named = {Path(str(record.backup)).name} | {  # type: ignore[attr-defined]
-                Path(str(p)).name
-                for p in record.safety_backup  # type: ignore[attr-defined]
+                Path(str(p)).name for p in record.safety_backup  # type: ignore[attr-defined]
             }
             for r in rows:
                 if r.name in named:
@@ -545,9 +546,13 @@ def carry_out(
 def _holder_refusal(holder: docker.ServerHolder, server_dir: Path) -> str:
     label = server_dir.name or "this server"
     if holder.ours and not holder.here and holder.live_here() is not True:
-        return forgetting.server_reservation_left(label, holder.name, forgetting.PRESS_DELETE_BACKUPS)
+        return forgetting.server_reservation_left(
+            label, holder.name, forgetting.PRESS_DELETE_BACKUPS
+        )
     if not holder.known:
-        return forgetting.server_reservation_unsaid(label, holder.name, forgetting.PRESS_DELETE_BACKUPS)
+        return forgetting.server_reservation_unsaid(
+            label, holder.name, forgetting.PRESS_DELETE_BACKUPS
+        )
     return forgetting.server_busy_elsewhere(
         label, holder.press, holder.since(), holder.who, forgetting.PRESS_DELETE_BACKUPS
     )
@@ -592,9 +597,7 @@ def _remove_under_the_lease(
             _remove_one(fresh, server_dir, by_name[name])
         except ShelfRefusal as exc:
             if done:
-                raise ShelfRefusal(
-                    f"{exc} Removed before that: {', '.join(done)}."
-                ) from exc
+                raise ShelfRefusal(f"{exc} Removed before that: {', '.join(done)}.") from exc
             raise
         done.append(name)
         freed += by_name[name].frees_bytes
@@ -613,7 +616,9 @@ def _remove_one(shelf: Shelf, server_dir: Path, row: ShelfRow) -> None:
         st = os.lstat(path)
         tuning.check_inside(path, server_dir)
     except (OSError, tuning.TuningError) as exc:
-        raise ShelfRefusal(f"{name} could not be looked at ({exc}), so it was not deleted.") from exc
+        raise ShelfRefusal(
+            f"{name} could not be looked at ({exc}), so it was not deleted."
+        ) from exc
     if (folder_st.st_dev, folder_st.st_ino) != shelf.folder_id:
         raise _changed()
     if identity_of(st) != row.identity or links.stat_is_link(st) or not stat.S_ISREG(st.st_mode):
@@ -705,7 +710,6 @@ def set_keep_setting(server_dir: Path, keep: int | None) -> None:
     temp = path.with_suffix(".json.yulon-tmp")
     temp.write_text(json.dumps({"keep": keep}), encoding="utf-8")
     os.replace(temp, path)
-
 
 
 # ------------------------------------------------------------- what the tab says

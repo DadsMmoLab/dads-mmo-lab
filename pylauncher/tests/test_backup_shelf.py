@@ -9,6 +9,7 @@ and a mutation in the commit log that proves the test fails without it.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from dataclasses import replace as dataclasses_replace
@@ -173,7 +174,9 @@ def test_the_game_a_backup_records_is_shown_and_an_unreadable_record_is_not_usab
     old = put(server, "20261001_100000", game=None)
     foreign = put(server, "20261002_100000", game="wow-tbc")
     bad = folder_of(server) / "20261003_100000_acore_world.sql"
-    bad.write_bytes(b"-- yulon-backup: game=\n" + BANNER + b"USE `acore_world`;\n-- Dump completed\n")
+    bad.write_bytes(
+        b"-- yulon-backup: game=\n" + BANNER + b"USE `acore_world`;\n-- Dump completed\n"
+    )
     found = shelf(server)
     assert row(found, old.name).game is None
     assert row(found, foreign.name).game == "wow-tbc"
@@ -280,9 +283,7 @@ def test_files_the_restore_marker_names_are_kept(server: Path) -> None:
         safety_backup=(named,),
         started_at="x",
     )
-    found = backup_shelf.read_shelf(
-        server, game_id=GAME, installed=NONE_INSTALLED, marker=marker
-    )
+    found = backup_shelf.read_shelf(server, game_id=GAME, installed=NONE_INSTALLED, marker=marker)
     assert row(found, named.name).kept_because
     assert row(found, source.name).kept_because
     assert row(found, other.name).kept_because is None
@@ -291,10 +292,13 @@ def test_files_the_restore_marker_names_are_kept(server: Path) -> None:
 def test_the_real_marker_file_is_read_when_none_is_given(server: Path) -> None:
     named = put(server, "20261001_100000", "acore_world", label="pre-restore")
     put(server, "20261009_100000", "acore_world")
-    maintenance.marker_path(server).write_text(
-        '{"backup": "", "databases": ["acore_world"], "safety_backup": ["%s"], "started_at": "x"}'
-        % named.as_posix()
-    )
+    marker = {
+        "backup": "",
+        "databases": ["acore_world"],
+        "safety_backup": [named.as_posix()],
+        "started_at": "x",
+    }
+    maintenance.marker_path(server).write_text(json.dumps(marker))
     assert row(shelf(server), named.name).kept_because
 
 
@@ -517,9 +521,7 @@ def test_another_yulon_holding_the_server_refuses_before_the_lease(
     assert old.exists()
 
 
-def test_a_leftover_reservation_refuses_with_the_remove_command(
-    server: Path, calls: Calls
-) -> None:
+def test_a_leftover_reservation_refuses_with_the_remove_command(server: Path, calls: Calls) -> None:
     old = put(server, "20261001_100000")
     put(server, "20261003_100000")
     plan = backup_shelf.plan_delete(shelf(server), old.name)
@@ -545,15 +547,11 @@ def test_the_real_lease_refuses_while_a_backup_holds_it(server: Path) -> None:
     plan = backup_shelf.plan_delete(shelf(server), old.name)
     with docker.maintenance_lease(server, "A backup of this server is running."):
         with pytest.raises(ShelfRefusal, match="backup of this server is running"):
-            backup_shelf.carry_out(
-                server, plan, game_id=GAME, installed=NONE_INSTALLED, spec=None
-            )
+            backup_shelf.carry_out(server, plan, game_id=GAME, installed=NONE_INSTALLED, spec=None)
     assert old.exists()
 
 
-def test_a_file_that_changed_since_the_plan_refuses_everything(
-    server: Path, calls: Calls
-) -> None:
+def test_a_file_that_changed_since_the_plan_refuses_everything(server: Path, calls: Calls) -> None:
     a = put(server, "20261001_100000", "acore_world")
     b = put(server, "20261002_100000", "acore_world")
     put(server, "20261009_100000", "acore_world")
@@ -595,9 +593,7 @@ def test_a_new_backup_that_changes_what_is_protected_refuses_the_cleanup(
     assert a.exists()
 
 
-def test_a_file_that_became_protected_since_the_plan_is_refused(
-    server: Path, calls: Calls
-) -> None:
+def test_a_file_that_became_protected_since_the_plan_is_refused(server: Path, calls: Calls) -> None:
     a = put(server, "20261001_100000", "acore_world")
     put(server, "20261009_100000", "acore_world")
     plan = backup_shelf.plan_delete(shelf(server), a.name)
@@ -706,15 +702,13 @@ def test_a_directory_with_a_backups_name_is_not_a_backup(server: Path) -> None:
 def test_a_file_the_platform_calls_a_link_is_not_listed(
     server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Windows reports a junction or WSL link as a plain entry; `links.stat_is_link` is the judge."""
+    """Windows shows a junction as a plain entry; `links.stat_is_link` is the judge."""
     put(server, "20261001_100000")
     monkeypatch.setattr(backup_shelf.links, "stat_is_link", lambda _st: True)
     assert shelf(server).rows == ()
 
 
-def test_a_new_backup_after_the_plan_refuses_the_whole_clean_up(
-    server: Path, calls: Calls
-) -> None:
+def test_a_new_backup_after_the_plan_refuses_the_whole_clean_up(server: Path, calls: Calls) -> None:
     """Every file named is still fine alone; the SET the rule selects is what moved."""
     a = put(server, "20261001_100000", "acore_world")
     b = put(server, "20261002_100000", "acore_world")
@@ -840,7 +834,9 @@ def test_the_keep_setting_is_stored_per_install_in_the_config_dir(
     assert backup_shelf.keep_setting(server) is None
 
 
-@pytest.mark.parametrize("junk", ["{not json", '{"keep": 0}', '{"keep": "3"}', '{"keep": 1.5}', "[]"])
+@pytest.mark.parametrize(
+    "junk", ["{not json", '{"keep": 0}', '{"keep": "3"}', '{"keep": 1.5}', "[]"]
+)
 def test_a_bad_keep_file_reads_as_off(
     server: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, junk: str
 ) -> None:
@@ -871,18 +867,18 @@ def test_keeping_fewer_than_one_is_refused(
         backup_shelf.set_keep_setting(server, 0)
 
 
-def test_retention_is_a_keep_rule_run_through_the_same_checks(
-    server: Path, calls: Calls
-) -> None:
+def test_retention_is_a_keep_rule_run_through_the_same_checks(server: Path, calls: Calls) -> None:
     a = put(server, "20261001_100000", "acore_world")
     b = put(server, "20261002_100000", "acore_world")
     c = put(server, "20261003_100000", "acore_world")
     done = backup_shelf.clean_up(
-        server, Rule(keep_newest=1), game_id=GAME, installed=NONE_INSTALLED, spec=object(),  # type: ignore[arg-type]
+        server,
+        Rule(keep_newest=1),
+        game_id=GAME,
+        installed=NONE_INSTALLED,
+        spec=object(),  # type: ignore[arg-type]
         now=NOW,
     )
     assert set(done.names) == {a.name, b.name}
     assert c.exists()
     assert calls.order[:2] == ["holder", "lease"]
-
-

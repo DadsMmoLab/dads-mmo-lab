@@ -69,7 +69,6 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import apply as apply_module
-from yulon import bot_population as botpop
 from yulon import (
     backup_shelf,
     botlist,
@@ -105,6 +104,7 @@ from yulon import (
     useraccounts,
     wsl,
 )
+from yulon import bot_population as botpop
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
@@ -15346,7 +15346,7 @@ class ControllerView(QWidget):
         self.clean_up_button.clicked.connect(self.clean_up_backups)
         self.delete_backup_button.setVisible(self.services.shelf is not None)
         self.clean_up_button.setVisible(self.services.shelf is not None)
-        self._shelf = None
+        self._shelf: backup_shelf.Shelf | None = None
         self._shelf_job = ""
         self._retain_after_backup = False
         actions.addWidget(self.plan_restore_button)
@@ -15467,7 +15467,9 @@ class ControllerView(QWidget):
             item = QListWidgetItem(f"{text}  \u00b7 kept" if r.kept_because else text)
             item.setData(Qt.ItemDataRole.UserRole, str(shelf.folder / r.name))
             item.setData(Qt.ItemDataRole.UserRole + 1, r.name)
-            item.setToolTip(f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip())
+            item.setToolTip(
+                f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip()
+            )
             if r.kept_because or r.cannot_delete:
                 item.setForeground(QColor(COLOR_TEXT_MUTED))
             self.backup_list.addItem(item)
@@ -15533,9 +15535,7 @@ class ControllerView(QWidget):
             "It is deleted for good: it does not go to the trash.",
         ]
         if row.read_only:
-            lines.append(
-                "It is marked read-only. Yu'lon will clear that mark to delete it."
-            )
+            lines.append("It is marked read-only. Yu'lon will clear that mark to delete it.")
         if not row.usable:
             lines.append(f"It cannot be restored: {row.problem}")
         if not ask_yes_no(self, "Delete this backup?", "\n\n".join(lines)):
@@ -15590,9 +15590,8 @@ class ControllerView(QWidget):
         if not isinstance(result, backup_shelf.Removed):
             return
         n = len(result.names)
-        lines = [
-            f"Deleted {n} file{'' if n == 1 else 's'}, freeing {backup_shelf.size_text(result.freed)}:"
-        ]
+        freed = backup_shelf.size_text(result.freed)
+        lines = [f"Deleted {n} file{'' if n == 1 else 's'}, freeing {freed}:"]
         lines += [f"  {name}" for name in result.names]
         self.maintenance_report.setPlainText("\n".join(lines))
 

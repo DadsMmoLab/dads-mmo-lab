@@ -45,7 +45,12 @@ def keep_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def make_view(
-    ps: _Ps, tmp_path: Path, made: _FakeMaintenance, monkeypatch: pytest.MonkeyPatch, *, seam: Any
+    ps: _Ps,  # noqa: F811
+    tmp_path: Path,
+    made: _FakeMaintenance,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    seam: Any,
 ) -> ControllerView:
     (tmp_path / "sql_scripts" / "backups").mkdir(parents=True, exist_ok=True)
     services = dataclasses.replace(_services(ps, tmp_path, [], made), shelf=seam)
@@ -314,9 +319,7 @@ def three_worlds(tmp_path: Path) -> list[Path]:
     return [put(tmp_path, f"2026100{d}_100000", "acore_world", pad=1024) for d in (1, 2, 3)]
 
 
-def test_the_clean_up_dialog_puts_the_total_on_the_button(
-    qapp: object, tmp_path: Path
-) -> None:
+def test_the_clean_up_dialog_puts_the_total_on_the_button(qapp: object, tmp_path: Path) -> None:
     files = three_worlds(tmp_path)
     shelf = backup_shelf.read_shelf(tmp_path, game_id=GAME, installed={})
     dialog = CleanUpDialog(shelf, keep_now=None)
@@ -340,7 +343,9 @@ def test_the_clean_up_dialog_puts_the_total_on_the_button(
 
 def test_the_dialog_never_offers_to_keep_nothing(qapp: object, tmp_path: Path) -> None:
     three_worlds(tmp_path)
-    dialog = CleanUpDialog(backup_shelf.read_shelf(tmp_path, game_id=GAME, installed={}), keep_now=None)
+    dialog = CleanUpDialog(
+        backup_shelf.read_shelf(tmp_path, game_id=GAME, installed={}), keep_now=None
+    )
     assert dialog.keep_spin.minimum() == 1
     dialog.deleteLater()
 
@@ -555,9 +560,7 @@ def test_a_failed_backup_does_not_leave_the_keep_armed_for_the_next_update_copy(
 _ = os
 
 
-def test_the_seam_retains_nothing_while_the_keep_is_off(
-    tmp_path: Path, keep_store: Path
-) -> None:
+def test_the_seam_retains_nothing_while_the_keep_is_off(tmp_path: Path, keep_store: Path) -> None:
     files = three_worlds(tmp_path)
     seam = backup_shelf.Seam(tmp_path, GAME)
     assert seam.retain() is None
