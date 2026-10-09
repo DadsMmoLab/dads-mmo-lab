@@ -8133,7 +8133,11 @@ def _claim_coming_up(
                     again=again,
                     labels=labels,
                     wsl_distro=wsl_distro,
-                    up_timeout=up_timeout,
+                    # What is left, not the whole again: the retry inside is part of the same
+                    # budget (T607 review).
+                    up_timeout=(
+                        None if up_timeout is None else max(0.05, deadline - time.monotonic())
+                    ),
                 )
             refused = _claim_refused(image, said or f"it exited {proc.returncode}")
             kind = (
@@ -8405,8 +8409,6 @@ class _Reservation:
     letting_go: threading.Event
     press: str
     count: int = 1
-    quick: bool = False
-    """Made under a budget (a Stop's): its release does not wait out a slow daemon."""
 
 
 _RESERVATIONS: dict[str, _Reservation] = {}
@@ -8559,16 +8561,20 @@ def _reservation_images(
 
 
 def _server_holder(
-    name: str, *, here: bool, ours: bool, known: bool, wsl_distro: str | None
+    name: str,
+    *,
+    here: bool,
+    ours: bool,
+    known: bool,
+    wsl_distro: str | None,
+    timeout: float = _CLAIM_ASK_TIMEOUT,
 ) -> ServerHolder:
     """What the daemon says about the reservation `name`: press, who, pid and when."""
     fmt = "{{.Id}}\t{{.Created}}" + "".join(
         f'\t{{{{index .Config.Labels "{key}"}}}}'
         for key in (PRESS_LABEL, WHO_LABEL, PID_LABEL, HOST_LABEL)
     )
-    proc = _docker(
-        ["inspect", name, "--format", fmt], timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro
-    )
+    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     parts = (
         [*proc.stdout.strip().split("\t"), "", "", "", "", "", ""][:6]
         if proc.returncode == 0
@@ -8689,20 +8695,47 @@ def server_claim(
     try:
         yield reservation.held
     finally:
-        with lock:
-            reservation.count -= 1
-            if not reservation.count:
-                del _RESERVATIONS[name]
-                reservation.letting_go.set()  # before the release ends the CLI
-                _release_claim(reservation.claim, quick=reservation.quick)
-                # Gone before the lock is let go: the next press of this process must not
-                # meet it dying (`_GONE_WAIT_SECONDS`).
-                _wait_gone(
-                    name,
-                    reservation.claim.wsl_distro,
-                    limit=_QUICK_RELEASE_SECONDS if reservation.quick else None,
-                    container=reservation.claim.container,
-                )
+        # The one letting go decides how long to wait, not the press that made it (T607 review):
+        # a Stop that outlives a Rebuild's reservation is the last out, and must not hang.
+        _let_go(name, lock, reservation, quick=budget_end is not None, patient=budget_end is None)
+
+
+def _let_go(
+    name: str, lock: threading.Lock, reservation: _Reservation, *, quick: bool, patient: bool
+) -> None:
+    """Drop one hold on `reservation`; the last one releases the container.
+
+    A `quick` release (a Stop's) gives each step `_QUICK_RELEASE_SECONDS`, and waits that long
+    for the per-name lock: if another job of this process holds it, the release is handed to a
+    background thread that waits as long as it takes, and the Stop goes on.
+    """
+    if patient:
+        lock.acquire()
+    elif not lock.acquire(timeout=_QUICK_RELEASE_SECONDS):
+        threading.Thread(
+            target=_let_go,
+            args=(name, lock, reservation),
+            kwargs={"quick": quick, "patient": True},
+            name="yulon-busy-release",
+            daemon=True,
+        ).start()
+        return
+    try:
+        reservation.count -= 1
+        if not reservation.count:
+            del _RESERVATIONS[name]
+            reservation.letting_go.set()  # before the release ends the CLI
+            _release_claim(reservation.claim, quick=quick)
+            # Gone before the lock is let go: the next press of this process must not
+            # meet it dying (`_GONE_WAIT_SECONDS`).
+            _wait_gone(
+                name,
+                reservation.claim.wsl_distro,
+                limit=_QUICK_RELEASE_SECONDS if quick else None,
+                container=reservation.claim.container,
+            )
+    finally:
+        lock.release()
 
 
 def _new_reservation(
@@ -8791,6 +8824,13 @@ def _new_reservation(
                 ours=claimed.ours if facts is None else facts.owner == owner_id(),
                 known=claimed.known or facts is not None,
                 wsl_distro=wsl_distro,
+                # Of what is left of a Stop's budget, but still long enough to read a holder
+                # for the question Stop asks.
+                timeout=(
+                    _CLAIM_ASK_TIMEOUT
+                    if budget_end is None
+                    else min(_CLAIM_ASK_TIMEOUT, max(0.3, budget_end - time.monotonic()))
+                ),
             )
             raise _refused(holder, label, this_press) from claimed
         except ClaimImageGone as gone:  # the next image of the chain
@@ -8815,7 +8855,7 @@ def _new_reservation(
         target=_watch_claim, args=(claim, lost, letting_go), name="yulon-busy-watch", daemon=True
     ).start()
     held = ClaimHeld(claim.name, lost, lambda: _claim_still_ours(claim))
-    return _Reservation(held, claim, letting_go, press, quick=budget_end is not None)
+    return _Reservation(held, claim, letting_go, press)
 
 
 def end_reservation(holder: ServerHolder, *, wsl_distro: str | None = None) -> bool:

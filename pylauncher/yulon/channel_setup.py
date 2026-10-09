@@ -1221,6 +1221,11 @@ def repair(
             create(state.account, password, gm_level)
         else:
             reset(state.account, password)
+    except ServerHeldElsewhere as held:
+        # Another Yu'lon is working on this server (T607): not a database that is down. The
+        # holder's own sentence is the reason, and nothing was changed.
+        logger.info(f"{game}: the reset of {state.account} waits: {held}")
+        return Refused(account=state.account, password=state.password, reason=str(held), plain=True)
     except Exception as exc:  # noqa: BLE001 - every way the write fails is the same sentence
         # The reset is a write to the auth database, and a database that is
         # not running is the ordinary reason it fails (T386). Nothing changed,
