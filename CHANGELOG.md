@@ -4,7 +4,6 @@ Every release of Yu'lon, newest first.
 
 <!--
 How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed" and "### Changed".
-- Making the support file no longer takes minutes when old logs are big: it keeps their newest lines and says what it cut.
 One plain line per change, at most about 120 characters, saying what the player gets. Bold button names are fine;
 ticket ids, proof, test notes, numbers as evidence, backticks and commands are not: they go in the pull request.
 New: Set a server's time zone on the Tuning tab with **Server time zone**.
@@ -27,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
 
 ### Fixed
+- Making the support file no longer takes minutes when old logs are big: it keeps their newest lines and says what it cut.
 - While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
