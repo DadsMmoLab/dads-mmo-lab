@@ -123,3 +123,49 @@ def test_a_refusal_when_nothing_moved_hides_no_version(tmp_path: Path) -> None:
     assert _git(server / "sql_scripts" / "clones" / "mobstats", "rev-parse", "HEAD") == first
     ledger = module_moves.read(server)
     assert ledger is None or "mod/mobstats" not in ledger.skipped
+
+
+def test_check_for_updates_hides_the_refused_version_and_shows_a_later_push(
+    tmp_path: Path,
+) -> None:
+    from yulon import apply as apply_module
+    from yulon.git import RunnerGit, is_behind
+
+    applier, origin, server = _rig(tmp_path)
+    _publish(origin, "11200", "v1")
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    _publish(origin, "20400", "v2")
+    with pytest.raises(CompletionRefused):
+        applier.update(_installed(applier))  # type: ignore[arg-type]
+
+    def row() -> apply_module.ModuleUpdate:
+        rows = apply_module.module_updates(server, git=RunnerGit(), kind="mod")
+        return next(r for r in rows if r.key == "mobstats")
+
+    hidden = row()
+    assert not is_behind(hidden.behind), "the refused version is not offered"
+    assert hidden.put_back_tip != ""
+
+    _publish(origin, "11200", "v3")  # the author moved on
+    assert is_behind(row().behind), "a later push is offered"
+
+
+def test_a_clone_edited_in_the_meantime_is_not_forced_back(tmp_path: Path) -> None:
+    """`restore_rev` is `--force`, so the put-back asks the clone is clean first (as put_back)."""
+    applier, origin, server = _rig(tmp_path)
+    _publish(origin, "11200", "v1")
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    second = _publish(origin, "20400", "v2")
+    clone = server / "sql_scripts" / "clones" / "mobstats"
+
+    def edits_then_refuses(manifest: object, folder: Path) -> object:
+        (folder / "MobStats.lua").write_text("-- my own work\n", encoding="utf-8")
+        raise CompletionRefused("Not any more.")
+
+    applier.recomplete = edits_then_refuses  # type: ignore[assignment]
+    with pytest.raises(CompletionRefused) as refused:
+        applier.update(_installed(applier))  # type: ignore[arg-type]
+
+    assert "did not put it back" in str(refused.value)
+    assert (clone / "MobStats.lua").read_text(encoding="utf-8") == "-- my own work\n"
+    assert _git(clone, "rev-parse", "HEAD") == second

@@ -683,6 +683,14 @@ class GuardedApplier(Applier):
         landed: str | None = reader(clone)
         if was_on is None or landed is None or landed == was_on:
             return ""
+        # `restore_rev` is `--force`, and "a caller must make its own check first"
+        # (`git.restore_rev`): the same one `put_back()` makes, here without a fetch.
+        if self._reset_cost(manifest, clone, history=False) is not None:
+            return (
+                f"Yu'lon did not put it back on the version it was on: files in "
+                f"{clone.relative_to(self.server_dir).as_posix()} were changed, and putting it "
+                "back would throw them away."
+            )
         try:
             self._reader("restore_rev", RevRestorer)(clone, was_on)
         except (ApplyError, OSError) as exc:
