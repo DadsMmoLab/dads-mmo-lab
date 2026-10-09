@@ -6934,10 +6934,7 @@ class Applier:
         return log.done, [*log.skipped, *log.client_left_behind]
 
     def _take_back(self, copy: ClientCopy, log: _Log) -> None:
-        """One recorded file: an add-on's by its own rule, else `_take_back_copy()`."""
-        if copy.addon:
-            self._take_back_addon_files([copy], log)
-            return
+        """One recorded `Data/` file (an add-on's go through `_take_back_addon_files()`)."""
         self._take_back_copy(copy, log)
 
     def _take_back_copy(

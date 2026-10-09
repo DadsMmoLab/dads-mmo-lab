@@ -212,11 +212,13 @@ def test_the_item_of_several_add_ons_is_named_for_the_one_they_all_start_with(
     tmp_path: Path,
 ) -> None:
     route, _addons = _route(tmp_path)
+    # `Bagnon_Config` at the top and `Bagnon` under `addons/`: the reader finds the
+    # top one first, so only the naming rule makes the item Bagnon.
     folder = _tree(
         tmp_path / "Bagnon-10.2",
         {
             "Bagnon_Config/Bagnon_Config.toc": "## Interface: 11200\n",
-            "Bagnon/Bagnon.toc": "## Interface: 11200\n",
+            "addons/Bagnon/Bagnon.toc": "## Interface: 11200\n",
         },
     )
 

@@ -258,6 +258,7 @@ def test_an_update_that_drops_a_file_takes_the_old_one_back(tmp_path: Path) -> N
     applier.install(manifest, folder=FolderSource(source, copy_folder))
 
     assert not (addon / "modules" / "bags.lua").exists()
+    assert not (addon / "modules").exists(), "taken back by the add-on rule: its folder too"
     assert (addon / "pfUI.toc").read_text() == newer["pfUI.toc"]
     copies = read_client_copies(applier.clone_dir(manifest), item_id=ITEM)
     assert {Path(c.path).name for c in copies} == {"pfUI.toc", "pfUI.lua"}
@@ -342,3 +343,61 @@ def test_a_receipt_whose_add_on_name_is_not_one_folder_is_left_alone(
     applier.remove(manifest)
 
     assert (addon / "pfUI.lua").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
+def test_a_folder_inside_the_add_on_that_became_a_link_is_not_deleted_through(
+    tmp_path: Path,
+) -> None:
+    """`modules/` swapped for a link to a copy elsewhere with the same bytes: nothing there goes."""
+    applier, manifest, addon = _install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "bags.lua").write_text(FILES["modules/bags.lua"], encoding="utf-8")
+    (addon / "modules" / "bags.lua").unlink()
+    (addon / "modules").rmdir()
+    (addon / "modules").symlink_to(elsewhere, target_is_directory=True)
+
+    report = applier.remove(manifest)
+
+    assert (elsewhere / "bags.lua").read_text() == FILES["modules/bags.lua"]
+    assert any(
+        line.endswith(
+            "(Yu'lon's record names it outside the pfUI add-on folder, so it left it " "alone)"
+        )
+        and "bags.lua" in line
+        for line in report.left_behind
+    ), report.left_behind
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
+def test_an_add_on_folder_that_is_a_link_now_is_left_whole(tmp_path: Path) -> None:
+    applier, manifest, addon = _install(tmp_path)
+    moved = tmp_path / "my-dev-copy"
+    addon.rename(moved)
+    addon.symlink_to(moved, target_is_directory=True)
+
+    report = applier.remove(manifest)
+
+    assert (moved / "pfUI.lua").is_file() and (moved / "modules" / "bags.lua").is_file()
+    assert (
+        f"the pfUI add-on folder in {addon.parent} (it is a link to another place now, so "
+        "Yu'lon took nothing back through it)"
+    ) in report.left_behind
+
+
+def test_when_the_other_servers_cannot_be_read_every_file_stays(tmp_path: Path) -> None:
+    applier, manifest, addon = _install(tmp_path)
+
+    def unreadable() -> tuple[Path, ...]:
+        raise OSError("state.json could not be read")
+
+    applier.other_server_dirs = unreadable
+
+    report = applier.remove(manifest)
+
+    assert (addon / "pfUI.lua").is_file()
+    assert (
+        f"the pfUI add-on folder in {addon.parent} (Yu'lon could not read whether another "
+        "server also installed it into this game client, so it left it alone)"
+    ) in report.left_behind

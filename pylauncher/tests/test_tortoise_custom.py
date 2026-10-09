@@ -1128,3 +1128,17 @@ def test_an_outside_add_on_through_the_tortoise_box_is_noted_and_taken_back_by_r
     assert not addon.exists()
     assert f"took back 2 files of the OldBars add-on from {addon}" in removed.done
     assert saved.read_text(encoding="utf-8") == "OldBarsDB = {}\n"
+
+
+def test_a_tortoise_add_on_carrying_a_program_is_refused(tmp_path: Path) -> None:
+    """The zip route's checks hold for an add-on cloned or copied too: it lands in the client."""
+    clone = _tree(tmp_path / "c", {"Bars/Bars.toc": "## Interface: 11200\n", "Bars/x.dll": "MZ"})
+    sentence = _refused_completion(_link("you/bars"), clone)
+    assert sentence.startswith("x.dll is a program file (a .dll file)")
+
+
+def test_reading_an_item_again_does_not_say_its_notes_twice(tmp_path: Path) -> None:
+    clone = _tree(tmp_path / "c", {"Old.toc": "## Interface: 11100\n"})
+    once = _complete(_link("you/old"), clone)
+    twice = _complete(once, clone)
+    assert len(custom.addon_notes(twice)) == 1
