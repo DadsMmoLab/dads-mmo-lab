@@ -564,9 +564,7 @@ def _reserved_for(
     with contextlib.ExitStack() as reserved:
         try:
             reserved.enter_context(
-                server_claim(
-                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=label
-                )
+                server_claim(server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=label)
             )
         except ServerReservationUnavailable as exc:
             if not exc.moot:
