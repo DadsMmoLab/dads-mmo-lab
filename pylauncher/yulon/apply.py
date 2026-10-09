@@ -31,6 +31,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -1086,20 +1087,55 @@ it back or names it again. A list of `{"item", "addon", "target", "aside"}`, ato
 """
 
 
+_ADDON_ASIDES_LOCK = threading.RLock()
+"""Serialises every read-change-write of `ADDON_ASIDES_FILE` in this process (round 3).
+
+Two presses of one server in two processes are not covered here: that is T568's
+server hold, which this branch does not carry yet (T613 ticket, combined-branch
+follow-up)."""
+
+
 def read_addon_asides(server_dir: Path) -> list[dict[str, str]]:
     """The noted asides of `server_dir`; `[]` for no file or one that will not read."""
+    return _read_addon_asides_checked(server_dir)[0]
+
+
+def _read_addon_asides_checked(server_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """The noted asides, and one sentence per entry left out because it is not Yu'lon's shape.
+
+    An entry's `addon` must be one folder name (`_one_folder_name`): the put-back
+    renames onto `Interface/AddOns/<addon>`, and `/elsewhere/pfUI` or `../../pfUI`
+    there is a path out of the client (round 3).
+    """
     try:
         raw = json.loads((server_dir / ADDON_ASIDES_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        return [], []
     keys = ("item", "addon", "target", "aside")
     if not isinstance(raw, list):
-        return []
-    return [
-        {k: entry[k] for k in keys}
-        for entry in raw
-        if isinstance(entry, dict) and all(isinstance(entry.get(k), str) for k in keys)
-    ]
+        return [], []
+    good: list[dict[str, str]] = []
+    bad: list[str] = []
+    for entry in raw:
+        if not (isinstance(entry, dict) and all(isinstance(entry.get(k), str) for k in keys)):
+            continue
+        if not _one_folder_name(entry["addon"]):
+            bad.append(
+                f"{entry['aside']} (Yu'lon's note beside the server names the add-on folder "
+                f"{entry['addon']!r} for it, which is not one folder in Interface/AddOns, so "
+                "Yu'lon left it alone)"
+            )
+            continue
+        good.append({k: entry[k] for k in keys})
+    return good, bad
+
+
+def _add_addon_aside(server_dir: Path, entry: Mapping[str, str]) -> list[dict[str, str]]:
+    """Note one more aside, under the lock; the entries as they were before, to undo with."""
+    with _ADDON_ASIDES_LOCK:
+        noted = read_addon_asides(server_dir)
+        _write_addon_asides(server_dir, [*noted, dict(entry)])
+        return noted
 
 
 def _write_addon_asides(server_dir: Path, entries: Sequence[Mapping[str, str]]) -> None:
@@ -6665,18 +6701,16 @@ class Applier:
         log.current_copies[key] = ClientCopy(
             step=step.src, path=key, sha256="", aside=str(aside), addon=target.name, folder=True
         )
-        noted = read_addon_asides(self.server_dir)
         note = {"item": item_id, "addon": target.name, "target": key, "aside": str(aside)}
+        noted: list[dict[str, str]] | None = None
         try:
             log.persist(self._claim_copies(log))
-            _write_addon_asides(self.server_dir, [*noted, note])
+            noted = _add_addon_aside(self.server_dir, note)
             os.rename(target, aside)
         except BaseException:
             self._unplan(log, key, None)
-            try:
-                _write_addon_asides(self.server_dir, noted)
-            except OSError as exc:
-                logger.warning(f"could not take back the note of {aside}: {exc}")
+            if noted is not None:
+                self._forget_addon_aside(note["aside"])
             raise
         log.new_asides[key] = str(aside)
         log.done.append(
@@ -7285,7 +7319,8 @@ class Applier:
         if addons:
             # Every item goes, so only another server's receipt keeps a file.
             self._take_back_addon_files(addons, log, None)
-        self._put_players_folders_back(addons, log, item_id=None)
+        # The server folder and its note go right after: name the paths, promise no note.
+        self._put_players_folders_back(addons, log, item_id=None, noting=False)
         if self.client_dir is not None or dests:
             self._orphans_back(dests, log)
         return log.done, [*log.skipped, *log.client_left_behind]
@@ -7516,6 +7551,7 @@ class Applier:
         *,
         item_id: str | None,
         keep: Iterable[str] = (),
+        noting: bool = True,
     ) -> None:
         """Every player's add-on folder set aside for this item: put back, or named and noted.
 
@@ -7526,9 +7562,35 @@ class Applier:
         which outlives the clone. An add-on name in `keep` is still being written by this
         item and is left aside. One put back, or one gone, leaves the note; one that
         cannot be (no client folder, its name taken) is named with its full path and its
-        note stays, so a later Remove can do it.
+        note stays, so a later Remove can do it. `noting=False` (Uninstall, which deletes
+        the server folder and the note with it) names the path and promises no note.
         """
-        noted = read_addon_asides(self.server_dir)
+        with _ADDON_ASIDES_LOCK:
+            self._put_players_folders_back_locked(
+                copies, log, item_id=item_id, keep=keep, noting=noting
+            )
+
+    def _forget_addon_aside(self, aside: str) -> None:
+        """Drop one aside's note, under the lock; logged when it cannot be."""
+        with _ADDON_ASIDES_LOCK:
+            noted = read_addon_asides(self.server_dir)
+            left = [e for e in noted if _path_key(Path(e["aside"])) != _path_key(Path(aside))]
+            try:
+                _write_addon_asides(self.server_dir, left)
+            except OSError as exc:
+                logger.warning(f"could not take back the note of {aside}: {exc}")
+
+    def _put_players_folders_back_locked(
+        self,
+        copies: Iterable[ClientCopy],
+        log: _Log,
+        *,
+        item_id: str | None,
+        keep: Iterable[str],
+        noting: bool,
+    ) -> None:
+        noted, untrusted = _read_addon_asides_checked(self.server_dir)
+        log.client_left_behind.extend(untrusted)
         wanted: dict[str, tuple[str, str, str]] = {}
         for copy in copies:
             if copy.folder:
@@ -7543,7 +7605,7 @@ class Applier:
         for key, (addon, aside, _item) in wanted.items():
             if addon.casefold() in keep_keys:
                 continue
-            if self._put_the_players_folder_back(addon, aside, log):
+            if self._put_the_players_folder_back(addon, aside, log, noting=noting):
                 done.add(key)
         left = [e for e in noted if _path_key(Path(e["aside"])) not in done]
         known = {_path_key(Path(e["aside"])) for e in noted}
@@ -7558,16 +7620,28 @@ class Applier:
             except OSError as exc:
                 logger.warning(f"could not rewrite {ADDON_ASIDES_FILE}: {exc}")
 
-    def _put_the_players_folder_back(self, addon: str, aside_raw: str, log: _Log) -> bool:
+    def _put_the_players_folder_back(
+        self, addon: str, aside_raw: str, log: _Log, *, noting: bool = True
+    ) -> bool:
         """One aside back under its name, or named; True when nothing is left to note."""
         aside = self._here_str(aside_raw)
         moved = Path(aside)
-        note = f"Yu'lon keeps a note of it in {self.server_dir / ADDON_ASIDES_FILE}"
+        note = (
+            f"; Yu'lon keeps a note of it in {self.server_dir / ADDON_ASIDES_FILE}"
+            if noting
+            else ""
+        )
+        if not _one_folder_name(addon):
+            log.client_left_behind.append(
+                f"{aside_raw} (Yu'lon's record names the add-on folder {addon!r} for it, which "
+                "is not one folder in Interface/AddOns, so Yu'lon left it alone)"
+            )
+            return True
         if self.client_dir is None:
             log.client_left_behind.append(
                 f"your own {addon} add-on, which Yu'lon set aside as {aside_raw} when it "
                 "installed this (no game client folder is set here now, so Yu'lon could not "
-                f"reach it); {note}; rename it back to {addon} when you want it again"
+                f"reach it){note}; rename it back to {addon} when you want it again"
             )
             return False
         addons = self._addons_dir()
@@ -7595,16 +7669,27 @@ class Applier:
         if os.path.lexists(folder):
             log.client_left_behind.append(
                 f"your own {folder.name} add-on, which Yu'lon set aside as {moved} when it "
-                f"installed this ({folder.name} is there again); {note}; rename it back to "
+                f"installed this ({folder.name} is there again){note}; rename it back to "
                 f"{folder.name} when you want it again"
             )
             return False
+        real_addons = _path_key(Path(os.path.realpath(addons)))
+        if (
+            _path_key(Path(os.path.realpath(folder.parent))) != real_addons
+            or _path_key(Path(os.path.realpath(moved.parent))) != real_addons
+        ):
+            # Belt (round 3): the name checks above already keep both ends in AddOns.
+            log.client_left_behind.append(
+                f"{moved} (it or its add-on's name is not in {addons} itself, so Yu'lon did "
+                "not move it)"
+            )
+            return True
         try:
             os.rename(moved, folder)
         except OSError as exc:
             log.client_left_behind.append(
                 f"your own {folder.name} add-on, which Yu'lon set aside as {moved} when it "
-                f"installed this (it could not be put back: {exc}); {note}; rename it back to "
+                f"installed this (it could not be put back: {exc}){note}; rename it back to "
                 f"{folder.name} when you want it again"
             )
             return False

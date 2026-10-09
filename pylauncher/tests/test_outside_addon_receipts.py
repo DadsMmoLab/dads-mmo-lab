@@ -1010,3 +1010,98 @@ def test_an_update_that_drops_one_of_two_add_ons_puts_back_only_that_ones_folder
     assert (addons / "pfUI.yulon-addon-old" / "mine.lua").read_text() == "-- my pfUI\n"
     assert not any("pfUI.yulon-addon-old" in line for line in updated.skipped), updated.skipped
     assert [n["addon"] for n in _noted(server)] == ["pfUI"]
+
+
+# ------------------------------------------------------------------ round 3 (14eab2c6)
+
+
+@pytest.mark.parametrize("bad", ["elsewhere", "../../pfUI", ""])
+def test_a_tampered_notes_add_on_name_never_moves_the_folder_out_of_add_ons(
+    tmp_path: Path, bad: str
+) -> None:
+    """The reviewer's F: `addons / "/elsewhere/pfUI"` is `/elsewhere/pfUI`."""
+    import shutil
+
+    applier, manifest, _own, aside = _replaced(tmp_path)
+    outside = tmp_path / "elsewhere" / "pfUI"
+    outside.parent.mkdir()
+    name = str(outside) if bad == "elsewhere" else bad
+    notes = _noted(applier.server_dir)
+    notes[0]["addon"] = name
+    (applier.server_dir / ADDON_ASIDES_FILE).write_text(json.dumps(notes), encoding="utf-8")
+    shutil.rmtree(applier.clone_dir(manifest))  # only the note speaks now
+
+    _done, left = applier.take_back_everything()
+
+    assert not outside.exists(), "moved out of Interface/AddOns by a tampered note"
+    assert aside.is_dir() and (aside / "pfUI.lua").read_text() == MINE
+    assert any(
+        "is not one folder in Interface/AddOns, so Yu'lon left it alone" in line for line in left
+    ), left
+
+
+def test_read_addon_asides_drops_an_entry_whose_add_on_is_not_one_folder(tmp_path: Path) -> None:
+    from yulon.apply import read_addon_asides
+
+    good = {
+        "item": "pfui",
+        "addon": "pfUI",
+        "target": "/c/pfUI",
+        "aside": "/c/pfUI.yulon-addon-old",
+    }
+    (tmp_path / ADDON_ASIDES_FILE).write_text(
+        json.dumps([good, {**good, "addon": "../x"}, {**good, "addon": "/abs"}]), encoding="utf-8"
+    )
+
+    assert read_addon_asides(tmp_path) == [good]
+
+
+def test_at_uninstall_a_kept_aside_is_named_by_its_path_and_no_note_is_promised(
+    tmp_path: Path,
+) -> None:
+    """The server folder, note and all, is deleted right after: the path is what is left."""
+    applier, _manifest_, own, aside = _replaced(tmp_path)
+    (own / "player-new.lua").write_text("x")  # keeps the name taken
+
+    _done, left = applier.take_back_everything()
+
+    assert aside.is_dir()
+    lines = [line for line in left if str(aside) in line]
+    assert lines and not any("keeps a note" in line for line in lines), left
+
+
+def test_two_threads_noting_asides_lose_neither(tmp_path: Path) -> None:
+    """The note is read, changed and written whole: one module lock serialises that."""
+    import threading
+
+    from yulon import apply as apply_module
+
+    server = tmp_path / "server"
+    server.mkdir()
+    real = apply_module._write_addon_asides
+    gate = threading.Barrier(2, timeout=1)
+
+    def slow(server_dir: Path, entries: object) -> None:
+        try:
+            gate.wait()
+        except threading.BrokenBarrierError:
+            pass
+        real(server_dir, entries)  # type: ignore[arg-type]
+
+    apply_module._write_addon_asides = slow  # type: ignore[assignment]
+    try:
+        threads = [
+            threading.Thread(
+                target=apply_module._add_addon_aside,
+                args=(server, {"item": n, "addon": n, "target": f"/c/{n}", "aside": f"/c/{n}.a"}),
+            )
+            for n in ("one", "two")
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        apply_module._write_addon_asides = real  # type: ignore[assignment]
+
+    assert sorted(e["item"] for e in apply_module.read_addon_asides(server)) == ["one", "two"]

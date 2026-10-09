@@ -2896,7 +2896,9 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T613 re-review. Lists the client's `Interface/AddOns` to find the add-on's name in the "
         "case it has on disk, before putting the player's own folder back from its recorded "
         "aside. It decides only whether that name is free; the rename is only from an aside "
-        "beside it with Yu'lon's aside name, never a link"
+        "beside it with Yu'lon's aside name, never a link, and only ONTO `Interface/AddOns/"
+        "<one folder name>`: a note or claim naming the add-on `/elsewhere/x` or `../x` is "
+        "refused, and both ends' real parents must be that AddOns folder (round 3)"
     ),
     ("apply.py", "_holds_more_than"): (
         "T613 PR-2. Walks an outside add-on's folder after its Remove (`links.walk`, never "
