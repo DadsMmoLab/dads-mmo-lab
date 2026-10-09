@@ -264,7 +264,6 @@ BETWEEN_STEPS = [
     ("install", "_sql", 1, "_conf"),
     ("install", "_conf", 1, "_patches"),
     ("install", "_sql", 2, "_client"),
-    ("install", "_dbc", 1, "_finish_claim"),
     ("configure", "_refuse_checkout_links", 1, "_patches"),
     ("configure", "_sql", 1, "_conf"),
     ("remove", "_refuse_checkout_links", 1, "_patches"),
@@ -294,3 +293,16 @@ def test_each_step_of_an_action_checks_the_hold_before_it_runs(
         assert applier.clone_dir(manifest).is_dir(), "the clone was deleted after the loss"
     else:
         assert target not in calls[positions[nth - 1] + 1 :], calls
+
+
+def test_a_loss_after_the_last_step_does_not_leave_a_complete_install_unfinished(
+    tmp_path: Path,
+) -> None:
+    """Every file is written by the time the claim is finished: stopping then would only mark a
+    complete install as not finished (review of the T607 rework)."""
+    spy = _Spy()
+    applier = _applier(tmp_path, spy, NO_SQL)
+    manifest = parse_manifest(NO_SQL)
+    calls = _lose_after(applier, spy, "_dbc", 1)
+    applier.install(manifest)  # does not raise
+    assert "_finish_claim" in calls
