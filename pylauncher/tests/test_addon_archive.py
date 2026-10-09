@@ -634,22 +634,43 @@ def test_a_short_body_is_refused(_cache: Path) -> None:
 def test_a_download_needs_room_for_its_declared_size(
     _cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(client_packs, "_free_bytes", lambda _folder: 1)
+    """Only the download folder's drive is short, so the unpack's own check cannot answer."""
+    downloads = _cache / "addons" / "downloads"
+    monkeypatch.setattr(
+        client_packs, "_free_bytes", lambda folder: 1 if downloads in folder.parents else 10**12
+    )
+    response = _Response(_zip_bytes(GOOD))
 
-    said = _refusal(lambda: stage_link(ARCHIVE, opener=_Opener(_Response(_zip_bytes(GOOD)))))
+    said = _refusal(lambda: stage_link(ARCHIVE, opener=_Opener(response)))
 
-    assert "of free space in" in said
+    assert said.startswith("master.zip needs ") and f"of free space in {downloads}" in said
+    assert response.reads == 0
     assert _left(_cache) == []
 
 
 def test_a_cancelled_download_leaves_nothing(_cache: Path) -> None:
-    said = _refusal(
-        lambda: stage_link(
-            ARCHIVE, opener=_Opener(_Response(_zip_bytes(GOOD))), cancelled=lambda: True
-        )
-    )
+    response = _Response(_zip_bytes(GOOD))
 
-    assert "was cancelled" in said
+    with pytest.raises(addon_archive.AddonCancelled) as caught:
+        stage_link(ARCHIVE, opener=_Opener(response), cancelled=lambda: True)
+
+    assert str(caught.value) == "The download of master.zip was cancelled." + NOTHING
+    assert response.reads == 0
+    assert _left(_cache) == []
+
+
+def test_a_cancelled_unpack_leaves_nothing_and_is_the_players_stop(
+    tmp_path: Path, _cache: Path
+) -> None:
+    from yulon.after_stop import StopTookEffect
+
+    path = _zip(tmp_path / "a.zip", GOOD)
+
+    with pytest.raises(addon_archive.AddonCancelled) as caught:
+        stage_zip(path, cancelled=lambda: True)
+
+    assert str(caught.value) == "Unpacking a.zip was cancelled." + NOTHING
+    assert isinstance(caught.value, StopTookEffect)
     assert _left(_cache) == []
 
 
