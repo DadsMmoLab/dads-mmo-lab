@@ -43,7 +43,10 @@ PROBE = "[DB Auto-Updater] Migration 0_world with hash 0 failed to apply."
 OPENING = "The world server stopped"
 """How every sentence `explain()` returns begins: tells one from a quoted log line."""
 
-_TAIL = "It will not come up until that update applies or is removed."
+_TAIL = (
+    "It will not start until that update applies: fix what the error names, or put back a "
+    "backup of the databases from before the update."
+)
 
 
 def explain(log: str) -> str:

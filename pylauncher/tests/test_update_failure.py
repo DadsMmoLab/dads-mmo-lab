@@ -78,3 +78,12 @@ def test_the_sentence_never_promises_that_nothing_changed() -> None:
     """DDL commits implicitly in MariaDB, so a failed file can leave its ALTERs applied."""
     said = update_failure.explain(CORE_FAILURE)
     assert "nothing changed" not in said.lower() and "rolled back" not in said.lower()
+
+
+def test_the_sentence_never_advises_removing_or_skipping_the_update() -> None:
+    """A failed file may have committed DDL before it failed; deleting it would hide that."""
+    for log in (CORE_FAILURE, MODULE_FAILURE, "DB AutoUpdater FAILED, cancelling server.\n"):
+        said = update_failure.explain(log).lower()
+        assert said
+        assert "removed" not in said and "remove " not in said and "skip" not in said
+        assert "backup" in said
