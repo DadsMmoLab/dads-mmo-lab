@@ -38,7 +38,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 import yulon
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError
@@ -96,7 +103,33 @@ class GameRef(_Strict):
     name: str = Field(min_length=1, max_length=100)
 
 
-Role = Literal["auth", "characters", "playerbots", "ale"]
+Role = Literal["auth", "characters", "world", "playerbots", "ale"]
+"""`world` only in a whole-server package (level 2)."""
+
+Kind = Literal["characters", "server"]
+"""What a package holds: accounts and characters (level 1), or the whole server (level 2)."""
+
+FileKind = Literal["conf", "answers", "manifest", "lua"]
+"""The non-database files of a whole-server package, each in its own folder of the zip."""
+
+FILE_FOLDERS: dict[str, str] = {
+    "conf": "conf/",
+    "answers": "answers/",
+    "manifest": "manifests/",
+    "lua": "lua/",
+}
+
+ANSWERS_TARGET = ".yulon-module-answers.json"
+"""The one Yu'lon record that travels: it describes the databases, which travel too."""
+
+_NEVER_PACKED = re.compile(
+    r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)"
+)
+"""Paths no file member may name: Yu'lon's records (the install claim, the folder id T568
+says a copy must make again), the database password, the channel credentials."""
+
+_SHA = r"^[0-9a-f]{40}$"
+_MANIFEST_TARGET = re.compile(r"(?:module|ale|mod|keg)/[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 class Member(_Strict):
@@ -166,9 +199,84 @@ class Counts(_Strict):
     bot_accounts: int = Field(ge=0)
 
 
+def _safe_target(value: str) -> str:
+    """A server-relative POSIX path that stays inside the server folder and is not a record."""
+    if not value or len(value) > 400 or any(ord(c) < 32 for c in value) or _unsafe_name(value):
+        raise ValueError("a file target is a relative path inside the server folder")
+    if _NEVER_PACKED.search(value):
+        raise ValueError("a Yu'lon record, the database password or a credential never travels")
+    return value
+
+
+class PackedSource(_Strict):
+    """One server source and the commit the packed server was built from."""
+
+    repo: str = Field(min_length=3, max_length=200)
+    dest: str = Field(min_length=1, max_length=200)
+    commit: str = Field(pattern=_SHA)
+    catalog_pin: str | None = Field(default=None, pattern=_SHA)
+    """The pin the packing Yu'lon's catalog named for this source, for the dialog only."""
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_inside(cls, value: str) -> str:
+        if value != "." and _unsafe_name(value):
+            raise ValueError("a source folder is a relative path inside the server folder")
+        return value
+
+
+class PackedModule(_Strict):
+    """One module installed from a clone, and the commit its clone was on."""
+
+    type: Literal["module", "ale", "mod", "keg"]
+    id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
+    origin: Literal["catalog", "link"]
+    repo: str = Field(min_length=3, max_length=200)
+    commit: str = Field(pattern=_SHA)
+
+
+class FileMember(_Strict):
+    """One non-database file in a whole-server package, and where it goes."""
+
+    file: str
+    kind: FileKind
+    target: str
+    bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _the_name_is_the_target(self) -> FileMember:
+        _check_target(self.kind, self.target)
+        if self.file != FILE_FOLDERS[self.kind] + self.target:
+            raise ValueError("a file member is stored under its kind's folder and its target")
+        return self
+
+
+def _check_target(kind: str, target: str) -> None:
+    if kind == "manifest":
+        if not _MANIFEST_TARGET.fullmatch(target):
+            raise ValueError("a manifest member is <type>/<id>")
+        return
+    if kind == "answers":
+        if target != ANSWERS_TARGET:
+            raise ValueError(f"the answers member is {ANSWERS_TARGET}")
+        return
+    _safe_target(target)
+    if kind == "conf" and not target.endswith(".conf"):
+        raise ValueError("a conf member is a .conf file")
+
+
+class ServerPart(_Strict):
+    """What a new install needs to rebuild the same server (level 2)."""
+
+    sources: tuple[PackedSource, ...] = Field(min_length=1)
+    modules: tuple[PackedModule, ...] = ()
+    files: tuple[FileMember, ...] = ()
+
+
 class Manifest(_Strict):
     format: int
-    kind: Literal["characters"] = "characters"
+    kind: Kind = "characters"
     made_by: MadeBy
     game: GameRef
     databases: tuple[Member, ...] = Field(min_length=1)
@@ -179,6 +287,13 @@ class Manifest(_Strict):
     counts: Counts
     excluded: tuple[str, ...] = ()
     secrets: str
+    server: ServerPart | None = None
+
+    @model_validator(mode="after")
+    def _a_server_package_and_only_one_has_its_section(self) -> Manifest:
+        if (self.kind == "server") != (self.server is not None):
+            raise ValueError("a whole-server package, and only one, carries a server section")
+        return self
 
     @field_validator("realm_name")
     @classmethod
@@ -229,15 +344,55 @@ class DumpFile:
     tables: tuple[str, ...]
 
 
-def package_filename(game_id: str, made: datetime) -> str:
-    """`yulon-move-<game>-<YYYYMMDD-HHMM>-keep-private.zip`."""
-    return f"yulon-move-{game_id}-{made:%Y%m%d-%H%M}-{KEEP_PRIVATE}.zip"
+@dataclass(frozen=True)
+class PackFile:
+    """One non-database file to pack, already read (confs, answers, manifests and Lua are small)."""
+
+    kind: FileKind
+    target: str
+    data: bytes
+
+    def __post_init__(self) -> None:
+        _check_target(self.kind, self.target)
+
+    @property
+    def file(self) -> str:
+        return FILE_FOLDERS[self.kind] + self.target
+
+
+@dataclass(frozen=True)
+class ServerSpec:
+    """The `server` section's facts the writer is given; it hashes the files itself."""
+
+    sources: tuple[PackedSource, ...]
+    modules: tuple[PackedModule, ...] = ()
+
+
+@dataclass(frozen=True)
+class ServerFacts:
+    """What a package of the whole server holds besides its databases (`move_server` reads it)."""
+
+    spec: ServerSpec
+    files: tuple[PackFile, ...]
+
+
+def package_filename(game_id: str, made: datetime, *, kind: Kind = "characters") -> str:
+    """`yulon-move-[server-]<game>-<YYYYMMDD-HHMM>-keep-private.zip`."""
+    word = "server-" if kind == "server" else ""
+    return f"yulon-move-{word}{game_id}-{made:%Y%m%d-%H%M}-{KEEP_PRIVATE}.zip"
 
 
 # ------------------------------------------------------------------- writing
 
 
-def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Manifest:
+def write_package(
+    dest: Path,
+    header: Header,
+    dumps: Sequence[DumpFile],
+    *,
+    server: ServerSpec | None = None,
+    files: Sequence[PackFile] = (),
+) -> Manifest:
     """Write the package to `dest`, read it back, and only then give it its name.
 
     Streamed: each dump is hashed in a first pass and copied into the zip in a second, so
@@ -247,6 +402,10 @@ def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Mani
     """
     if dest.exists():
         raise MovePackageError(f"{dest.name} already exists, so Yu'lon did not overwrite it.")
+    if files and server is None:
+        raise MovePackageError("Only a whole-server package carries files besides its databases.")
+    if len({f.file for f in files}) != len(files):
+        raise MovePackageError("Two files to pack have the same name, so nothing was packed.")
     members: list[Member] = []
     for dump in dumps:
         digest, size = _hash_file(dump.path)
@@ -274,6 +433,25 @@ def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Mani
         counts=header.counts,
         excluded=tuple(header.excluded),
         secrets=SECRETS,
+        kind="server" if server is not None else "characters",
+        server=(
+            ServerPart(
+                sources=server.sources,
+                modules=server.modules,
+                files=tuple(
+                    FileMember(
+                        file=f.file,
+                        kind=f.kind,
+                        target=f.target,
+                        bytes=len(f.data),
+                        sha256=hashlib.sha256(f.data).hexdigest(),
+                    )
+                    for f in files
+                ),
+            )
+            if server is not None
+            else None
+        ),
     )
     partial = dest.with_name(dest.name + ".partial")
     try:
@@ -288,6 +466,8 @@ def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Mani
                 ):
                     while chunk := source.read(_CHUNK):
                         sink.write(chunk)
+            for packed in files:
+                archive.writestr(packed.file, packed.data)
         read_package(partial)
         partial.replace(dest)
     except OSError as exc:
@@ -332,6 +512,29 @@ class Package:
             if member.schema_name == schema:
                 return member
         raise MovePackageError(f"{self.path.name} holds no {schema} database.")
+
+    def files(self, kind: FileKind | None = None) -> tuple[FileMember, ...]:
+        """The non-database members, of one kind or all, in the manifest's order."""
+        if self.manifest.server is None:
+            return ()
+        return tuple(f for f in self.manifest.server.files if kind is None or f.kind == kind)
+
+    def file(self, kind: FileKind, target: str) -> FileMember:
+        for member in self.files(kind):
+            if member.target == target:
+                return member
+        raise MovePackageError(f"{self.path.name} holds no {kind} file {target}.")
+
+    def file_bytes(self, member: FileMember) -> bytes:
+        """One small file member, checked again as it is read."""
+        try:
+            with zipfile.ZipFile(self.path) as archive:
+                data = archive.read(member.file)
+        except (OSError, KeyError, zipfile.BadZipFile) as exc:
+            raise MovePackageError(_changed(self.path.name)) from exc
+        if hashlib.sha256(data).hexdigest() != member.sha256 or len(data) != member.bytes:
+            raise MovePackageError(_changed(self.path.name))
+        return data
 
     def head(self, schema: str, size: int = 8192) -> bytes:
         """The first bytes of one dump, for reading its game record without extracting it."""
@@ -441,8 +644,11 @@ def read_package(path: Path) -> Package:
         except ValidationError as exc:
             logger.info(f"{path.name}: manifest rejected: {exc}")
             raise MovePackageError(NOT_A_PACKAGE) from exc
-        listed = {m.file for m in manifest.databases}
+        extra = manifest.server.files if manifest.server is not None else ()
+        listed = {m.file for m in manifest.databases} | {f.file for f in extra}
         if len({m.schema_name for m in manifest.databases}) != len(manifest.databases):
+            raise MovePackageError(NOT_A_PACKAGE)
+        if len({f.file for f in extra}) != len(extra):
             raise MovePackageError(NOT_A_PACKAGE)
         stray = sorted(set(names) - listed - {MANIFEST_NAME})
         if stray:
@@ -450,18 +656,21 @@ def read_package(path: Path) -> Package:
                 f"{path.name} holds a file its list does not name ({stray[0]}), so Yu'lon "
                 "will not open it."
             )
-        for member in manifest.databases:
-            if member.file not in names:
+        checked: list[tuple[str, str, int]] = [
+            (m.file, m.sha256, m.bytes) for m in manifest.databases
+        ] + [(f.file, f.sha256, f.bytes) for f in extra]
+        for file, sha256, length in checked:
+            if file not in names:
                 raise MovePackageError(
-                    f"{path.name} is missing {member.file}, which its list names, so nothing "
+                    f"{path.name} is missing {file}, which its list names, so nothing "
                     "was brought in."
                 )
             try:
-                with archive.open(member.file, mode="r") as fh:
+                with archive.open(file, mode="r") as fh:
                     digest, size = _hash_stream(fh)
             except (OSError, zipfile.BadZipFile) as exc:
                 raise MovePackageError(_changed(path.name)) from exc
-            if digest != member.sha256 or size != member.bytes:
+            if digest != sha256 or size != length:
                 raise MovePackageError(_changed(path.name))
     return Package(path=path, manifest=manifest)
 

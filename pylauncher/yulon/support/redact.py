@@ -107,6 +107,21 @@ def database_info_passwords(text: str) -> set[str]:
     return found
 
 
+def database_info_passwords_replaced(text: str, replacement: str) -> str:
+    """`text` with the password field of every `host;port;user;PASSWORD;schema` replaced.
+
+    The grammar the support file masks with, for a move package's conf files (T601): an
+    empty field stays empty, and everything else in the text keeps its bytes.
+    """
+
+    def put(match: re.Match[str]) -> str:
+        if not match.group("password"):
+            return match.group(0)
+        return match.group("head") + replacement
+
+    return _DATABASE_INFO.sub(put, text)
+
+
 def _mask_field(match: re.Match[str]) -> str:
     if not match.group("password"):
         return match.group(0)
