@@ -2774,10 +2774,21 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "of this file to revert to` rather than restoring something it could not see"
     ),
     ("controller_wow_tortoise/custom.py", "_first_cpp"): (
-        "T596. Walks a Tortoise add-on or database package (a folder the player chose, or a "
-        "fresh clone), `.git` aside, for C/C++ source; decides a REFUSAL (a server module is a "
-        "later Yu'lon) raised before the copy or, after a clone, before any step reads it, "
-        "never a write"
+        "T596. Walks a Tortoise package (a folder the player chose, or a fresh clone), `.git` "
+        "aside, for C/C++ source; decides a REFUSAL (C++ in a repository not named like a "
+        "server module, or outside the `src/` the core builds) raised before the copy or, "
+        "after a clone, before any step reads it, never a write"
+    ),
+    ("controller_wow_tortoise/custom.py", "_has_cpp_in_src"): (
+        "T596. Looks for a folder named exactly `src` in a package (the core's module glob is "
+        "case-sensitive) to tell a server module the core will compile from a data package; "
+        "decides the manifest's rebuild flag and a refusal, never a write"
+    ),
+    ("controller_wow_tortoise/custom.py", "_conf_steps"): (
+        "T596. Lists a server module's `conf/` for `*.conf.dist` files to name the settings "
+        "steps the install writes to `etc/modules/<n>.conf`; refuses a file with no [Section] "
+        "line before anything is copied or written, and the write itself is the applier's "
+        "`_conf()`, which never replaces a file that is already there"
     ),
     ("controller_wow_tortoise/custom.py", "_sql_files"): (
         "T596. Lists data/sql/<auth|character|char|world> of a package to name the .sql files "

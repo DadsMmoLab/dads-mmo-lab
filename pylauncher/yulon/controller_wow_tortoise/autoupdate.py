@@ -573,7 +573,30 @@ class GuardedApplier(Applier):
 
     def remove(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "remove")
-        return _with_note(super().remove(manifest, values), note)
+        report = _naming_the_conf_kept(super().remove(manifest, values), manifest)
+        return _with_note(report, note)
+
+
+def _naming_the_conf_kept(report: ApplyReport, manifest: Manifest) -> ApplyReport:
+    """Say what Remove does with an outside server module's settings files (T596, PR-B).
+
+    It never removes them: the image that compiled the module still reads
+    `etc/modules/<n>.conf` at every start until a Rebuild has taken the module out,
+    and a world that cannot find one does not start (`Config.cpp:207-231`). After
+    the Rebuild the file is unread and harmless, so it stays for the player to
+    delete or to find again if the module is installed again.
+    """
+    if manifest.type != "module" or manifest.origin is None:
+        return report
+    files = [step.file for step in manifest.conf if step.template is not None]
+    if not files:
+        return report
+    line = (
+        f"its settings file {', '.join(files)} is kept: the server running now was built with "
+        "this module and still reads it, so press Rebuild to take the module out of the server; "
+        "after that the file is unread"
+    )
+    return replace(report, left_behind=(line, *report.left_behind))
 
 
 def _with_note(report: ApplyReport, note: str) -> ApplyReport:

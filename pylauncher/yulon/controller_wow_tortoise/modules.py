@@ -16,8 +16,10 @@ game-agnostic (style-guide §4).
 
 The core DOES compile modules from `modules/<name>/src/` (`modules/README.md`,
 `ConfigureModules.cmake`; this docstring said it did not until T596). None is
-shipped, and a module from outside is a later Yu'lon: what a player can bring
-today is an add-on or a database package (`custom.py`, T596).
+shipped, but a player can bring one from a link or a folder (`custom.py`, T596):
+it is cloned to `<server>/modules/<name>`, which the image recipe lays over the
+core's own `modules/`, and it is compiled in at the next Rebuild. An add-on and a
+database package come the same way.
 
 **What is NOT inherited from TBC, and this is the whole reason 8.7d is its own
 box.** Three facts were measured against this fork's own source on m910q,
@@ -149,17 +151,22 @@ def layout() -> custom.TortoiseLayout:
     return custom.TortoiseLayout(shipped_addons=shipped_addons())
 
 
+def _taken_ids() -> tuple[str, ...]:
+    """The ids this game ships in either family a custom item can land in."""
+    return (*shipped_ids("mod"), *shipped_ids("module"))
+
+
 def derive_link(text: str) -> Manifest:
-    """A Tortoise add-on or database package for the link `text`, or `DeriveError` (T596)."""
+    """A Tortoise server module, add-on or database package for the link `text` (T596)."""
     return module_source.derive_link(
-        text, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+        text, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
 
 
 def derive_folder(path: Path) -> Manifest:
     """As `derive_link()`, for a folder on this computer; read before anything is copied."""
     return module_source.derive_folder(
-        path, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+        path, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
 
 
@@ -171,7 +178,7 @@ def complete(manifest: Manifest, clone: Path) -> Manifest:
     the applier takes a first install's folder back.
     """
     completed = custom.complete(manifest, clone, shipped_addons=shipped_addons())
-    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids())
+    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids(completed.type))
     return completed
 
 
