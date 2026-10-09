@@ -23,7 +23,7 @@ Stdlib for Discord and GitHub; the official ``anthropic`` SDK for Claude.
 from __future__ import annotations
 
 import argparse
-import difflib
+import collections
 import json
 import os
 import re
@@ -51,6 +51,7 @@ CHANGELOG_LINK_TEXT = "Full changelog on GitHub"
 PR_LINK_TEXT = "Full list of changes"
 BIG_PR_CHANGELOG_LINES = 4  # a PR adding this many CHANGELOG lines gets the release shape
 BIG_PR_COMMITS = 10  # ... so does one with more commits than this (and a changelog line)
+RETRY_WAIT = 5  # seconds before the one retry of a PR lookup that failed or lags
 MAX_PUSH_LOOKUPS = 50  # commits of one push whose PR is looked up
 MIN_PHRASE = 20  # a cut at a phrase end must keep at least this much
 NEW_HEADING = "## New:"
@@ -412,15 +413,85 @@ def load_event() -> dict:
 # --- merged -----------------------------------------------------------------
 
 
-def _find_pr(sha: str) -> dict | None:
-    """The MERGED pull request behind a commit, if any. An open PR is not one."""
+def _pushed_branch(event: dict) -> str:
+    """The branch the push went to (the PRs that count are merged into this one)."""
+    ref = event.get("ref") or ""
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/") :]
+    return (event.get("repository") or {}).get("default_branch") or "Yulon"
+
+
+def _lookup_pr(sha: str, branch: str) -> dict | None:
+    """The MERGED pull request behind a commit that went into `branch`, if any.
+
+    An open PR is not one, and neither is a PR merged into some other branch (a stacked
+    PR). Raises when GitHub cannot be asked.
+    """
+    prs = gh_json("GET", f"/repos/{repo()}/commits/{sha}/pulls") or []
+    for pr in prs:
+        if pr.get("merged_at") and (pr.get("base") or {}).get("ref") == branch:
+            return pr
+    return None
+
+
+def _find_prs(commits: list, branch: str) -> list[dict]:
+    """One merged PR per commit that has one, in push order, none twice.
+
+    A lookup that failed or found nothing is tried once more after RETRY_WAIT seconds
+    (GitHub can lag behind a merge). A commit still without one, whose message ends in
+    "(#N)" as a squash merge's does, is mapped by that number and the fallback is logged.
+    """
+    found: dict[int, dict] = {}
+    for attempt in (1, 2):
+        pending = [at for at in range(len(commits)) if at not in found]
+        if attempt == 2:
+            if not pending:
+                break
+            log(f"{len(pending)} commit(s) without a merged PR yet: asking again in {RETRY_WAIT}s.")
+            time.sleep(RETRY_WAIT)
+        for at in pending:
+            try:
+                pr = _lookup_pr(commits[at]["id"], branch)
+            except Exception as exc:
+                log(f"Could not look up the PR of {commits[at]['id'][:8]} ({type(exc).__name__}).")
+                continue
+            if pr is not None:
+                found[at] = {**pr, "pushed_sha": commits[at]["id"]}
+    for at in range(len(commits)):
+        if at in found:
+            continue
+        sha = commits[at]["id"]
+        tail = re.search(r"\(#(\d+)\)\s*$", _first_line(commits[at]))
+        pr = _pr_by_number(int(tail.group(1)), branch) if tail else None
+        if pr is not None:
+            log(f"Found PR #{pr['number']} of {sha[:8]} from the (#N) in its message.")
+            found[at] = {**pr, "pushed_sha": sha}
+        elif tail:
+            log(f"PR #{tail.group(1)} of {sha[:8]} is not merged into {branch}: no post.")
+        else:
+            log(f"Skipping {sha[:8]}: no merged PR behind it.")
+    out, seen = [], set()
+    for at in sorted(found):
+        if found[at]["number"] not in seen:
+            seen.add(found[at]["number"])
+            out.append(found[at])
+    return out
+
+
+def _pr_by_number(number: int, branch: str) -> dict | None:
     try:
-        prs = gh_json("GET", f"/repos/{repo()}/commits/{sha}/pulls") or []
+        pr = gh_json("GET", f"/repos/{repo()}/pulls/{number}") or {}
     except Exception as exc:
-        log(f"Could not look up the PR of {sha[:8]} ({type(exc).__name__}).")
+        log(f"Could not read PR #{number} either ({type(exc).__name__}): no post.")
         return None
-    merged = [p for p in prs if p.get("merged_at")]
-    return merged[0] if merged else None
+    if pr.get("merged_at") and (pr.get("base") or {}).get("ref") == branch:
+        return pr
+    return None
+
+
+def _first_line(commit: dict) -> str:
+    lines = (commit.get("message") or "").splitlines()
+    return lines[0] if lines else commit["id"][:8]
 
 
 def _gh_pages(path: str, pages: int = 10) -> list:
@@ -443,33 +514,58 @@ def _items_text(items) -> str:
     return "\n\n".join(out)
 
 
+def _bullet_texts(lines, prefix: str) -> set[str]:
+    out = set()
+    for line in lines:
+        if line.startswith(prefix) and not line.startswith(prefix * 3):
+            found = _BULLET_RE.fullmatch(line[1:].rstrip())
+            if found:
+                out.add(found.group(1).strip())
+    return out
+
+
+def _changelog_at(ref: str) -> str:
+    return _request(
+        "GET",
+        _gh_url(f"/repos/{repo()}/contents/CHANGELOG.md?ref={urllib.parse.quote(ref)}"),
+        headers=_gh_headers("application/vnd.github.raw"),
+    )
+
+
 def _pr_changelog_items(pr: dict, sha: str) -> tuple[list[str], list[str], list[str]] | None:
     """The CHANGELOG lines a PR adds under ## Unreleased, as (new, fixed, changed).
 
-    The PR's file diff says which lines it added; the CHANGELOG at the merge commit says
-    under which heading each of them stands. None when that cannot be read.
+    The CHANGELOG is read at the PR's merge commit (for a merge or rebase merge the pushed
+    commit that maps to the PR is its first, which lacks the later lines). The PR's file
+    diff says which lines were added (a line also removed in the same diff only moved);
+    when GitHub left the patch out, the CHANGELOG before the merge is compared instead.
+    None when it cannot be read.
     """
+    merge = pr.get("merge_commit_sha") or sha
     try:
         files = _gh_pages(f"/repos/{repo()}/pulls/{pr['number']}/files")
         entry = next((f for f in files if f.get("filename") == "CHANGELOG.md"), None)
         if entry is None:
             return [], [], []
-        added = set()
-        for line in (entry.get("patch") or "").splitlines():
-            found = _BULLET_RE.fullmatch(line[1:].rstrip()) if line.startswith("+") else None
-            if found and not line.startswith("+++"):
-                added.add(found.group(1).strip())
-        changelog = _request(
-            "GET",
-            _gh_url(f"/repos/{repo()}/contents/CHANGELOG.md?ref={sha}"),
-            headers=_gh_headers("application/vnd.github.raw"),
-        )
+        patch = (entry.get("patch") or "").splitlines()
+        after = release_items(changelog_section(_changelog_at(merge), "Unreleased"))
+        if patch:
+            added = _bullet_texts(patch, "+") - _bullet_texts(patch, "-")
+            return tuple([line for line in lines if line in added] for lines in after)
+        parent = gh_json("GET", f"/repos/{repo()}/commits/{merge}")["parents"][0]["sha"]
+        before = release_items(changelog_section(_changelog_at(parent), "Unreleased"))
     except Exception as exc:
         log(f"Could not read the CHANGELOG lines of PR #{pr['number']} ({type(exc).__name__}).")
         return None
-    unreleased = release_items(changelog_section(changelog, "Unreleased"))
-    new, fixed, changed = ([line for line in lines if line in added] for lines in unreleased)
-    return new, fixed, changed
+    seen = collections.Counter(line for lines in before for line in lines)
+    out: tuple[list[str], list[str], list[str]] = ([], [], [])
+    for lines, kept in zip(after, out, strict=True):
+        for line in lines:
+            if seen[line] > 0:
+                seen[line] -= 1
+            else:
+                kept.append(line)
+    return out
 
 
 def _pr_commit_count(pr: dict) -> int:
@@ -489,7 +585,7 @@ def _is_big(pr: dict, items) -> bool:
     return total > 0 and _pr_commit_count(pr) > BIG_PR_COMMITS
 
 
-def _pr_embed(pr: dict, sha: str) -> dict:
+def _pr_embed(pr: dict) -> dict:
     """The post of one merged PR: its number as a link, then a short or a big description."""
     author = (pr.get("user") or {}).get("login", "someone")
     embed = {
@@ -499,7 +595,7 @@ def _pr_embed(pr: dict, sha: str) -> dict:
         "footer": {"text": f"Merged PR #{pr['number']} by {author}"},
     }
     number = f"[#{pr['number']}]({pr['html_url']})"
-    items = _pr_changelog_items(pr, sha)
+    items = _pr_changelog_items(pr, pr.get("pushed_sha") or "")
     if items is not None and _is_big(pr, items):
         summary = summarize("pr_big", pr["title"], _items_text(items))
         lists = shape_release_reply(summary, items) if summary else None
@@ -527,22 +623,13 @@ def cmd_merged() -> int:
             log(f"Skipping {commit.get('id', '')[:8]}: skip-ci commit.")
             continue
         commits.append(commit)
-    seen: set[int] = set()
     failed = 0
-    for commit in commits[:MAX_PUSH_LOOKUPS]:
-        sha = commit["id"]
-        pr = _find_pr(sha)
-        if pr is None:
-            log(f"Skipping {sha[:8]}: no merged PR behind it.")
-            continue
-        if pr["number"] in seen:
-            continue
-        seen.add(pr["number"])
+    for pr in _find_prs(commits[:MAX_PUSH_LOOKUPS], _pushed_branch(event)):
         try:
-            msg_id = discord.post(_pr_embed(pr, sha))
+            msg_id = discord.post(_pr_embed(pr))
             log(f"Posted PR #{pr['number']} to Discord (msg_id={msg_id}).")
         except Exception as exc:
-            log(f"Discord post failed for {sha[:8]} ({type(exc).__name__}: {exc}).")
+            log(f"Discord post failed for PR #{pr['number']} ({type(exc).__name__}: {exc}).")
             failed += 1
         time.sleep(1)
     return 1 if failed else 0
@@ -814,8 +901,6 @@ _BREAK_BEFORE = re.compile(r" \u2014 |; ")
 
 
 _PHRASE_ENDS = (". ", " \u2014 ", "; ", ", ")
-_WORD_RE = re.compile(r"[a-z0-9']{3,}")
-MATCH_SHARE = 0.6
 
 
 def shorten(text: str, limit: int = RELEASE_BULLET_MAX) -> str:
@@ -838,25 +923,54 @@ def shorten(text: str, limit: int = RELEASE_BULLET_MAX) -> str:
     return out.rstrip(" ,;:-\u2014") + "\u2026"
 
 
+_WORD_RE = re.compile(r"[a-z0-9']{3,}")
+_STOP = frozenset(
+    "the and for you your yours are was were has have had but not all its out can will "
+    "also with from that this they them then than into onto upon over each any now just "
+    "only more most very when where which what who how why while still too one ones "
+    "there their here about after before again once".split()
+)
+_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|cannot|none|nothing|nor|without|refus\w*|reject\w*|prevent\w*)\b|n't\b",
+    re.IGNORECASE,
+)
+MATCH_SHARE = 0.7  # of the bullet's key words that are in the line
+COVER_SHARE = 0.4  # of the line's key words that are in the bullet
+MIN_KEY_WORDS = 4  # a bullet has at least this many key words, or all of a shorter line's
+
+
 def _same_word(a: str, b: str) -> bool:
     return a == b or (min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a)))
+
+
+def _key_words(text: str) -> list[str]:
+    seen: list[str] = []
+    for word in _WORD_RE.findall(text.lower().replace("**", "")):
+        if word not in _STOP and word not in seen:
+            seen.append(word)
+    return seen
 
 
 def is_changelog_line(bullet: str, items: list[str]) -> bool:
     """True if `bullet` is one of `items`, shortened or reworded a little.
 
-    Most of the bullet's words must be words of one item (a word and its plural or
-    ending count as the same), or the two texts must be alike as a whole.
+    Stop words are ignored. The bullet needs at least MIN_KEY_WORDS key words (all of a
+    shorter line's), MATCH_SHARE of them must be words of the line (a word and its ending
+    count as the same) and COVER_SHARE of the line's key words must be in the bullet. A
+    bullet that adds or drops a negation ("no longer", "not", "never", "n't", "refuses",
+    ...) against the line says something else and is refused.
     """
-    words = _WORD_RE.findall(bullet.lower().replace("**", ""))
+    mine = _key_words(bullet)
+    negated = bool(_NEGATION_RE.search(bullet))
     for item in items:
-        have = _WORD_RE.findall(item.lower().replace("**", ""))
-        if words and sum(any(_same_word(w, h) for h in have) for w in words) >= MATCH_SHARE * len(
-            words
-        ):
-            return True
-        alike = difflib.SequenceMatcher(None, bullet.lower(), item.lower()).ratio()
-        if alike >= MATCH_SHARE:
+        theirs = _key_words(item)
+        if not mine or len(mine) < min(MIN_KEY_WORDS, len(theirs)):
+            continue
+        if negated != bool(_NEGATION_RE.search(item)):
+            continue
+        inside = sum(any(_same_word(w, t) for t in theirs) for w in mine)
+        covered = sum(any(_same_word(w, t) for w in mine) for t in theirs)
+        if inside >= MATCH_SHARE * len(mine) and covered >= COVER_SHARE * len(theirs):
             return True
     return False
 
