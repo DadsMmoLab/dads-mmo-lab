@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import discord_notify as dn  # noqa: E402
 
 WEBHOOK = "https://discord.com/api/webhooks/111/secret-token"
+RELEASE_WEBHOOK = "https://discord.com/api/webhooks/222/other-token"
 REPO = "owner/repo"
 
 
@@ -46,9 +47,16 @@ class FakeWorld:
         self.patch_fails = False
         self.attempts: dict[str, str] = {}
         self.attempt_calls: list[str] = []
+        self.failing_hooks: set[str] = set()
 
-    def discord(self, method=None):
-        return [c for c in self.calls if "discord.com" in c[1] and (method in (None, c[0]))]
+    def discord(self, method=None, hook=None):
+        return [
+            c
+            for c in self.calls
+            if "discord.com" in c[1]
+            and (method in (None, c[0]))
+            and (hook is None or f"/webhooks/{hook}/" in c[1])
+        ]
 
     def request(self, method, url, payload=None, headers=None):
         self.calls.append((method, url, payload))
@@ -88,7 +96,11 @@ class FakeWorld:
         raise AssertionError(f"unexpected request {method} {url}")
 
     def _discord(self, method, url, payload):
-        assert url.startswith("https://discord.com/api/webhooks/111/secret-token")
+        assert url.startswith(
+            ("https://discord.com/api/webhooks/111/secret-token", RELEASE_WEBHOOK)
+        )
+        if any(f"/webhooks/{h}/" in url for h in self.failing_hooks):
+            raise http_error(500)
         if method == "POST":
             self.next_id += 1
             msg = {"id": str(self.next_id), "embeds": payload["embeds"]}
@@ -137,8 +149,10 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GH_TOKEN", "ghs_test")
     monkeypatch.setenv("GITHUB_API_URL", "https://api.github.com")
-    for var in ("PR", "ISSUE", "RELEASE"):
+    for var in ("PR", "ISSUE", "RELEASE", "RELEASE_CHANNEL"):
         monkeypatch.delenv(f"DISCORD_{var}_THREAD_ID", raising=False)
+    monkeypatch.delenv("DISCORD_RELEASE_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("RELEASE_ONLY_CHANNEL", raising=False)
     w.event_path = tmp_path / "event.json"
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(w.event_path))
     w.claude = FakeClaude()
@@ -868,3 +882,260 @@ def test_the_repository_guard_check_refuses_a_condition_a_fork_can_slip_past():
     assert not guards_the_whole_condition(f"{REPO_GUARD} && (a) || true")
     assert not guards_the_whole_condition(f"true || {REPO_GUARD} && (a)")
     assert not guards_the_whole_condition(f"{REPO_GUARD} || (a)")
+
+
+# --- the second (release channel) webhook -----------------------------------
+
+
+def release_ready(world, monkeypatch, tag="v1.0", release_hook=RELEASE_WEBHOOK):
+    world.releases = [{"tag_name": tag}]
+    world.changelog = f"## {tag} - d\n- A change\n"
+    if release_hook is not None:
+        monkeypatch.setenv("DISCORD_RELEASE_WEBHOOK_URL", release_hook)
+
+
+def test_release_goes_to_both_channels_with_one_summary(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0") == 0
+    (main,) = world.discord("POST", hook="111")
+    (second,) = world.discord("POST", hook="222")
+    assert main[2]["embeds"] == second[2]["embeds"]
+    assert main[2]["embeds"][0]["description"] == "A short summary."
+    assert len(world.claude.requests) == 1
+
+
+def test_release_webhook_unset_posts_to_the_main_channel_only(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook=None)
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST", hook="111")) == 1
+    assert len(world.discord("POST")) == 1
+
+
+def test_release_webhook_blank_counts_as_unset(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook="  ")
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST")) == 1
+    assert len([c for c in world.calls if c[0] == "POST"]) == 1  # no post to a blank URL
+
+
+def test_the_same_url_in_both_settings_posts_once(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook=WEBHOOK + "?wait=true")
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST")) == 1
+
+
+def test_the_same_url_with_a_different_thread_is_a_second_target(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook=WEBHOOK)
+    monkeypatch.setenv("DISCORD_RELEASE_THREAD_ID", "t-main")
+    monkeypatch.setenv("DISCORD_RELEASE_CHANNEL_THREAD_ID", "t-rel")
+    assert dn.cmd_release("v1.0") == 0
+    urls = [c[1] for c in world.discord("POST")]
+    assert len(urls) == 2
+    assert any("thread_id=t-main" in u for u in urls)
+    assert any("thread_id=t-rel" in u for u in urls)
+
+
+def test_each_channel_uses_its_own_thread_variable(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    monkeypatch.setenv("DISCORD_RELEASE_THREAD_ID", "t-main")
+    monkeypatch.setenv("DISCORD_RELEASE_CHANNEL_THREAD_ID", "t-rel")
+    assert dn.cmd_release("v1.0") == 0
+    (main,) = world.discord("POST", hook="111")
+    (second,) = world.discord("POST", hook="222")
+    assert "thread_id=t-main" in main[1] and "t-rel" not in main[1]
+    assert "thread_id=t-rel" in second[1] and "t-main" not in second[1]
+
+
+def test_no_thread_variable_for_the_release_channel_posts_to_the_channel(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    monkeypatch.setenv("DISCORD_RELEASE_THREAD_ID", "t-main")
+    assert dn.cmd_release("v1.0") == 0
+    (second,) = world.discord("POST", hook="222")
+    assert "thread_id" not in second[1]
+
+
+def test_one_failing_channel_does_not_stop_the_other(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.failing_hooks = {"111"}
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST", hook="222")) == 1
+    world.failing_hooks = {"222"}
+    world.calls.clear()
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST", hook="111")) == 1
+
+
+def test_the_job_fails_only_when_every_configured_post_failed(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.failing_hooks = {"111", "222"}
+    assert dn.cmd_release("v1.0") == 1
+    world.failing_hooks = {"111"}
+    monkeypatch.delenv("DISCORD_RELEASE_WEBHOOK_URL")
+    assert dn.cmd_release("v1.0") == 1  # the only configured post failed
+
+
+def test_the_main_webhook_unset_still_posts_to_the_release_channel(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL")
+    assert dn.cmd_release("v1.0") == 0
+    assert len(world.discord("POST", hook="222")) == 1
+    assert len(world.discord("POST")) == 1
+
+
+def test_no_webhook_at_all_posts_nothing_and_succeeds(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook=None)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL")
+    assert dn.cmd_release("v1.0") == 0
+    assert world.discord() == []
+
+
+def test_only_release_channel_posts_there_and_not_to_the_main_channel(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0", only_release_channel=True) == 0
+    assert len(world.discord("POST", hook="222")) == 1
+    assert world.discord("POST", hook="111") == []
+
+
+def test_only_release_channel_refuses_clearly_without_the_release_webhook(
+    world, monkeypatch, capsys
+):
+    release_ready(world, monkeypatch, release_hook=None)
+    assert dn.cmd_release("v1.0", only_release_channel=True) == 1
+    assert "DISCORD_RELEASE_WEBHOOK_URL" in capsys.readouterr().err
+    assert world.discord() == []
+    assert world.claude.requests == []
+
+
+def test_only_release_channel_with_the_same_url_as_main_refuses(world, monkeypatch):
+    release_ready(world, monkeypatch, release_hook=WEBHOOK)
+    assert dn.cmd_release("v1.0", only_release_channel=True) == 1
+    assert world.discord() == []
+
+
+def test_only_release_channel_comes_from_the_command_line_and_the_environment(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.main(["release", "--tag", "v1.0", "--only-release-channel"]) == 0
+    assert world.discord("POST", hook="111") == []
+    assert len(world.discord("POST", hook="222")) == 1
+    monkeypatch.setenv("RELEASE_ONLY_CHANNEL", "true")
+    assert dn.main(["release", "--tag", "v1.0"]) == 0
+    assert world.discord("POST", hook="111") == []
+    assert len(world.discord("POST", hook="222")) == 2
+    monkeypatch.setenv("RELEASE_ONLY_CHANNEL", "")
+    assert dn.main(["release", "--tag", "v1.0"]) == 0
+    assert len(world.discord("POST", hook="111")) == 1
+
+
+def test_the_rerun_skip_rule_covers_both_channels(world, monkeypatch):
+    monkeypatch.setenv("DISCORD_RELEASE_WEBHOOK_URL", RELEASE_WEBHOOK)
+    assert rerun(world, monkeypatch, 2, ["success"]) == 0
+    assert world.discord("POST") == []
+
+
+def test_merged_and_issue_posts_stay_on_the_main_webhook(world, monkeypatch):
+    monkeypatch.setenv("DISCORD_RELEASE_WEBHOOK_URL", RELEASE_WEBHOOK)
+    set_event(world, push_event("a"))
+    world.pulls["00" + "a" * 38] = [a_pr()]
+    assert dn.cmd_merged() == 0
+    assert run_issue(world, "opened") == 0
+    assert world.discord("POST", hook="222") == []
+    assert len(world.discord("POST", hook="111")) == 2
+
+
+def test_release_workflow_passes_the_second_channel_secret_var_and_input():
+    wf = load_workflow("discord-release.yml")
+    dispatch = wf[True]["workflow_dispatch"]["inputs"]["only_release_channel"]
+    assert dispatch["type"] == "boolean" and dispatch["default"] is False
+    assert dispatch["required"] is False
+    env = wf["jobs"]["notify"]["steps"][-1]["env"]
+    assert env["DISCORD_RELEASE_WEBHOOK_URL"] == "${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}"
+    assert (
+        env["DISCORD_RELEASE_CHANNEL_THREAD_ID"] == "${{ vars.DISCORD_RELEASE_CHANNEL_THREAD_ID }}"
+    )
+    assert (
+        env["RELEASE_ONLY_CHANNEL"] == "${{ inputs.only_release_channel == true && 'true' || '' }}"
+    )
+    assert "github.repository == 'DadsMmoLab/dads-mmo-lab'" in wf["jobs"]["notify"]["if"]
+
+
+def test_only_the_release_workflow_gets_the_second_webhook():
+    for name in ("discord-merged.yml", "discord-issues.yml"):
+        assert "DISCORD_RELEASE_WEBHOOK_URL" not in (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+# --- @everyone on the release channel only ----------------------------------
+
+
+def test_the_release_channel_post_pings_everyone_and_the_main_post_does_not(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0") == 0
+    (main,) = world.discord("POST", hook="111")
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"].startswith("@everyone")
+    assert second[2]["allowed_mentions"] == {"parse": ["everyone"]}
+    assert "content" not in main[2]
+    assert main[2]["allowed_mentions"] == {"parse": []}
+    assert main[2]["embeds"] == second[2]["embeds"]
+
+
+def test_only_release_channel_keeps_the_ping(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0", only_release_channel=True) == 0
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"].startswith("@everyone")
+    assert second[2]["allowed_mentions"] == {"parse": ["everyone"]}
+
+
+def test_the_ping_text_is_ours_alone_never_from_github(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.changelog = "## v1.0 - d\n- @here and @everyone in a line\n"
+    world.claude = FakeClaude(stop_reason="refusal")
+    monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+    assert dn.cmd_release("v1.0") == 0
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"] == dn.RELEASE_PING
+    assert "here" not in second[2]["content"]
+
+
+def test_everyone_and_here_in_the_release_text_are_defused_in_both_posts(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.changelog = "## v1.0 - d\n- @here and @everyone and @EVERYONE in a line\n"
+    world.claude = FakeClaude(text="Summary says @everyone and @here.")
+    monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+    for refusal in (False, True):
+        world.calls.clear()
+        if refusal:
+            world.claude = FakeClaude(stop_reason="refusal")
+            monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+        assert dn.cmd_release("v1.0") == 0
+        for _m, _u, payload in world.discord("POST"):
+            embed = payload["embeds"][0]
+            text = embed["title"] + embed["description"] + embed.get("footer", {}).get("text", "")
+            assert not re.search(r"@(everyone|here)", text, re.I)
+            assert "everyone" in text.lower() or "here" in text.lower()
+
+
+def test_everyone_in_pr_and_issue_posts_is_defused_too(world):
+    set_event(world, push_event("a"))
+    world.pulls["00" + "a" * 38] = [a_pr(title="Fix @everyone", body="ping @everyone")]
+    world.claude = FakeClaude(text="ping @here")
+    assert dn.cmd_merged() == 0
+    world.issue = a_issue(title="Crash @here", body="hi @everyone")
+    set_event(world, issue_event("opened"))
+    assert dn.cmd_issue() == 0
+    for _m, _u, payload in world.discord("POST"):
+        embed = payload["embeds"][0]
+        text = (
+            embed["title"] + embed.get("description", "") + embed.get("footer", {}).get("text", "")
+        )
+        assert not re.search(r"@(everyone|here)", text, re.I)
+        assert "content" not in payload
+        assert payload["allowed_mentions"] == {"parse": []}
+
+
+def test_the_footer_is_defused_too():
+    payload = dn.Discord(WEBHOOK)._payload(
+        {"title": "t", "footer": {"text": "by @everyone and @here"}}
+    )
+    assert "@everyone" not in payload["embeds"][0]["footer"]["text"]
+    assert "@here" not in payload["embeds"][0]["footer"]["text"]

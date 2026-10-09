@@ -6,7 +6,10 @@ name: discord-release
 # A re-run does not post again if an earlier attempt of the same run succeeded
 # (the script checks); a re-run after a failed attempt does post.
 # Run it by hand with a tag to re-post. Tick "Skip the Claude summary" to post
-# the raw CHANGELOG section instead.
+# the raw CHANGELOG section instead. With the secret DISCORD_RELEASE_WEBHOOK_URL
+# set, every release post also goes to that channel (one summary, two posts, each
+# independent; the release channel's one opens with @everyone). Tick "Post only to
+# the release channel" to re-post there alone.
 
 on:
   workflow_run:
@@ -20,6 +23,11 @@ on:
         type: string
       no_summary:
         description: Skip the Claude summary and post the raw CHANGELOG section
+        required: false
+        default: false
+        type: boolean
+      only_release_channel:
+        description: Post only to the release channel (a re-post that must not repeat in the main one)
         required: false
         default: false
         type: boolean
@@ -51,6 +59,10 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ inputs.no_summary != true && secrets.ANTHROPIC_API_KEY || '' }}
           DISCORD_RELEASE_THREAD_ID: ${{ vars.DISCORD_RELEASE_THREAD_ID }}
+          # optional second channel: the same post, also sent there
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          DISCORD_RELEASE_CHANNEL_THREAD_ID: ${{ vars.DISCORD_RELEASE_CHANNEL_THREAD_ID }}
+          RELEASE_ONLY_CHANNEL: ${{ inputs.only_release_channel == true && 'true' || '' }}
           RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
           RELEASE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
