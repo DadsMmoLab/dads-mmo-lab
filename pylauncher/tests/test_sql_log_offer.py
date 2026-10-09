@@ -62,21 +62,23 @@ def test_the_dist_zero_is_offered(tmp_path: Path) -> None:
     assert [(o.file, o.now) for o in sql_log_offer.offers(tortoise(), tmp_path)] == [(MANGOSD, "0")]
 
 
-@pytest.mark.parametrize("value", ["1", "true", "TRUE", '"1"', "2"])
-def test_a_value_the_player_already_set_to_on_is_never_offered(tmp_path: Path, value: str) -> None:
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "YES", '"1"'])
+def test_a_value_the_server_reads_as_on_is_never_offered(tmp_path: Path, value: str) -> None:
     lay(tmp_path, DIST.replace("= 0", f"= {value}"))
     assert sql_log_offer.offers(tortoise(), tmp_path) == ()
 
 
-@pytest.mark.parametrize("value", ["0", "false", "False", '"0"'])
-def test_every_spelling_of_off_is_offered(tmp_path: Path, value: str) -> None:
+@pytest.mark.parametrize(
+    "value", ["0", "false", "False", '"0"', "on", "y", "True", "Yes", "maybe", "2", ""]
+)
+def test_every_value_the_server_reads_as_off_is_offered(tmp_path: Path, value: str) -> None:
+    """`GetBoolDefault` (tortoise-wow 187af788) is on for exactly true/TRUE/yes/YES/1.
+
+    So `on`, `y`, `True` and `2` print the statements exactly as `0` does, and the player who
+    wrote one of them thinking it was on is the player this offer is for.
+    """
     lay(tmp_path, DIST.replace("= 0", f"= {value}"))
     assert len(sql_log_offer.offers(tortoise(), tmp_path)) == 1
-
-
-def test_a_value_that_is_neither_on_nor_off_is_left_alone(tmp_path: Path) -> None:
-    lay(tmp_path, DIST.replace("= 0", "= maybe"))
-    assert sql_log_offer.offers(tortoise(), tmp_path) == ()
 
 
 def test_a_key_missing_from_the_file_is_offered_and_a_commented_one_does_not_count(
@@ -87,10 +89,15 @@ def test_a_key_missing_from_the_file_is_offered_and_a_commented_one_does_not_cou
     assert offer.now == ""
 
 
-def test_two_active_lines_are_not_offered_because_which_one_wins_is_a_guess(
-    tmp_path: Path,
-) -> None:
+def test_the_last_of_two_active_lines_is_the_one_the_server_reads(tmp_path: Path) -> None:
     lay(tmp_path, DIST + "LogFilter_SQLText = 1\n")
+    assert sql_log_offer.offers(tortoise(), tmp_path) == ()
+    lay(tmp_path, DIST.replace("= 0", "= 1") + "LogFilter_SQLText = 0\n")
+    assert len(sql_log_offer.offers(tortoise(), tmp_path)) == 1
+
+
+def test_the_key_in_two_sections_is_ambiguous_and_left_alone(tmp_path: Path) -> None:
+    lay(tmp_path, DIST + "[Other]\nLogFilter_SQLText = 0\n")
     assert sql_log_offer.offers(tortoise(), tmp_path) == ()
 
 
@@ -313,3 +320,41 @@ def test_a_refused_write_says_so_and_leaves_the_offer_up(
     assert path.read_bytes() == DIST.encode()
     assert "disk full" in view.tuning_report.toPlainText()
     assert shown(view)
+
+
+def test_turn_it_off_is_greyed_while_a_job_runs_and_back_when_it_ends(
+    qapp: object, ps, tmp_path: Path
+) -> None:
+    lay(tmp_path)
+    view = view_for(tortoise(), tmp_path)
+    assert view.tuning_log_offer_off_button.isEnabled()
+    view._set_busy(True, "Rebuild")
+    assert shown(view) and not view.tuning_log_offer_off_button.isEnabled()
+    view._set_busy(False)
+    assert view.tuning_log_offer_off_button.isEnabled()
+
+
+def test_a_press_that_gets_through_during_a_job_writes_nothing(
+    qapp: object, ps, tmp_path: Path
+) -> None:
+    path = lay(tmp_path)
+    view = view_for(tortoise(), tmp_path)
+    view._set_busy(True, "Rebuild")
+    view.turn_off_sql_log()
+    assert path.read_bytes() == DIST.encode()
+    assert list(path.parent.glob("*.bak")) == []
+
+
+def test_keep_it_stays_live_during_a_job_because_it_writes_no_conf(
+    qapp: object, ps, tmp_path: Path
+) -> None:
+    lay(tmp_path)
+    view = view_for(tortoise(), tmp_path)
+    view._set_busy(True, "Rebuild")
+    assert view.tuning_log_offer_keep_button.isEnabled()
+
+
+def test_a_value_the_server_reads_as_off_is_written_over_with_one(tmp_path: Path) -> None:
+    path = lay(tmp_path, DIST.replace("= 0", "= on"))
+    sql_log_offer.turn_off(tortoise(), tmp_path, [MANGOSD])
+    assert path.read_bytes() == DIST.replace("= 0", "= 1").encode()

@@ -9729,6 +9729,9 @@ class ControllerView(QWidget):
             self.tuning_banner_button.setEnabled(False)
             # T94: a reset writes the same confs, and its undo puts them back.
             self.tuning_reset_button.setEnabled(False)
+            # T619: and so does the SQL-log offer's "Turn it off" -- it writes mangosd.conf
+            # under whatever is running. "Keep it as it is" writes no conf and stays live.
+            set_enabled_why(self.tuning_log_offer_off_button, wait_for(job))
             self.compose_banner_button.setEnabled(False)
             # T99: the bot count is one of those confs (or the compose override
             # a recreate is reading), and its owed-job button is the banner's.
@@ -9776,6 +9779,8 @@ class ControllerView(QWidget):
             self._set_time_zone_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
+            # T619: "Turn it off" is back, if the offer is still made.
+            self._refresh_sql_log_offer()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -18675,8 +18680,8 @@ class ControllerView(QWidget):
     def _refresh_sql_log_offer(self) -> None:
         """Show the SQL-log offer for the confs that still owe an answer (T619); else hide it.
 
-        Two small file reads, like the rates rows beside it. Not shown while a job
-        has the server folder.
+        Two small file reads, like the rates rows beside it. While a job runs the strip is
+        still shown, with "Turn it off" greyed (`_set_busy`): that button writes a conf.
         """
         offered = sql_log_offer.offers(self.entry, self.services.controller.server_dir)
         self._sql_log_offered = tuple(o.file for o in offered)
@@ -18696,6 +18701,8 @@ class ControllerView(QWidget):
     @Slot()
     def turn_off_sql_log(self) -> None:
         """The offer's "Turn it off": that one key, a backup first, a restart owed (T619)."""
+        if self._busy:  # the button is greyed then; this is for a press that gets past it
+            return
         server_dir = self.services.controller.server_dir
         try:
             done = sql_log_offer.turn_off(self.entry, server_dir, self._sql_log_offered)

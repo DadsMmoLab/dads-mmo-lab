@@ -14,10 +14,15 @@ kept in `<server>/.yulon-sql-log-offer.json` and the file is not asked about aga
 player who wants the statements is not nagged (a record that cannot be read just asks
 again; the question is harmless).
 
-**Only a plain off is offered.** The key absent (the core then takes 0) or ONE active
-assignment reading off. A value that is on, a word the core would not read as a boolean,
-or two active lines (which one the server reads is a guess) are left exactly as they are.
-The press re-reads the file, so a value changed since the offer is not written over.
+**Only what the SERVER reads as off is offered, by the server's own reading** (read at the
+pinned core, tortoise-wow 187af788): `Config::GetBoolDefault` (`src/shared/Config/Config.cpp`)
+is on for exactly `true`, `TRUE`, `yes`, `YES` and `1`, and off for anything else -- `on`,
+`y`, `True`, `0`, `false`, `2`, an empty value -- so all of those are offered. A key with no
+line takes `logFilterData`'s default for `sql_text` (`src/shared/Log.cpp`), which is false:
+the statements print, so absent is offered too. When the key has several active lines in one
+section the LAST wins (ACE's ini import overwrites, and `tuning.write` rewrites that line);
+lines in different sections are ambiguous and left alone. The press re-reads the file, so a
+value changed since the offer is not written over.
 
 **Which files, and what value, come from the catalog's conf table**, not from a list here:
 every file whose table carries `LogFilter_SQLText`, with the value the table wants. When
@@ -56,7 +61,7 @@ class Offer:
     file: str
     """Relative to the server folder, as the Tuning tab spells it (`etc/mangosd.conf`)."""
     now: str
-    """What the file says: `0` or `false`, or empty when the file has no such line."""
+    """What the file says (`0`, `false`, ...), or empty when it has no such line."""
 
 
 @dataclass(frozen=True)
@@ -117,31 +122,43 @@ def _record(server_dir: Path, files: Iterable[str], how: str) -> None:
         logger.warning(f"could not record the answer about {KEY} in {path}: {exc}")
 
 
-def _reading(path: Path) -> list[str] | None:
-    """Every active value of the key in this conf, in order; `None` when it cannot be read."""
+SERVER_READS_AS_ON = frozenset({"true", "TRUE", "yes", "YES", "1"})
+"""The only spellings `Config::GetBoolDefault` reads as on at the pinned core (see above)."""
+
+
+def _reading(path: Path) -> str | None:
+    """What the server would read the key as: its value, `""` when the file has no line.
+
+    `None` when the file cannot be read, or the key sits in more than one section (the
+    server takes the first section that has it, which this does not try to guess).
+    """
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             text = handle.read()
     except (OSError, UnicodeDecodeError):
         return None
-    values: list[str] = []
+    section = ""
+    found: dict[str, str] = {}
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped[0] in "#[":
+        if not stripped or stripped[0] == "#":
+            continue
+        if stripped[0] == "[":
+            section = stripped
             continue
         head, sep, tail = stripped.partition("=")
         if sep and head.strip() == KEY:
-            values.append(tail.strip().strip('"'))
-    return values
+            found[section] = tail.strip().strip('"')
+    if len(found) > 1:
+        return None
+    return next(iter(found.values()), "")
 
 
 def _offer_for(server_dir: Path, file: str) -> Offer | None:
-    values = _reading(server_dir / file)
-    if values is None or len(values) > 1:
+    value = _reading(server_dir / file)
+    if value is None or value in SERVER_READS_AS_ON:
         return None
-    if not values:
-        return Offer(file, "")
-    return Offer(file, values[0]) if tuning.core_bool(values[0]) is False else None
+    return Offer(file, value)
 
 
 def offers(entry: CatalogEntry, server_dir: Path) -> tuple[Offer, ...]:
