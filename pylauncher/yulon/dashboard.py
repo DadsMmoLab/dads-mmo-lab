@@ -234,6 +234,14 @@ class Verdict:
     """A module's own health sentence (`module_health`), once this run is ready; empty before
     that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
     """
+    honor_copy_missing: bool = False
+    """A restart loop whose last dead run died on T159's signature (T629).
+
+    The log says `[1146] Table '...character_inventory_copy' doesn't exist`: the weekly honor
+    maintenance asserted on the table no SQL had made, which "Apply database corrections..."
+    creates. Kept across the fresh run Docker starts between two crashes, so the Server tab
+    does not change its sentence every cycle; only a dead run's own log can end it.
+    """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
 
@@ -272,6 +280,10 @@ class Verdict:
             and not self.after_a_loop
             and not self.failure
         )
+
+
+HONOR_COPY_MISSING = re.compile(r"\[1146\] Table '[^']*character_inventory_copy' doesn't exist")
+"""T159's crash: honor maintenance truncates a table no SQL made (`ObjectMgr.cpp:10126`)."""
 
 
 def line(verdict: Verdict) -> str:
@@ -406,6 +418,8 @@ class Dashboard:
             self._login_log_of = None
         self._hint_run: str | None = None
         self._hint = False
+        self._honor_run: str | None = None
+        self._honor = False
         self._login_run: str | None = None
         self._login_read_at: datetime | None = None
         self._wrong_client_at: datetime | None = None
@@ -579,6 +593,7 @@ class Dashboard:
                 state.started_at,
                 uptime,
                 warning=self._foreign_data_hint(state.started_at, state.status),
+                honor_copy_missing=self._honor_copy_missing(state.started_at, state.status),
                 failure=self._update_failure(
                     state.started_at, uptime, dead=state.status == "restarting"
                 ),
@@ -602,6 +617,25 @@ class Dashboard:
             if line:
                 verdict = replace(verdict, module_line=line)
         return self._with_wrong_client(verdict, state.started_at)
+
+    def _honor_copy_missing(self, run: str, status: str) -> bool:
+        """Whether the loop's last dead run died on T159's missing table (T629).
+
+        Read like `_foreign_data_hint()`: once per run, and only once the run is dead, because
+        a read of a running run lands mid-load. The answer stands through the running run
+        Docker starts between two crashes; the next dead run's log replaces it.
+        """
+        if not run or status == "running":
+            return self._honor
+        if self._honor_run != run:
+            try:
+                log = self._run_log(run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
+                return self._honor
+            self._honor_run = run
+            self._honor = HONOR_COPY_MISSING.search(log) is not None
+        return self._honor
 
     def _foreign_data_hint(self, run: str, status: str) -> str:
         """The sentence blaming the client's data files for a loop, or "" (T593).
