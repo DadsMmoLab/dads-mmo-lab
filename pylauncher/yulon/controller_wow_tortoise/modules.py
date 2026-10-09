@@ -45,6 +45,7 @@ worth writing down, and without the files the Modules tab prints
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -58,6 +59,9 @@ from yulon.apply import (
     cached_module_update,
     cached_module_updates,
     clone_release,
+)
+from yulon.apply import (
+    refresh_module_updates as refresh_cached,
 )
 from yulon.catalog.native import read_state
 from yulon.catalog.upstream import Comparison, Release, github_slug
@@ -221,6 +225,49 @@ def module_updates(
     row is kept for a day (an hour when nothing answered) and the press costs
     GitHub nothing while the addon has not moved.
     """
+    branches, releases = _follows()
+    return cached_module_updates(
+        server_dir,
+        kind="mod",
+        git=git,
+        branches=branches,
+        releases=releases,
+        newest_release=newest_release,
+        compare_commits=compare_commits,
+        now=now,
+    )
+
+
+def refresh_module_updates(
+    server_dir: Path,
+    cancel: threading.Event,
+    *,
+    git: CountingGit | None = None,
+    newest_release: Callable[[str], Release | None] | None = None,
+    compare_commits: Callable[[str, str, str], Comparison | None] | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """The same count as `module_updates()`, in the background and bounded (T621).
+
+    Fills the day's cache the Check press and the addon note read; see
+    `apply.refresh_module_updates()` for what a failure, a cancel and a missing git do.
+    """
+    branches, releases = _follows()
+    return refresh_cached(
+        server_dir,
+        kind="mod",
+        cancel=cancel,
+        git=git,
+        branches=branches,
+        releases=releases,
+        newest_release=newest_release,
+        compare_commits=compare_commits,
+        now=now,
+    )
+
+
+def _follows() -> tuple[dict[str, str | None], dict[str, str]]:
+    """Each mod's branch, and the GitHub slug of each that follows its releases (T126)."""
     branches: dict[str, str | None] = {}
     releases: dict[str, str] = {}
     try:
@@ -234,16 +281,7 @@ def module_updates(
                     releases[manifest.id] = slug
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
         logger.warning(f"could not read the wow-tortoise mods for what they follow: {exc}")
-    return cached_module_updates(
-        server_dir,
-        kind="mod",
-        git=git,
-        branches=branches,
-        releases=releases,
-        newest_release=newest_release,
-        compare_commits=compare_commits,
-        now=now,
-    )
+    return branches, releases
 
 
 def release_note(

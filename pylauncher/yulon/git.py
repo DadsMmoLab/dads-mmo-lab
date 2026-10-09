@@ -1677,10 +1677,7 @@ class RunnerGit:
             return Counted(None)
         ref = _fetch_ref(branch)
         try:
-            _run_git(
-                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
-                cwd=dest,
-            )
+            self._fetch_to_count(dest, ref)
         except GitError as exc:
             logger.debug(
                 f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
@@ -1693,6 +1690,18 @@ class RunnerGit:
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return Counted(None)
+
+    def _fetch_to_count(self, dest: Path, ref: str) -> None:
+        """The fetch `counted_behind()` counts against; `GitError` if it fails.
+
+        Unbounded here, as it has always been: the person pressed Check for updates and is
+        looking at it. `RefreshGit` is the same fetch with a leash, for the one caller that
+        runs without anybody waiting.
+        """
+        _run_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+            cwd=dest,
+        )
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
@@ -2107,6 +2116,71 @@ def distro_owner(distro: str, inside: str) -> str | None:
         logger.debug(f"{distro} did not say who owns {inside}: rc={proc.returncode} {said!r}")
         return None
     return said
+
+
+FETCH_TIMEOUT_SECONDS = 90
+"""How long the background refresh lets one `git fetch` run before it ends it (T621).
+
+A depth-1 fetch of an add-on or module is kilobytes to a few megabytes; a minute and a half
+covers a slow line and still ends a dead proxy or a stalled server.
+"""
+
+FETCH_LOW_SPEED_LIMIT = 1000
+"""Bytes a second below which git counts a transfer as stalled (`http.lowSpeedLimit`)."""
+
+FETCH_LOW_SPEED_SECONDS = 20
+"""How long it may stay below `FETCH_LOW_SPEED_LIMIT` before git gives up (`http.lowSpeedTime`)."""
+
+_BOUNDED_FETCH_ARGS = [
+    "-c",
+    f"http.lowSpeedLimit={FETCH_LOW_SPEED_LIMIT}",
+    "-c",
+    f"http.lowSpeedTime={FETCH_LOW_SPEED_SECONDS}",
+]
+
+
+class RefreshGit(RunnerGit):
+    """`RunnerGit` for the background update refresh: a fetch that cannot hang, and can be ended.
+
+    T621. Nobody is waiting on this fetch, so nobody would notice one that never returns:
+    it carries git's own low-speed limits (a transfer that stalls gives up), a process timeout
+    (a connection that never opens is ended too) and the `cancel` event of the run it belongs
+    to (a Quit or a press that starts ends it within a fifth of a second). Every answer to
+    "could not fetch" is the same `Counted(None)` the Check press gives, and the caller keeps
+    the count it had.
+    """
+
+    def __init__(
+        self,
+        cancel: threading.Event | None = None,
+        timeout: float = FETCH_TIMEOUT_SECONDS,
+    ) -> None:
+        self._cancel = cancel if cancel is not None else threading.Event()
+        self._timeout = timeout
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        if self._cancel.is_set():
+            return Counted(None)
+        return super().counted_behind(dest, branch, release=release)
+
+    def _fetch_to_count(self, dest: Path, ref: str) -> None:
+        argv = [
+            "git",
+            *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
+            *_BOUNDED_FETCH_ARGS,
+            "fetch",
+            "origin",
+            ref,
+        ]
+        try:
+            proc = runner.run_cancellable(
+                argv, cwd=dest, env=_no_prompt_env(), timeout=self._timeout, cancel=self._cancel
+            )
+        except OSError as exc:
+            raise GitError(f"{argv[0]} could not be started: {exc}") from exc
+        if proc.returncode != 0:
+            raise GitError(f"{' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
 
 
 @dataclass(frozen=True)
