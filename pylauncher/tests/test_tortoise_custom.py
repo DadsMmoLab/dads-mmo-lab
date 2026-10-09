@@ -933,3 +933,33 @@ def test_an_update_of_an_outside_module_reads_its_clone_again(tmp_path: Path) ->
         "etc/modules/mod-up-extra.conf",
         "etc/modules/mod-up.conf",
     ]
+
+
+def test_an_update_that_brings_a_settings_file_another_module_owns_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the update path asks the same question the first install does."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    owner = _tortoise_applier(
+        server,
+        _Clone({"src/a.cpp": "int x;\n", "conf/taken.conf.dist": "[Taken]\n"}),
+        _Db(),
+        client,
+    )
+    tortoise_modules.install_custom(owner)(tortoise_modules.derive_link("you/mod-owner"), None)
+
+    git = _Clone({"src/a.cpp": "int x;\n", "conf/mod-up.conf.dist": "[Up]\n"})
+    applier = _tortoise_applier(server, git, _Db(), client)
+    url = "https://github.com/you/mod-up"
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(url), None)
+
+    git.files["conf/taken.conf.dist"] = "[Mine]\n"
+    applier.remote_url = lambda _dest: url  # type: ignore[method-assign]
+    applier.unmodified = lambda _dest, _path: True  # type: ignore[method-assign]
+    applier.no_local_commits = lambda _dest, _branch: True  # type: ignore[method-assign]
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    with pytest.raises(CompletionRefused, match="mod-owner"):
+        applier.update(listed["mod-up"])
+    now = {m.id: m for m in tortoise_modules.store().load_all("module")}["mod-up"]
+    assert [c.file for c in now.conf] == ["etc/modules/mod-up.conf"], "nothing new was recorded"

@@ -201,14 +201,10 @@ def install_custom(applier: Applier) -> CustomInstall:
         finished: list[Manifest] = []
 
         kept: list[str] = []
+        completer = _completer(applier, kept)
 
         def finish(derived: Manifest, clone: Path) -> Manifest:
-            # Read first and persist after: a settings file another installed item
-            # already owns is refused before this press records anything.
-            found = custom.complete(derived, clone, shipped_addons=shipped_addons())
-            _refuse_a_shared_conf(applier, found)
-            kept.extend(_kept_conf_lines(applier.server_dir, found, clone))
-            finished.append(complete(derived, clone))
+            finished.append(completer(derived, clone))
             return finished[-1]
 
         first = not os.path.lexists(applier.clone_dir(manifest))
@@ -231,6 +227,27 @@ def install_custom(applier: Applier) -> CustomInstall:
         return replace(report, skipped=(*report.skipped, *left)) if left else report
 
     return install
+
+
+def _completer(
+    applier: Applier, kept: list[str] | None = None
+) -> Callable[[Manifest, Path], Manifest]:
+    """`complete()` behind the checks an outside item gets whenever its clone is read (T596).
+
+    Read first and persist after: a settings file another installed item already owns is
+    refused before anything is recorded, on an Install and on an Update alike (an update can
+    add or rename a `conf/*.conf.dist`). `kept`, when given, collects the lines for settings
+    files that were already there.
+    """
+
+    def finish(derived: Manifest, clone: Path) -> Manifest:
+        found = custom.complete(derived, clone, shipped_addons=shipped_addons())
+        _refuse_a_shared_conf(applier, found)
+        if kept is not None:
+            kept.extend(_kept_conf_lines(applier.server_dir, found, clone))
+        return complete(derived, clone)
+
+    return finish
 
 
 def _kept_conf_lines(server_dir: Path, found: Manifest, clone: Path) -> list[str]:
@@ -406,7 +423,7 @@ def applier(
         sql_backup=sql_backup,
     )
     # An item brought from a link is read again whenever its clone is put on new code.
-    guarded.recomplete = complete
+    guarded.recomplete = _completer(guarded)
     return guarded
 
 
