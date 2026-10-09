@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import database_presence, docker, forgetting, platform, wsl
+from yulon import database_presence, docker, forgetting, platform, server_build_gone, wsl
 from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
@@ -347,6 +347,7 @@ class Controller:
             if conflicts:
                 logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
                 raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+            self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             if not asked_before_the_servers:
                 self._ask_before_the_servers()
@@ -363,6 +364,24 @@ class Controller:
                 # would otherwise stop 15-25 s after this app's last call into it,
                 # killing the server it just started (T132, `wsl.hold()`).
                 self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def refuse_a_missing_image(self) -> None:
+        """Raise `StartRefused` when Docker no longer has this server's built image (T627).
+
+        Asked BEFORE anything is started, with one `docker image inspect`: without it
+        `compose up` tries to pull `yulon.local/...` from a registry of that name, and
+        dies on a name lookup after the database was started and the realm row written.
+        Docker not answering is not "gone"; the Start goes on as it did.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        reason = server_build_gone.refusal_before_start(
+            entry,
+            self.server_dir,
+            lambda refs: docker.images_built(refs, wsl_distro=self.wsl_distro),
+        )
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
 
     def refuse_a_missing_database(self) -> None:
         """Raise `DatabaseMissing` when Docker says this server's database is gone or empty (T377).
