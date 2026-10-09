@@ -24,7 +24,7 @@ from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.test_controller_view import _Ps, _tuning_view
 from tests.test_install_channel import INSTALL, WOTLK, _Answering, _channel
 from yulon import channel_setup as setup
-from yulon import docker, platform, play, resources, useraccounts
+from yulon import docker, party, platform, play, resources, useraccounts
 from yulon.catalog.catalog import load_catalog
 from yulon.ui import controller_view as controller_view_module
 
@@ -51,7 +51,7 @@ class _Hold:
         self.refuse = refuse
 
     @contextmanager
-    def __call__(self, press: str) -> Iterator[None]:
+    def __call__(self, press: str, budget: float | None = None) -> Iterator[None]:
         if self.refuse:
             raise docker.ServerReserved(HELD, docker.ServerHolder("yulon-busy-x", "id"))
         self.events.append(f"hold:{press}")
@@ -221,20 +221,58 @@ def test_every_character_method_is_a_read_or_holds() -> None:
 # ------------------------------------------------------------------ every construction is wired
 
 
+def _constructions(callee: str) -> list[tuple[str, int, bool]]:
+    """Every call of `callee` in the `yulon` package: (file, line, passes `hold_server=`)."""
+    found: list[tuple[str, int, bool]] = []
+    for path in sorted(Path(resources.__file__).parent.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (
+                node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else node.func.id if isinstance(node.func, ast.Name) else ""
+            )
+            if name == callee:
+                held = "hold_server" in {k.arg for k in node.keywords}
+                found.append((path.name, node.lineno, held))
+    return found
+
+
 @pytest.mark.parametrize("callee", ["InstallAccounts", "InstallPlay"])
-def test_every_construction_in_the_controller_wires_the_hold(callee: str) -> None:
-    source = Path(resources.__file__).parent.joinpath("ui", "controller_view.py")
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == callee
-    ]
-    assert calls, f"no {callee}( call found: the guard has gone blind"
-    unwired = [c.lineno for c in calls if "hold_server" not in {k.arg for k in c.keywords}]
-    assert unwired == [], f"{callee}( at controller_view.py:{unwired} takes no hold_server="
+def test_every_construction_anywhere_in_yulon_wires_the_hold(callee: str) -> None:
+    """Every module, not just the controller's: My Party builds an InstallPlay of its own."""
+    calls = _constructions(callee)
+    assert {name for name, _line, _held in calls} >= {"controller_view.py"}, "the guard is blind"
+    unwired = [f"{name}:{line}" for name, line, held in calls if not held]
+    assert unwired == [], f"{callee}( takes no hold_server= at {unwired}"
+
+
+def test_my_partys_bot_level_setter_writes_inside_the_hold_and_not_without_it(
+    tmp_path: Path,
+) -> None:
+    """Mutation: build the party's own `InstallPlay` without `hold_server=`."""
+    from tests.test_party import WOTLK as PARTY_WOTLK
+    from tests.test_party import _ready_install, _WriteSql
+
+    sql = _WriteSql("1\tOWNER", "2\tFRIEND", "")
+    seam = party.InstallParty(
+        PARTY_WOTLK,
+        _ready_install(tmp_path),
+        sql=sql,
+        channel_for_saved=lambda: _Nothing(),
+        container="ac-worldserver",
+        world_running=lambda: False,
+        engine=lambda: party.BinaryRead(True, "in"),
+        link_writer=sql,
+        hold_server=_Hold(refuse=True),
+    )
+    asked = len(sql.asked)
+    outcome = seam.level_setter("Aevret", 60)
+    assert outcome.done is False and "Another Yu'lon is working on WoW" in outcome.problem
+    assert sql.written == []
+    assert len(sql.asked) == asked, "the server was asked"
 
 
 # ------------------------------------------------------------------ the account create seam

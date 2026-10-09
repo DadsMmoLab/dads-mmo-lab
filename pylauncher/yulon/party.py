@@ -3095,7 +3095,12 @@ class InstallParty:
         self.level_setter: LevelSetter = (
             level_setter
             or play.InstallPlay(
-                entry, server_dir, sql=sql, channel_for_saved=channel_for_saved
+                entry,
+                server_dir,
+                sql=sql,
+                channel_for_saved=channel_for_saved,
+                # T610: the level is a write to the server, under its cross-process hold.
+                hold_server=hold_server,
             ).set_level
         )
 

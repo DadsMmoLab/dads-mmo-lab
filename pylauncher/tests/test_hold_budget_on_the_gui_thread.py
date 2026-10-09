@@ -86,7 +86,7 @@ def test_the_tuning_saves_hold_gives_up_inside_its_budget_on_a_slow_docker(
 
 
 def _channel(tmp_path: Path, server: Path) -> setup.InstallChannel:
-    """A channel whose hold is the controller's own and carries no budget (as the factories wire it)."""
+    """A channel whose hold is the controller's own and has no budget of its own."""
     return setup.InstallChannel(
         WOTLK,
         server,
