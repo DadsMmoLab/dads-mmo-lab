@@ -71,7 +71,9 @@ def view(
 def _stopping(view: ControllerView, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     events: list[str] = []
     monkeypatch.setattr(
-        docker, "end_reservation", lambda holder: events.append(f"end:{holder.container}") or True
+        docker,
+        "end_reservation",
+        lambda holder, **_kw: events.append(f"end:{holder.container}") or True,
     )
     monkeypatch.setattr(view.services.controller, "stop", lambda: events.append("stop") or True)
     return events
@@ -171,7 +173,7 @@ def test_clear_it_is_offered_for_this_users_own_leftover_when_the_lock_is_held(
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        docker, "end_reservation", lambda holder: cleared.append(holder.container) or True
+        docker, "end_reservation", lambda holder, **_kw: cleared.append(holder.container) or True
     )
     view.clear_the_leftover_reservation()
 
@@ -200,7 +202,7 @@ def test_clear_it_is_not_offered_otherwise(
     view._start_failed(_refused(holder))
     assert view.clear_reservation_button.isHidden(), why
     removed: list[Any] = []
-    monkeypatch.setattr(docker, "end_reservation", lambda h: removed.append(h) or True)
+    monkeypatch.setattr(docker, "end_reservation", lambda h, **_kw: removed.append(h) or True)
     view.clear_the_leftover_reservation()
     assert removed == [], why
 
@@ -221,7 +223,7 @@ def test_stop_anyway_stops_even_when_the_holders_reservation_would_not_be_remove
 
     ran.clear()
     monkeypatch.setattr(controller_view_module, "_ask_with", _Asked("yes"))
-    monkeypatch.setattr(docker, "end_reservation", lambda holder: False)
+    monkeypatch.setattr(docker, "end_reservation", lambda holder, **_kw: False)
     monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
     monkeypatch.setattr(docker, "server_claim", _always_held)  # the holder is still there
     monkeypatch.setattr(
@@ -245,7 +247,7 @@ def test_stop_anyway_stops_when_another_yulon_took_the_server_after_the_removal(
 
     ran.clear()
     monkeypatch.setattr(controller_view_module, "_ask_with", _Asked("yes"))
-    monkeypatch.setattr(docker, "end_reservation", lambda holder: True)
+    monkeypatch.setattr(docker, "end_reservation", lambda holder, **_kw: True)
     monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
     monkeypatch.setattr(docker, "server_claim", _always_held)  # a newcomer holds it again
     monkeypatch.setattr(

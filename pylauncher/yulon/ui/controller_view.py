@@ -9910,7 +9910,7 @@ class ControllerView(QWidget):
 
     def _stop_over(self, holder: docker.ServerHolder) -> bool:
         """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
-        if docker.end_reservation(holder):
+        if docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro):
             try:
                 return self.services.controller.stop()
             except docker.ServerReserved as newcomer:
@@ -9955,7 +9955,7 @@ class ControllerView(QWidget):
             return
         self.clear_reservation_button.setEnabled(False)
         self._run(
-            lambda: docker.end_reservation(holder),
+            lambda: docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro),
             self._leftover_cleared,
             self._leftover_clear_failed,
         )
