@@ -86,7 +86,7 @@ def stop_took_effect(exc: BaseException) -> bool:
     return False
 
 
-def withdraw_stop(cancel: threading.Event | None) -> None:
+def withdraw_stop(cancel: threading.Event | None) -> bool:
     """The job's Stop came too late to change anything: take it back, so the press SUCCEEDS.
 
     The lead's ruling (T247 review, 2026-10-05): a rebuild whose new world had
@@ -98,13 +98,23 @@ def withdraw_stop(cancel: threading.Event | None) -> None:
     finding the Cancel it set cleared when the job ends, reports the job as
     finished, so every owner's success path runs. A Stop pressed again after
     this sets the Cancel again and is an ordinary Stop.
+
+    **Only a Stop is taken back (T607).** A press whose server reservation was lost from
+    elsewhere (another Yu'lon's "Stop anyway", Docker restarting) has its cancel set by that
+    loss, and the server is no longer what the press proved: that is not a Stop that came too
+    late. The cancel carries the loss as `reservation_lost`, and while it is set nothing is
+    cleared. Returns whether the Stop was taken back (False: nothing to take back, or a loss).
     """
     if cancel is None:
-        return
+        return False
+    lost = getattr(cancel, "reservation_lost", None)
+    if isinstance(lost, threading.Event) and lost.is_set():
+        return False
     anyway = getattr(cancel, "anyway", None)
     if isinstance(anyway, threading.Event):
         anyway.clear()
     cancel.clear()
+    return True
 
 
 class PutBackAfterStop(TrueAfterStop):

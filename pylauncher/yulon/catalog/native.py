@@ -4781,6 +4781,13 @@ READY_ANYWAY_IN_THE_WATCH = (
 """`READY_STOPPED_IN_THE_WATCH` for the escape pressed in the watch after a Stop during the load
 (T247 review): the first press came in the load, not in the watch, and the sentence says so."""
 
+READY_LOST_IN_THE_WATCH = (
+    "The world server reported ready, and this server's reservation in Docker then ended from "
+    "elsewhere (another Yu'lon stopped it, or Docker restarted) in the last moment of the minute "
+    "it is watched, so this build was not proved to stay up."
+)
+"""The reservation lost in the watch's last pause: not a Stop that came too late (T607)."""
+
 READY_STOP_TOO_LATE = (
     "Stop was pressed after the new build had already been watched for the whole minute, so it "
     "came too late to matter: the build is kept."
@@ -6479,6 +6486,11 @@ class PressCancel(threading.Event):
     def is_set(self) -> bool:
         return super().is_set() or self._lost.is_set() or self.player_stopped()
 
+    @property
+    def reservation_lost(self) -> threading.Event:
+        """The reservation's loss, which `withdraw_stop()` must not take back (T607)."""
+        return self._lost
+
     def player_stopped(self) -> bool:
         """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
         return self._stop is not None and self._stop.is_set()
@@ -6515,6 +6527,9 @@ def _end_on_loss(
     `done` ends the watcher when the press does.
     """
     ending = cancel if cancel is not None else threading.Event()
+    # Told apart from the player's Stop: `withdraw_stop()` takes back a Stop that came too late,
+    # and must not take back a loss (T607).
+    ending.reservation_lost = held.lost  # type: ignore[attr-defined]
     if held.lost.is_set():
         ending.set()
         return ending
@@ -13548,8 +13563,11 @@ class StagedInstaller:
                     if ctx.cancel is not None and ctx.cancel.is_set():
                         # The lead's ruling: too late means the press SUCCEEDED. The
                         # Stop is taken back, so the rest of the press runs and the
-                        # panel says it finished (`withdraw_stop()`).
-                        withdraw_stop(ctx.cancel)
+                        # panel says it finished (`withdraw_stop()`). A reservation lost
+                        # from elsewhere is not a Stop (T607): the server was stopped under
+                        # the press, so it ends as a loss earlier in the watch does.
+                        if not withdraw_stop(ctx.cancel):
+                            raise StoppedInTheWatch(READY_LOST_IN_THE_WATCH)
                         yield READY_STOP_TOO_LATE
                     yield "The server is up."
                     return
