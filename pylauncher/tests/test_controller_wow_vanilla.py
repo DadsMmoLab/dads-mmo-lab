@@ -444,6 +444,7 @@ def test_the_absent_schema_alarm_names_schemas_this_core_could_have(tmp_path: Pa
     theirs = wotlk_maintenance.backup(
         tmp_path / "again",
         _FakeMysql(present),
+        game=wotlk_maintenance.game_of(ENTRY),
         spec=docker_ctl.SPEC,
         running=lambda: [ENTRY.container_spec().db],
     )
@@ -482,7 +483,11 @@ def test_a_restore_is_refused_while_this_installs_worldserver_is_running(
     assert [reason for reason in plan.refusals if spec.world in reason]
 
     blind = wotlk_maintenance.plan_restore(
-        backup_file, tmp_path, spec=WOTLK.container_spec(), running=census
+        backup_file,
+        tmp_path,
+        game=wotlk_maintenance.game_of(ENTRY),
+        spec=WOTLK.container_spec(),
+        running=census,
     )
     assert [reason for reason in blind.refusals if WOTLK.container_spec().db in reason]
     assert not [reason for reason in blind.refusals if spec.world in reason]

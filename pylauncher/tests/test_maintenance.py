@@ -20,14 +20,19 @@ from yulon import docker
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import (
     DockerMysql,
+    Game,
     MaintenanceError,
-    backup,
     backups_dir,
     interrupted_restore,
-    plan_restore,
-    restore,
     verify_dump,
 )
+
+# T603: every call here is this one game's; what a different game does is
+# tests/test_backup_knows_its_game.py's business.
+WOTLK = Game("wow-wotlk", "WoW WotLK")
+backup = functools.partial(maintenance.backup, game=WOTLK)
+plan_restore = functools.partial(maintenance.plan_restore, game=WOTLK)
+restore = functools.partial(maintenance.restore, game=WOTLK)
 
 WORLD = "ac-worldserver"
 AUTH = "ac-authserver"
@@ -36,9 +41,15 @@ DB = "ac-database"
 AT = datetime(2026, 8, 23, 14, 30, 5)
 
 
-def good_dump(*databases: str) -> bytes:
-    """A dump shaped like the real thing: banner, a USE per database, end marker."""
-    parts = [b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n"]
+def good_dump(*databases: str, game: str | None = "wow-wotlk") -> bytes:
+    """A dump shaped like the real thing: banner, a USE per database, end marker.
+
+    With the game record a backup Yu'lon wrote carries (T603), unless `game=None`:
+    what mysqldump itself writes, which is what the fake database container hands
+    `backup()` to put its own record in front of.
+    """
+    parts = [f"-- yulon-backup: game={game}\n".encode()] if game else []
+    parts.append(b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n")
     for name in databases:
         raw = name.encode("utf-8")
         parts.append(
@@ -64,7 +75,7 @@ class FakeMysql:
 
     def dump_into(self, database: str, sink: IO[bytes]) -> None:
         self.dumped.append(database)
-        sink.write(self._body if self._body is not None else good_dump(database))
+        sink.write(self._body if self._body is not None else good_dump(database, game=None))
 
     def load_from(self, source: IO[bytes]) -> None:
         self.loaded.append(source.read())

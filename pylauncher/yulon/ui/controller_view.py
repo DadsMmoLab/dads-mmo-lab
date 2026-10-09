@@ -3489,6 +3489,7 @@ def _for_wotlk(
         backup=lambda: wotlk_maintenance.backup(
             server_dir,
             mysql,
+            game=wotlk_maintenance.game_of(entry),
             spec=spec,
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
@@ -3496,6 +3497,7 @@ def _for_wotlk(
         plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
             path,
             server_dir,
+            game=wotlk_maintenance.game_of(entry),
             spec=spec,
             wsl_distro=wsl_distro,
             can_start_database=can_start_database,
@@ -3507,6 +3509,7 @@ def _for_wotlk(
         restore=lambda plan: wotlk_maintenance.restore(
             plan,
             mysql,
+            game=wotlk_maintenance.game_of(entry),
             confirm=plan.token,
             spec=spec,
             # Bound here for the same reason `backup` binds it four lines up, and
@@ -15821,6 +15824,10 @@ class ControllerView(QWidget):
                 "into the databases it names rather than returning them to the state the backup "
                 "was taken from. Press Restore to go ahead."
             )
+            if result.game_unproven:
+                # T603: said before the press, and asked again at it.
+                lines.append("")
+                lines.append(wotlk_maintenance.UNLABELED_BACKUP)
             if warning:
                 lines.append("")
                 lines.append(warning)
@@ -15845,6 +15852,20 @@ class ControllerView(QWidget):
             # restore's take-back writes (`_put_back_refused`, the other order).
             self.maintenance_report.setPlainText(RESTORE_DURING_PUT_BACK)
             return
+        if plan.game_unproven:
+            # T603: an old backup names no game and Yu'lon cannot tell it from the
+            # schema names. One question, defaulting to No; `restore()` itself refuses
+            # an unproven plan that was not answered, so this is not the only guard.
+            if not self._confirm(
+                "Restore a backup that does not say which game it is from?",
+                f"{wotlk_maintenance.UNLABELED_BACKUP}\n\nRestore {plan.backup.name} anyway?",
+            ):
+                self.maintenance_report.setPlainText(
+                    f"Nothing was restored: {plan.backup.name} does not say which game it is from "
+                    "and you did not agree to restore it."
+                )
+                return
+            plan = plan.with_unlabeled_accepted()
         set_enabled_why(self.restore_button, wait_for("the restore"))
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it

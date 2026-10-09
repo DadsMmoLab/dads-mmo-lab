@@ -267,6 +267,7 @@ class _FakeMaintenance:
         self.forgotten = 0
         self.interrupted: InterruptedRestore | None = None
         self.refusals: tuple[str, ...] = ()
+        self.game_unproven = False
 
     def create(self, name: str, password: str, gm: int) -> AccountResult:
         self.created.append((name, password, gm))
@@ -284,6 +285,7 @@ class _FakeMaintenance:
             databases=("acore_characters",),
             size_bytes=2048,
             refusals=self.refusals,
+            game_unproven=self.game_unproven,
         )
 
     def do_restore(self, plan: RestorePlan) -> RestoreReport:
@@ -698,6 +700,54 @@ def test_a_planned_restore_runs_and_reports(qapp: object, ps: _Ps, tmp_path: Pat
     view.run_restore()
     assert [p.backup.name for p in made.restored] == ["chars.sql"]
     assert "acore_characters" in view.maintenance_report.toPlainText()
+
+
+def test_a_backup_that_names_no_game_is_asked_about_before_it_is_restored(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T603: an old backup is a question, in the plan and at the press; No restores nothing."""
+    made = _FakeMaintenance()
+    made.game_unproven = True
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+    asked: list[tuple[str, str]] = []
+    answers = iter([False, True])
+
+    def answer(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return next(answers)
+
+    monkeypatch.setattr(view, "_confirm", answer)
+
+    view.show_restore_plan()
+    assert "does not say which game it is from" in view.maintenance_report.toPlainText()
+    assert view.restore_button.isEnabled()  # a question, not a refusal
+
+    view.run_restore()
+    assert made.restored == []
+    assert len(asked) == 1 and "chars.sql" in asked[0][1]
+    assert "Nothing was restored" in view.maintenance_report.toPlainText()
+
+    view.run_restore()
+    assert [p.backup.name for p in made.restored] == ["chars.sql"]
+    assert made.restored[0].unlabeled_accepted
+
+
+def test_a_backup_that_names_this_game_is_restored_without_a_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+
+    def never(title: str, question: str) -> bool:
+        raise AssertionError(f"asked {title!r} about a backup that names its game")
+
+    monkeypatch.setattr(view, "_confirm", never)
+    view.show_restore_plan()
+    view.run_restore()
+    assert [p.backup.name for p in made.restored] == ["chars.sql"]
+    assert not made.restored[0].unlabeled_accepted
 
 
 def test_backing_up_says_where_it_went(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -28884,6 +28934,7 @@ def test_a_backup_whose_docker_exec_fails_keeps_the_pipe_path_off_the_screen(
     made.back_up = lambda: wotlk_maintenance.backup(  # type: ignore[method-assign]
         tmp_path,
         wotlk_maintenance.DockerMysql("ac-database", "pw"),
+        game=wotlk_maintenance.Game("wow-wotlk", "WoW WotLK"),
         running=lambda: ["ac-database"],
     )
     view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)

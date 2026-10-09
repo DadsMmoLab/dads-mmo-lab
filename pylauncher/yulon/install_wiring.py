@@ -238,6 +238,7 @@ class _MaintenanceSnapshot:
                 report = maintenance.backup(
                     server_dir,
                     self._mysql(server_dir),
+                    game=maintenance.game_of(self.entry),
                     only=tuple(databases),
                     label=SNAPSHOT_LABEL,
                     spec=spec,
@@ -281,11 +282,16 @@ class _MaintenanceSnapshot:
                 self._database_up(server_dir)
                 mysql = self._mysql(server_dir)
                 for path in snapshot.files:
+                    game = maintenance.game_of(self.entry)
                     plan = maintenance.plan_restore(
-                        path, server_dir, spec=spec, wsl_distro=self.wsl_distro
+                        path, server_dir, game=game, spec=spec, wsl_distro=self.wsl_distro
                     )
                     if plan.refusals:
                         raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    # The copy is this server's own, taken moments ago by `take()`, so
+                    # one a Yu'lon older than the game record wrote needs no question
+                    # (T603). A copy that records ANOTHER game is already a refusal above.
+                    plan = plan.with_unlabeled_accepted()
                     # A replacement, not the Maintenance tab's merge: the tables
                     # the copy does not hold -- made by the new build or by its
                     # database updates -- are dropped before the copy loads.
@@ -293,6 +299,7 @@ class _MaintenanceSnapshot:
                     report = maintenance.restore(
                         plan,
                         mysql,
+                        game=game,
                         confirm=plan.token,
                         spec=spec,
                         core_databases=self.entry.core_databases(),
