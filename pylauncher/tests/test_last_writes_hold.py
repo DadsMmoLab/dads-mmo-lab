@@ -528,9 +528,25 @@ SEAMS: dict[str, tuple[str, str]] = {
     ),
     "characters_withheld": ("reads", "a mapping of reasons"),
     "no_modules_note": ("reads", "a sentence"),
+    # Fields of the after-release batch, classified when it was combined with this table:
+    "custom_module_tips": ("reads", "two tooltips"),
+    "default_addons": (
+        "lower",
+        "an Applier install: the Applier holds; Play's put-back writes only the game client",
+    ),
+    "module_refresh": ("reads", "the same counts as module_updates, in the background"),
+    "move": (
+        "open",
+        "T601: packs and brings in under this process's Maintenance lease and hold, as Backup "
+        "and Restore do",
+    ),
+    "shelf": (
+        "held",
+        "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
+    ),
 }
 
-OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding"}
+OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding", "move"}
 """Pinned: closing one of these is an edit here, and a new one is a decision, not a drift."""
 
 
