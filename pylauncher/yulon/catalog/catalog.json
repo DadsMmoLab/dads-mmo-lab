@@ -92,6 +92,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,
@@ -594,6 +595,7 @@
         }
       },
       "client": {
+        "addon_interface": 20400,
         "version": "2.4.3",
         "build": 8606,
         "required_build": 8606,
@@ -1037,6 +1039,7 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.12.1",
         "build": 5875,
         "required_build": 5875,
@@ -1451,6 +1454,7 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.18.1",
         "build": 7272,
         "required_build": 5875,
@@ -1902,6 +1906,7 @@
         "local_address_column": "localAddress"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12342,
         "required_build": 12340,
@@ -2568,6 +2573,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,
