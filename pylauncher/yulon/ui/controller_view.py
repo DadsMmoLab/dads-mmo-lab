@@ -88,6 +88,7 @@ from yulon import (
     install_wiring,
     logsnap,
     module_moves,
+    move_flows,
     networking,
     party,
     platform,
@@ -194,6 +195,7 @@ from yulon.ui.widgets.modules_panel import (
     build_module_rows,
     moved_by_server_update,
 )
+from yulon.ui.widgets.move_panel import MovePanel
 from yulon.ui.widgets.page import (
     RowsList,
     RowsScroll,
@@ -1815,6 +1817,12 @@ class ControllerServices:
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
     """
+    move: move_flows.MoveServices | None = None
+    """Pack this server's accounts and characters, and bring such a file in (T601).
+
+    `None` draws no Move group on the Maintenance tab. Every shipped game wires it, because the
+    engine under it (the Maintenance tab's backup and restore) is the same for all of them.
+    """
     database_alone: DatabaseAlone | None = None
     """How to bring this install's database up for a backup, and put it back (T76).
 
@@ -2709,6 +2717,55 @@ def _database_alone(
     )
 
 
+def _move_services(
+    entry: CatalogEntry,
+    server_dir: Path,
+    mysql: wotlk_maintenance.DockerMysql,
+    controller: Controller,
+    *,
+    wsl_distro: str | None,
+) -> move_flows.MoveServices:
+    """The Move group's four presses, over the same engine the Backup and Restore buttons use.
+
+    Built here, with the factories' own `mysql`, `controller` and `wsl_distro`, so the move
+    cannot reach a different daemon than the buttons beside it (the 2026-08-27 report: a
+    census asked the wrong Docker). The database is brought up alone by the same
+    `_database_alone()` Backup uses; the server is stopped and started by the tab's own
+    controller, which does the save-first and the evidence a Stop always does.
+    """
+
+    def running() -> list[str]:
+        return list(docker.status(wsl_distro=wsl_distro))
+
+    def bot_marker() -> move_flows.BotMarker | None:
+        answer = dbreads.resolve_marker(entry, server_dir)
+        return move_flows.BotMarker(answer.marker.prefix) if answer.marker is not None else None
+
+    backup, plan_restore, restore = move_flows.engine_for(
+        entry, server_dir, mysql, running=running, wsl_distro=wsl_distro
+    )
+    alone = _database_alone(entry.container_spec(), server_dir, wsl_distro=wsl_distro)
+    return move_flows.services_for(
+        move_flows.MoveWorld(
+            entry=entry,
+            game=wotlk_maintenance.game_of(entry),
+            server_dir=server_dir,
+            mysql=mysql,
+            backup=backup,
+            plan_restore=plan_restore,
+            restore=restore,
+            running=running,
+            ownership=lambda: native.read_claim(server_dir, valid=()).ownership,
+            stop_server=controller.stop,
+            start_server=controller.start,
+            bring_up=alone.bring_up,
+            take_down=alone.take_down,
+            channel_account=channel_setup.account_name(composegen.install_id(server_dir)),
+            marker=bot_marker,
+        )
+    )
+
+
 def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
     """None, and a warning if the catalog has since said otherwise.
 
@@ -2780,6 +2837,7 @@ def _assemble(
     module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
     default_addons: tuple[str, ...] = (),
+    mysql: wotlk_maintenance.DockerMysql | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -2818,6 +2876,11 @@ def _assemble(
         # four times. Four copies is how `_for_tortoise` came to be the one
         # factory that never bound `play`.
         database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+        move=(
+            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro)
+            if mysql is not None
+            else None
+        ),
         backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
         plan_restore=plan_restore,
         restore=restore,
@@ -3282,6 +3345,7 @@ def _for_wotlk(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3612,6 +3676,7 @@ def _for_tbc(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3767,6 +3832,7 @@ def _for_vanilla(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3941,6 +4007,7 @@ def _for_centurion(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick if watcher is not None else None,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4226,6 +4293,7 @@ def _for_tortoise(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -7649,6 +7717,7 @@ class ControllerView(QWidget):
         # `busy_reason()` nor `_busy` sees them, and a removal must.
         self._backup_running = False
         self._restore_running = False
+        self._move_panel: MovePanel | None = None  # T601: `forget_refusal()` reads `.running`
         self._network_applying = False
         self._import_running = False
         self._uninstall_running = False
@@ -9394,6 +9463,8 @@ class ControllerView(QWidget):
             return forgetting.BACKUP_RUNNING
         if self._restore_running:
             return forgetting.RESTORE_RUNNING
+        if self._move_panel is not None and self._move_panel.running:
+            return forgetting.MOVE_RUNNING
         if self._module_job_running():
             return forgetting.module_running(self._module_pending or "a Modules tab action")
         if self._network_applying:
@@ -15384,6 +15455,19 @@ class ControllerView(QWidget):
         columns.addWidget(backups, 3)
         columns.addWidget(restore, 2)
         box.addLayout(columns)
+        if self.services.move is not None:
+            # T601: pack and bring in accounts and characters. Its report goes to the same box
+            # a backup's and a restore's do, and a finished move re-lists the backups (the
+            # copy taken before a bring-in is one).
+            self._move_panel = MovePanel(
+                self.services.move,
+                jobs=self._jobs,
+                report=self.maintenance_report.setPlainText,
+                failed=self._maintenance_failed,
+                changed=self.refresh_backups,
+                parent=tab,
+            )
+            box.addWidget(self._move_panel)
         self._add_panel_tab(tab, "maintenance", "Maintenance")
         self.refresh_backups()
 

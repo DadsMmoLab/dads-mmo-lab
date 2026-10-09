@@ -479,3 +479,30 @@ def test_a_bundle_still_over_the_cap_at_every_floor_says_so(tmp_path: Path) -> N
     for name in members:
         if name.startswith(("live/", "conf/")):
             assert len(members[name].encode()) <= bundle.MIN_TAIL, name
+
+
+def test_a_move_package_in_the_server_folder_never_reaches_the_zip(tmp_path: Path) -> None:
+    """T601: a package holds every account's login verifier. No folder the bundle reads carries it.
+
+    Dropped in the places it could plausibly sit: the server folder, a conf folder, and the
+    backups folder, under the name Yu'lon gives it and under another.
+    """
+    install = _install(tmp_path)
+    secret = b"SRP-VERIFIER-OF-SOMEBODYS-ACCOUNT"
+    for where in (
+        install.server_dir,
+        install.server_dir / "etc",
+        install.server_dir / "sql_scripts" / "backups",
+    ):
+        where.mkdir(parents=True, exist_ok=True)
+        for name in ("yulon-move-wow-tbc-20261009-1530-keep-private.zip", "renamed.zip"):
+            with zipfile.ZipFile(where / name, "w") as z:
+                z.writestr("db/realmd.sql", secret)
+    sources = Sources(platform.config_dir(), None, (install,))
+    dest = tmp_path / "s.zip"
+    bundle.build(dest, sources, Redactor.build([]), seams=_seams())
+    assert dest.exists()
+    with zipfile.ZipFile(dest) as archive:
+        names = archive.namelist()
+        assert not [n for n in names if "yulon-move" in n or n.endswith("renamed.zip")]
+        assert not [n for n in names if secret in archive.read(n)]

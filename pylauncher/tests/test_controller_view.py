@@ -30526,3 +30526,46 @@ def test_a_tab_opened_at_start_up_asks_for_the_addons_a_moment_later(
     for _ in range(50):
         QApplication.processEvents()
     assert quiet_applier.installed == []
+
+
+# ----------------------------------------------------------------- T601: the Move group
+
+
+@pytest.mark.parametrize(
+    "game_id",
+    ["wow-wotlk", "wow-unbound", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"],
+)
+def test_every_game_gets_the_move_group_from_its_real_factory(game_id: str, tmp_path: Path) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    services = ControllerServices.for_entry(load_catalog().get(game_id), tmp_path)
+    assert services.move is not None, game_id
+
+
+def test_the_maintenance_tab_draws_the_move_group_only_where_it_is_wired(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon.ui.widgets.move_panel import MovePanel
+
+    without = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert without._move_panel is None
+
+    services = _services(ps, tmp_path, [])
+    services.move = ControllerServices.for_entry(WOTLK, tmp_path).move
+    with_move = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert isinstance(with_move._move_panel, MovePanel)
+    assert with_move._move_panel.pack_button.text() == "Pack for another computer…"
+
+
+def test_a_removal_is_refused_while_accounts_are_being_packed_or_brought_in(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    services = _services(ps, tmp_path, [])
+    services.move = ControllerServices.for_entry(WOTLK, tmp_path).move
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.forget_refusal() is None
+    assert view._move_panel is not None
+    view._move_panel.running = True
+    assert view.forget_refusal() == forgetting.MOVE_RUNNING
