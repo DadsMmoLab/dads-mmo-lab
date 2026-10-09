@@ -5367,6 +5367,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     55 after T564: four more `npc-teleporter` install steps: one before the files (clears the
     menus an earlier Install made), one after each `.dist` that moves its gossip menus off the
     base game's ids, and the put-back of the 19 base rows between them.
+    53 after T634: upstream renumbered its menus itself (38078d1d), so the two relocation
+    steps are gone.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5387,7 +5389,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        55,
+        53,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
