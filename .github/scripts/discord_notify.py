@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 
 MODEL = "claude-haiku-5-5"
-MAX_TOKENS = 2000
+MAX_TOKENS = 4000
 # Haiku reads this much easily; a release section runs to ~8000 characters and the
 # CHANGELOG section of v0.9.15 alone was 7559, so the old 6000 hid its end.
 MAX_INPUT_CHARS = 24000

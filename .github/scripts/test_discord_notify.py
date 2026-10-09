@@ -2020,3 +2020,8 @@ def test_a_push_looks_up_at_most_max_push_lookups_commits(world, monkeypatch):
         world.pulls[f"{i:02d}" + "a" * 38] = [a_pr(10 + i)]
     assert dn.cmd_merged() == 0
     assert len(world.discord("POST")) == 2
+
+
+def test_claude_has_room_to_think_before_it_writes_the_lists():
+    """At 2000 the real v0.9.15 release stopped on max_tokens in two runs of three."""
+    assert 3500 <= dn.MAX_TOKENS <= 4000
