@@ -231,12 +231,28 @@ def test_a_docker_that_is_not_there_does_not_refuse_a_start_it_will_fail_itself(
     assert ran == ["start"]
 
 
-def test_a_daemon_that_does_not_answer_does_not_refuse_a_start_either(
+def test_a_daemon_that_is_down_does_not_refuse_a_start_it_will_fail_itself(
     fake_docker: Path, server: Path
 ) -> None:
-    (fake_docker / "no-answer").write_text("", encoding="utf-8")
+    (fake_docker / "no-answer").write_text("", encoding="utf-8")  # "Cannot connect to the daemon"
     start_staged(SPEC, server)
     assert ran == ["start"]
+
+
+def test_a_daemon_that_hangs_refuses_a_start_and_lets_a_stop_through(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opus adversarial review: a hung look went ahead unreserved, beside another Yu'lon's job.
+
+    Mutation this catches: the timeout treated as moot in `_in_flight`.
+    """
+    (fake_docker / "inspect-hangs").write_text("", encoding="utf-8")
+    monkeypatch.setattr(docker, "_CLAIM_ASK_TIMEOUT", 0.3)
+    with pytest.raises(docker.ServerReservationUnavailable, match="not answering"):
+        start_staged(SPEC, server)
+    assert ran == []
+    stop_staged(SPEC, server)  # Stop always stops
+    assert ran == ["stop"]
 
 
 def test_a_folder_that_takes_no_id_file_does_not_refuse_a_start(
@@ -889,3 +905,26 @@ def test_sql_runs_unreserved_when_the_reservation_is_moot_and_is_refused_when_it
     with pytest.raises(ApplyRefusal, match="Docker is not answering"):
         applier.install(parse_manifest(STACKABLES))
     assert sql.files == [] and sql.statements == []
+
+
+@pytest.mark.parametrize(
+    ("method", "press"),
+    [
+        ("remove_kept_build", native.REMOVE_KEPT_BUILD_LABEL),
+        ("repair_base_compose", native.REPAIR_FILES_LABEL),
+    ],
+)
+def test_the_one_call_presses_reserve_too_and_are_refused_before_they_touch_anything(
+    tmp_path: Path, method: str, press: str
+) -> None:
+    """ "Remove kept build" deletes the `-parked` images another process's rollback needs;
+    "Repair server files" rewrites the compose file. Opus adversarial review.
+
+    Mutation this catches: either left unreserved."""
+    taken: list[str] = []
+    rec = Recorder()
+    installer = engine(rec, server_claim=_refusing(taken))
+    with pytest.raises(InstallerError, match="Another Yu'lon is working on WoW"):
+        getattr(installer, method)(InstallOptions(server_dir=_installed(tmp_path)))
+    assert taken == [press]
+    assert rec.calls == []

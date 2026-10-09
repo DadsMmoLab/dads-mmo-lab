@@ -6565,6 +6565,28 @@ def _reserving(
     return decorate
 
 
+def _reserving_call(press: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """`_reserving()` for a press that is one call and returns a value, not a generator (T568).
+
+    "Remove kept build" can delete the `-parked` images another process's rollback needs;
+    "Repair server files" rewrites the compose file under a running server's recreate.
+    """
+
+    def decorate(method: Callable[..., Any]) -> Callable[..., Any]:
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Any:
+            given = signature.bind(self, *args, **kwargs).arguments
+            options = given.get("options") or InstallOptions()
+            with self._reservation(self.server_dir(options), press):
+                return method(self, *args, **kwargs)
+
+        return reserved
+
+    return decorate
+
+
 class StagedInstaller:
     """Abstract spine: everything an install needs that is not about one emulator.
 
@@ -8798,6 +8820,7 @@ class StagedInstaller:
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
+    @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
     def remove_kept_build(self, options: InstallOptions | None = None) -> str:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
@@ -12694,6 +12717,7 @@ class StagedInstaller:
         )
         return check
 
+    @_reserving_call(REPAIR_FILES_LABEL)
     def repair_base_compose(
         self, options: InstallOptions | None = None, *, now: datetime | None = None
     ) -> ComposeRepaired:

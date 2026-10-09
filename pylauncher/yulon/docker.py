@@ -7790,6 +7790,13 @@ class ClaimDockerDown(ClaimUnavailable):
     """The claim could not be made because Docker itself is not there or not answering (T568)."""
 
 
+class ClaimDockerSilent(ClaimUnavailable):
+    """Docker did not answer in time (T568): it cannot be told whether another Yu'lon holds it.
+
+    Not `ClaimDockerDown`: a daemon that is down cannot be raced on, one that is merely slow can.
+    """
+
+
 class ClaimImageGone(ClaimUnavailable):
     """The claim could not be made because its image is not in Docker (T568: try the next)."""
 
@@ -8240,7 +8247,10 @@ WHO_LABEL = "yulon.who"
 """A reservation's label: `user@host (OS)` of the Yu'lon that holds it."""
 
 PID_LABEL = "yulon.pid"
-"""A reservation's label: the holding process's id (for the holder's own log, never trusted)."""
+"""A reservation's label: the holding process's id, with `HOST_LABEL` what "Clear it" checks."""
+
+HOST_LABEL = "yulon.host"
+"""A reservation's label: the holding computer's name (`socket.gethostname()`)."""
 
 RESERVATIONS_ON = True
 """Whether lifecycle commands and presses reserve their server at all. Production: always.
@@ -8251,6 +8261,12 @@ that this default stays True."""
 
 _STOP_RESERVE_TIMEOUT = 5.0
 """How long a Stop gives Docker to make its reservation before it goes ahead without one."""
+
+SILENT_DOCKER = (
+    "Docker is not answering, so Yu'lon cannot tell whether another Yu'lon is working on this "
+    "server; try again."
+)
+"""Why a press is refused when Docker timed out: a slow daemon can be raced on, so nothing runs."""
 
 _GONE_WAIT_SECONDS = 10.0
 """How long a reservation's container gets to be gone after it was released or removed.
@@ -8302,10 +8318,25 @@ class ServerHolder:
     who: str = ""
     pid: str = ""
     created: str = ""
+    host: str = ""
     ours: bool = False
     here: bool = False
     known: bool = True
     wsl_distro: str | None = None
+
+    def live_here(self) -> bool | None:
+        """Is the process that holds this a live one on THIS computer? None when it cannot be told.
+
+        "Ours" is only the same config folder: a headless install run, or a second window
+        that got past the single-instance lock, holds a LIVE reservation of its own. Only a
+        holder whose host label is this computer and whose pid is not running is a leftover;
+        anything unlabelled or from another computer cannot be told (T568, Opus review).
+        """
+        if not self.host or self.host != socket.gethostname() or not self.pid.isdigit():
+            return None
+        from yulon.selfupdate.layout import pid_is_alive
+
+        return pid_is_alive(int(self.pid))
 
     def since(self, now: float | None = None) -> str:
         """The daemon's creation stamp as "14:02 (3 minutes ago)"; empty when unreadable."""
@@ -8408,11 +8439,9 @@ def _wait_gone(
 
 def _docker_must_answer(proc: subprocess.CompletedProcess[str]) -> None:
     """Raise `ClaimDockerDown` when `proc` says Docker is not there or not answering (T568)."""
-    if (
-        _cli_missing(proc)
-        or runner.timed_out(proc)
-        or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr))
-    ):
+    if runner.timed_out(proc):
+        raise ClaimDockerSilent(SILENT_DOCKER)
+    if _cli_missing(proc) or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr)):
         raise ClaimDockerDown(
             proc.stderr.strip() or "Docker is not answering; start Docker and try again."
         )
@@ -8470,13 +8499,16 @@ def _server_holder(
 ) -> ServerHolder:
     """What the daemon says about the reservation `name`: press, who, pid and when."""
     fmt = "{{.Id}}\t{{.Created}}" + "".join(
-        f'\t{{{{index .Config.Labels "{key}"}}}}' for key in (PRESS_LABEL, WHO_LABEL, PID_LABEL)
+        f'\t{{{{index .Config.Labels "{key}"}}}}'
+        for key in (PRESS_LABEL, WHO_LABEL, PID_LABEL, HOST_LABEL)
     )
     proc = _docker(
         ["inspect", name, "--format", fmt], timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro
     )
     parts = (
-        [*proc.stdout.strip().split("\t"), "", "", "", "", ""][:5] if proc.returncode == 0 else []
+        [*proc.stdout.strip().split("\t"), "", "", "", "", "", ""][:6]
+        if proc.returncode == 0
+        else []
     )
     if not parts:
         return ServerHolder(name, "", ours=ours, here=here, known=False, wsl_distro=wsl_distro)
@@ -8487,6 +8519,7 @@ def _server_holder(
         who=parts[3],
         pid=parts[4],
         created=parts[1],
+        host=parts[5],
         ours=ours,
         here=here,
         known=known,
@@ -8496,7 +8529,7 @@ def _server_holder(
 
 def _refused(holder: ServerHolder, label: str, this_press: str) -> ServerReserved:
     """The refusal for a reservation `holder` holds: its sentence, by whose it is."""
-    if holder.ours and not holder.here:
+    if holder.ours and not holder.here and holder.live_here() is not True:
         said = forgetting.server_reservation_left(label, holder.name, this_press)
     elif not holder.known:
         said = forgetting.server_reservation_unsaid(label, holder.name, this_press)
@@ -8600,7 +8633,12 @@ def _new_reservation(
     up_timeout: float | None,
 ) -> _Reservation:
     """Make the container `name`; the daemon's refusal of a second one is the exclusion."""
-    labels = [(PRESS_LABEL, press), (WHO_LABEL, _who()), (PID_LABEL, str(os.getpid()))]
+    labels = [
+        (PRESS_LABEL, press),
+        (WHO_LABEL, _who()),
+        (PID_LABEL, str(os.getpid())),
+        (HOST_LABEL, socket.gethostname()),
+    ]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
     chain = _reservation_images(spec, images, wsl_distro)
@@ -8612,6 +8650,10 @@ def _new_reservation(
             raise ServerReservationUnavailable(
                 forgetting.server_reservation_unavailable(label, str(down)), moot=True
             ) from down
+        except ClaimDockerSilent as silent:
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(silent))
+            ) from silent
         if image is None:
             break
         try:

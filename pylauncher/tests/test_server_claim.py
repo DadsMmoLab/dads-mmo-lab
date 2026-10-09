@@ -68,7 +68,13 @@ def _labels(state: Path, name: str) -> dict[str, str]:
 
 
 def _another_process_holds(
-    state: Path, name: str, *, owner: str, press: str = "Update the server to latest…"
+    state: Path,
+    name: str,
+    *,
+    owner: str,
+    press: str = "Update the server to latest…",
+    pid: str = "999",
+    host: str | None = None,
 ) -> subprocess.Popen[bytes]:
     """Another Yu'lon's reservation: its own docker CLI with stdin held open."""
     proc = subprocess.Popen(
@@ -79,7 +85,8 @@ def _another_process_holds(
             "--label", f"{docker.CLAIM_LABEL}=theirs",
             "--label", f"{docker.PRESS_LABEL}={press}",
             "--label", f"{docker.WHO_LABEL}=pk on THEIR-PC (Windows)",
-            "--label", f"{docker.PID_LABEL}=999",
+            "--label", f"{docker.PID_LABEL}={pid}",
+            *(["--label", f"{docker.HOST_LABEL}={host}"] if host else []),
             "--entrypoint", "sh", IMAGE, "-c", "cat >/dev/null",
         ],
         stdin=subprocess.PIPE,
@@ -454,13 +461,15 @@ def test_a_folder_that_cannot_be_written_to_make_an_id_is_moot(
 # ------------------------------------------------------------------ cold review of T568
 
 
-def test_a_daemon_that_hangs_is_moot_not_no_image(
+def test_a_daemon_that_hangs_refuses_it_is_neither_moot_nor_no_image(
     fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A timed-out look is "Docker is not answering", never "no image: press Rebuild".
+    """A timed-out look cannot tell whether another Yu'lon holds the server: refused, plainly.
 
-    Mutation this catches: the timeout counted as an absent image (a starting Docker Desktop
-    then refused every Start and every press with advice to rebuild).
+    Not "no image: press Rebuild" (cold review), and not moot (Opus adversarial review): under
+    load the look times out before the `docker run` that would have been refused, and running
+    unreserved then works beside the holder.
+    Mutations this catches: the timeout counted as an absent image; the timeout counted as moot.
     """
     (fake_docker / "inspect-hangs").write_text("", encoding="utf-8")
     monkeypatch.setattr(docker, "_CLAIM_ASK_TIMEOUT", 0.3)
@@ -468,8 +477,10 @@ def test_a_daemon_that_hangs_is_moot_not_no_image(
     with pytest.raises(docker.ServerReservationUnavailable) as refused:
         with docker.server_claim(server, press="Start", images=[IMAGE], spec=spec):
             pytest.fail("went ahead")
-    assert refused.value.moot is True
-    assert "Rebuild" not in str(refused.value)
+    assert refused.value.moot is False
+    said = str(refused.value)
+    assert "Docker is not answering" in said and "whether another Yu'lon is working" in said, said
+    assert "Rebuild" not in said and "Nothing was changed" in said, said
 
 
 def test_the_wait_for_gone_is_for_its_own_container_not_the_name(
@@ -486,3 +497,44 @@ def test_the_wait_for_gone_is_for_its_own_container_not_the_name(
     assert docker._wait_gone("yulon-busy-x", None, container="older-container") is True
     assert time.monotonic() - began < 1.0
     assert docker._wait_gone("yulon-busy-x", None, container="newer-container", limit=0.3) is False
+
+
+# ---------------------------------------------------------------- alive or leftover (Opus review)
+
+
+def test_a_reservation_carries_the_computer_it_was_made_on(fake_docker: Path, server: Path) -> None:
+    with docker.server_claim(server, press="Update", images=[IMAGE]):
+        assert _labels(fake_docker, _name(server))[docker.HOST_LABEL] == socket.gethostname()
+
+
+def test_a_holder_is_live_dead_or_cannot_be_told(fake_docker: Path, server: Path) -> None:
+    import sys
+
+    done = subprocess.Popen([sys.executable, "-c", "pass"])
+    done.wait()
+    here = socket.gethostname()
+    base = {"name": "n", "container": "c"}
+    assert docker.ServerHolder(**base, host=here, pid=str(os.getpid())).live_here() is True
+    assert docker.ServerHolder(**base, host=here, pid=str(done.pid)).live_here() is False
+    assert docker.ServerHolder(**base, host="elsewhere", pid=str(os.getpid())).live_here() is None
+    assert docker.ServerHolder(**base, host="", pid=str(os.getpid())).live_here() is None
+    assert docker.ServerHolder(**base, host=here, pid="").live_here() is None
+
+
+def test_a_live_process_of_this_users_is_a_working_yulon_not_a_leftover(
+    fake_docker: Path, server: Path
+) -> None:
+    """Same config folder, live pid on this computer: the refusal is "working on", with no
+    `docker rm -f` line (a headless run or a second window holds it, Opus review)."""
+    name = _name(server)
+    theirs = _another_process_holds(
+        fake_docker, name, owner=docker.owner_id(), pid=str(os.getpid()), host=socket.gethostname()
+    )
+    try:
+        with pytest.raises(docker.ServerReserved) as refused:
+            with docker.server_claim(server, press="Start", images=[IMAGE]):
+                pytest.fail("went ahead")
+        said = str(refused.value)
+        assert "Another Yu'lon is working on" in said and "docker rm" not in said, said
+    finally:
+        theirs.kill()

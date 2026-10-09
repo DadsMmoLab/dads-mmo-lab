@@ -9937,10 +9937,13 @@ class ControllerView(QWidget):
         if not isinstance(exc, docker.ServerReserved):
             return
         holder = exc.holder
+        # Not a live process of this user's on this computer (a headless run, a second window
+        # that got past the lock): only a holder known to be dead is cleared (Opus review).
         if (
             holder.ours
             and not holder.here
             and holder.container
+            and holder.live_here() is False
             and single_instance.holds_the_lock()
         ):
             self._leftover = holder

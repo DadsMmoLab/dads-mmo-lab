@@ -8,6 +8,8 @@ lock; another user's leftover shows its command only. Fixtures are `test_control
 
 from __future__ import annotations
 
+import os
+import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -157,18 +159,31 @@ def test_a_restart_refused_by_another_yulon_does_not_offer_to_stop(
 
 # ------------------------------------------------------------------ [Clear it]
 
-OWN = docker.ServerHolder("yulon-busy-abc", "own-id", press="Rebuild", ours=True)
+
+def _dead_pid() -> str:
+    import subprocess
+    import sys
+
+    done = subprocess.Popen([sys.executable, "-c", "pass"])
+    done.wait()
+    return str(done.pid)
+
+
+def _own(host: str, pid: str, **kw: Any) -> docker.ServerHolder:
+    return docker.ServerHolder(
+        "yulon-busy-abc", "own-id", press="Rebuild", ours=True, host=host, pid=pid, **kw
+    )
 
 
 def _lock(monkeypatch: pytest.MonkeyPatch, held: bool) -> None:
     monkeypatch.setattr(single_instance, "holds_the_lock", lambda: held)
 
 
-def test_clear_it_is_offered_for_this_users_own_leftover_when_the_lock_is_held(
+def test_clear_it_is_offered_for_this_users_own_dead_leftover_when_the_lock_is_held(
     view: ControllerView, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _lock(monkeypatch, True)
-    view._start_failed(_refused(OWN))
+    view._start_failed(_refused(_own(socket.gethostname(), _dead_pid())))
     assert not view.clear_reservation_button.isHidden()
 
     cleared: list[str] = []
@@ -186,9 +201,16 @@ def test_clear_it_is_offered_for_this_users_own_leftover_when_the_lock_is_held(
     ("holder", "lock", "why"),
     [
         (docker.ServerHolder("n", "id", ours=False), True, "another user's"),
-        (docker.ServerHolder("n", "id", ours=True), False, "no single-instance lock"),
-        (docker.ServerHolder("n", "id", ours=True, here=True), True, "this process's own"),
+        (_own(socket.gethostname(), _dead_pid()), False, "no single-instance lock"),
+        (
+            docker.ServerHolder("n", "id", ours=True, here=True),
+            True,
+            "this process's own",
+        ),
         (docker.ServerHolder("n", "", ours=True), True, "no container id"),
+        (_own(socket.gethostname(), str(os.getpid())), True, "a LIVE process of this user's"),
+        (_own("", ""), True, "unlabelled: cannot tell"),
+        (_own("another-computer", _dead_pid()), True, "another computer: cannot tell"),
     ],
 )
 def test_clear_it_is_not_offered_otherwise(
@@ -198,6 +220,8 @@ def test_clear_it_is_not_offered_otherwise(
     lock: bool,
     why: str,
 ) -> None:
+    """Mutation this catches: "ours" alone (the config-dir hash) deciding the button, which
+    could remove a live headless run's or a second window's reservation (Opus review)."""
     _lock(monkeypatch, lock)
     view._start_failed(_refused(holder))
     assert view.clear_reservation_button.isHidden(), why
