@@ -4837,6 +4837,36 @@ def test_the_sweep_says_nothing_when_nothing_is_left(tmp_path: Path) -> None:
     assert _REAL_SWEEP(config_dir=tmp_path) is None
 
 
+def test_the_start_up_sweep_also_removes_stale_add_on_staging_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T613 PR-2: the add-on staging sweep rides the start-up sweep, off the GUI thread."""
+    from yulon import addon_archive
+
+    swept: list[str] = []
+    monkeypatch.setattr(addon_archive, "sweep_stale", lambda: swept.append("addons") or [])
+
+    assert _REAL_SWEEP(config_dir=tmp_path) is None
+    assert swept == ["addons"]
+
+
+def test_an_add_on_sweep_that_breaks_does_not_stop_the_client_copy_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from yulon import addon_archive
+
+    def broken() -> list[Path]:
+        raise RuntimeError("no cache dir")
+
+    monkeypatch.setattr(addon_archive, "sweep_stale", broken)
+    foreign = _leftover(tmp_path, "WoW (Yu'lon map data, temporary)")
+    with caplog.at_level("WARNING", logger="main"):
+        notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert notice is not None and foreign.is_dir()
+    assert "could not sweep the add-on staging folders: no cache dir" in caplog.text
+
+
 def _leftover(tmp_path: Path, name: str) -> Path:
     """A folder at a noted place that is not ours: kept, warned about, noticed."""
     import json

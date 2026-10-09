@@ -424,8 +424,16 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverN
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
-    from yulon import play_client, ui_settings
+    from yulon import addon_archive, play_client, ui_settings
     from yulon.catalog.families import trinitycore
+
+    # T613 PR-2: the add-on staging and download folders a stopped Yu'lon left,
+    # up to 500 MB each, that no press will ever come back for. Logged, never said.
+    try:
+        for folder in addon_archive.sweep_stale():
+            logger.info(f"removed the add-on staging folder {folder}, left by an earlier run")
+    except Exception as exc:  # noqa: BLE001 - one sweep must not stop the other
+        logger.warning(f"could not sweep the add-on staging folders: {exc}")
 
     lost: list[play_client.LostFlag] = []
     for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir, flags_lost=lost):

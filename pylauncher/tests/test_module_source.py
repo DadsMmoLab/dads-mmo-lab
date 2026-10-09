@@ -1079,3 +1079,24 @@ def test_staging_on_another_file_system_is_refused_before_anything_is_copied(
 
     assert _bytes_under(dest) == before
     _modules_holds_only(dest)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a named pipe needs mkfifo (not Windows)")
+def test_copy_folder_leaves_out_a_named_pipe_and_copies_the_rest(tmp_path: Path) -> None:
+    """T613 PR-2: `addon_archive.check_folder` passes over anything not a plain file.
+
+    So the copier must too: `copytree` refuses a named pipe as a `shutil.Error`
+    (a "special file") after the old copy is set aside, and a socket or device
+    the same way. Left out, as `.git` is, and the copy goes on.
+    """
+    src = tmp_path / "pfUI"
+    src.mkdir()
+    (src / "pfUI.toc").write_text("## Interface: 11200\n", encoding="utf-8")
+    os.mkfifo(src / "pipe.lua")
+    dest = tmp_path / "server" / "sql_scripts" / "clones" / "pfui"
+    dest.parent.mkdir(parents=True)
+
+    module_source.copy_folder(src, dest)
+
+    assert (dest / "pfUI.toc").read_text(encoding="utf-8") == "## Interface: 11200\n"
+    assert not os.path.lexists(dest / "pipe.lua")

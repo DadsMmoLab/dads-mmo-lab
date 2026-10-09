@@ -881,3 +881,81 @@ def test_a_fifo_in_a_folder_is_passed_over_not_read(tmp_path: Path) -> None:
 
     assert not hung, "check_folder opened the FIFO and blocked"
     assert [tree.files for tree in got] == [2]  # type: ignore[attr-defined]
+
+
+# --- T613 PR-2: cancel inside one large member, and the start-up sweep ----------------------
+
+
+def test_a_cancel_pressed_while_one_large_member_unpacks_stops_it_part_way(
+    tmp_path: Path, _cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asked per chunk, not once per member: one 400 MB member could not be cancelled before.
+
+    The zip has ONE member, so a check made only before each member is asked once and
+    answers "go on"; only a check inside the member's own loop is asked again.
+    """
+    monkeypatch.setattr(client_packs, "CHUNK_BYTES", 1024)
+    path = _zip(
+        tmp_path / "big.zip",
+        {"Big/Big.toc": "## Interface: 11200\n" + "-- pad\n" * 2000},
+        deflate=False,
+    )
+    asked: list[int] = []
+
+    def cancelled() -> bool:
+        asked.append(1)
+        return len(asked) >= 2
+
+    with pytest.raises(addon_archive.AddonCancelled) as caught:
+        stage_zip(path, cancelled=cancelled)
+
+    assert str(caught.value) == "Unpacking big.zip was cancelled." + NOTHING
+    assert len(asked) == 2
+    assert _left(_cache) == []
+
+
+def _aged(path: Path, seconds: float) -> Path:
+    when = path.stat().st_mtime - seconds
+    os.utime(path, (when, when))
+    return path
+
+
+def test_the_start_up_sweep_removes_staging_and_download_folders_a_crash_left(
+    _cache: Path,
+) -> None:
+    staging = addon_archive.staging_dir()
+    downloads = addon_archive.downloads_dir()
+    old_stage = staging / "tmpold1"
+    (old_stage / "pfUI").mkdir(parents=True)
+    (old_stage / "pfUI" / "pfUI.toc").write_text("## Interface: 11200\n")
+    old_download = downloads / "tmpold2"
+    old_download.mkdir(parents=True)
+    (old_download / "master.zip.part").write_bytes(b"PK")
+    _aged(old_stage, 2 * addon_archive.STALE_SECONDS)
+    _aged(old_download, 2 * addon_archive.STALE_SECONDS)
+
+    removed = addon_archive.sweep_stale()
+
+    assert sorted(removed) == sorted([old_stage, old_download])
+    assert not old_stage.exists() and not old_download.exists()
+    assert staging.is_dir() and downloads.is_dir()
+
+
+def test_the_start_up_sweep_leaves_a_folder_a_running_install_is_using(_cache: Path) -> None:
+    """Younger than `STALE_SECONDS`: another Yu'lon, or this one, may be unpacking into it."""
+    fresh = addon_archive.staging_dir() / "tmpnew"
+    fresh.mkdir(parents=True)
+    old = _aged(_mkdir(addon_archive.staging_dir() / "tmpold"), 2 * addon_archive.STALE_SECONDS)
+
+    assert addon_archive.sweep_stale() == [old]
+    assert fresh.is_dir()
+
+
+def test_the_start_up_sweep_with_no_cache_folder_does_nothing(_cache: Path) -> None:
+    assert addon_archive.sweep_stale() == []
+    assert not (_cache / "addons").exists()
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir(parents=True)
+    return path

@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Container
 from datetime import date
@@ -665,14 +666,28 @@ def _git_and_links(folder: str, names: list[str]) -> set[str]:
 
     An `OSError`, the copier's failure (`apply.FolderCopier`): reached only by a
     link made after `_first_link()` looked, when the old copy is already gone.
+
+    Anything that is neither a folder nor a plain file -- a named pipe, a socket,
+    a device -- is left behind too (T613 PR-2): `copytree` refuses one as a
+    "special file" with the whole copy, `addon_archive.check_folder()` passes
+    over one without opening it, and neither a module nor an add-on is made of one.
     """
     if links.is_link(folder):  # a child folder swapped for a link after its parent's look
         raise OSError(f"{folder} became a link while it was being copied; it was not copied")
+    left = {".git"} & set(names)
     for name in sorted(names):
         path = os.path.join(folder, name)
-        if name != ".git" and links.is_link(path):
+        if name == ".git":
+            continue
+        if links.is_link(path):
             raise OSError(f"{path} became a link while it was being copied; it was not copied")
-    return {".git"} & set(names)
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            continue  # gone since the listing: `copytree` says so in its own words
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            left.add(name)
+    return left
 
 
 def _link_refusal(link: Path) -> str:
