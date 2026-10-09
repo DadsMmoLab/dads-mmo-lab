@@ -724,9 +724,7 @@ def test_docker_sql_query_keeps_the_password_and_the_sql_out_of_argv_as_well(
         ]
     ]
     assert rows == "12401\n"  # stdout: the rows are the answer, stderr is not
-    assert (
-        kwargs_seen[0]["input"] == b"SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
-    )
+    assert kwargs_seen[0]["input"] == b"SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
     env = kwargs_seen[0]["env"]
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"
     assert "hunter2" not in " ".join(seen[0])
