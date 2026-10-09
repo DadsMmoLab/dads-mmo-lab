@@ -26,6 +26,7 @@ databases, and no conf file is packed.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import re
@@ -145,6 +146,18 @@ class Evidence(_Strict):
     kind: str = Field(min_length=1, max_length=40)
     count: int = Field(ge=0)
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    modules: tuple[str, ...] = ()
+    """The module rows of the same ledger, each `name|hash` (AzerothCore/TrinityCore `updates`
+    rows that are not core ones; Tortoise `migrations` rows with a module). Kept apart from
+    `digest` because they are compared apart: a different module set is a different sentence."""
+
+    @field_validator("modules")
+    @classmethod
+    def _module_rows(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for row in value:
+            if not row or len(row) > 400 or any(ord(c) < 32 for c in row):
+                raise ValueError("a module row is printable text of up to 400 characters")
+        return value
 
 
 class Counts(_Strict):
@@ -277,6 +290,17 @@ def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Mani
                         sink.write(chunk)
         read_package(partial)
         partial.replace(dest)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise MovePackageError(
+                "There is not enough free space where the file goes (it needs up to "
+                f"{_megabytes(sum(m.bytes for m in members))} MB). Free some space or pick "
+                "another folder, then pack again. Nothing was packed."
+            ) from exc
+        raise MovePackageError(
+            f"Yu'lon could not write {dest.name}: {exc}. Nothing was packed."
+        ) from exc
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
@@ -332,13 +356,30 @@ class Package:
                         digest.update(chunk)
                         size += len(chunk)
                         sink.write(chunk)
-        except (OSError, zipfile.BadZipFile) as exc:
+        except zipfile.BadZipFile as exc:
             target.unlink(missing_ok=True)
             raise MovePackageError(NOT_A_PACKAGE) from exc
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            if exc.errno == errno.ENOSPC:
+                raise MovePackageError(
+                    f"There is not enough free space to unpack {self.path.name} (it needs "
+                    f"{_megabytes(member.bytes)} MB). Free some space and try again. Nothing "
+                    "was brought in."
+                ) from exc
+            raise MovePackageError(
+                f"Yu'lon could not write {target.name} while unpacking {self.path.name}: {exc}. "
+                "Nothing was brought in."
+            ) from exc
         if digest.hexdigest() != member.sha256 or size != member.bytes:
             target.unlink(missing_ok=True)
             raise MovePackageError(_changed(self.path.name))
         return target
+
+
+def _megabytes(size: int) -> int:
+    """Whole megabytes, rounded up, for a sentence about space."""
+    return max(1, -(-size // (1024 * 1024)))
 
 
 def _changed(name: str) -> str:
@@ -462,7 +503,9 @@ def dump_from_another_game(name: str, found: str, target_name: str) -> str:
 
 
 def version_difference(
-    package: Mapping[str, Evidence], here: Mapping[str, Evidence | None]
+    package: Mapping[str, Evidence],
+    here: Mapping[str, Evidence | None],
+    optional: frozenset[str] = frozenset(),
 ) -> str | None:
     """A sentence if the package's databases are not at this server's version, else None.
 
@@ -471,25 +514,75 @@ def version_difference(
     import (`docker.start_staged` leaves it out on purpose), so data one step behind would
     be run on a newer core as it is. `here` holds `None` for a schema that could not be
     asked, which refuses too: an unreadable version is not a matching one.
+
+    The module rows of a ledger are compared apart, after the core ones: the load replaces the
+    whole ledger table, so a target with a module the file lacks would lose that module's row
+    while its tables stayed, and its next database update would run the module's SQL again.
+    Equal module sets make the replacement harmless, so equal is the only way through.
+
+    `optional` names schemas that may have no ledger at all (playerbots, the Lua engine). For
+    those a missing record is a state, not an error: none on both sides matches, and a record
+    on one side only is a difference, named as that.
     """
     differences: list[str] = []
-    for schema, theirs in sorted(package.items()):
+    for schema in sorted(set(package) | set(optional)):
+        theirs = package.get(schema)
         ours = here.get(schema)
-        if ours is None:
+        if schema in optional:
+            if theirs is None and ours is None:
+                continue
+            if theirs is None:
+                differences.append(
+                    f"{schema}: this server has an update record and the file has none"
+                )
+                continue
+            if ours is None:
+                differences.append(
+                    f"{schema}: the file has an update record and this server has none"
+                )
+                continue
+        elif ours is None:
             differences.append(f"{schema}: this server's version could not be read")
-        elif ours.kind != theirs.kind or ours.digest != theirs.digest:
+            continue
+        elif theirs is None:  # pragma: no cover - the loop covers package keys only
+            continue
+        if ours.kind != theirs.kind or ours.digest != theirs.digest:
             differences.append(
                 f"{schema}: {theirs.count} {_unit(theirs.kind)} in the file, {ours.count} here"
             )
-    if not differences:
-        return None
-    return (
-        "The databases in this file are not at the same version as this server's "
-        f"({'; '.join(differences)}), and Yu'lon cannot convert characters between versions. "
-        "Put both servers on the same version (use "
-        f"{under_server_build(UPDATE_TO_LATEST)} on the one that is behind, and pack again if "
-        "it was the old one), then try again."
-    )
+    if differences:
+        return (
+            "The databases in this file are not at the same version as this server's "
+            f"({'; '.join(differences)}), and Yu'lon cannot convert characters between versions. "
+            "Put both servers on the same version (use "
+            f"{under_server_build(UPDATE_TO_LATEST)} on the one that is behind, and pack again if "
+            "it was the old one), then try again."
+        )
+    return _module_difference(package, here)
+
+
+def _module_difference(
+    package: Mapping[str, Evidence], here: Mapping[str, Evidence | None]
+) -> str | None:
+    """The sentence for a package whose module rows are not this server's, else None."""
+    sentences: list[str] = []
+    for schema, theirs in sorted(package.items()):
+        ours = here.get(schema)
+        if ours is None or set(ours.modules) == set(theirs.modules):
+            continue
+        only_theirs = set(theirs.modules) - set(ours.modules)
+        only_ours = set(ours.modules) - set(theirs.modules)
+        sentences.append(
+            "This package was made on a server with "
+            f"{_module_names(only_theirs) or 'no module this one lacks'}, this one has "
+            f"{_module_names(only_ours) or 'no module the package lacks'}: install the same "
+            "modules first, or move the whole server (level 2)."
+        )
+    return " ".join(sentences) or None
+
+
+def _module_names(rows: set[str]) -> str:
+    return ", ".join(sorted({row.partition("|")[0] for row in rows}))
 
 
 def _unit(kind: str) -> str:

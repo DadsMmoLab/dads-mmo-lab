@@ -62,6 +62,9 @@ class Db:
         fail_load_of: str | None = None,
         extra_tables: dict[str, dict[str, int]] | None = None,
         fail_dump_of: str | None = None,
+        module_rows: dict[str, tuple[tuple[str, str], ...]] | None = None,
+        updates_by_schema: dict[str, tuple[str, ...]] | None = None,
+        no_ledger: tuple[str, ...] = (),
     ) -> None:
         self.events = events
         self.present = present
@@ -71,6 +74,9 @@ class Db:
         self.version_table = version_table
         self.fail_load_of = fail_load_of
         self.fail_dump_of = fail_dump_of
+        self.module_rows = module_rows or {}  # schema -> ((name, hash), ...) of non-core rows
+        self.updates_by_schema = updates_by_schema or {}
+        self.no_ledger = no_ledger
         self.session_columns = "session_key\tYES\n"
         self.extra_tables = extra_tables or {}  # schema -> {table: rows} the target alone has
         self.queries: list[str] = []
@@ -117,13 +123,20 @@ class Db:
         if "'session_key'" in sql and "information_schema.COLUMNS" in sql:
             return self.session_columns
         if "information_schema.TABLES" in sql:
+            asked = re.search(r"TABLE_SCHEMA = '([^']+)'", sql)
+            if asked is not None and asked.group(1) in self.no_ledger:
+                return ""
             return f"{self.version_table}\n" if self.version_table else ""
         if "COUNT(*)" in sql:
             return "\t".join(str(n) for n in self.counts) + "\n"
         if "realmlist" in sql:
             return f"{self.realm}\n"
         if "`updates`" in sql:
-            return "".join(f"{name}\n" for name in self.updates)
+            schema = re.search(r"`([^`]+)`\.`updates`", sql).group(1)  # type: ignore[union-attr]
+            if "NOT IN ('RELEASED'" in sql:
+                return "".join(f"{n}\t{h}\n" for n, h in self.module_rows.get(schema, ()))
+            names = self.updates_by_schema.get(schema, self.updates)
+            return "".join(f"{name}\n" for name in names)
         raise AssertionError(f"unscripted query: {sql}")
 
 
@@ -998,7 +1011,7 @@ def test_non_empty_data_the_file_does_not_cover_refuses_the_plan(tmp_path: Path)
     )
     plan = move_flows.plan_import(target(tmp_path, db=db).world, package)
     assert not plan.allowed
-    said = plan.refusals[0]
+    said = " ".join(plan.refusals)
     assert "acore_playerbots.playerbots_random_bots" in said
     assert "acore_characters.mod_transmog" in said
     assert "mod_empty" not in said
@@ -1050,3 +1063,101 @@ def test_a_realm_name_with_a_backslash_survives_the_clients_escaping(tmp_path: P
     folder.mkdir()
     manifest = move_flows.export_package(box.world, folder, stop_allowed=False).manifest
     assert manifest.realm_name == "Back\\slash"
+
+
+# ------------------------------------------------------------ module rows, other ledgers (lead)
+
+MODULES_A = (("0000_playerbots_names.sql", "aa11"), ("transmog.sql", "bb22"))
+
+
+def test_the_manifest_carries_the_module_rows_of_each_ledger(tmp_path: Path) -> None:
+    db = Db([], module_rows={"acore_characters": MODULES_A})
+    box = Box(tmp_path, running_now=("ac-database",), db=db)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    manifest = move_flows.export_package(box.world, folder, stop_allowed=False).manifest
+    assert manifest.schema_evidence["acore_characters"].modules == (
+        "0000_playerbots_names.sql|aa11",
+        "transmog.sql|bb22",
+    )
+    assert manifest.schema_evidence["acore_auth"].modules == ()
+
+
+def packed_with(tmp_path: Path, **db: object) -> Path:
+    root = tmp_path / "source-mod"
+    root.mkdir(exist_ok=True)
+    source = Box(root, running_now=("ac-database",), db=Db([], **db))  # type: ignore[arg-type]
+    folder = tmp_path / "out-mod"
+    folder.mkdir(exist_ok=True)
+    return move_flows.export_package(source.world, folder, stop_allowed=False).path
+
+
+def test_a_target_with_the_same_module_rows_is_allowed(tmp_path: Path) -> None:
+    package = packed_with(tmp_path, module_rows={"acore_characters": MODULES_A})
+    box = target(tmp_path, db=Db([], module_rows={"acore_characters": MODULES_A}))
+    assert move_flows.plan_import(box.world, package).allowed
+
+
+def test_a_target_with_other_module_rows_is_refused_naming_them(tmp_path: Path) -> None:
+    package = packed_with(tmp_path, module_rows={"acore_characters": MODULES_A})
+    here = (("0000_playerbots_names.sql", "aa11"), ("ah_bot.sql", "cc33"))
+    box = target(tmp_path, db=Db([], module_rows={"acore_characters": here}))
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert plan.refusals == (
+        "This package was made on a server with transmog.sql, this one has ah_bot.sql: "
+        "install the same modules first, or move the whole server (level 2).",
+    )
+
+
+def test_module_rows_that_change_after_the_plan_refuse_the_run(tmp_path: Path) -> None:
+    package = packed_with(tmp_path, module_rows={"acore_characters": MODULES_A})
+    box = target(tmp_path, db=Db([], module_rows={"acore_characters": MODULES_A}))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed
+    box.db.module_rows = {"acore_characters": ()}
+    box.events.clear()
+    with pytest.raises(MaintenanceError, match="install the same modules first"):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert not [e for e in box.events if e.startswith(("load:", "dump:"))]
+
+
+PLAYERBOTS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+
+
+def test_the_playerbots_ledger_at_another_version_is_refused_naming_it(tmp_path: Path) -> None:
+    package = packed_with(tmp_path, present=PLAYERBOTS)
+    box = target(
+        tmp_path,
+        db=Db([], present=PLAYERBOTS, updates_by_schema={"acore_playerbots": ("x", "y", "z")}),
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "acore_playerbots: 2 updates in the file, 3 here" in plan.refusals[0]
+
+
+def test_a_schema_without_any_ledger_on_both_sides_is_not_a_difference(tmp_path: Path) -> None:
+    present = (*PLAYERBOTS, "acore_ale")
+    package = packed_with(tmp_path, present=present, no_ledger=("acore_ale",))
+    assert "acore_ale" not in move.read_package(package).manifest.schema_evidence
+    box = target(tmp_path, db=Db([], present=present, no_ledger=("acore_ale",)))
+    assert move_flows.plan_import(box.world, package).allowed
+
+
+def test_a_ledger_on_one_side_only_is_refused(tmp_path: Path) -> None:
+    present = (*PLAYERBOTS, "acore_ale")
+    package = packed_with(tmp_path, present=present, no_ledger=("acore_ale",))
+    box = target(tmp_path, db=Db([], present=present))  # this server's ale has a ledger
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "acore_ale: this server has an update record and the file has none" in plan.refusals[0]
+
+
+def test_a_target_without_the_playerbots_schema_is_not_asked_about_its_ledger(
+    tmp_path: Path,
+) -> None:
+    package = packed_with(tmp_path, present=PLAYERBOTS)
+    box = target(tmp_path)  # acore_auth, acore_characters, acore_world only
+    assert move_flows.plan_import(box.world, package).allowed

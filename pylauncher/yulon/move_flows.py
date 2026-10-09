@@ -64,6 +64,9 @@ ROLES: tuple[Role, ...] = ("auth", "characters", "playerbots", "ale")
 EVIDENCE_ROLES: tuple[Role, ...] = ("auth", "characters")
 """The roles whose database version decides whether a package fits."""
 
+OPTIONAL_EVIDENCE_ROLES: tuple[Role, ...] = ("playerbots", "ale")
+"""Roles that are compared too, but may have no update record at all (the Lua engine's has none)."""
+
 BEFORE_MOVE_LABEL = "before-move"
 """The label of the copy of the target's databases taken before anything is loaded."""
 
@@ -272,15 +275,24 @@ def _read_version(world: MoveWorld, schema: str) -> Evidence | None:
         ).split()
         tables = set(found)
         quoted = f"`{schema}`"
+        module_sql = ""
         if "updates" in tables:
             kind = "updates"
             sql = (
                 f"SELECT `name` FROM {quoted}.`updates` "
                 "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
             )
+            module_sql = (
+                f"SELECT `name`, `hash` FROM {quoted}.`updates` "
+                "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+            )
         elif "migrations" in tables:
             kind = "migrations"
             sql = f"SELECT `Hash` FROM {quoted}.`migrations` WHERE `Module` = '' ORDER BY `Hash`;"
+            module_sql = (
+                f"SELECT `Module`, `Hash` FROM {quoted}.`migrations` "
+                "WHERE `Module` <> '' ORDER BY `Module`, `Hash`;"
+            )
         elif tables & {"character_db_version", "realmd_db_version"}:
             kind = "db_version"
             table = sorted(tables & {"character_db_version", "realmd_db_version"})[0]
@@ -292,16 +304,49 @@ def _read_version(world: MoveWorld, schema: str) -> Evidence | None:
         else:
             return None
         items = [line.strip() for line in world.mysql.query(sql).splitlines() if line.strip()]
+        modules = tuple(
+            sorted(
+                line.strip().replace("\t", "|")
+                for line in (world.mysql.query(module_sql).splitlines() if module_sql else ())
+                if line.strip()
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - a version that cannot be asked is not a version
         logger.info(f"could not read the version of {schema}: {exc}")
         return None
     if not items:
         return None
-    return Evidence(kind=kind, count=len(items), digest=digest_of(items))
+    return Evidence(kind=kind, count=len(items), digest=digest_of(items), modules=modules)
 
 
 def _read_versions(world: MoveWorld, roles: Mapping[Role, str]) -> dict[str, Evidence | None]:
-    return {roles[r]: _read_version(world, roles[r]) for r in EVIDENCE_ROLES if r in roles}
+    wanted = (*EVIDENCE_ROLES, *OPTIONAL_EVIDENCE_ROLES)
+    return {roles[r]: _read_version(world, roles[r]) for r in wanted if r in roles}
+
+
+def _version_problem(
+    world: MoveWorld,
+    manifest: Manifest,
+    roles: Mapping[Role, str],
+    here: Mapping[str, Evidence | None],
+) -> str | None:
+    """The sentence for a package that is not at this server's version or modules, else None.
+
+    The playerbots and Lua-engine schemas are compared only where this server has them: a server
+    without one gets it created by the dump, and has no record there to disagree with.
+    """
+    package = dict(manifest.schema_evidence)
+    schemas = world.entry.schema_map()
+    optional: set[str] = set()
+    for role in OPTIONAL_EVIDENCE_ROLES:
+        schema = schemas.get(role)
+        if schema is None:
+            continue
+        if roles.get(role) == schema:
+            optional.add(schema)
+        else:
+            package.pop(schema, None)
+    return move.version_difference(package, here, frozenset(optional))
 
 
 def _bot_and_app_clauses(world: MoveWorld) -> tuple[str, str]:
@@ -496,8 +541,9 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
                     f"characters to pack. {undone}"
                 )
         versions = _read_versions(world, roles)
+        required = {roles[r] for r in EVIDENCE_ROLES}
         for schema, version in versions.items():
-            if version is None:
+            if version is None and schema in required:
                 raise MoveError(
                     f"Yu'lon could not read the database version of {schema}, so a package "
                     f"made from it could not be checked on the other computer. {undone}"
@@ -718,7 +764,7 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             refusals=(f"Yu'lon could not look at this server: {exc}",),
             schemas=schemas,
         )
-    said = move.version_difference(manifest.schema_evidence, here)
+    said = _version_problem(world, manifest, roles, here)
     if said:
         refusals.append(said)
     if counts is None:
@@ -939,7 +985,7 @@ def _import_locked(
     manifest = package.manifest
     roles = _present_roles(world)
     here = _read_versions(world, roles)
-    said = move.version_difference(manifest.schema_evidence, here)
+    said = _version_problem(world, manifest, roles, here)
     if said:
         raise MoveError(f"{said} {_NOT_IN}")
     counts = _survey_counts(world, roles)

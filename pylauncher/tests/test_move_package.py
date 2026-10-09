@@ -372,3 +372,164 @@ def test_an_unreadable_target_version_is_not_a_match() -> None:
 
 def test_a_schema_missing_from_the_target_is_not_a_match() -> None:
     assert move.version_difference({"s": ev()}, {}) is not None
+
+
+# ------------------------------------------------------------------ module rows (lead, 2026-10-09)
+
+
+def ev_with_modules(*rows: tuple[str, str], digest: str = DIGEST_A) -> Evidence:
+    """Evidence whose core digest is `digest` and whose module rows are `(name, hash)`."""
+    return Evidence(
+        kind="updates",
+        count=10,
+        digest=digest,
+        modules=tuple(sorted(f"{name}|{row_hash}" for name, row_hash in rows)),
+    )
+
+
+def test_evidence_made_before_module_rows_existed_reads_as_having_none() -> None:
+    assert Evidence(kind="updates", count=1, digest=DIGEST_A).modules == ()
+
+
+def test_equal_module_rows_are_the_same_version() -> None:
+    mine = ev_with_modules(("0000_playerbots_names.sql", "aa"), ("x_mod.sql", "bb"))
+    assert move.version_difference({"s": mine}, {"s": mine}) is None
+
+
+def test_different_module_rows_are_refused_and_name_the_modules_that_differ() -> None:
+    package = ev_with_modules(("0000_playerbots_names.sql", "aa"), ("transmog.sql", "bb"))
+    here = ev_with_modules(("0000_playerbots_names.sql", "aa"), ("ah_bot.sql", "cc"))
+    assert move.version_difference({"s": package}, {"s": here}) == (
+        "This package was made on a server with transmog.sql, this one has ah_bot.sql: "
+        "install the same modules first, or move the whole server (level 2)."
+    )
+
+
+def test_a_module_that_only_one_side_has_is_named_and_the_other_side_says_none() -> None:
+    package = ev_with_modules(("transmog.sql", "bb"))
+    here = ev_with_modules()
+    assert move.version_difference({"s": package}, {"s": here}) == (
+        "This package was made on a server with transmog.sql, this one has no module the "
+        "package lacks: install the same modules first, or move the whole server (level 2)."
+    )
+
+
+def test_the_same_module_file_with_another_hash_is_a_difference_and_named_on_both_sides() -> None:
+    said = move.version_difference(
+        {"s": ev_with_modules(("a.sql", "11"))}, {"s": ev_with_modules(("a.sql", "22"))}
+    )
+    assert said == (
+        "This package was made on a server with a.sql, this one has a.sql: install the same "
+        "modules first, or move the whole server (level 2)."
+    )
+
+
+def test_a_core_version_difference_is_said_before_a_module_difference() -> None:
+    said = move.version_difference(
+        {"s": ev_with_modules(("a.sql", "11"), digest=DIGEST_A)},
+        {"s": ev_with_modules(("b.sql", "22"), digest=DIGEST_B)},
+    )
+    assert said is not None and said.startswith("The databases in this file are not at the same")
+
+
+def test_an_optional_schema_with_no_update_record_on_either_side_is_not_a_difference() -> None:
+    assert (
+        move.version_difference({}, {"acore_ale": None}, optional=frozenset({"acore_ale"})) is None
+    )
+
+
+def test_an_optional_schema_with_a_record_on_one_side_only_is_refused_and_named() -> None:
+    said = move.version_difference(
+        {"acore_playerbots": ev()},
+        {"acore_playerbots": None},
+        optional=frozenset({"acore_playerbots"}),
+    )
+    assert said is not None
+    assert "acore_playerbots: the file has an update record and this server has none" in said
+    said = move.version_difference(
+        {},
+        {"acore_playerbots": ev()},
+        optional=frozenset({"acore_playerbots"}),
+    )
+    assert said is not None
+    assert "acore_playerbots: this server has an update record and the file has none" in said
+
+
+def test_an_optional_schema_at_another_version_is_refused_like_the_core_ones() -> None:
+    said = move.version_difference(
+        {"acore_playerbots": ev(DIGEST_A, 3)},
+        {"acore_playerbots": ev(DIGEST_B, 4)},
+        optional=frozenset({"acore_playerbots"}),
+    )
+    assert said is not None and "acore_playerbots: 3 updates in the file, 4 here" in said
+
+
+# ------------------------------------------------------------------ a full disk
+
+
+def test_a_full_disk_while_unpacking_says_so_with_the_size_needed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    body = b"x" * (3 * 1024 * 1024 + 5)
+    src = dump(tmp_path, "acore_auth", body=body)
+    path = tmp_path / "big.zip"
+    write_package(path, header(), [src])
+    package = read_package(path)
+    out = tmp_path / "out"
+    out.mkdir()
+    real_open = Path.open
+
+    def full(self: Path, mode: str = "r", *a: object, **k: object):  # type: ignore[no-untyped-def]
+        if self.parent == out:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(self, mode, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", full)
+    with pytest.raises(MovePackageError) as raised:
+        package.extract("acore_auth", out)
+    assert str(raised.value) == (
+        "There is not enough free space to unpack big.zip (it needs 4 MB). Free some space "
+        "and try again. Nothing was brought in."
+    )
+
+
+def test_another_write_failure_while_unpacking_is_not_called_a_bad_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    path = pack(tmp_path, "acore_auth")
+    package = read_package(path)
+    out = tmp_path / "out"
+    out.mkdir()
+    real_open = Path.open
+
+    def denied(self: Path, mode: str = "r", *a: object, **k: object):  # type: ignore[no-untyped-def]
+        if self.parent == out:
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_open(self, mode, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(MovePackageError) as raised:
+        package.extract("acore_auth", out)
+    assert str(raised.value) != move.NOT_A_PACKAGE
+    assert "could not write" in str(raised.value)
+
+
+def test_a_full_disk_while_writing_the_package_says_so_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    src = dump(tmp_path, "acore_auth", body=b"y" * (2 * 1024 * 1024))
+
+    def full(*a: object, **k: object) -> object:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", full)
+    dest = tmp_path / "out.zip"
+    with pytest.raises(MovePackageError, match="not enough free space where the file goes"):
+        write_package(dest, header(), [src])
+    assert not dest.exists() and not list(tmp_path.glob("*.partial"))
