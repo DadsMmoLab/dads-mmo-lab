@@ -241,7 +241,9 @@ def _rows_in(folder: Path, game_id: str | None) -> list[ShelfRow]:
         return rows
     for entry in entries:
         try:
-            st = entry.stat(follow_symlinks=False)
+            # `os.lstat`, not `entry.stat()`: on Windows the entry's look leaves st_ino, st_dev
+            # and st_nlink at zero, and the identity and the second-name test are made of them.
+            st = os.lstat(entry.path)
         except OSError:
             continue
         if links.stat_is_link(st) or not stat.S_ISREG(st.st_mode):

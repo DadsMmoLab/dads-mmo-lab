@@ -603,3 +603,19 @@ def test_delete_and_clean_up_wait_while_one_of_them_runs(
     fn, done, _failed = held[0]
     done(fn())
     assert view.clean_up_button.isEnabled()
+
+
+@pytest.mark.parametrize("game_id", sorted(view_module._FACTORIES))
+def test_every_game_wires_the_shelf_to_its_own_folder_and_game(
+    game_id: str, tmp_path: Path, qapp: object
+) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    entry = load_catalog().get(game_id)
+    services = view_module.ControllerServices.for_entry(entry, tmp_path)
+    seam = services.shelf
+    assert seam is not None
+    assert seam.server_dir == tmp_path
+    assert seam.game_id == game_id
+    assert seam.spec == entry.container_spec()
+    assert services.backups_dir() == backup_shelf.backups_dir(tmp_path)

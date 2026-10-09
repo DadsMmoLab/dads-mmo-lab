@@ -226,6 +226,32 @@ def test_a_backups_folder_linked_to_somewhere_inside_the_install_may_delete(
     assert row(found, "20261001_100000_acore_world.sql").cannot_delete is None
 
 
+def test_the_look_at_each_file_is_a_whole_lstat_not_the_directory_entrys(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows `DirEntry.stat()` leaves inode, device and link count at zero."""
+    path = put(server, "20261001_100000")
+    os.link(path, server / "second-name.sql")
+    real_scandir = os.scandir
+
+    class Entry:
+        def __init__(self, inner: os.DirEntry[str]) -> None:
+            self.name, self.path = inner.name, inner.path
+            self._inner = inner
+
+        def stat(self, *, follow_symlinks: bool = True) -> object:
+            raw = self._inner.stat(follow_symlinks=follow_symlinks)
+            return os.stat_result(
+                (raw.st_mode, 0, 0, 0, raw.st_uid, raw.st_gid, raw.st_size, 0, raw.st_mtime, 0)
+            )
+
+    monkeypatch.setattr(os, "scandir", lambda p: [Entry(e) for e in real_scandir(p)])
+    r = row(shelf(server), path.name)
+    assert r.identity[:2] != (0, 0)
+    assert r.links == 2
+    assert r.frees_bytes == 0
+
+
 # -------------------------------------------------------------- protections
 
 
