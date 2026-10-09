@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import database_presence, docker, forgetting, wsl
+from yulon import database_presence, docker, forgetting, platform, wsl
 from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
@@ -522,8 +522,11 @@ class Controller:
     def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
         """The server folders (by compose working dir) of `containers`, each with one container.
 
-        Only a folder this host can see: a working dir inside a WSL distro, or one Docker has
-        no label for, is skipped (and logged), since there is no id file to put in it.
+        A folder this host can see: a path on this host, or -- when this server's Docker lives
+        in a WSL distro (`wsl_distro`) -- a Linux path in that distro, read through its
+        `\\\\wsl.localhost` share (T607; the other server's Docker is this one's, so its path is
+        in this distro). A working dir this host cannot see, or one Docker has no label for, is
+        skipped (and logged), since there is no id file to put in it.
         """
         found: dict[Path, str] = {}
         for name in containers:
@@ -531,14 +534,27 @@ class Controller:
                 working = docker.container_working_dir(name, wsl_distro=self.wsl_distro)
             except docker.DockerCommandError:
                 working = None
-            folder = Path(working) if working else None
-            if folder is None or not folder.is_dir():
+            folder = self._visible_folder(working)
+            if folder is None:
                 logger.info(f"no server folder this host can see for {name} ({working!r})")
                 continue
             if folder.resolve() == self.server_dir.resolve():
                 continue
             found.setdefault(folder, name)
         return found
+
+    def _visible_folder(self, working: str | None) -> Path | None:
+        """`working` as a folder this host can read, or None."""
+        if not working:
+            return None
+        direct = Path(working)
+        if direct.is_dir():
+            return direct
+        if self.wsl_distro is not None and working.startswith("/"):
+            share = platform.wsl_unc_path(self.wsl_distro, working)
+            if share is not None and share.is_dir():
+                return share
+        return None
 
     def refuse_start(self) -> None:
         """Raise `StartRefused` when the folder or `start_guard` gives a reason; before any stop.

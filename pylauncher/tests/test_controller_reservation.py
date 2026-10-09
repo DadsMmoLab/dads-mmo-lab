@@ -149,3 +149,91 @@ def test_stopping_the_other_server_reserves_its_folder_and_is_refused_while_it_i
 
     assert controller.stop_conflicting() == ["o-db", "o-world"]
     assert stopped == [(["o-db", "o-world"], True)], "the stop ran without the other's reservation"
+
+
+# ------------------------------------------------------------------ T607 item 7
+
+
+class _InDistro(_Recorded):
+    def __init__(self, server_dir: Path, distro: str) -> None:
+        super().__init__(server_dir)
+        self.wsl_distro = distro
+
+
+def _wsl_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, list[tuple[list[str], bool]]]:
+    """Our server beside an OTHER server whose working dir is a Linux path inside our distro.
+
+    Only the UNC spelling of that path (`platform.wsl_unc_path`) is a folder this host can
+    read, as on a Windows host with the other server in the WSL distro this server lives in.
+    """
+    ours, other = tmp_path / "ours", tmp_path / "unc" / "other"
+    ours.mkdir()
+    other.mkdir(parents=True)
+    stopped: list[tuple[list[str], bool]] = []
+
+    def stop_containers(names: list[str], **_kw: Any) -> None:
+        stopped.append((names, docker.reservation_held_here(other)))
+
+    monkeypatch.setattr(docker, "stop_containers", stop_containers)
+    monkeypatch.setattr(docker, "container_project", lambda *_a, **_kw: "other")
+    monkeypatch.setattr(docker, "project_containers", lambda *_a, **_kw: ["o-db", "o-world"])
+    monkeypatch.setattr(docker, "container_working_dir", lambda *_a, **_kw: "/home/u/other")
+    monkeypatch.setattr(
+        platform,
+        "wsl_unc_path",
+        lambda distro, inside: other if (distro, inside) == ("Ubuntu", "/home/u/other") else None,
+    )
+    monkeypatch.setattr("yulon.wsl.release", lambda *_a, **_kw: True)
+    real_prefix = platform.docker_prefix
+    # The fake CLI stands for the distro's docker, whatever distro is asked.
+    monkeypatch.setattr(platform, "docker_prefix", lambda distro=None, **_kw: real_prefix(None))
+    return ours, other, stopped
+
+
+def test_a_server_inside_our_wsl_distro_is_reserved_when_the_other_one_is_stopped(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ours, other, stopped = _wsl_other(tmp_path, monkeypatch)
+    controller = _InDistro(ours, "Ubuntu")
+    controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
+    assert controller.stop_conflicting() == ["o-db", "o-world"]
+    assert stopped == [(["o-db", "o-world"], True)], "the WSL-resident server was not reserved"
+
+
+def test_a_wsl_resident_server_held_by_another_yulon_is_not_stopped(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ours, other, stopped = _wsl_other(tmp_path, monkeypatch)
+    controller = _InDistro(ours, "Ubuntu")
+    controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
+    theirs = _holds(fake_docker, other, press="Update the server to latest…")
+    try:
+        with pytest.raises(docker.ServerReserved):
+            controller.stop_conflicting()
+        assert stopped == [], "the other server was stopped under another Yu'lon's job"
+    finally:
+        theirs.kill()
+
+
+def test_a_linux_path_is_not_turned_into_a_wsl_share_for_a_server_outside_any_distro(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `wsl_distro`: the daemon is the host's, and a path this host cannot see stays unseen."""
+    ours, other, stopped = _wsl_other(tmp_path, monkeypatch)
+    controller = _Recorded(ours)
+    controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
+    assert controller.stop_conflicting() == ["o-db", "o-world"]
+    assert stopped == [(["o-db", "o-world"], False)]
+
+
+def test_a_wsl_share_that_is_not_there_is_left_unreserved_and_the_stop_goes_ahead(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ours, other, stopped = _wsl_other(tmp_path, monkeypatch)
+    monkeypatch.setattr(platform, "wsl_unc_path", lambda *_a: tmp_path / "no-such-share")
+    controller = _InDistro(ours, "Ubuntu")
+    controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
+    assert controller.stop_conflicting() == ["o-db", "o-world"]
+    assert stopped == [(["o-db", "o-world"], False)]
