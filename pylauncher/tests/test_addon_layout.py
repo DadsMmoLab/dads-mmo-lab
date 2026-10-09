@@ -461,3 +461,27 @@ def test_a_toc_whose_name_windows_cannot_hold_as_a_folder_is_refused(
     said = _refused(find_addons(tmp_path / "src", interface=11200, shipped={}))
 
     assert said.startswith(f"{stem}.toc names a folder the game client cannot hold on Windows")
+
+
+# --- review round 1 (2026-10-09) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("stem", ["CON .x", "COM¹", "lpt².x"])
+def test_a_device_name_with_a_space_or_a_superscript_is_refused(tmp_path: Path, stem: str) -> None:
+    _toc(tmp_path / "src" / "Probe", stem)
+
+    said = _refused(find_addons(tmp_path / "src", interface=11200, shipped={}))
+
+    assert said.startswith(f"{stem}.toc names a folder the game client cannot hold on Windows")
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_a_utf16_toc_is_refused_in_plain_words(tmp_path: Path, encoding: str) -> None:
+    folder = tmp_path / "src" / "Probe"
+    folder.mkdir(parents=True)
+    bom = b"\xff\xfe" if encoding.endswith("le") else b"\xfe\xff"
+    (folder / "Probe.toc").write_bytes(bom + "## Interface: 11200\n".encode(encoding))
+
+    said = _refused(find_addons(tmp_path / "src", interface=11200, shipped={}))
+
+    assert said.startswith("Probe.toc is saved as UTF-16, which the game client cannot read")

@@ -11,6 +11,7 @@ import hashlib
 import io
 import os
 import stat
+import threading
 import urllib.request
 import zipfile
 from collections.abc import Callable, Mapping
@@ -710,3 +711,173 @@ def test_a_member_name_windows_cannot_hold_is_refused(
 
     assert said.startswith(f"{bad!r} in the zip has a name a game client's folder on Windows")
     assert _left(_cache) == []
+
+
+# --- review round 1 (2026-10-09) -----------------------------------------------------------
+
+
+def _pe_stub() -> bytes:
+    """The smallest shape of a Windows program: `MZ`, e_lfanew at 0x3C pointing at `PE\\0\\0`."""
+    header = bytearray(0x40)
+    header[0:2] = b"MZ"
+    header[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    return bytes(header) + b"PE\0\0" + b"\x4c\x01" + bytes(18)
+
+
+def test_a_damaged_lzma_member_is_a_refusal_not_a_raw_error(tmp_path: Path, _cache: Path) -> None:
+    path = tmp_path / "a.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_LZMA) as archive:
+        archive.writestr("pfUI/pfUI.toc", "## Interface: 11200\n" * 50)
+    data = bytearray(path.read_bytes())
+    data[30 + len("pfUI/pfUI.toc") + 20] ^= 0xFF  # inside the LZMA stream
+    path.write_bytes(bytes(data))
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith("a.zip is damaged or uses a kind of zip Yu'lon cannot read")
+    assert _left(_cache) == []
+
+
+def test_a_lua_file_that_starts_with_mz_is_taken(tmp_path: Path) -> None:
+    """`MZ = 'Mozambique'` is Lua, not a program: only a real PE header is refused."""
+    lua = b"MZ = 'Mozambique'\n" + b"-- " + b"x" * 2000 + b"\n"
+    staged = stage_zip(_zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/countries.lua": lua}))
+
+    assert (staged.root / "pfUI-master" / "countries.lua").read_bytes() == lua
+
+
+@pytest.mark.parametrize("name", ["pfUI-master/core.lua", "pfUI-master/hook.asi"])
+def test_a_real_windows_program_under_any_suffix_is_refused(
+    tmp_path: Path, _cache: Path, name: str
+) -> None:
+    path = _zip(tmp_path / "a.zip", {**GOOD, name: _pe_stub()})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith(f"{name} is a program file (a Windows program inside)")
+    assert _left(_cache) == []
+
+
+def test_mz_whose_header_points_past_the_end_is_not_a_program(tmp_path: Path) -> None:
+    stub = bytearray(_pe_stub())
+    stub[0x3C:0x40] = (0x10000).to_bytes(4, "little")
+    staged = stage_zip(_zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/x.blp": bytes(stub)}))
+
+    assert (staged.root / "pfUI-master" / "x.blp").is_file()
+
+
+def test_mz_whose_header_points_at_something_else_is_not_a_program(tmp_path: Path) -> None:
+    stub = bytearray(_pe_stub())
+    stub[0x40:0x44] = b"NOPE"
+    staged = stage_zip(_zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/x.blp": bytes(stub)}))
+
+    assert (staged.root / "pfUI-master" / "x.blp").is_file()
+
+
+def test_a_windows_program_whose_header_is_past_the_first_kilobyte_is_refused(
+    tmp_path: Path, _cache: Path
+) -> None:
+    """Past the buffered head but inside the file: cautious, it is taken for a program."""
+    body = bytearray(4096)
+    body[0:2] = b"MZ"
+    body[0x3C:0x40] = (3000).to_bytes(4, "little")
+    body[3000:3004] = b"PE\0\0"
+    path = _zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/big.lua": bytes(body)})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert "is a program file (a Windows program inside)" in said
+
+
+@pytest.mark.parametrize(
+    ("magic", "kind"),
+    [
+        (b"\x7fELF\x02\x01\x01", "a Linux program inside"),
+        (b"\xfe\xed\xfa\xce", "a macOS program inside"),
+        (b"\xce\xfa\xed\xfe", "a macOS program inside"),
+        (b"\xfe\xed\xfa\xcf", "a macOS program inside"),
+        (b"\xcf\xfa\xed\xfe", "a macOS program inside"),
+        (b"\xca\xfe\xba\xbe", "a macOS program inside"),
+        (b"\xbe\xba\xfe\xca", "a macOS program inside"),
+    ],
+)
+def test_linux_and_macos_programs_under_any_suffix_are_refused(
+    tmp_path: Path, _cache: Path, magic: bytes, kind: str
+) -> None:
+    path = _zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/x.lua": magic + bytes(60)})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith(f"pfUI-master/x.lua is a program file ({kind})")
+    assert _left(_cache) == []
+
+
+@pytest.mark.parametrize("suffix", [".lnk", ".js", ".hta", ".reg", ".jar"])
+def test_more_program_suffixes_are_refused(tmp_path: Path, _cache: Path, suffix: str) -> None:
+    path = _zip(tmp_path / "a.zip", {**GOOD, f"pfUI-master/x{suffix}": "text"})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith(f"pfUI-master/x{suffix} is a program file (a {suffix} file)")
+
+
+@pytest.mark.parametrize(
+    "bad", ["pfUI-master/CON .lua", "pfUI-master/COM¹.lua", "pfUI-master/lpt³"]
+)
+def test_device_names_with_a_space_or_a_superscript_are_refused(
+    tmp_path: Path, _cache: Path, bad: str
+) -> None:
+    path = _zip(tmp_path / "a.zip", {**GOOD, bad: "x"})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith(f"{bad!r} in the zip has a name a game client's folder on Windows")
+    assert _left(_cache) == []
+
+
+def test_a_folder_with_a_lua_starting_with_mz_is_taken(tmp_path: Path) -> None:
+    root = _folder(tmp_path / "src")
+    (root / "pfUI" / "countries.lua").write_bytes(b"MZ = 'Mozambique'\n")
+
+    assert check_folder(root).files == 3
+
+
+def test_a_folder_with_a_real_windows_program_is_refused(tmp_path: Path) -> None:
+    root = _folder(tmp_path / "src")
+    (root / "pfUI" / "hook.asi").write_bytes(_pe_stub())
+
+    said = _refusal(lambda: check_folder(root))
+
+    assert said.startswith("pfUI/hook.asi is a program file (a Windows program inside)")
+
+
+def test_a_folder_with_a_linux_program_is_refused(tmp_path: Path) -> None:
+    root = _folder(tmp_path / "src")
+    (root / "pfUI" / "x.lua").write_bytes(b"\x7fELF" + bytes(60))
+
+    said = _refusal(lambda: check_folder(root))
+
+    assert said.startswith("pfUI/x.lua is a program file (a Linux program inside)")
+
+
+def test_a_fifo_in_a_folder_is_passed_over_not_read(tmp_path: Path) -> None:
+    """Opening a FIFO for reading blocks until a writer comes; the check must never do it.
+
+    Run on a thread with a bound, and a regression is unblocked by opening the FIFO's
+    other end, so a reverted fix fails here instead of hanging the suite.
+    """
+    root = _folder(tmp_path / "src")
+    fifo = root / "pfUI" / "pipe"
+    os.mkfifo(fifo)
+    got: list[object] = []
+    worker = threading.Thread(target=lambda: got.append(check_folder(root)), daemon=True)
+
+    worker.start()
+    worker.join(10)
+    hung = worker.is_alive()
+    if hung:
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(10)
+
+    assert not hung, "check_folder opened the FIFO and blocked"
+    assert [tree.files for tree in got] == [2]  # type: ignore[attr-defined]
