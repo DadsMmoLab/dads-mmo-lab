@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import enum
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -934,25 +935,52 @@ def parse_tree_files(raw: str) -> tuple[str, ...]:
     return tuple(path for path in raw.split("\0") if path)
 
 
+_LOGGED_ARGV_CHARS = 1000
+"""How much of a containerized git command line one log line shows (T630 re-review)."""
+
+
+def _logged(argv: Sequence[str]) -> str:
+    """`argv` joined for a log line, cut at `_LOGGED_ARGV_CHARS` with how much was left out."""
+    said = " ".join(argv)
+    if len(said) <= _LOGGED_ARGV_CHARS:
+        return said
+    return f"{said[:_LOGGED_ARGV_CHARS]} … ({len(said) - _LOGGED_ARGV_CHARS} more characters)"
+
+
 def file_lines_args(rev: str, paths: Sequence[str]) -> list[str]:
-    """`git grep -z -I --no-color -e "" <rev> -- <paths>`: every line of the files, one run (T630).
+    """`git grep -z -I --no-color -e ^ <rev> -- <folders>`: every line of the files, one run (T630).
 
-    `-e ""` matches every line, empty ones too, and `-z` puts a NUL after each
-    `<rev>:<path>`, so an answer splits cleanly whatever a line holds. `-I` leaves
-    binary files out; `--no-color` and no pager, so nothing a config sets is run.
+    The FOLDERS of `paths` are the pathspecs, not the files: an install months behind
+    moves past thousands of update files, and a command line naming each one passes
+    Windows' 32,767-character limit (docker.exe and wsl.exe alike). `parse_file_lines()`
+    keeps the files asked. `-e ^` matches every line, empty ones too, and is a
+    non-empty argument, which an empty pattern handed through wsl.exe might not stay.
+    `-z` puts a NUL after each `<rev>:<path>`, so an answer splits cleanly whatever a
+    line holds. `-I` leaves binary files out; `--no-color`, and no pager.
     """
-    return ["grep", "-z", "-I", "--no-color", "-e", "", rev, "--", *paths]
+    folders = sorted({posixpath.dirname(path) or "." for path in paths})
+    return ["grep", "-z", "-I", "--no-color", "-e", "^", rev, "--", *folders]
 
 
-def parse_file_lines(raw: str, rev: str) -> dict[str, tuple[str, ...]]:
-    """`{path: lines}` from a `file_lines_args()` answer; a file with no lines is absent."""
+def parse_file_lines(
+    raw: str, rev: str, paths: Sequence[str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    """`{path: lines}` from a `file_lines_args()` answer, only `paths` when given.
+
+    A file with no lines is absent. The answer covers the whole folders asked, so the
+    files that were not named are dropped here.
+    """
+    wanted = set(paths) if paths is not None else None
     found: dict[str, list[str]] = {}
     lead = f"{rev}:"
     for record in raw.split("\n"):
         name, sep, line = record.partition("\0")
         if not sep:
             continue
-        found.setdefault(name.removeprefix(lead), []).append(line)
+        path = name.removeprefix(lead)
+        if wanted is not None and path not in wanted:
+            continue
+        found.setdefault(path, []).append(line)
     return {path: tuple(lines) for path, lines in found.items()}
 
 
@@ -1632,7 +1660,7 @@ class RunnerGit:
         if proc.returncode not in (0, 1):
             logger.debug(f"could not read the files {rev} has in {dest}: {proc.stderr.strip()}")
             return None
-        return parse_file_lines(proc.stdout, rev)
+        return parse_file_lines(proc.stdout, rev, paths)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
@@ -2571,7 +2599,7 @@ class ContainerGit:
                 return {}
             logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
             return None
-        return parse_file_lines(proc.stdout, rev)
+        return parse_file_lines(proc.stdout, rev, paths)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
@@ -3006,7 +3034,7 @@ class ContainerGit:
         # string this process already held. Same shape as
         # `docker.build_staged()`, and safe to print: these URLs come from the
         # manifest allow-list and carry no credentials.
-        logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
+        logger.info(f"containerized git: `{_logged(argv[1:])}` into {dest}")
         try:
             proc = runner.run(argv, env=_no_prompt_env(), stdin=subprocess.DEVNULL)
         except OSError as exc:

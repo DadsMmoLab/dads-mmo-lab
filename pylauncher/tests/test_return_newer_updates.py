@@ -727,3 +727,157 @@ def test_file_lines_reads_every_file_in_one_git_run(tmp_path: Path) -> None:
         "data/sql/a.sql": ("-- a", "", "SELECT 1;"),
         "data/sql/b.sql": ("SELECT 2;",),
     }
+
+
+# -- re-review of 2db10bd9 ------------------------------------------------------------------
+
+
+def test_file_lines_asks_git_by_folder_so_thousands_of_files_stay_under_the_windows_limit() -> None:
+    """An install months behind: thousands of added update files, two folders.
+
+    Windows caps a command line at 32,767 characters (docker.exe and wsl.exe alike), so the
+    argv names the folders and the answer is filtered to the files asked.
+    """
+    from yulon import git
+
+    paths = [
+        f"data/sql/updates/db_world/2026_{n // 100:02d}_{n % 100:02d}_00.sql" for n in range(4000)
+    ]
+    paths += [f"data/sql/updates/pending_db_world/rev_{n}.sql" for n in range(1000)]
+    args = git.file_lines_args("b" * 40, paths)
+    assert len(" ".join(args)) < 1000, len(" ".join(args))
+    assert "data/sql/updates/db_world" in args and "data/sql/updates/pending_db_world" in args
+
+
+def test_file_lines_matches_every_line_with_a_pattern_that_cannot_vanish() -> None:
+    """An empty argument may be dropped on the way through wsl.exe; `^` cannot be."""
+    from yulon import git
+
+    args = git.file_lines_args("b" * 40, ["data/sql/a.sql"])
+    assert "" not in args, args
+    assert args[args.index("-e") + 1] == "^"
+    assert "-I" in args
+
+
+def test_file_lines_keeps_only_the_files_asked(tmp_path: Path) -> None:
+    """Real git: the folder is grepped, the answer holds only the named file."""
+    import subprocess
+
+    from yulon import git
+
+    if not git.git_available():
+        pytest.skip("no host git")
+    repo = tmp_path / "repo"
+    (repo / "data/sql").mkdir(parents=True)
+    (repo / "data/sql/a.sql").write_text("SELECT 1;\n\n", encoding="utf-8")
+    (repo / "data/sql/b.sql").write_text("SELECT 2;\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "one"]):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=repo, check=True
+        )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert git.RunnerGit().file_lines(repo, head, ("data/sql/a.sql",)) == {
+        "data/sql/a.sql": ("SELECT 1;", "")
+    }
+
+
+def test_the_same_sql_filed_for_another_database_is_not_a_refiling(tmp_path: Path) -> None:
+    """One added `db_characters/` file holding SQL that a removed world file also holds.
+
+    It re-files the removed CHARACTERS file, never the world one: the world update stays
+    lacked even though it comes first and its SQL is the same.
+    """
+    rec, server_dir = _ready(tmp_path)
+    chars = "rev_1727000000000000009.sql"
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (
+        ("D", f"data/sql/updates/pending_db_world/{PENDING}"),
+        ("D", f"data/sql/updates/pending_db_characters/{chars}"),
+        ("A", f"data/sql/updates/db_characters/{SQUASHED}"),
+    )
+    _target_ships(
+        rec, server_dir, "data/sql/updates/db_characters", SQUASHED, dest=".", rev=CORE_PIN
+    )
+    rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_world/{PENDING}")] = PENDING_SQL
+    rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_characters/{chars}")] = PENDING_SQL
+    rec.lines[(server_dir, CORE_PIN, f"data/sql/updates/db_characters/{SQUASHED}")] = PENDING_SQL
+    rec.applied_updates["acore_world"] = f"{PENDING}\n"
+    rec.applied_updates["acore_characters"] = f"{chars}\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "identical SQL for another database counted as the same update"
+    message = str(raised)
+    assert f"acore_world has 1 update the tested commit does not have ({PENDING})" in message
+    assert chars not in message, message
+
+
+def test_a_removed_file_with_no_sql_is_never_a_refiling(tmp_path: Path) -> None:
+    """Comments only: nothing to compare, so an added comments-only file proves nothing."""
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=True)
+    rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_world/{PENDING}")] = ("-- empty",)
+    rec.lines[(server_dir, CORE_PIN, f"data/sql/updates/db_world/{SQUASHED}")] = ("-- header",)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "an empty update matched an empty one"
+
+
+def test_one_added_file_re_files_one_removed_file(tmp_path: Path) -> None:
+    """Two removed files with the same SQL, one added file: one of them is still lacked."""
+    rec, server_dir = _ready(tmp_path)
+    second = "rev_1727000000000000001.sql"
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (
+        ("D", f"data/sql/updates/pending_db_world/{PENDING}"),
+        ("D", f"data/sql/updates/pending_db_world/{second}"),
+        ("A", f"data/sql/updates/db_world/{SQUASHED}"),
+    )
+    _target_ships(
+        rec,
+        server_dir,
+        "data/sql/updates/db_world",
+        "2026_09_30_00.sql",
+        SQUASHED,
+        dest=".",
+        rev=CORE_PIN,
+    )
+    for name in (PENDING, second):
+        rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_world/{name}")] = PENDING_SQL
+    rec.lines[(server_dir, CORE_PIN, f"data/sql/updates/db_world/{SQUASHED}")] = PENDING_SQL
+    rec.applied_updates["acore_world"] = f"{PENDING}\n{second}\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "one added file re-filed two removed ones"
+    assert "acore_world has 1 update the tested commit does not have" in str(raised), raised
+
+
+def test_an_unknown_database_state_is_said_when_the_return_goes_on(tmp_path: Path) -> None:
+    from yulon.catalog.families import azerothcore
+
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir, applied=False)
+    rec.db_was_up = None
+    said, raised, _fake = _return(rec, server_dir)
+    assert raised is None, raised
+    assert azerothcore.DATABASE_MAYBE_STARTED in said
+
+
+def test_the_containerised_git_logs_a_bounded_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Thousands of paths must not become one log line thousands of characters long."""
+    import logging
+    import subprocess
+
+    from yulon import git, runner
+
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(git.platform, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(git.platform, "filesystem_type", lambda _p: "ext4")
+    monkeypatch.setattr(
+        runner, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    paths = [f"data/sql/x/{n:05d}.sql" for n in range(3000)]
+    with caplog.at_level(logging.INFO, logger="yulon.git"):
+        git.ContainerGit()._capture(dest, ["ls-tree", "-r", "HEAD", "--", *paths], writes=False)
+    lines = [r.getMessage() for r in caplog.records if "containerized git" in r.getMessage()]
+    assert lines and max(len(line) for line in lines) < 2000, max(len(x) for x in lines)
