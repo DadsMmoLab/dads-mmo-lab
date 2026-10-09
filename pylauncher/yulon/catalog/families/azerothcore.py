@@ -23,15 +23,17 @@ nine stages above and nothing else.
 from __future__ import annotations
 
 import os
+import posixpath
 import stat
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 from yulon import docker, git, networking, server_build_presses
-from yulon.catalog.catalog import AzerothCoreData, CatalogEntry
+from yulon.catalog import snapshot
+from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
@@ -45,6 +47,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    _listed,
     _listing,
     build_cancel_note,
     download_left_sentence,
@@ -61,6 +64,78 @@ CORE_UPDATES_NOTE = (
 """What a Stop during an update's core database updates costs (T220)."""
 
 DIST_SUFFIX = ".dist"
+
+SQL_FOLDER = "data/sql"
+"""Where the core and every module keep the SQL their updaters apply (T630).
+
+The core's `data/sql/updates/db_*` and `data/sql/archive`, mod-playerbots'
+`data/sql/playerbots/updates`, a module's `data/sql/db-world`: one folder to ask git
+about per source, whatever the layout under it."""
+
+APPLIED_UPDATES_QUESTION = "SELECT name FROM updates WHERE name IN "
+"""Which of the named files a database's update ledger holds (T630).
+
+AzerothCore's updater, and mod-playerbots' own on its database, write one `updates`
+row per file it applied, keyed by the file's base name (`apply.read_ledger()` asks
+the same table), and nothing ever takes a row back: updates only go forward."""
+
+NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
+
+
+def newer_updates_refusal(
+    applied: Mapping[str, Sequence[str]], copies: Mapping[str, Path | None]
+) -> str:
+    """Why "Return to the tested pin…" stopped: the databases are ahead of the pin (T630).
+
+    `applied` is, per database, the updates it holds that the tested commit does not
+    ship; `copies` the dump `snapshot.copy_from_before()` found for each, or None. The
+    way back is said only when every one of those databases has a copy from before.
+    """
+    each = []
+    for database, names in applied.items():
+        one = len(names) == 1
+        each.append(
+            f"{database} has {len(names)} update{'' if one else 's'} the tested commit does "
+            f"not have ({', '.join(names)})"
+        )
+    databases = list(applied)
+    total = sum(len(names) for names in applied.values())
+    those = "that update" if total == 1 else "those updates"
+    head = (
+        "Going back to the commit this app was tested against would start the older server "
+        f"on databases a newer build has already updated: {'; '.join(each)}. Database updates "
+        f"only go forward, so the older server would meet {_listed(databases)} as "
+        f"{those} left {'it' if len(databases) == 1 else 'them'}, which it was not built for "
+        f"and may not start on. {NOTHING_DONE}"
+    )
+    missing = [database for database in databases if copies.get(database) is None]
+    if missing:
+        latest = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+        return (
+            f"{head} Yu'lon found no copy of {_listed(missing)} from before {those} in the "
+            "server's backups folder, so this server cannot go back to the tested commit: keep "
+            f"the build you have ({latest} keeps it current)."
+        )
+    found = [copy for copy in copies.values() if copy is not None]
+    files = _listed([f"{path.parent.name}/{path.name}" for path in found])
+    back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+    one = len(databases) == 1
+    return (
+        f"{head} To go back, first put {_listed(databases)} back as "
+        f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
+        f"restore {files} on Maintenance (it works with the server stopped), then press "
+        f"{back} again without starting the server in between, since a start would apply "
+        f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
+        "copy was taken."
+    )
+
+
+def updates_unread(source: str, why: str) -> str:
+    """The fail-closed refusal: git or the database could not say (T630)."""
+    return (
+        f"Yu'lon could not read which database updates {source}, so it could not tell "
+        f"whether the older server can start on your databases ({why}). {NOTHING_DONE}"
+    )
 
 
 def confs_from_dist(entry: CatalogEntry) -> tuple[str, ...]:
@@ -471,6 +546,138 @@ class AzerothCoreInstaller(StagedInstaller):
         yield from self._carried(server_dir, quiet=True)
         scriptdeploy.check_layable(server_dir, self._block().lua_scripts)
 
+    def check_moved_sources(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, object]:
+        """Refuse a way back onto databases a newer build already updated (T630).
+
+        Asked by the update route right after the move and before anything is built,
+        stopped or copied; a refusal puts every source back. Only for "Return to the
+        tested pin…": an update moves forward, where its own updates are what it brings.
+
+        Live on m910q (2026-10-09): Unbound's Update to latest had applied
+        mod-playerbots 037c0141's `2026_09_21_00_playerbots_speech.sql`, which drops
+        `playerbots_speech`; the Return compiled 7bae1b5c for fifty minutes, and its
+        world crash-looped on that missing table. The core's `db_world` updates that
+        T220's import applies go the same one way.
+
+        So: the `.sql` files the move takes away that the target no longer ships, and
+        that are newer than what it ships beside them (`_updates_the_target_lacks()`);
+        then, only if there are any, which of them the databases' `updates` tables hold.
+        Git or a database that cannot say refuses too.
+        """
+        yield from ()
+        if not to_pin:
+            return None
+        lacked = self._updates_the_target_lacks(moved)
+        if not lacked:
+            return None
+        count = len(lacked)
+        yield (
+            f"The tested commit does not ship {count} database update{'' if count == 1 else 's'} "
+            "the code you run has; asking the databases whether they already hold "
+            f"{'it' if count == 1 else 'them'}."
+        )
+        applied = self._applied_of(server_dir, lacked)
+        if not applied:
+            yield "None of them was applied, so the older server can start on your databases."
+            return None
+        backups = server_dir / snapshot.BACKUPS_FOLDER
+        copies = {
+            database: snapshot.copy_from_before(backups, database, names)
+            for database, names in applied.items()
+        }
+        raise InstallerError(newer_updates_refusal(applied, copies))
+
+    def _updates_the_target_lacks(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> tuple[str, ...]:
+        """Base names of the update files going back removes and the target does not ship.
+
+        Per moved source, git's answer about `SQL_FOLDER` between the commit it was on
+        and the one it stands on now. A removed file still counts out when the target
+        ships its name anywhere under that folder (an update upstream archived), or
+        ships a name in the same folder that sorts at or after it: AzerothCore's and
+        mod-playerbots' updates are named by date, so that one is older than what the
+        target has, which a Return that moves forward (T588) over a squash removes.
+        """
+        lacked: dict[str, None] = {}
+        for source, dest, old in moved:
+            new = self._seams.head_sha(dest)
+            if new is None:
+                raise InstallerError(
+                    updates_unread(
+                        f"going back takes away in {source.repo}", "git did not say its commit"
+                    )
+                )
+            if new == old:
+                continue
+            pairs = self._seams.changed_files(dest, old, new, (SQL_FOLDER,))
+            if pairs is None:
+                raise InstallerError(
+                    updates_unread(
+                        f"going back takes away in {source.repo}",
+                        f"git could not compare {old[:7]} with {new[:7]}",
+                    )
+                )
+            removed = [
+                path for status, path in pairs if status.startswith("D") and path.endswith(".sql")
+            ]
+            if not removed:
+                continue
+            shipped = _sql_names(dest / SQL_FOLDER, recursive=True)
+            for path in removed:
+                name = posixpath.basename(path)
+                if name in shipped:
+                    continue
+                beside = _sql_names(dest / posixpath.dirname(path), recursive=False)
+                if any(other >= name for other in beside):
+                    continue
+                lacked[name] = None
+        return tuple(lacked)
+
+    def _applied_of(self, server_dir: Path, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
+        """Per database, which of `names` its `updates` table holds; only those holding any.
+
+        The database is brought up alone first (a stopped server has it down), never the
+        world: a start after a restore would apply the very updates again.
+        """
+        spec = self.entry.container_spec()
+        try:
+            self._seams.start_db(spec, server_dir, because="nothing was built or changed")
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                updates_unread(
+                    "your databases already have",
+                    f"Yu'lon could not start the database to " f"ask it: {exc}",
+                )
+            ) from exc
+        password = self.resolve_secrets(server_dir).db_password
+        client = self._native().db.client
+        quoted = ", ".join("'" + n.replace("\\", "\\\\").replace("'", "''") + "'" for n in names)
+        applied: dict[str, tuple[str, ...]] = {}
+        for database in self.snapshot_databases():
+            try:
+                rows = self._seams.sql_query(
+                    spec.db, client, password, database, f"{APPLIED_UPDATES_QUESTION}({quoted})"
+                )
+            except docker.DockerCommandError as exc:
+                raise InstallerError(
+                    updates_unread(
+                        "your databases already have",
+                        f"Yu'lon could not ask {database} which of them it already has: {exc}",
+                    )
+                ) from exc
+            held = {line.strip() for line in rows.splitlines() if line.strip()}
+            found = tuple(name for name in names if name in held)
+            if found:
+                applied[database] = found
+        return applied
+
     def repair_database_stages(self) -> tuple[Stage, ...]:
         """The spine's four, after the client-data download (T377).
 
@@ -830,3 +1037,13 @@ class AzerothCoreInstaller(StagedInstaller):
             yield "This server has no separate database import step."
             return
         yield from self.stage_import(ctx, CallableGate(self._probe, self._reset), service)
+
+
+def _sql_names(folder: Path, *, recursive: bool) -> frozenset[str]:
+    """The base names of the `.sql` files in `folder` (or under it); empty when it is not there."""
+    try:
+        found = folder.rglob("*.sql") if recursive else folder.glob("*.sql")
+        return frozenset(path.name for path in found if path.is_file())
+    except OSError as exc:
+        logger.warning(f"could not list the SQL files in {folder}: {exc}")
+        return frozenset()

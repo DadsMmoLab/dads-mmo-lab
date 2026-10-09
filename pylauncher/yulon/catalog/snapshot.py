@@ -14,12 +14,15 @@ back before the old build starts again.
 What lives here is the seam and its two records. The dump and the restore are the
 Maintenance tab's own (`controller_wow_wotlk.maintenance.backup()` / `restore()`),
 and `install_wiring.database_snapshot_for()` binds them, because `catalog/` must
-not import a controller package (the same shape as the import probe). The one
-thing done here is forgetting older copies: only the last one per server is kept.
+not import a controller package (the same shape as the import probe). Two things
+are done here: forgetting older copies (only the last one per server is kept), and
+finding, for "Return to the tested pin…", the newest dump that is from before the
+updates the tested commit does not ship (`copy_from_before()`, T630).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +48,26 @@ It holds the databases as the new build left them, so nothing that build wrote
 is lost. A label of its own, not the Maintenance tab's `pre-restore`, so
 `prune_older()` can keep only the newest per database without touching a copy
 the player's own Restore took (cold review of 23361ca3)."""
+
+
+BACKUPS_FOLDER = Path("sql_scripts") / "backups"
+"""Where every copy and backup of a server's databases lives, relative to its folder.
+
+`controller_wow_wotlk.maintenance.BACKUP_SUBDIR`, spelled again because `catalog/`
+must not import a controller package; a test pins the two equal (T630)."""
+
+DUMP_TRAILER = b"-- Dump completed"
+"""What mysqldump writes last; a dump without it was cut short (`maintenance._DUMP_TRAILER`)."""
+
+UPDATES_TABLE = b"CREATE TABLE `updates`"
+"""What a dump of an AzerothCore database holds for its update ledger (T630)."""
+
+DUMP_READ_BYTES = 4 * 1024 * 1024
+"""How much of a dump `copy_from_before()` reads at a time; a world dump is some hundreds of MB."""
+
+_EDGE_BYTES = 8192
+
+_STAMPED = re.compile(r"^\d{8}_\d{6}_")
 
 
 @dataclass(frozen=True)
@@ -176,3 +199,59 @@ def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     if removed:
         logger.info(f"forgot {len(removed)} older update copy file(s) in {directory}")
     return tuple(removed)
+
+
+def copy_from_before(directory: Path, database: str, updates: Sequence[str]) -> Path | None:
+    """The newest complete dump of `database` in `directory` naming none of `updates`; never raises.
+
+    What "Return to the tested pin…" names when the database already has updates the
+    tested commit does not ship (T630): the way back is a copy from before them. Read
+    from the dump itself, not from its label or its time: the copy an update kept is
+    from before THAT update, which after a second update is not before the first, and a
+    restore of a copy that still holds them would cost the player everything since and
+    open nothing. Any label counts (a backup the player took, an update's copy, a
+    restore's safety copy); a dump that was cut short, or that has no `updates` table,
+    is not one a restore can be sent to. None when there is no such dump or the folder
+    cannot be read.
+    """
+    try:
+        found = sorted(
+            path
+            for path in directory.iterdir()
+            if _STAMPED.match(path.name) and path.name.endswith(f"_{database}.sql")
+        )
+    except OSError:
+        return None
+    for path in reversed(found):
+        if _holds_none_of(path, updates):
+            return path
+    return None
+
+
+def _holds_none_of(path: Path, updates: Sequence[str]) -> bool:
+    """A complete dump with an `updates` table whose rows name none of `updates`. Never raises.
+
+    mysqldump quotes each row's name (`'2026_09_21_00_playerbots_speech.sql'`), so the
+    quoted name is looked for, across the seams between reads.
+    """
+    needles = [f"'{name}'".encode() for name in updates]
+    # The tail kept between reads: longer than any name, and holding the trailer line
+    # at the end (`maintenance._EDGE_BYTES`'s 8 KiB).
+    keep = max([_EDGE_BYTES, *(len(needle) for needle in needles)])
+    carry = b""
+    table = False
+    try:
+        with path.open("rb") as dump:
+            while True:
+                piece = dump.read(DUMP_READ_BYTES)
+                if not piece:
+                    break
+                window = carry + piece
+                if any(needle in window for needle in needles):
+                    return False
+                table = table or UPDATES_TABLE in window
+                carry = window[-keep:]
+    except OSError as exc:
+        logger.warning(f"could not read {path} to see which updates it holds: {exc}")
+        return False
+    return table and DUMP_TRAILER in carry

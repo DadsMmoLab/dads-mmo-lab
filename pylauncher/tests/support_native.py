@@ -387,6 +387,17 @@ class Recorder:
     row is a ledger nobody can read, and the update route then refuses every press.
     """
 
+    applied_updates: dict[str, str] = field(default_factory=dict)
+    """T630: what a schema's `updates` table answers to "which of these names do you hold".
+
+    Keyed by schema, VERBATIM like `query_answer`; a schema not named holds none of
+    them. Filtered by the names asked, as the `IN (...)` filters, so a test sees the
+    route ask about the files it found and not the whole ledger.
+    """
+
+    updates_error: str = ""
+    """T630: non-empty and every `updates` question fails with it (a database that cannot say)."""
+
     column_answer: str | None = None
     """What an `information_schema.columns` question answers; None falls through to `query_answer`.
 
@@ -763,6 +774,15 @@ class Recorder:
             return self.realm_row
         if "yulon_install_file" in statement:
             return self.file_ledger
+        if "FROM updates WHERE name IN" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([^']*)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.applied_updates.get(schema or "", "").splitlines()
+                if line in asked
+            )
         if self.column_answer is not None and "information_schema.columns" in statement:
             return self.column_answer
         if statement.startswith(scriptdeploy.TABLES_QUESTION):

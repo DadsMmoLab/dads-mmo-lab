@@ -25,6 +25,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
 
 ### Fixed
+- **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
