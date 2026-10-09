@@ -846,4 +846,25 @@ def test_every_discord_job_runs_only_in_the_main_repository():
     for name in ("discord-merged.yml", "discord-issues.yml", "discord-release.yml"):
         for job in load_workflow(name)["jobs"].values():
             cond = " ".join(str(job.get("if", "")).split())
-            assert cond == REPO_GUARD or cond.startswith(f"{REPO_GUARD} && ("), (name, cond)
+            assert cond == REPO_GUARD or guards_the_whole_condition(cond), (name, cond)
+
+
+def guards_the_whole_condition(cond):
+    # "guard && ( ... )" where that bracket closes at the very end, so nothing after it
+    # (an "|| true") can let a fork through.
+    prefix = f"{REPO_GUARD} && "
+    if not cond.startswith(prefix + "("):
+        return False
+    rest, depth = cond[len(prefix) :], 0
+    for i, ch in enumerate(rest):
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        if depth == 0:
+            return i == len(rest) - 1
+    return False
+
+
+def test_the_repository_guard_check_refuses_a_condition_a_fork_can_slip_past():
+    assert guards_the_whole_condition(f"{REPO_GUARD} && (a || (b && c))")
+    assert not guards_the_whole_condition(f"{REPO_GUARD} && (a) || true")
+    assert not guards_the_whole_condition(f"true || {REPO_GUARD} && (a)")
+    assert not guards_the_whole_condition(f"{REPO_GUARD} || (a)")
