@@ -308,3 +308,96 @@ def test_an_image_the_daemon_refuses_is_not_moot(fake_docker: Path, server: Path
         with docker.server_claim(server, press="Start", images=[IMAGE]):
             pytest.fail("went ahead")
     assert refused.value.moot is False
+
+
+# ------------------------------------------------------------------ a loaded daemon (live, T568)
+# On yulon-ubuntu under load 9 the first live run found the container of a finished press
+# still there ten seconds later (`rm -f`: "removal ... is already in progress"), so the next
+# press of the same Yu'lon was refused as "an earlier run left its reservation", and "Stop
+# anyway" removed nothing.
+
+
+def test_a_finished_press_is_gone_from_docker_before_the_next_can_start(
+    fake_docker: Path, server: Path
+) -> None:
+    """Mutation this catches: the exit not waiting for the container to be gone."""
+    (fake_docker / "claim-lingers").write_text("", encoding="utf-8")
+    (fake_docker / "rm-lingers").write_text("", encoding="utf-8")
+    name = _name(server)
+    with docker.server_claim(server, press="Update", images=[IMAGE]):
+        pass
+    assert name not in fake_containers(fake_docker), "the exit left the container to linger"
+    with docker.server_claim(server, press="Rebuild", images=[IMAGE]):  # and nothing refuses it
+        assert name in fake_containers(fake_docker)
+
+
+def test_ending_a_holders_reservation_returns_once_it_is_gone(
+    fake_docker: Path, server: Path
+) -> None:
+    """ "Stop anyway" removes by id, and the Stop that follows must not meet it dying."""
+    (fake_docker / "rm-lingers").write_text("", encoding="utf-8")
+    name = _name(server)
+    theirs = _another_process_holds(fake_docker, name, owner="someone-else")
+    try:
+        holder = docker.reservation_holder(server)
+        assert holder is not None and holder.container
+        assert docker.end_reservation(holder) is True
+        assert name not in fake_containers(fake_docker)
+    finally:
+        theirs.kill()
+
+
+def test_a_holder_that_is_being_removed_is_waited_for_not_refused_for(
+    fake_docker: Path, server: Path
+) -> None:
+    """A container Docker is already removing is nobody's hold: the take waits, then goes.
+
+    Mutation this catches: the dying holder read as a live Yu'lon's (or an earlier run's)
+    reservation, which refused a press seconds after the one before it ended.
+    """
+    (fake_docker / "rm-lingers").write_text("", encoding="utf-8")
+    name = _name(server)
+    theirs = _another_process_holds(fake_docker, name, owner=docker.owner_id())
+    try:
+        removing = subprocess.run(
+            [str(fake_docker.parent / "fake-docker"), "rm", "-f", name + "-id"], capture_output=True
+        )
+        assert removing.returncode == 1  # "already in progress": it is `removing` now
+        assert (fake_docker / "containers" / name).read_text(encoding="utf-8") == "removing"
+        with docker.server_claim(server, press="Start", images=[IMAGE]) as held:
+            assert held.name == name
+    finally:
+        theirs.kill()
+
+
+def test_a_holder_docker_was_slow_to_name_is_asked_again_before_it_is_called_unknown(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 1 s look that decides "whose is it" fails twice on a loaded daemon; the holder is then
+    read once more with the longer bound before the refusal says Docker would not say.
+
+    Mutation this catches: `known=False` taken at the look's word.
+    """
+    name = _name(server)
+    theirs = _another_process_holds(fake_docker, name, owner="someone-else")
+    real = docker._claim_facts
+    looks: list[float] = []
+
+    def short_look_fails(
+        container: str, timeout: float = docker._CLAIM_ASK_TIMEOUT, **kw: object
+    ) -> object:
+        looks.append(timeout)
+        if timeout == docker._CLAIM_LOOK_TIMEOUT:
+            return None
+        return real(container, timeout=timeout, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "_claim_facts", short_look_fails)
+    try:
+        with pytest.raises(docker.ServerReserved) as refused:
+            with docker.server_claim(server, press="Start", images=[IMAGE]):
+                pytest.fail("went ahead")
+        assert refused.value.holder.known is True
+        assert refused.value.holder.press == "Update the server to latest…"
+        assert docker._CLAIM_ASK_TIMEOUT in looks
+    finally:
+        theirs.kill()

@@ -108,6 +108,21 @@ if args[:1] == ["run"] and "-i" in args and (
         sys.stderr.write("docker: Error response from daemon: failed to create task\\n")
         sys.exit(127)
     sys.stdin.read()
+    if (state / "claim-lingers").exists() and box.exists():
+        # T568: `--rm` removal in progress on a loaded daemon: `removing`, then gone.
+        import subprocess
+        box.write_text("removing", encoding="utf-8")
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, pathlib; time.sleep(0.6); "
+             "pathlib.Path(sys.argv[1]).unlink(missing_ok=True)",
+             str(box)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.exit(0)
     box.unlink(missing_ok=True)
     sys.exit(0)
 if args[:1] in (["run"], ["create"]):
@@ -189,7 +204,8 @@ if args[:1] == ["inspect"]:
         values = dict(line.split("=", 1) for line in given if "=" in line)
         keys = [piece.split('"')[1] for piece in fmt.split(".Config.Labels ")[1:]]
         made = (state / "containers" / args[1]).read_text(encoding="utf-8")
-        status = ["created" if made == "created" else "running"] if ".State.Status" in fmt else []
+        state_word = made if made in ("created", "removing") else "running"
+        status = [state_word] if ".State.Status" in fmt else []
         # T568: `{{{{.Created}}}}` is the daemon's own stamp (a `created-at` file, else fixed).
         when = state / "created-at"
         made_at = (
@@ -303,6 +319,26 @@ if args[:2] == ["rm", "-f"]:
         box = state / "containers" / args[2][: -len("-id")]
     if (state / "refuse-rm").exists():
         sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
+        sys.exit(1)
+    if (state / "rm-lingers").exists() and box.exists():
+        # T568: a loaded daemon (measured on yulon-ubuntu, load 9): `rm -f` answers "already
+        # in progress" and the container stays, `removing`, for a moment before it is gone.
+        box.write_text("removing", encoding="utf-8")
+        import subprocess
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, pathlib; time.sleep(0.6); "
+             "pathlib.Path(sys.argv[1]).unlink(missing_ok=True)",
+             str(box)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.stderr.write(
+            f"Error response from daemon: removal of container {{args[2]}} "
+            "is already in progress\\n"
+        )
         sys.exit(1)
     if (state / "rm-in-progress").exists() and box.exists():
         # `--rm` got there first: Moby answers the second removal like this,

@@ -8233,6 +8233,16 @@ that this default stays True."""
 _STOP_RESERVE_TIMEOUT = 5.0
 """How long a Stop gives Docker to make its reservation before it goes ahead without one."""
 
+_GONE_WAIT_SECONDS = 10.0
+"""How long a reservation's container gets to be gone after it was released or removed.
+
+Measured on yulon-ubuntu under load 9 (T568's first live run): the container of a finished press
+was still there ten seconds later (`rm -f` answered "removal ... is already in progress"), so
+the next press was refused as "an earlier run left its reservation" and "Stop anyway" removed
+nothing. On a quiet daemon it is gone in about a second (T543)."""
+
+_GONE_POLL_SECONDS = 0.2
+
 _LISTED_IMAGES = 3
 """How many `yulon.local/*` images the last resort of the image chain tries."""
 
@@ -8354,6 +8364,21 @@ def reservation_lost(server_dir: Path | str) -> bool:
     name = reservation_name(server_dir)
     held = _RESERVATIONS.get(name) if name else None
     return held is not None and held.held.lost.is_set()
+
+
+def _wait_gone(name: str, wsl_distro: str | None, limit: float | None = None) -> bool:
+    """Poll until the container `name` is gone from Docker; False if it is still there at `limit`.
+
+    A daemon that does not answer reads as gone (no container could be shown): this is a wait
+    for a removal in progress, not a proof.
+    """
+    deadline = time.monotonic() + (_GONE_WAIT_SECONDS if limit is None else limit)
+    while True:
+        if _claim_facts(name, timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro) is None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_GONE_POLL_SECONDS)
 
 
 def _docker_must_answer(proc: subprocess.CompletedProcess[str]) -> None:
@@ -8524,6 +8549,9 @@ def server_claim(
                 del _RESERVATIONS[name]
                 reservation.letting_go.set()  # before the release ends the CLI
                 _release_claim(reservation.claim)
+                # Gone before the lock is let go: the next press of this process must not
+                # meet it dying (`_GONE_WAIT_SECONDS`).
+                _wait_gone(name, reservation.claim.wsl_distro)
 
 
 def _new_reservation(
@@ -8542,6 +8570,7 @@ def _new_reservation(
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
     chain = _reservation_images(spec, images, wsl_distro)
+    waited_for_a_dying_one = False
     while True:
         try:
             image = next(chain, None)
@@ -8563,11 +8592,25 @@ def _new_reservation(
             )
             break
         except FolderClaimed as claimed:
+            # Asked again with the longer bound: the 1 s look that decided "whose" fails twice
+            # on a loaded daemon, and a holder is then not "unknown", only unseen.
+            facts = _claim_facts(name, timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro)
+            if (
+                facts is not None
+                and facts.status not in ("running", "created")
+                and not waited_for_a_dying_one
+            ):
+                # Docker is already removing it (a press that ended a moment ago): nobody's
+                # hold. Waited for, then taken once more; never removed here.
+                waited_for_a_dying_one = True
+                if _wait_gone(name, wsl_distro):
+                    chain = _reservation_images(spec, images, wsl_distro)
+                    continue
             holder = _server_holder(
                 name,
                 here=claimed.here,
-                ours=claimed.ours,
-                known=claimed.known,
+                ours=claimed.ours if facts is None else facts.owner == owner_id(),
+                known=claimed.known or facts is not None,
                 wsl_distro=wsl_distro,
             )
             raise _refused(holder, label, this_press) from claimed
@@ -8605,7 +8648,10 @@ def end_reservation(holder: ServerHolder) -> bool:
     """
     if not holder.container:
         return False
-    return _remove_claim(holder.container, wsl_distro=holder.wsl_distro)
+    removed = _remove_claim(holder.container, wsl_distro=holder.wsl_distro)
+    # "Removal already in progress" is not a failure, only not yet done: the Stop that follows
+    # must not meet the container dying.
+    return _wait_gone(holder.name, holder.wsl_distro) if holder.name else removed
 
 
 def reservation_holder(
