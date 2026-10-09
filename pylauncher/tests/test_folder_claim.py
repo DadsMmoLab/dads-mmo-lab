@@ -502,6 +502,7 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
     cancel = threading.Event()
     looks_after_stop = [0]
     removed: list[str] = []
+    gone = threading.Event()
 
     def facts(_name: str, timeout: float = 5.0, **_kw: object) -> object:
         if not cancel.is_set():
@@ -515,10 +516,14 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
 
     monkeypatch.setattr(docker, "_claim_facts", facts)
     monkeypatch.setattr(
-        docker, "_remove_claim", lambda c, timeout=5.0, **_kw: removed.append(c) is None
+        docker,
+        "_remove_claim",
+        lambda c, timeout=5.0, **_kw: (removed.append(c), gone.set())[1] is None,
     )
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
-    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
+    # The sweep window is longer than the wait below, so a removal that only came at the end
+    # of the real give-up window would miss the wait.
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 30.0)
     outcome: list[BaseException] = []
 
     def press() -> None:
@@ -538,10 +543,9 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
     (fake_docker / "claim-slow").unlink()
     assert len(outcome) == 1 and isinstance(outcome[0], docker.ClaimStopped), outcome
     assert took < 5.0, took
-    deadline = time.monotonic() + HANG_BOUND
-    while not removed:
-        assert time.monotonic() < deadline, "the late claim was left behind"
-        time.sleep(0.02)
+    # Signalled by the removal itself: no wall-clock deadline for a loaded runner to miss. The
+    # wait only bounds a hang, and is shorter than the sweep window.
+    assert gone.wait(20.0), "the late claim was left behind"
     assert removed == ["late-id"]
 
 
