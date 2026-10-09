@@ -2125,3 +2125,52 @@ def test_a_run_past_the_read_span_is_read_once_and_then_remembered(tmp_path: Pat
     watch = _tortoise_watch(tmp_path, age=dashboard.READY_READ_SPAN * 2, log="quiet\n", asked=asked)
     assert [watch.tick().ready for _ in range(3)] == [True] * 3
     assert len(asked) == 1
+
+
+def test_a_run_between_the_settle_time_and_the_read_span_is_read_once_a_minute_at_most(
+    tmp_path: Path,
+) -> None:
+    """A world hung for 15 minutes is found on the first tick; the log is not read every tick."""
+    asked: list[str] = []
+    now = [NOW]
+    run = _stamp(NOW - timedelta(minutes=15))
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or "Loading maps...\n",
+        now=lambda: now[0],
+    )
+    for _ in range(12):  # a minute of 5-second ticks
+        assert watch.tick().ready is True
+        now[0] += timedelta(seconds=5)
+    assert len(asked) == 1
+    now[0] += dashboard.FAILURE_READ_EVERY
+    watch.tick()
+    assert len(asked) == 2
+
+
+def test_the_log_read_for_a_failed_update_also_serves_the_realm_keeper_once(
+    tmp_path: Path,
+) -> None:
+    """One read of a run's first span answers both who ask, so the run is read no more often."""
+    asked: list[str] = []
+    run = _stamp(NOW - dashboard.READY_READ_SPAN * 2)
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or "Loading maps...\n",
+        now=lambda: NOW,
+    )
+    watch.tick()
+    assert watch._world_said_ready(run) is False  # the keeper's ask takes the same text
+    assert len(asked) == 1
+    assert watch._world_said_ready(run) is False  # its next ask is fresh
+    assert len(asked) == 2

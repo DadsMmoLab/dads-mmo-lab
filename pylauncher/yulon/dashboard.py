@@ -143,6 +143,9 @@ READY_READ_SPAN = timedelta(minutes=30)
 The marker comes at the end of the load (1-3 min measured on Tortoise with 500 bots); a run
 that did not print it in its first half hour is not called ready, the safe direction."""
 
+FAILURE_READ_EVERY = timedelta(seconds=60)
+"""How often a run past `SETTLED_AFTER` and not yet ready is read for a failed update (T600)."""
+
 HEALTH_RETRY_EVERY = timedelta(seconds=60)
 """How long a module's health reading made without the world's ready line is replayed.
 
@@ -409,6 +412,8 @@ class Dashboard:
         self._failure_text = ""
         self._failure_settled = False
         self._ticks = 0
+        self._early: tuple[str, str, set[str]] | None = None
+        self._failure_read_at: datetime | None = None
         self._run_log_cache: tuple[int, str, str] | None = None
         self._now = now or (lambda: datetime.now(UTC))
         self._missing_table_said = dbreads.MissingTableSaid()
@@ -472,9 +477,7 @@ class Dashboard:
             return False
         if self._ready_run == run:
             return True
-        started = _run_start(run)
-        until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
-        if not self._banner.search(self._ready_log_of(self.spec.world, run, until)):
+        if not self._banner.search(self._early_log(run, as_keeper=True)):
             return False
         self._ready_run, self._ready_seen_at = run, self._now()
         return True
@@ -735,6 +738,25 @@ class Dashboard:
             self._ready_seen_at = self._now()
         return True
 
+    def _early_log(self, run: str, *, as_keeper: bool) -> str:
+        """Run `run`'s log up to `READY_READ_SPAN`, one read serving both who ask for it (T600).
+
+        The realm keeper looks for the ready marker in it and `_update_failure()` for a failed
+        update. Whoever asks first reads; the other takes that same text once, so a run is
+        read as often as before this question was added, and the keeper's own later asks
+        (which expect a fresh read) are untouched.
+        """
+        who = "keeper" if as_keeper else "failure"
+        slot = self._early
+        if slot is not None and slot[0] == run and who not in slot[2]:
+            slot[2].add(who)
+            return slot[1]
+        started = _run_start(run)
+        until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
+        text = self._ready_log_of(self.spec.world, run, until)
+        self._early = (run, text, {who})
+        return text
+
     def _run_log(self, run: str) -> str:
         """Run `run`'s whole log, read once per tick however many questions are put to it."""
         cached = self._run_log_cache
@@ -759,24 +781,30 @@ class Dashboard:
             return ""
         if self._failure_run != run:
             self._failure_run, self._failure_text, self._failure_settled = run, "", False
+            self._failure_read_at = None
         if self._failure_text:
             return self._failure_text
         if self._failure_settled or self._ready_run == run:
             return ""
-        young = uptime is None or uptime < READY_READ_SPAN
+        now = self._now()
         try:
-            if young:
-                log = self._run_log(run)
+            if uptime is None or uptime < SETTLED_AFTER:
+                log = self._run_log(run)  # the same read `_saw_ready()` makes every tick
+            elif uptime < READY_READ_SPAN:
+                # Past the tab's settle time the run is called ready anyway, so the log is read
+                # to see what that rule must not outrank: once a `FAILURE_READ_EVERY`.
+                at = self._failure_read_at
+                if at is not None and timedelta(0) <= now - at < FAILURE_READ_EVERY:
+                    return ""
+                self._failure_read_at = now
+                log = self._early_log(run, as_keeper=False)
             else:
-                started = _run_start(run)
-                until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
-                log = self._ready_log_of(self.spec.world, run, until)
+                log = self._early_log(run, as_keeper=False)
+                self._failure_settled = True  # the whole first span has been read
         except Exception as exc:  # noqa: BLE001 - an unreadable log is no answer, not a crash
             logger.warning(f"could not read {self.entry.id}'s world log for a failed update: {exc}")
             return ""
         self._failure_text = update_failure.explain(log)
-        if not young:
-            self._failure_settled = True
         return self._failure_text
 
     def _docker_is_restoring(self, new_run: bool) -> bool:
