@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
+- **Play** puts the game add-ons you brought back into a ready-to-play client that was made again.
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
