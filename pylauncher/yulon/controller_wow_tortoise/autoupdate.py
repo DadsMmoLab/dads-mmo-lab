@@ -63,7 +63,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker
+from yulon import docker, server_build_presses
 from yulon.apply import (
     Applier,
     ApplyError,
@@ -591,10 +591,11 @@ def _naming_the_conf_kept(report: ApplyReport, manifest: Manifest) -> ApplyRepor
     files = [step.file for step in manifest.conf if step.template is not None]
     if not files:
         return report
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
     line = (
         f"its settings file {', '.join(files)} is kept: the server running now was built with "
-        "this module and still reads it, so press Rebuild to take the module out of the server; "
-        "after that the file is unread"
+        f"this module and still reads it, so press {rebuild} to take the module out of the "
+        "server; after that the file is unread"
     )
     return replace(report, left_behind=(line, *report.left_behind))
 

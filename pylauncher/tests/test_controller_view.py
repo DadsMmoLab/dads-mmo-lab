@@ -21043,9 +21043,9 @@ def test_tortoises_box_offers_both_buttons_with_its_own_tips(
     assert view.module_link_button.toolTip() == controller_view_module.TORTOISE_LINK_TIP
     assert view.module_folder_button.toolTip() == controller_view_module.TORTOISE_FOLDER_TIP
     tip = view.module_link_button.toolTip()
-    assert "mod-" in tip and "tw-mod-" in tip and "Rebuild" in tip and "later" not in tip
+    assert "mod-" in tip and "tw-mod-" in tip and "rebuilt" in tip and "later" not in tip
     folder_tip = view.module_folder_button.toolTip()
-    assert "tw-mod-" in folder_tip and "Rebuild" in folder_tip
+    assert "tw-mod-" in folder_tip and "rebuilt" in folder_tip
 
 
 def test_wotlks_tips_are_unchanged_by_tortoises(qapp: object, ps: _Ps, tmp_path: Path) -> None:
