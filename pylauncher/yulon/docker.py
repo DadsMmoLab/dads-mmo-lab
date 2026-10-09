@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
 
-from yulon import ansi, container_end, platform, runner, server_build_presses, wsl
+from yulon import ansi, container_end, platform, runner, server_build_presses, update_failure, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
@@ -3389,6 +3389,15 @@ the loading sentence again once a look reads.
 WORLD_FINISHED_LOADING = "The world has finished loading; stopping it now."
 """Said once the world can hear the stop, if a wait was announced first (T158)."""
 
+WORLD_STUCK_AT_UPDATE_TAIL = (
+    " It is not loading and cannot hear a stop, so Yu'lon is stopping it now instead of waiting."
+)
+"""Follows `update_failure.explain()`'s sentence when a stop finds a world stuck at a failed
+update (T600)."""
+
+_UPDATE_LOG_TAIL = 20
+"""How many lines of a run's log a stop reads to see whether it ends on a failed update."""
+
 WORLD_STOPPED_ANYWAY = (
     "Stopping the world now, as asked, although it had not finished loading. It may be "
     "force-stopped: a world still loading ignores the stop and is killed when the "
@@ -4226,6 +4235,9 @@ def wait_for_the_world_to_load(
       ignore anything, and `docker stop` cancels a pending restart, so the
       stop goes at once.
     * SIGTERM is caught -- the stop goes now. Said only after a wait was said.
+    * the world cannot hear the stop and its log ENDS on a failed world update (T600): the
+      core waits in a read on its console there, so nothing is loading and the signal would
+      be ignored for the whole grace. The world is killed and the stop goes on, saying why.
     * the world was looked at and was NOT seen able to hear the stop, and
       `control.forced()` -- "Stop now anyway". Said as a warning, because the
       stop that follows may be the forced one. A press never makes it skip the
@@ -4320,12 +4332,41 @@ def world_load_steps(
             logger.warning(WORLD_STOPPED_ANYWAY)
             yield WORLD_STOPPED_ANYWAY
             return
+        if caught is False and state.settled:
+            stuck = _stuck_at_a_failed_update(world, run, wsl_distro)
+            if stuck:
+                # Deaf and not loading: tortoise-wow waits in a read on its console after a
+                # failed update (T600), so the stop's SIGTERM is ignored for the whole grace.
+                # Nothing is loading and nothing was saved yet, so the kill loses nothing.
+                logger.warning(f"{world} is stuck at a failed update; killing it, then stopping")
+                try:
+                    kill_container(world, wsl_distro=wsl_distro)
+                except DockerCommandError as exc:
+                    logger.warning(f"could not kill {world}: {exc}")
+                yield stuck + WORLD_STUCK_AT_UPDATE_TAIL
+                return
         if caught is None:
             logger.warning(f"could not read whether {world} can hear a stop; asking again")
             yield from say(WORLD_LOAD_UNCHECKED, warn=True)
         else:
             yield from say(WORLD_STILL_LOADING)
         _pause(control, _LOAD_POLL_SECONDS)
+
+
+def _stuck_at_a_failed_update(world: str, run: str, wsl_distro: str | None) -> str:
+    """`update_failure.explain()`'s sentence when run `run`'s log ENDS on a failed update, or `""`.
+
+    Only the last non-empty line counts: the core goes quiet after `failed to apply.` (it waits in
+    a read), while a world that went on printing is a world that is going on (T600).
+    """
+    tail = _logs(world, this_run_only=True, since=run, tail=_UPDATE_LOG_TAIL, wsl_distro=wsl_distro)
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    if not (update_failure.FAILED.search(last) or update_failure.CLOSED.search(last)):
+        return ""
+    return update_failure.explain(tail)
 
 
 def stop_containers(
@@ -4758,6 +4799,7 @@ def _logs(
     this_run_only: bool = False,
     since: str = "",
     until: str = "",
+    tail: int | None = None,
     wsl_distro: str | None = None,
 ) -> str:
     """Return a container's logs, or `""` if they can't be read.
@@ -4776,7 +4818,8 @@ def _logs(
     `this_run_only` scopes the read to the current run by asking when that run
     started; `until` ends it there (`docker logs --until`). `--tail` is not an
     alternative: the marker is printed once, so a tail window either misses it or
-    slides past it.
+    slides past it. `tail` is for the opposite question, what a run's log ENDS on
+    (T600: a world stuck at a failed update), which a window answers exactly.
     """
     argv = ["logs"]
     if this_run_only:
@@ -4788,6 +4831,8 @@ def _logs(
     if until:
         # T581: a bounded read, for a marker printed early in a run that may be days long.
         argv += ["--until", until]
+    if tail is not None:
+        argv += ["--tail", str(tail)]
     proc = _docker([*argv, container], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
