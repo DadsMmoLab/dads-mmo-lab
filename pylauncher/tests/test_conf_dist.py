@@ -396,6 +396,48 @@ def test_a_debug_or_trace_name_alone_does_not_make_a_switch() -> None:
     assert [item.type for item in found.values()] == ["int", "int"]
 
 
+@pytest.mark.parametrize(
+    ("name", "text", "default"),
+    [
+        (
+            "a key whose options sit under Default:",
+            "#    Mod.Difficulty\n"
+            "#        Description: Enable a harder difficulty for dungeons.\n"
+            "#        Default:     0 - (Disabled)\n"
+            "#                     1 - (Heroic)\n"
+            "#                     2 - (Mythic)\n"
+            "Mod.Difficulty = 0\n",
+            "0",
+        ),
+        (
+            "`on` in a sentence is not a switch",
+            "# Item entry given to the player on login\nMod.LoginItem = 0\n",
+            "0",
+        ),
+        (
+            "a name that says Announce is not a switch",
+            "# Chat channel id the module announces in\nMod.Announce = 1\n",
+            "1",
+        ),
+        (
+            "`no` in a sentence is not a switch",
+            "# Faction template for the NPC. 0 means no change\nMod.Faction = 0\n",
+            "0",
+        ),
+    ],
+)
+def test_a_key_with_more_than_two_values_or_only_everyday_words_is_a_number(
+    name: str, text: str, default: str
+) -> None:
+    """Cold review: the options under `Default:` and the words `on`/`no` made these switches.
+
+    A switch that is wrong loses the user's value (a server at 2 reads as on, and turning it
+    on writes 1); a number box is always safe.
+    """
+    (item,) = conf_dist.parse(text)
+    assert (item.default, item.type) == (default, "int"), name
+
+
 def test_a_decimal_default_is_text() -> None:
     assert _by_key(BLOCK_ABOVE)["AOELoot.Range"].type is None
 
@@ -559,11 +601,51 @@ def test_with_no_dist_beside_it_the_clones_template_is_read(tmp_path: Path) -> N
 def test_a_template_that_leaves_the_clone_is_not_read(tmp_path: Path, template: str) -> None:
     """Codex review: a template path is the clone's own, in either separator style."""
     _put(tmp_path, CONF, "Other.Key = 1\n")
+    # The clone exists: on Linux a `..` through a missing folder resolves to nothing, which
+    # would refuse the path with or without the guard (cold review).
+    (tmp_path / "modules/mod-x/conf").mkdir(parents=True)
+    # On Linux a backslash is part of a file's name, so the same spelling is also a plain
+    # file in the clone: only the separator rule refuses it.
+    _put(tmp_path, "modules/mod-x/..\\other\\x.conf.dist", "Other.Key = 1\n")
     _put(tmp_path, "modules/other/mod_x.conf.dist", "Other.Key = 1\n")
     _put(tmp_path, "modules/other.conf.dist", "Other.Key = 1\n")
     template = template.replace("{abs}", str(tmp_path / "modules/other.conf.dist"))
     manifest = _manifest(conf=[{"file": CONF, "template": template, "keys": []}])
     assert _rows(tmp_path, [manifest]) == ()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_template_that_is_a_link_out_of_the_clone_is_not_read(tmp_path: Path) -> None:
+    """A link in the clone to a file elsewhere in the server folder (`worldserver.conf.dist`)."""
+    _put(tmp_path, CONF, "Other.Key = 1\n")
+    _put(tmp_path, "env/dist/etc/worldserver.conf.dist", "Other.Key = 1\n")
+    clone = tmp_path / "modules/mod-x/conf"
+    clone.mkdir(parents=True)
+    (clone / "mod_x.conf.dist").symlink_to(tmp_path / "env/dist/etc/worldserver.conf.dist")
+    assert _rows(tmp_path) == ()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_template_under_a_link_out_of_the_clone_is_not_read(tmp_path: Path) -> None:
+    """The folder `conf` in the clone is a link to another folder of the server."""
+    _put(tmp_path, CONF, "Other.Key = 1\n")
+    _put(tmp_path, "env/dist/etc/mod_x.conf.dist", "Other.Key = 1\n")
+    (tmp_path / "modules/mod-x").mkdir(parents=True)
+    (tmp_path / "modules/mod-x/conf").symlink_to(
+        tmp_path / "env/dist/etc", target_is_directory=True
+    )
+    assert _rows(tmp_path) == ()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_template_that_is_a_link_inside_the_clone_is_read(tmp_path: Path) -> None:
+    _put(tmp_path, CONF, "Clone.Key = 1\n")
+    _put(tmp_path, "modules/mod-x/data/real.dist", "Clone.Key = 1\n")
+    (tmp_path / "modules/mod-x/conf").mkdir()
+    (tmp_path / "modules/mod-x/conf/mod_x.conf.dist").symlink_to(
+        tmp_path / "modules/mod-x/data/real.dist"
+    )
+    assert [r.key for r in _rows(tmp_path)] == ["Clone.Key"]
 
 
 def test_no_dist_anywhere_is_no_card(tmp_path: Path) -> None:

@@ -11,7 +11,9 @@ the server folder), exactly as every other card.
 **The source.** The `.conf.dist` BESIDE the live conf (`env/dist/etc/modules/<name>.conf.dist`,
 which the server build puts there and is the file the running server was built from), then
 the `conf/` template in the module's own clone. A file that is a link out of the server
-folder, is too big for the raw editor, or is not UTF-8 is not read.
+folder, is too big for the raw editor, or is not UTF-8 is not read; a template that is not
+inside the clone (a `..`, an absolute path, or a link to another file of the server folder)
+is not read either.
 
 **Whose conf.** Only an INSTALLED module's conf, directly in the modules folder, that the
 manifest names with no keys, that no other card already declares keys for, and that is not
@@ -147,9 +149,10 @@ def parse(text: str) -> tuple[DistKey, ...]:
         if not first:
             continue
         here = attached.get(index, [])
-        words = _help_of(key, here, docs, names)
+        entry = _entry_of(key, here, docs, names)
+        words = _help(entry)
         default = value.strip('"')
-        rows.append(DistKey(key, default, words, _type_of(key, value, words)))
+        rows.append(DistKey(key, default, words, _type_of(key, value, words, _whole(entry))))
     return tuple(rows)
 
 
@@ -188,20 +191,29 @@ def _heads_an_indented_body(lines: list[str], n: int) -> bool:
     return False
 
 
-def _help_of(
+def _entry_of(
     key: str, block: list[str], docs: Mapping[str, list[str]], names: Collection[str]
-) -> str | None:
-    """The module author's words about `key`: its own entry by name, else the block above it."""
+) -> list[str]:
+    """The comment lines that are about `key`: its own entry by name, else the block above it."""
     if key in docs:
-        return _help(docs[key])
+        return docs[key]
     entries = _entries(block, names)
     if entries:
         # One entry right above, headed by a name the file does not assign, is this key's
         # (a heading spelled differently from the key); a name another key owns is not.
         if len(entries) == 1 and entries[0][0] not in names:
-            return _help(entries[0][1])
-        return None
-    return _help(block)
+            return entries[0][1]
+        return []
+    return block
+
+
+def _whole(lines: Iterable[str]) -> str:
+    """Everything the entry says, its `Default:` and option lines too, on one line.
+
+    The help leaves the default out; the type reads it (`Default: 0 - (Disabled)`,
+    `1 - (Heroic)`, `2 - (Mythic)` shows a key takes three values, not two).
+    """
+    return " ".join(" ".join(body.split()) for body in lines).strip()
 
 
 def _help(lines: Iterable[str]) -> str | None:
@@ -248,15 +260,19 @@ def reads_unsigned(default: str, words: str | None) -> bool:
 
 
 _TOGGLE_IN_PROSE = re.compile(
-    r"\b(?:enable[ds]?|disable[ds]?|on|off|true|false|yes|no|toggle|whether)\b", re.IGNORECASE
+    r"\b(?:enable[ds]?|disable[ds]?|off|true|false|yes|toggle|whether)\b", re.IGNORECASE
 )
-_TOGGLE_IN_NAME = re.compile(r"enable|disable|announce|allow", re.IGNORECASE)
+_TOGGLE_IN_NAME = re.compile(r"enable|disable|allow", re.IGNORECASE)
 _A_QUANTITY = re.compile(
     r"\b(?:how many|interval|seconds?|minutes?|hours?|days?|delay|timeout|count|number of|"
     r"amount|maximum|minimum|limit|level)\b",
     re.IGNORECASE,
 )
-"""What shows that a key defaulting to 0 or 1 is a toggle, and what shows it is a quantity."""
+"""What shows that a key defaulting to 0 or 1 is a toggle, and what shows it is a quantity.
+
+`on` and `no` are everyday words (`given on login`, `0 means no change`) and a name such as
+`Announce` says where a message goes, not that it is optional: none of them proves a switch.
+"""
 
 
 def _is_a_toggle(key: str, prose: str) -> bool:
@@ -272,15 +288,19 @@ def _is_a_toggle(key: str, prose: str) -> bool:
     return bool(_TOGGLE_IN_PROSE.search(prose) or numbers == {0, 1} or _TOGGLE_IN_NAME.search(key))
 
 
-def _type_of(key: str, raw: str, words: str | None) -> str | None:
-    """`bool`, `int` or `None` (a text box), only where the default makes it certain."""
+def _type_of(key: str, raw: str, words: str | None, whole: str = "") -> str | None:
+    """`bool`, `int` or `None` (a text box), only where the default makes it certain.
+
+    `words` is the help; `whole` is the entry's every line, the default and its options too,
+    which is what a switch is checked against.
+    """
     if not _WHOLE.fullmatch(raw):
         return None
     prose = words or ""
     smallest, largest = tuning.int_range(reads_unsigned(raw, prose))
     if not smallest <= int(raw) <= largest or _DECIMALISH.search(prose):
         return None
-    return "bool" if raw in ("0", "1") and _is_a_toggle(key, prose) else "int"
+    return "bool" if raw in ("0", "1") and _is_a_toggle(key, f"{whole} {prose}") else "int"
 
 
 def rows_for(
@@ -358,11 +378,12 @@ def _read_card(
     text = _plain_text(server_dir / file, server_dir)
     if text is None:
         return (), None
-    sources = [server_dir / f"{file}{DIST_SUFFIX}"]
+    clone = clone_dir(manifest)
+    sources: list[tuple[Path, Path | None]] = [(server_dir / f"{file}{DIST_SUFFIX}", None)]
     if template is not None and _is_inside_the_clone(template):
-        sources.append(clone_dir(manifest) / template)
-    for source in sources:
-        dist = _plain_text(source, server_dir)
+        sources.append((clone / template, clone))
+    for source, within in sources:
+        dist = _plain_text(source, server_dir, within)
         keys = parse(dist) if dist is not None else ()
         if keys:
             return keys, text
@@ -377,14 +398,20 @@ def _is_inside_the_clone(template: str) -> bool:
     return bool(template) and not path.is_absolute() and ".." not in path.parts
 
 
-def _plain_text(path: Path, server_dir: Path) -> str | None:
+def _plain_text(path: Path, server_dir: Path, within: Path | None = None) -> str | None:
     """`path`'s text when it is a plain file inside the server folder that may be read.
 
     Not a link out of the server folder (`tuning.check_inside`), not bigger than the raw
-    editor opens, and UTF-8 (`tuning._read`); anything else answers `None`.
+    editor opens, and UTF-8 (`tuning._read`); anything else answers `None`. `within`, when
+    given (a module's clone), is a second fence: the file must also RESOLVE inside it, so a
+    link in the clone to another file of the server folder (its `worldserver.conf.dist`) is
+    not a template.
     """
     try:
         tuning.check_inside(path, server_dir)
+        if within is not None and not path.resolve().is_relative_to(within.resolve()):
+            logger.debug(f"conf_dist: {path} leaves {within}")
+            return None
         if not path.is_file() or path.stat().st_size > tuning.MAX_EDIT_BYTES:
             return None
     except (tuning.TuningError, OSError) as exc:
