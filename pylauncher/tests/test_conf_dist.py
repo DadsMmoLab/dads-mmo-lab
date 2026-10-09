@@ -410,6 +410,26 @@ def test_a_debug_or_trace_name_alone_does_not_make_a_switch() -> None:
             "0",
         ),
         (
+            "a decimal third value under Default:",
+            "#    Mod.Mode\n"
+            "#        Description: Enable the module.\n"
+            "#        Default:     0 - Disabled\n"
+            "#                     1 - Normal\n"
+            "#                     2.5 - Aggressive\n"
+            "Mod.Mode = 0\n",
+            "0",
+        ),  # a number box would refuse the 2.5: text
+        (
+            "a hexadecimal third value under Default:",
+            "#    Mod.Flags\n"
+            "#        Description: Enable the module.\n"
+            "#        Default:     0 - Disabled\n"
+            "#                     1 - Normal\n"
+            "#                     0x2 - Aggressive\n"
+            "Mod.Flags = 1\n",
+            "1",
+        ),
+        (
             "`on` in a sentence is not a switch",
             "# Item entry given to the player on login\nMod.LoginItem = 0\n",
             "0",
@@ -426,7 +446,7 @@ def test_a_debug_or_trace_name_alone_does_not_make_a_switch() -> None:
         ),
     ],
 )
-def test_a_key_with_more_than_two_values_or_only_everyday_words_is_a_number(
+def test_a_key_with_more_than_two_values_or_only_everyday_words_is_not_a_switch(
     name: str, text: str, default: str
 ) -> None:
     """Cold review: the options under `Default:` and the words `on`/`no` made these switches.
@@ -435,7 +455,8 @@ def test_a_key_with_more_than_two_values_or_only_everyday_words_is_a_number(
     on writes 1); a number box is always safe.
     """
     (item,) = conf_dist.parse(text)
-    assert (item.default, item.type) == (default, "int"), name
+    decimal = "2.5" in text
+    assert (item.default, item.type) == (default, None if decimal else "int"), name
 
 
 def test_a_negative_value_shown_only_under_default_makes_the_key_text() -> None:

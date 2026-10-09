@@ -244,6 +244,9 @@ def _help(lines: Iterable[str]) -> str | None:
     return text
 
 
+_NUMBER_TOKEN = re.compile(r"(?<![\w.])-?[0-9](?:\w|\.(?=\w))*")
+"""A number-looking word: `2`, `2.5`, `0x2`, `-1`, `3rd`. Only exactly `0` and `1` fit a switch."""
+
 _NEGATIVE_IN_PROSE = re.compile(r"(?<![\w.])-[0-9]")
 """A negative number written in a comment (`-1 for no limit`): the key is read as signed."""
 
@@ -284,8 +287,10 @@ def _is_a_toggle(key: str, prose: str) -> bool:
     """
     if any(int(n) not in (0, 1) for n in _OTHER_NUMBER.findall(prose)) or _A_QUANTITY.search(prose):
         return False
-    if _NEGATIVE_IN_PROSE.search(prose):
-        return False  # `-1 - (Unlimited)` is a third value, not a `1`
+    if _NEGATIVE_IN_PROSE.search(prose) or any(
+        token not in ("0", "1") for token in _NUMBER_TOKEN.findall(prose)
+    ):
+        return False  # `-1`, `2.5`, `0x2` are further values, not a `0` or a `1`
     numbers = {int(n) for n in _OTHER_NUMBER.findall(prose)}
     return bool(_TOGGLE_IN_PROSE.search(prose) or numbers == {0, 1} or _TOGGLE_IN_NAME.search(key))
 
@@ -302,7 +307,7 @@ def _type_of(key: str, raw: str, words: str | None, whole: str = "") -> str | No
     if reads_unsigned(raw, prose) != reads_unsigned(raw, f"{whole} {prose}"):
         return None  # a negative shown only under `Default:`: the save check could not see it
     smallest, largest = tuning.int_range(reads_unsigned(raw, prose))
-    if not smallest <= int(raw) <= largest or _DECIMALISH.search(prose):
+    if not smallest <= int(raw) <= largest or _DECIMALISH.search(f"{whole} {prose}"):
         return None
     return "bool" if raw in ("0", "1") and _is_a_toggle(key, f"{whole} {prose}") else "int"
 
