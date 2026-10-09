@@ -13,7 +13,9 @@ job: a refusal, a cut-off reply or any API error falls back to the plain text
 
 Everything read from GitHub (PR, issue and release text) is written by other
 people. It goes to Claude wrapped in tags and marked as data, and every Discord
-payload carries ``allowed_mentions: {"parse": []}`` so nothing in it can ping.
+payload carries ``allowed_mentions: {"parse": []}`` and @everyone / @here in that
+text is defused, so nothing in it can ping. The one exception is the release
+channel's post, which opens with our own fixed "@everyone ..." line.
 
 Stdlib for Discord and GitHub; the official ``anthropic`` SDK for Claude.
 """
@@ -225,13 +227,31 @@ def server_url() -> str:
 # --- Discord ----------------------------------------------------------------
 
 
+RELEASE_PING = "@everyone A new Yu'lon release is out."
+_MENTION_ALL = re.compile(r"@(?=(?:everyone|here)\b)", re.IGNORECASE)
+
+
+def defuse_mentions(text: str) -> str:
+    """Break @everyone / @here in text that came from GitHub or Claude (zero-width space)."""
+    return _MENTION_ALL.sub("@\u200b", text)
+
+
 class Discord:
     """The webhook, optionally aimed at a thread."""
 
-    def __init__(self, webhook_url: str, thread_id: str = "", username: str = "Yu'lon"):
+    def __init__(
+        self,
+        webhook_url: str,
+        thread_id: str = "",
+        username: str = "Yu'lon",
+        ping_everyone: str = "",
+    ):
         self.base = webhook_url.split("?")[0].rstrip("/")
         self.thread_id = thread_id.strip()
         self.username = username
+        # Our own text, sent as the message content with @everyone allowed. Nothing
+        # from GitHub or Claude ever goes there; the embed text is defused below.
+        self.ping_everyone = ping_everyone
 
     def _url(self, message_id: str = "", wait: bool = False) -> str:
         url = self.base + (f"/messages/{message_id}" if message_id else "")
@@ -244,12 +264,18 @@ class Discord:
 
     def _payload(self, embed: dict, edit: bool = False) -> dict:
         embed = dict(embed)
-        embed["title"] = clip(embed.get("title", ""), EMBED_TITLE_MAX)
+        embed["title"] = clip(defuse_mentions(embed.get("title", "")), EMBED_TITLE_MAX)
         if embed.get("description"):
-            embed["description"] = clip(embed["description"], EMBED_DESC_MAX)
+            embed["description"] = clip(defuse_mentions(embed["description"]), EMBED_DESC_MAX)
+        if embed.get("footer", {}).get("text"):
+            embed["footer"] = dict(embed["footer"])
+            embed["footer"]["text"] = defuse_mentions(embed["footer"]["text"])
         payload = {"embeds": [embed], "allowed_mentions": {"parse": []}}
         if not edit:
             payload["username"] = self.username
+            if self.ping_everyone:
+                payload["content"] = self.ping_everyone
+                payload["allowed_mentions"] = {"parse": ["everyone"]}
         return payload
 
     def _call(self, method: str, url: str, payload: dict | None = None) -> str:
@@ -309,7 +335,12 @@ def release_targets(only_release_channel: bool) -> list[tuple[str, Discord]] | N
     main = make_discord("DISCORD_RELEASE_THREAD_ID", "Yu'lon releases", quiet=True)
     extra = os.environ.get("DISCORD_RELEASE_WEBHOOK_URL", "").strip()
     second = (
-        Discord(extra, os.environ.get("DISCORD_RELEASE_CHANNEL_THREAD_ID", ""), "Yu'lon releases")
+        Discord(
+            extra,
+            os.environ.get("DISCORD_RELEASE_CHANNEL_THREAD_ID", ""),
+            "Yu'lon releases",
+            ping_everyone=RELEASE_PING,
+        )
         if extra
         else None
     )

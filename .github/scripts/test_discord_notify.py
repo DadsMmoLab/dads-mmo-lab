@@ -902,7 +902,6 @@ def test_release_goes_to_both_channels_with_one_summary(world, monkeypatch):
     assert main[2]["embeds"] == second[2]["embeds"]
     assert main[2]["embeds"][0]["description"] == "A short summary."
     assert len(world.claude.requests) == 1
-    assert second[2]["allowed_mentions"] == {"parse": []}
 
 
 def test_release_webhook_unset_posts_to_the_main_channel_only(world, monkeypatch):
@@ -1062,3 +1061,81 @@ def test_release_workflow_passes_the_second_channel_secret_var_and_input():
 def test_only_the_release_workflow_gets_the_second_webhook():
     for name in ("discord-merged.yml", "discord-issues.yml"):
         assert "DISCORD_RELEASE_WEBHOOK_URL" not in (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+# --- @everyone on the release channel only ----------------------------------
+
+
+def test_the_release_channel_post_pings_everyone_and_the_main_post_does_not(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0") == 0
+    (main,) = world.discord("POST", hook="111")
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"].startswith("@everyone")
+    assert second[2]["allowed_mentions"] == {"parse": ["everyone"]}
+    assert "content" not in main[2]
+    assert main[2]["allowed_mentions"] == {"parse": []}
+    assert main[2]["embeds"] == second[2]["embeds"]
+
+
+def test_only_release_channel_keeps_the_ping(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0", only_release_channel=True) == 0
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"].startswith("@everyone")
+    assert second[2]["allowed_mentions"] == {"parse": ["everyone"]}
+
+
+def test_the_ping_text_is_ours_alone_never_from_github(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.changelog = "## v1.0 - d\n- @here and @everyone in a line\n"
+    world.claude = FakeClaude(stop_reason="refusal")
+    monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+    assert dn.cmd_release("v1.0") == 0
+    (second,) = world.discord("POST", hook="222")
+    assert second[2]["content"] == dn.RELEASE_PING
+    assert "here" not in second[2]["content"]
+
+
+def test_everyone_and_here_in_the_release_text_are_defused_in_both_posts(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    world.changelog = "## v1.0 - d\n- @here and @everyone and @EVERYONE in a line\n"
+    world.claude = FakeClaude(text="Summary says @everyone and @here.")
+    monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+    for refusal in (False, True):
+        world.calls.clear()
+        if refusal:
+            world.claude = FakeClaude(stop_reason="refusal")
+            monkeypatch.setattr(dn, "_make_client", lambda: world.claude)
+        assert dn.cmd_release("v1.0") == 0
+        for _m, _u, payload in world.discord("POST"):
+            embed = payload["embeds"][0]
+            text = embed["title"] + embed["description"] + embed.get("footer", {}).get("text", "")
+            assert not re.search(r"@(everyone|here)", text, re.I)
+            assert "everyone" in text.lower() or "here" in text.lower()
+
+
+def test_everyone_in_pr_and_issue_posts_is_defused_too(world):
+    set_event(world, push_event("a"))
+    world.pulls["00" + "a" * 38] = [a_pr(title="Fix @everyone", body="ping @everyone")]
+    world.claude = FakeClaude(text="ping @here")
+    assert dn.cmd_merged() == 0
+    world.issue = a_issue(title="Crash @here", body="hi @everyone")
+    set_event(world, issue_event("opened"))
+    assert dn.cmd_issue() == 0
+    for _m, _u, payload in world.discord("POST"):
+        embed = payload["embeds"][0]
+        text = (
+            embed["title"] + embed.get("description", "") + embed.get("footer", {}).get("text", "")
+        )
+        assert not re.search(r"@(everyone|here)", text, re.I)
+        assert "content" not in payload
+        assert payload["allowed_mentions"] == {"parse": []}
+
+
+def test_the_footer_is_defused_too():
+    payload = dn.Discord(WEBHOOK)._payload(
+        {"title": "t", "footer": {"text": "by @everyone and @here"}}
+    )
+    assert "@everyone" not in payload["embeds"][0]["footer"]["text"]
+    assert "@here" not in payload["embeds"][0]["footer"]["text"]

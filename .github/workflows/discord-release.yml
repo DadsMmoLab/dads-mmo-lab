@@ -8,7 +8,8 @@ name: discord-release
 # Run it by hand with a tag to re-post. Tick "Skip the Claude summary" to post
 # the raw CHANGELOG section instead. With the secret DISCORD_RELEASE_WEBHOOK_URL
 # set, every release post also goes to that channel (one summary, two posts, each
-# independent); tick "Post only to the release channel" to re-post there alone.
+# independent; the release channel's one opens with @everyone). Tick "Post only to
+# the release channel" to re-post there alone.
 
 on:
   workflow_run:
