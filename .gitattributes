@@ -37,6 +37,8 @@ pylauncher/tests/data/wotlk-rendered/*.yml  text eol=lf
 # turn that byte equality into a line-ending coincidence, and a CRLF patch is
 # not the file the upstream report attaches.
 pylauncher/catalog/installers/shared/cmangos/patches/*.patch  text eol=lf
+pylauncher/catalog/installers/wow-tortoise/patches/*.patch   text eol=lf
+pylauncher/tests/fixtures/tortoise-187af788/**               text eol=lf
 pylauncher/tests/fixtures/cmangos-vmap-8ec338a1/**            text eol=lf
 
 # The upstream issue draft carries that same patch inline, and the fence is

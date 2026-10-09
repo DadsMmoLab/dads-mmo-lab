@@ -840,9 +840,9 @@ def test_a_cmangos_update_never_rewrites_the_compose_files_the_players_edit_surv
     both directions re-rendered all three compose files (T173): a player's own
     line in the override was thrown away, and a pre-T169 install gained its
     `./logs` bind without the `LogsDir` its Repair sets with it (the next test).
-    Tortoise carries no patch and was never touched -- measured live on the
-    T168 update, mtimes unchanged -- which is why it is here: the same answer
-    for all three.
+    Tortoise carried no patch when this was measured -- live on the T168 update,
+    mtimes unchanged -- and carries the updater patch now (T600), which edits
+    the core's source and not the compose files: the same answer for all three.
 
     The press must still finish, the sources must move, and the files must be
     the same bytes, the same mtime and the same inode.

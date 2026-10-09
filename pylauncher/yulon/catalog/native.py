@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import inspect
 import io
 import json
 import math
@@ -81,6 +82,7 @@ from yulon import (
     database_presence,
     dbsecret,
     docker,
+    forgetting,
     git,
     module_answers,
     networking,
@@ -90,6 +92,7 @@ from yulon import (
     runner,
     server_build_presses,
     serverlock,
+    update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
 from yulon.catalog import (
@@ -120,6 +123,7 @@ from yulon.catalog.installer import (
     OneShotLeftRunning,
     ReadyWaitStopped,
     RollbackNotDone,
+    ScriptsPartlyLaid,
     SelfExplainedError,
     UnsupportedPlatformError,
     UpdateRefused,
@@ -149,7 +153,16 @@ ERROR_RUN_REBUILD = "rebuild"
 """`InstallState.error_run` for a failure of any press on a remembered server (T207)."""
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
+MOVE_IN_FILE = ".yulon-move-in.json"
+"""A server being built from another computer's package records its steps here (T601 level 2)."""
+
+OUR_OWN_FILES = (
+    STATE_FILE,
+    networking.INTENT_FILE,
+    module_answers.ANSWERS_FILE,
+    docker.FOLDER_ID_FILE,
+    MOVE_IN_FILE,
+)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -165,7 +178,8 @@ created by this app (.yulon-network.json)` from
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
 in one place rather than in the five call sites that ask the question. The third
-is T104's record of the answers a player gave a module's questions.
+is T104's record of the answers a player gave a module's questions. The fourth is T601's
+move-in record, written before the install of a server brought from another computer.
 """
 
 OPENING_NOTE = (
@@ -582,6 +596,12 @@ exist under that name is the defect T7's ticket is titled after. One string, so
 a rename moves both.
 """
 
+INSTALL_PRESS = "Install"
+"""The install's name on its reservation, taken at the `start-db` stage (T568)."""
+
+REPAIR_DATABASE_PRESS = "Repair the database…"
+"""The Server tab's repair press, by the name its reservation carries (T568)."""
+
 ADOPT_CONSEQUENCE = (
     "Yu'lon will treat these databases as a finished import from now on. It cannot check that "
     "the import finished; you are saying so. If it did not, the next press of Apply pending "
@@ -778,7 +798,7 @@ CORRECTIONS_CANCEL_NOTE = (
 )
 """`RERUN_CANCEL_NOTE`'s counterpart for T129's press: the gate already reads a finished import."""
 
-CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable"]
+CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable", "busy"]
 
 
 @dataclass(frozen=True)
@@ -2665,6 +2685,54 @@ it, and the Rebuild press is not refused by it. Only the sentence differs, becau
 tags are mixed" is false here -- every one names the new build."""
 
 
+SCRIPTS_NOT_BACK = "scripts"
+"""`START_REFUSED_FILE`'s `why` when a rollback could not lay the old Lua scripts again (T562)."""
+
+SCRIPTS_NOT_BACK_REFUSAL = (
+    "This server's Lua scripts are not the ones its build was made with: an update or rebuild "
+    "laid new ones, and either stopped part-way or could not put the old ones back. A Start "
+    "would run the old build on them, so it must be rebuilt first: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` says `scripts` (T562).
+
+The record and the clearing are the mixed tags' own: only a Rebuild that succeeds removes
+it (it lays the scripts from the sources the folder is on), and the Rebuild press is not
+refused by it."""
+
+
+NO_ROLLBACK_SCRIPTS_MIXED = (
+    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "The servers were stopped to lay the Lua scripts and no container was replaced, so nothing "
+    "runs now and the scripts are a mix of the old and the new. Start is refused until this "
+    "server is rebuilt: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""T602: a rebuild with no rollback whose Lua lay failed part-way, with the servers down."""
+
+
+class _MixedScripts:
+    """A plain Rebuild's Lua lay changed some scripts and failed (T602), as this press saw it.
+
+    `unsaved` is `owe_start()`'s warning when the file that blocks a Start could not be
+    written (a full disk is the likeliest cause of the lay failing), else "".
+    """
+
+    def __init__(self) -> None:
+        self.scripts = False
+        self.unsaved = ""
+
+    def not_saved_note(self) -> str:
+        """The sentence for a marker that is not on disk: a hand Start would not be blocked."""
+        if not self.unsaved:
+            return ""
+        return (
+            " But the note that blocks Start could not be saved (the disk would not take the "
+            "file), so Start is NOT blocked: do not press Start. Press "
+            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} first."
+        )
+
+
 def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
     """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
 
@@ -2686,7 +2754,11 @@ def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | N
         why = json.loads(text).get("why")
     except (ValueError, AttributeError):
         why = None
-    return UNTESTED_BUILD_REFUSAL if why == UNTESTED_BUILD else REBUILD_OWED_REFUSAL
+    if why == UNTESTED_BUILD:
+        return UNTESTED_BUILD_REFUSAL
+    if why == SCRIPTS_NOT_BACK:
+        return SCRIPTS_NOT_BACK_REFUSAL
+    return REBUILD_OWED_REFUSAL
 
 
 def owe_start(server_dir: Path, *, why: str = "rebuild") -> str:
@@ -3144,6 +3216,19 @@ def source_not_back(repo: str, dest: Path, old: str, reason: str) -> str:
         f"{repo} in {dest} could not be put back on {old[:7]} ({reason}); that folder still "
         "holds the new code, and the old build reads its database updates from it. Put it back "
         f"with `git -C {dest} checkout --detach --force {old}`, then press Start."
+    )
+
+
+def scripts_not_back_sentence(reasons: Sequence[str]) -> str:
+    """Why the old build was left stopped: its Lua scripts would not go back (T562).
+
+    The update laid the new build's scripts with the servers down; the rollback's
+    re-lay of the old set failed, so the folder still holds the new ones and the old
+    binary would start on them. Each reason already names what to press.
+    """
+    return (
+        "The old build was not started: the folder still holds the new build's Lua "
+        f"scripts. {' '.join(reasons)}"
     )
 
 
@@ -4891,6 +4976,13 @@ READY_ANYWAY_IN_THE_WATCH = (
 """`READY_STOPPED_IN_THE_WATCH` for the escape pressed in the watch after a Stop during the load
 (T247 review): the first press came in the load, not in the watch, and the sentence says so."""
 
+READY_LOST_IN_THE_WATCH = (
+    "The world server reported ready, and this server's reservation in Docker then ended from "
+    "elsewhere (another Yu'lon stopped it, or Docker restarted) in the last moment of the minute "
+    "it is watched, so this build was not proved to stay up."
+)
+"""The reservation lost in the watch's last pause: not a Stop that came too late (T607)."""
+
 READY_STOP_TOO_LATE = (
     "Stop was pressed after the new build had already been watched for the whole minute, so it "
     "came too late to matter: the build is kept."
@@ -5166,6 +5258,19 @@ def _line_around(text: str, found: re.Match[str]) -> str:
     return (text[start:] if end < 0 else text[start:end]).strip()
 
 
+def _fatal_words(text: str, found: re.Match[str]) -> str:
+    """What a refusal quotes for a `fatal` match: its line, or a failed update's sentence.
+
+    T600: a failed world update is quoted as the sentence naming its file and MariaDB's error
+    (`update_failure.explain()`), which reads the lines before it in `text`; the bare line names
+    no error. Every other fatal match is the whole line, as `_line_around()` says.
+    """
+    line = _line_around(text, found)
+    if update_failure.FAILED.search(line) or update_failure.CLOSED.search(line):
+        return update_failure.explain(text) or line
+    return line
+
+
 def _spell_elapsed(seconds: float) -> str:
     """`31 -> "31 seconds"`, `70 -> "1 minute 10 seconds"`, `180 -> "3 minutes"` (T223).
 
@@ -5375,7 +5480,7 @@ def _read_world(
         return "gone", now.status
     found = re.search(fatal, now.text) if fatal is not None else None
     if found is not None:
-        return "fatal", _line_around(now.text, found)
+        return "fatal", _fatal_words(now.text, found)
     if now == before:
         return ("quiet" if now.status else "unreadable"), None
     return "alive", None
@@ -5475,7 +5580,7 @@ def _dying_words(texts: Sequence[str], fatal: str | None) -> str:
     for text in texts:
         found = re.search(fatal, text) if fatal is not None else None
         if found is not None:
-            return _line_around(text, found)
+            return _fatal_words(text, found)
     for text in texts:
         said = [line.strip() for line in text.splitlines() if line.strip()]
         if said:
@@ -6308,6 +6413,14 @@ class Seams:
 
     What it yields is a `docker.ClaimHeld` (T549: whether the claim was lost mid-press);
     a stand-in that yields anything else is a claim nobody watches."""
+    server_claim: Callable[..., AbstractContextManager[docker.ClaimHeld]] = docker.server_claim
+    """T568: a press's reservation of its server across processes (`docker.server_claim()`).
+
+    A server inside a WSL distro binds it to that distro's Docker (`in_wsl()`)."""
+    reservation_holder: Callable[..., docker.ServerHolder | None] = docker.reservation_holder
+    """T607: who holds a server's reservation (`docker.reservation_holder()`, inspect only).
+
+    Asked by the corrections reading, so a retry is not offered over another Yu'lon's press."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -6519,6 +6632,8 @@ class Seams:
             fs_type=lambda _path: None,
             run_container=refused("Running an install container"),
             folder_claim=refused("Claiming a server folder for an extraction"),
+            server_claim=on(docker.server_claim, wsl_distro=distro),
+            reservation_holder=on(docker.reservation_holder, wsl_distro=distro),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
@@ -6559,6 +6674,145 @@ def recorded_install_id(server_dir: Path) -> str:
             "server inside the distro is named after that id. Nothing was started."
         )
     return ident
+
+
+class PressCancel(threading.Event):
+    """A press's cancel: the player's Stop, or its reservation lost (T549, T568).
+
+    Read live, not copied by a thread: a tool's watcher or a stage's check sees the
+    claim's loss the moment it is set, as it sees a Stop.
+    """
+
+    def __init__(self, stop: threading.Event | None, lost: threading.Event) -> None:
+        super().__init__()
+        self._stop = stop
+        self._lost = lost
+        anyway = getattr(stop, "anyway", None)
+        if anyway is not None:
+            self.anyway = anyway
+
+    def is_set(self) -> bool:
+        return super().is_set() or self._lost.is_set() or self.player_stopped()
+
+    @property
+    def reservation_lost(self) -> threading.Event:
+        """The reservation's loss, which `withdraw_stop()` must not take back (T607)."""
+        return self._lost
+
+    def player_stopped(self) -> bool:
+        """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
+        return self._stop is not None and self._stop.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            step = _PRESS_CANCEL_POLL
+            if deadline is not None:
+                step = min(step, deadline - time.monotonic())
+                if step <= 0:
+                    return False
+            self._lost.wait(step)  # wakes at once on the loss; polls the Stop
+        return True
+
+
+_PRESS_CANCEL_POLL = 0.05
+"""How often `PressCancel.wait()` looks at the player's Stop. Not a deadline."""
+
+
+_LOSS_POLL_SECONDS = 0.2
+"""How often the watcher of a press's reservation looks at whether the press is still running."""
+
+
+def _end_on_loss(
+    held: docker.ClaimHeld, cancel: threading.Event | None, done: threading.Event
+) -> threading.Event:
+    """Make the loss of `held` the press's own Stop: set its `cancel` when `held.lost` is set.
+
+    Codex adversarial review: a press whose reservation another Yu'lon's "Stop anyway" removed
+    must end at its next check, as a Stop does. The press's OWN cancel is set, not wrapped:
+    the job runner, `withdraw_stop()` and "Stop now anyway" (`CancelWithForce`) all read that
+    object. Returns the cancel to hand the press (a new one when the caller gave none).
+    `done` ends the watcher when the press does.
+    """
+    ending = cancel if cancel is not None else threading.Event()
+    # Told apart from the player's Stop: `withdraw_stop()` takes back a Stop that came too late,
+    # and must not take back a loss (T607).
+    ending.reservation_lost = held.lost  # type: ignore[attr-defined]
+    if held.lost.is_set():
+        ending.set()
+        return ending
+
+    def watch() -> None:
+        while not done.is_set():
+            if held.lost.wait(_LOSS_POLL_SECONDS):
+                ending.set()
+                return
+
+    threading.Thread(target=watch, name="yulon-reservation-loss", daemon=True).start()
+    return ending
+
+
+def _reserving(
+    press: str | Callable[[Mapping[str, Any]], str],
+) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
+    """Decorate a press (a generator method) so it holds its server's reservation (T568).
+
+    The reservation is taken when the press starts running, after the player's Yes and
+    before its own re-reads, so the checks that ask "has anything changed since the dialog"
+    are exclusive across processes and not only true at one moment. Held to the press's last
+    line, including its ready wait, put-backs and `after_update`; a press it calls (Update ->
+    Rebuild) shares the one reservation. `press` is the player's own name for the press, or a
+    function of the call's arguments that says it (Update and Return to the pin are one method).
+    """
+
+    def decorate(method: Callable[..., Iterator[str]]) -> Callable[..., Iterator[str]]:
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Iterator[str]:
+            given = signature.bind(self, *args, **kwargs).arguments
+            options = given.get("options") or InstallOptions()
+            named = press if isinstance(press, str) else press(given)
+            done = threading.Event()
+            with self._reservation(self.server_dir(options), named, given.get("cancel")) as held:
+                if held is not None:
+                    kwargs["cancel"] = _end_on_loss(held, given.get("cancel"), done)
+                try:
+                    yield from method(self, *args, **kwargs)
+                except GeneratorExit:
+                    raise
+                except BaseException:
+                    if held is not None and held.lost.is_set():
+                        yield forgetting.reservation_lost_line(named)
+                    raise
+                finally:
+                    done.set()
+
+        return reserved
+
+    return decorate
+
+
+def _reserving_call(press: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """`_reserving()` for a press that is one call and returns a value, not a generator (T568).
+
+    "Remove kept build" can delete the `-parked` images another process's rollback needs;
+    "Repair server files" rewrites the compose file under a running server's recreate.
+    """
+
+    def decorate(method: Callable[..., Any]) -> Callable[..., Any]:
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Any:
+            given = signature.bind(self, *args, **kwargs).arguments
+            options = given.get("options") or InstallOptions()
+            with self._reservation(self.server_dir(options), press):
+                return method(self, *args, **kwargs)
+
+        return reserved
+
+    return decorate
 
 
 class StagedInstaller:
@@ -6658,6 +6912,24 @@ class StagedInstaller:
         change to the server; a stop that fails raises `InstallerError`, and the
         press stops there. `press` is the menu entry the refusal tells the player
         to press again.
+        """
+        return iter(())
+
+    def lays_scripts_with_the_servers_down(self, server_dir: Path) -> bool:
+        """Does a rebuild of this install lay files once the old world has stopped (T562)?
+
+        False on the spine. The AzerothCore family's Lua scripts are read when the
+        world starts, so they are laid in the window between the stop and the start,
+        and a plain Rebuild then stops the servers in a call of its own, as the update
+        route always did, for the window to exist.
+        """
+        return False
+
+    def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
+        """Lay what `lays_scripts_with_the_servers_down()` says, with the servers stopped (T562).
+
+        Called by `stage_recreate()` after the stop and before the start, and by the
+        update route's put-back with the old sources back. Nothing on the spine.
         """
         return iter(())
 
@@ -6766,6 +7038,71 @@ class StagedInstaller:
         return None
 
     # -- the contract ----------------------------------------------------
+
+    def reserved(
+        self, server_dir: Path, press: str
+    ) -> AbstractContextManager[docker.ClaimHeld | None]:
+        """This server's reservation for a press the caller runs itself (T568).
+
+        For the one press that is not a method here: the conf half of "Repair server files…"
+        (`install_wiring.repair_confs_for_app()`). Refuses with the holder's sentence as an
+        `InstallerError`; a folder Yu'lon has no record of reserves nothing.
+        """
+        return self._reservation(server_dir, press)
+
+    @contextmanager
+    def _reservation(
+        self,
+        server_dir: Path,
+        press: str,
+        cancel: threading.Event | None = None,
+        *,
+        images: Sequence[str] | None = None,
+    ) -> Iterator[docker.ClaimHeld | None]:
+        """This server's reservation across processes, for a press; a refusal is a sentence.
+
+        Only for a folder Yu'lon has a record of: a press on any other folder refuses by
+        itself, and reserving it would write an id file into somebody else's folder. The
+        server's own database container's image runs the reservation, then the build's
+        refs (`docker.server_claim()`). Refused, the press is an `InstallerError` carrying
+        the holder's sentence and nothing was changed.
+        """
+        if not (server_dir / STATE_FILE).is_file():
+            yield None
+            return
+        refs = self.image_refs_at(server_dir) if images is None else tuple(images)
+        try:
+            spec: docker.ContainerSpec | None = self.entry.container_spec()
+        except InstallerError as unreadable:
+            # The compose file could not be read: the press meets that itself, in its own
+            # words; the reservation falls back to the built refs for its image.
+            logger.info(f"no container spec for the reservation of {server_dir}: {unreadable}")
+            spec = None
+        stack = ExitStack()
+        held: docker.ClaimHeld | None = None
+        try:
+            held = stack.enter_context(
+                self._seams.server_claim(
+                    server_dir,
+                    press=press,
+                    images=refs,
+                    spec=spec,
+                    cancel=cancel,
+                    label=self.entry.name,
+                )
+            )
+        except docker.ServerReservationUnavailable as unavailable:
+            if not unavailable.moot:
+                raise InstallerError(str(unavailable)) from unavailable
+            # Docker is not there (or not answering) or the folder will not take the id
+            # file: the press meets that itself, in its own words, and nothing can race.
+            logger.warning(f"{press} on {server_dir} without a reservation: {unavailable}")
+        except docker.ServerHeldError as refused:
+            raise InstallerError(str(refused)) from refused
+        with stack:
+            # A "reservation" the module made while reservations are off has no name and
+            # nothing to lose: the press is not watched for it.
+            yield held if isinstance(held, docker.ClaimHeld) and held.name else None
 
     def server_dir(self, options: InstallOptions) -> Path:
         """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""
@@ -6918,12 +7255,34 @@ class StagedInstaller:
         the current state, and after this change that is exactly one function.
         """
         state = ctx.state
+        # T568: an install has no database, and no containers to race on, until `start-db`;
+        # from there to the last stage another Yu'lon's Start, Stop or SQL would race it.
+        # Not before: WotLK's `clone-core` empties the server folder, which would change the
+        # folder id under a held reservation.
+        reservation = ExitStack()
+        reserved = False
         try:
-            with self._held_awake() as note:
+            with reservation, self._held_awake() as note:
                 if note:
                     yield note
                 for number, stage in enumerate(stages, start=1):
                     self._check_cancel(ctx.cancel)
+                    if stage.name == "start-db" and not reserved:
+                        reserved = True
+                        held = reservation.enter_context(
+                            self._reservation(
+                                ctx.server_dir,
+                                INSTALL_PRESS,
+                                ctx.cancel,
+                                images=self.image_refs_at(ctx.server_dir),
+                            )
+                        )
+                        if held is not None:
+                            # Codex review: a reservation another Yu'lon's "Stop anyway"
+                            # removed ends the install at its next check, as a Stop does.
+                            over = threading.Event()
+                            reservation.callback(over.set)
+                            ctx = replace(ctx, cancel=_end_on_loss(held, ctx.cancel, over))
                     # WHERE THE USER IS, on its own line and never folded into
                     # the `--- <name>` marker. A format everything greps is not
                     # a place to add fields.
@@ -7131,6 +7490,7 @@ class StagedInstaller:
             self.update_files(self._update_context(server_dir, None)),
         )
 
+    @_reserving(UPDATES_BUTTON_LABEL)
     def update_databases(
         self,
         options: InstallOptions | None = None,
@@ -7228,6 +7588,7 @@ class StagedInstaller:
             for name in ("start-db", "import", "up", "ready")
         )
 
+    @_reserving(REPAIR_DATABASE_PRESS)
     def repair_database(
         self,
         options: InstallOptions | None = None,
@@ -7367,13 +7728,40 @@ class StagedInstaller:
         """
         server_dir = self.server_dir(options or InstallOptions())
         try:
-            return self._correction_check(self._update_context(server_dir, None))
+            check = self._correction_check(self._update_context(server_dir, None))
+            return self._busy_elsewhere(server_dir, check)
         except Exception as exc:  # noqa: BLE001 - a status path has nowhere to put one
             logger.warning(f"could not compare {server_dir}'s install plan with this app's: {exc}")
             return CorrectionCheck(
                 "unreadable",
                 why=f"this install's databases could not be asked ({type(exc).__name__}: {exc})",
             )
+
+    def _busy_elsewhere(self, server_dir: Path, check: CorrectionCheck) -> CorrectionCheck:
+        """A `stale` reading is `busy` while another Yu'lon holds this server (T607, T568 plan 6).
+
+        Its stuck world-update rows may be that Yu'lon's press, still running, and a retry
+        offered over it would race it. Inspect only; asked of `stale` readings only, so a
+        status poll of a current install costs the daemon nothing. A holder this process is
+        (the press reading its own check under its reservation) does not count, and a daemon
+        that will not say leaves the reading as it was: the press takes the reservation
+        itself and refuses in its own words.
+        """
+        if check.state != "stale":
+            return check
+        try:
+            holder = self._seams.reservation_holder(server_dir)
+        except Exception as exc:  # noqa: BLE001 - the press asks again, and refuses in words
+            logger.info(f"could not ask who holds {server_dir}'s reservation: {exc}")
+            return check
+        if holder is None or holder.here:
+            return check
+        return CorrectionCheck(
+            "busy",
+            why=forgetting.corrections_held_elsewhere(
+                self.entry.name, holder.press, holder.since(), holder.who
+            ),
+        )
 
     def _correction_check(self, ctx: StageContext) -> CorrectionCheck:
         """The family's reading. The spine keeps no per-phase record, so it knows nothing."""
@@ -7406,6 +7794,7 @@ class StagedInstaller:
             self.entry, server_dir, check.offered, files, check.withheld, check.stuck
         )
 
+    @_reserving(CORRECTIONS_BUTTON_LABEL)
     def apply_corrections(
         self,
         check: CorrectionCheck,
@@ -7527,7 +7916,15 @@ class StagedInstaller:
             # world that reads as down by then goes on to the import's guard.
             self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
             return False
-        if self.correction_check(options) != check:
+        now = self.correction_check(options)
+        if now.state == "busy":
+            # Another Yu'lon holds the server (T607 review): not a database that changed, and
+            # the holder is named by the reading itself.
+            raise InstallerError(
+                f"{now.why} Nothing was stopped and nothing was applied: the world server is "
+                f"still running."
+            )
+        if now != check:
             raise InstallerError(
                 f"{self.entry.name}'s databases have changed since the confirmation was shown, so "
                 f"there may be nothing left for this to apply. Nothing was stopped and nothing "
@@ -7833,6 +8230,7 @@ class StagedInstaller:
             )
         return adopt_confirmation(self.entry, self.server_dir(options or InstallOptions()), row)
 
+    @_reserving(ADOPT_BUTTON_LABEL)
     def adopt_as_imported(
         self,
         options: InstallOptions | None = None,
@@ -8055,7 +8453,9 @@ class StagedInstaller:
         and `before_replace` as its `before_signal`), `forward()`, then the same
         recreate as always -- its own stop finds nothing running. Without it, and on
         a rollback (whose servers `_restore_rollback()` has already stopped), the
-        one `recreate` call below.
+        one `recreate` call below. **A family that lays files for the world's start
+        (`lays_scripts_with_the_servers_down()`, T562) takes the two calls on a plain
+        Rebuild as well**, and lays between them.
 
         The stage the whole feature turns on. Everything above it can be
         perfect -- an hour of compiler output, four fresh images -- and if the
@@ -8129,8 +8529,12 @@ class StagedInstaller:
         # `before_replace` is its `before_signal`: past it, something may have
         # been touched; a Cancel before it leaves nothing touched.
         control = _stop_control(ctx, rollback=rollback)
-        if servers_down is not None and not rollback:
-            yield from servers_down.prepare()
+        stop_first = servers_down is not None or self.lays_scripts_with_the_servers_down(
+            ctx.server_dir
+        )
+        if stop_first and not rollback:
+            if servers_down is not None:
+                yield from servers_down.prepare()
 
             def stop_them(say: docker.OutputSink) -> None:
                 self._seams.stop_servers(
@@ -8164,7 +8568,11 @@ class StagedInstaller:
                     f"The server was rebuilt, but its servers could not be stopped to start the "
                     f"new build: {exc}"
                 ) from exc
-            yield from servers_down.forward(ctx)
+            # T562: the scripts the world reads at its start, laid now that nothing runs.
+            # A `ScriptsPartlyLaid` from here is `rebuild()`'s to answer (T602).
+            yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
+            if servers_down is not None:
+                yield from servers_down.forward(ctx)
 
         # T577: marked offline before the replace starts the new world, so the realm list says
         # Offline for the whole load. On the update route the old world is already down here,
@@ -8218,6 +8626,7 @@ class StagedInstaller:
                 ) from exc
         yield "The containers were replaced."
 
+    @_reserving(server_build_presses.REBUILD)
     def rebuild(
         self,
         options: InstallOptions | None = None,
@@ -8414,6 +8823,7 @@ class StagedInstaller:
         built = False
         touched = False
         parking = _Parking()
+        mixed = _MixedScripts()
         self._build_exit = None
         compiled_from: dict[str, str] = {}
         """T589: the commits the build stage compiled (or the kept build it used) came from."""
@@ -8458,9 +8868,24 @@ class StagedInstaller:
             # before the compose command is issued -- not at the stage's first yield
             # (round 2), which left a window between the readiness probe and the
             # command where a failure read as a partial replacement.
-            yield from self.stage_recreate(
-                stage_ctx, before_replace=mark_touched, servers_down=servers_down
-            )
+            try:
+                yield from self.stage_recreate(
+                    stage_ctx, before_replace=mark_touched, servers_down=servers_down
+                )
+            except ScriptsPartlyLaid:
+                # T602: the lay changed some scripts and then failed, so the folder holds a
+                # mix of the old and the new set. The update route's rollback lays the old
+                # set from the old checkout; a plain Rebuild has no old checkout, so its
+                # rollback must not start the old build on the mix. Remembered HERE, in
+                # memory, and also in the file that blocks every later Start: the disk that
+                # filled under the script may refuse the file too, and `owe_start()` only
+                # says so, so the rollback cannot rely on the file alone.
+                if servers_down is None:
+                    mixed.scripts = True
+                    mixed.unsaved = owe_start(stage_ctx.server_dir, why=SCRIPTS_NOT_BACK)
+                    if mixed.unsaved:
+                        yield mixed.unsaved
+                raise
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
@@ -8590,7 +9015,11 @@ class StagedInstaller:
                 # back to. `touched` says whether the containers run it yet.
                 # No start refusal here (owner, 2026-09-28; lead, T223): a first
                 # build has no old one to go back to, so one would leave nothing runnable.
-                message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
+                if mixed.scripts:
+                    # T602: the servers were stopped for the lay and nothing was replaced.
+                    message = f"{failure} {NO_ROLLBACK_SCRIPTS_MIXED}{mixed.not_saved_note()}"
+                else:
+                    message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 if touched:
                     raise carry_detail(exc, RebuildChangedTheServer(message, up=False)) from exc
@@ -8608,6 +9037,7 @@ class StagedInstaller:
                 # describes the server (scoped re-review, the lead's (a)): it goes below,
                 # and the restore treats the names as it always did.
                 hold_rollback=hold and not touched,
+                mixed_scripts=mixed,
             )
             also = self._forget_the_stopped_build(server_dir) if touched and hold else ""
             message_said = f"{message}{also}"
@@ -8734,6 +9164,7 @@ class StagedInstaller:
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
+    @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
     def remove_kept_build(self, options: InstallOptions | None = None) -> str:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
@@ -8998,6 +9429,13 @@ class StagedInstaller:
         """
         return iter(())
 
+    @_reserving(
+        lambda given: (
+            server_build_presses.RETURN_TO_PIN
+            if given.get("to_pin")
+            else server_build_presses.UPDATE_TO_LATEST
+        )
+    )
     def update_to_latest(
         self,
         options: InstallOptions | None = None,
@@ -9210,7 +9648,10 @@ class StagedInstaller:
 
             def back(stage_ctx: StageContext) -> Iterator[str]:
                 nonlocal sources_back
-                failed = yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                scripts_problem: list[str] = []
+                failed = yield from self._restore_the_folder(
+                    moved, server_dir, opts, state, press, scripts_not_back=scripts_problem
+                )
                 sources_back = True
                 sources_failed.extend(failed)
                 # The copy goes back even when a folder did not: with the servers
@@ -9220,10 +9661,19 @@ class StagedInstaller:
                     yield from self._put_copy_back(server_dir, copy)
                 except LeaveStopped as exc:
                     copy_problem = str(exc)
-                if failed:
+                if failed or scripts_problem:
                     # T217 (B3): the old build would read the new module's SQL from
                     # the folder that did not go back. It is not started.
+                    # T562: nor on the new build's Lua scripts, when the old set could
+                    # not be laid again with the servers down.
                     said = [source_not_back(s.repo, dest, old, why) for s, dest, old, why in failed]
+                    if scripts_problem:
+                        said.append(scripts_not_back_sentence(scripts_problem))
+                        # Durable, like a source that did not go back: a later Start must
+                        # not run the old build on the new scripts either.
+                        warned = owe_start(server_dir, why=SCRIPTS_NOT_BACK)
+                        if warned:
+                            yield warned
                     raise LeaveStopped(" ".join([*said, copy_problem]).strip())
                 if copy_problem:
                     raise LeaveStopped(copy_problem)
@@ -9636,11 +10086,16 @@ class StagedInstaller:
         opts: InstallOptions,
         state: InstallState,
         press: str,
+        scripts_not_back: list[str] | None = None,
     ) -> Generator[str, None, list[tuple[EmulatorSource, Path, str, str]]]:
         """Put the sources back AND write this app's own files into them again.
 
         `press` is the label of the press being put back (T163): the carried
         patch's sentence sends the player to it again.
+
+        `scripts_not_back` (T562): when given, the sentence of a script re-lay that
+        failed is appended to it. The update route's `back()` reads it: the old
+        build must not start on the new build's scripts.
 
         **Two halves, and the second is not tidying.** `restore_rev()` is a
         `checkout --force`: it puts the checkout on the old commit and, with it,
@@ -9670,6 +10125,7 @@ class StagedInstaller:
                 yield warned
         if not moved:
             return failed
+
         # T163: each half names the press that mends IT, and neither is
         # Rebuild. Upstream's compose file in the folder is one Rebuild refuses
         # (`_refuse_unless_rebuildable()`) and so does this same press, which
@@ -9684,6 +10140,36 @@ class StagedInstaller:
         # skipped); this same press writes the patch before it compiles. Neither
         # sentence says "nothing was compiled": this also runs after a compile
         # that `rebuild()` rolled back.
+        def lay_the_scripts() -> Generator[str, None, None]:
+            # T562: the scripts follow the sources back; laid with the servers down on
+            # a rollback, and a no-op before the compile (nothing was laid yet).
+            try:
+                yield from self.lay_scripts(server_dir, quiet=False)
+            except SelfExplainedError as exc:
+                # T563: a stage that already said what failed and what to do (a Lua
+                # link, a record that could not be saved) is passed through as it
+                # stands: "press again" does not mend every one of them.
+                logger.warning(f"could not lay the scripts back into {server_dir}: {exc}")
+                if scripts_not_back is not None:
+                    scripts_not_back.append(str(exc))
+                yield (
+                    f"The source folders are back on their old commits, but this app's own "
+                    f"files could not be put into them again. {exc}"
+                )
+            except (InstallerError, OSError) as exc:
+                logger.warning(f"could not lay the scripts back into {server_dir}: {exc}")
+                # Rebuild whatever press this was: the folder is back on the old
+                # commits, and Rebuild lays the scripts from them (an update would
+                # move the sources forward again first).
+                rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+                said = (
+                    f"The scripts could not be put back ({exc}). Once the reason is fixed, "
+                    f"press {rebuild}: it lays them from the old sources."
+                )
+                if scripts_not_back is not None:
+                    scripts_not_back.append(said)
+                yield said
+
         try:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
         except (InstallerError, OSError) as exc:
@@ -9697,6 +10183,7 @@ class StagedInstaller:
                 f"{composegen.BASE_FILE} is the repository's own. "
                 f"{compose_back_advice(server_dir)}"
             )
+            yield from lay_the_scripts()
             return failed
         try:
             yield from self.apply_carried_patches(server_dir)
@@ -9717,6 +10204,7 @@ class StagedInstaller:
                 f"reason is fixed, press {server_build_presses.under_server_build(press)} "
                 "again: it writes the patch before it compiles."
             )
+        yield from lay_the_scripts()
         return failed
 
     def _put_sources_back(
@@ -9910,6 +10398,28 @@ class StagedInstaller:
             ),
         )
 
+    def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
+        """Write `rows` into the install record, keeping every other source's row (T601).
+
+        For a server built from a move package at commits that are not this catalog's pins:
+        the rows say where each source stands, so the Server tab offers Update or Return the
+        way it does after a press (`_against_the_catalog`). Re-read here for
+        `_record_source_revs`' reason. False when the record would not be read or written.
+        """
+        if not rows:
+            return True
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            logger.warning(
+                f"{server_dir} would not say what it is; the moved-in rows were not written"
+            )
+            return False
+        keep = {row.repo for row in rows}
+        merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(rows)
+        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
+        written = read_state(server_dir, valid=self.stage_names())
+        return written is not None and set(rows) <= set(written.source_revs)
+
     def _remember_refused(self, server_dir: Path, refused: UpdateRefused) -> None:
         """Record the upstream commit an update refused, so the tab stops offering it (T179).
 
@@ -10095,6 +10605,7 @@ class StagedInstaller:
         press: str = server_build_presses.REBUILD,
         parking: _Parking | None = None,
         hold_rollback: bool = False,
+        mixed_scripts: _MixedScripts | None = None,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
 
@@ -10298,6 +10809,9 @@ class StagedInstaller:
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
         # tags as its rollback, and a repair that failed must not start them again.
         refused = self.start_refusal(ctx.server_dir)
+        if mixed_scripts is not None and mixed_scripts.scripts:
+            # T602: held in memory too, for a marker the disk would not take.
+            refused = f"{refused or SCRIPTS_NOT_BACK_REFUSAL}{mixed_scripts.not_saved_note()}"
         if stay is not None:
             yield from self._release(named)
             yield from self._release(letting_go)
@@ -12639,6 +13153,7 @@ class StagedInstaller:
         )
         return check
 
+    @_reserving_call(REPAIR_FILES_LABEL)
     def repair_base_compose(
         self, options: InstallOptions | None = None, *, now: datetime | None = None
     ) -> ComposeRepaired:
@@ -13443,8 +13958,11 @@ class StagedInstaller:
                     if ctx.cancel is not None and ctx.cancel.is_set():
                         # The lead's ruling: too late means the press SUCCEEDED. The
                         # Stop is taken back, so the rest of the press runs and the
-                        # panel says it finished (`withdraw_stop()`).
-                        withdraw_stop(ctx.cancel)
+                        # panel says it finished (`withdraw_stop()`). A reservation lost
+                        # from elsewhere is not a Stop (T607): the server was stopped under
+                        # the press, so it ends as a loss earlier in the watch does.
+                        if not withdraw_stop(ctx.cancel):
+                            raise StoppedInTheWatch(READY_LOST_IN_THE_WATCH)
                         yield READY_STOP_TOO_LATE
                     yield "The server is up."
                     return
@@ -13521,9 +14039,14 @@ class StagedInstaller:
                     detail=read_it,
                 )
             if verdict == "fatal":
+                # T600: a failed world update is already a whole sentence (file, MariaDB's error).
+                printed = (
+                    detail
+                    if isinstance(detail, str) and detail.startswith(update_failure.OPENING)
+                    else f"It printed a line that means it never will: {detail!r}."
+                )
                 raise InstallerError(
-                    f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest.{kept}"
+                    f"{never_ready}. {printed} {logs} has the rest.{kept}"
                     f"{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )

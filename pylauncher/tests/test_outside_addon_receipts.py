@@ -1172,3 +1172,62 @@ def test_the_real_parent_check_is_the_last_guard_when_a_name_slips_past(
     assert not outside.exists()
     assert aside.is_dir()
     assert any("is not in" in line and "so Yu'lon did not move it" in line for line in left), left
+
+
+# ------------------------------------------- the asides note under the server hold (batch combine)
+
+
+def test_a_second_yulons_take_back_is_refused_while_the_first_holds_the_server(
+    tmp_path: Path,
+) -> None:
+    """The note beside the server is per-server state another Yu'lon shares (T568's hold).
+
+    Mutation this catches: `_put_players_folders_back()` under the process lock only.
+    """
+    from tests.test_more_writes_hold import _Hold
+
+    applier, _manifest_, own, aside = _replaced(tmp_path)
+    note = (applier.server_dir / ADDON_ASIDES_FILE).read_bytes()
+    other = Applier(
+        applier.server_dir, client_dir=applier.client_dir, hold_server=_Hold(refuse=True)
+    )
+
+    with pytest.raises(ApplyRefusal, match="Another Yu'lon is working on"):
+        other.take_back_everything()
+
+    assert (applier.server_dir / ADDON_ASIDES_FILE).read_bytes() == note
+    assert aside.is_dir() and (aside / "pfUI.lua").read_text() == MINE
+
+
+def test_the_take_back_holds_the_server_under_its_own_press(tmp_path: Path) -> None:
+    from tests.test_more_writes_hold import _Hold
+    from yulon.apply import PUT_FOLDERS_BACK_PRESS
+
+    applier, _manifest_, own, aside = _replaced(tmp_path)
+    hold = _Hold()
+    held = Applier(applier.server_dir, client_dir=applier.client_dir, hold_server=hold)
+    held.take_back_everything()
+    assert hold.events[:1] == [f"hold:{PUT_FOLDERS_BACK_PRESS}"]
+    assert not aside.exists() and (own / "pfUI.lua").read_text() == MINE
+
+
+def test_setting_a_folder_aside_is_refused_whole_while_another_yulon_holds_the_server(
+    tmp_path: Path,
+) -> None:
+    """Install takes the hold first, so the player's folder is never moved and nothing noted."""
+    from tests.test_more_writes_hold import _Hold
+
+    client = _client(tmp_path)
+    own = client / "Interface" / "AddOns" / "pfUI"
+    own.mkdir()
+    (own / "pfUI.lua").write_text(MINE)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client, hold_server=_Hold(refuse=True))
+    with pytest.raises(ApplyRefusal, match="Another Yu'lon is working on"):
+        applier.install(
+            _manifest(), folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+        )
+    assert (own / "pfUI.lua").read_text() == MINE
+    assert not (own.parent / "pfUI.yulon-addon-old").exists()
+    assert not (server / ADDON_ASIDES_FILE).exists()

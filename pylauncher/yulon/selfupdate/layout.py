@@ -745,6 +745,32 @@ def pid_is_alive(pid: int, *, windows: bool | None = None) -> bool:
     return True
 
 
+def pid_liveness(pid: int, *, windows: bool | None = None) -> bool | None:
+    """`pid_is_alive()` that says None, not False, when the probe itself failed (T568).
+
+    For a caller that acts on "dead" (T568's "Clear it" removes a reservation only for a
+    holder proven dead): an unexpected OSError, or a Windows call that raised, is "cannot
+    tell", never "dead".
+    """
+    if pid <= 0:
+        return False
+    on_windows = os.name == "nt" if windows is None else windows
+    if on_windows:
+        try:
+            return _windows_pid_is_alive(pid)
+        except Exception:  # noqa: BLE001 - a failed probe is "cannot tell"
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # somebody else's process, and therefore alive
+        return True
+    except OSError:
+        return None
+    return True
+
+
 _STILL_ACTIVE = 259
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _ERROR_ACCESS_DENIED = 5

@@ -88,14 +88,16 @@ tests need neither a daemon nor a database.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -180,6 +182,39 @@ _EDGE_BYTES = 8192
 # so a match that straddles a boundary is still found (duplicates are deduped).
 _SCAN_CHUNK = 1 << 20
 _SCAN_OVERLAP = 512
+
+
+@dataclass(frozen=True)
+class Game:
+    """Which game a server is, for the one fact a backup has to carry (T603).
+
+    `id` is the catalog entry's id. It is the only thing that tells WotLK from
+    Unbound or TBC from Vanilla: each pair shares its schema names, so a dump's own
+    `USE` lines cannot. `name` is what the player reads in a refusal.
+    """
+
+    id: str
+    name: str
+
+
+def game_of(entry: _HasIdAndName) -> Game:
+    """The `Game` of a catalog entry; the one place a call site spells it."""
+    return Game(entry.id, entry.name)
+
+
+class _HasIdAndName(Protocol):
+    id: str
+    name: str
+
+
+# The record a backup carries, as one comment line ahead of mysqldump's banner (T603).
+# In the file, not beside it, so a rename, a copy to another folder or a move package
+# cannot separate the record from the dump. mysql ignores a `--` comment, and
+# `_only_dump_preamble()` already lets `--` lines stand above the banner. The grammar
+# is the catalog's slug grammar, so every real game id fits.
+GAME_RECORD = re.compile(r"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
+_GAME_RECORD_BYTES = re.compile(rb"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
+_GAME_RECORD_LEAD = b"-- yulon-backup:"
 
 
 class MaintenanceError(RuntimeError):
@@ -304,8 +339,8 @@ class DockerMysql:
             if name
         )
 
-    def dump_into(self, database: str, sink: IO[bytes]) -> None:
-        proc = self._exec(self._dump_argv(database), stdout=sink)
+    def dump_into(self, database: str, sink: IO[bytes], ignore: Sequence[str] = ()) -> None:
+        proc = self._exec(self._dump_argv(database, ignore), stdout=sink)
         if proc.returncode != 0:
             raise MaintenanceError(
                 f"The backup of {database} did not finish.", detail=_stderr(proc)
@@ -351,7 +386,27 @@ class DockerMysql:
         if proc.returncode != 0:
             raise MaintenanceError(f"the statement failed: {_stderr(proc)}")
 
-    def _dump_argv(self, database: str) -> list[str]:
+    def query(self, sql: str) -> str:
+        """Run one read statement and return what the client printed (T601).
+
+        Tab-separated rows, no header, as `--batch --skip-column-names` writes them. The
+        statement goes over stdin like every other here, never into argv. For the move's
+        reads of a server's version and counts; a write goes through `execute()`.
+        """
+        proc = self._exec(
+            [
+                mysql_client(self.db_container, client=self.client),
+                "-uroot",
+                "--batch",
+                "--skip-column-names",
+            ],
+            input_text=sql if sql.endswith("\n") else sql + "\n",
+        )
+        if proc.returncode != 0:
+            raise MaintenanceError(f"the query failed: {_stderr(proc)}")
+        return (proc.stdout or b"").decode("utf-8", "replace")
+
+    def _dump_argv(self, database: str, ignore: Sequence[str] = ()) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
 
         `--databases` (rather than a bare name) is what makes the file
@@ -395,6 +450,10 @@ class DockerMysql:
         Not compressed. Compression would put this process back in the data path
         for the whole payload, and the plain `.sql` produced here is exactly
         what the guide's own restore line consumes.
+
+        `ignore` names tables of THIS database to leave out (T601: the auth dump of a
+        move package leaves `realmlist` behind, because the realm row belongs to the
+        server the package lands on). Empty, the argv is what it always was.
         """
         return [
             mysql_client(self.db_container, "mysqldump", client=self.client),
@@ -403,6 +462,7 @@ class DockerMysql:
             "--routines",
             "--events",
             "--triggers",
+            *(f"--ignore-table={database}.{table}" for table in ignore),
             "--databases",
             database,
         ]
@@ -527,8 +587,10 @@ def backup(
     server_dir: Path,
     mysql: MysqlDocker,
     *,
+    game: Game,
     only: Sequence[str] | None = None,
     label: str | None = None,
+    ignore_tables: Mapping[str, Sequence[str]] | None = None,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
@@ -543,6 +605,9 @@ def backup(
     since it is the thing being asked.
 
     Args:
+        game: Which game this server is. Written into every file as the record
+            `plan_restore()` checks (T603). Required, not defaulted: a call site
+            that could leave it out would write backups no restore can vouch for.
         only: Restrict the backup to these schemas — the "take a backup before
             this SQL change" case, where dumping a multi-gigabyte `acore_world`
             for a change to `acore_characters` is the difference between a habit
@@ -552,6 +617,10 @@ def backup(
             the copy taken automatically before a restore is not mistaken for
             one the user asked for (`wow-manage.sh` does the same with
             `pre_restore`).
+        ignore_tables: Tables to leave out of a database's dump, by schema (T601).
+            Only the move package uses it: its auth dump has no `realmlist`. A
+            backup taken with this is not a complete copy of that schema, so it is
+            for a caller that owns the file and says what is missing.
         wsl_distro: Which daemon holds this install's containers, for the
             census. `mysql` carries the same fact for the dump itself; both are
             needed, because they are two different questions asked of docker.
@@ -596,7 +665,15 @@ def backup(
     done: list[Dump] = []
     for database in wanted:
         try:
-            done.append(_dump_one(mysql, database, directory / f"{stamp}_{middle}{database}.sql"))
+            done.append(
+                _dump_one(
+                    mysql,
+                    database,
+                    directory / f"{stamp}_{middle}{database}.sql",
+                    game,
+                    tuple((ignore_tables or {}).get(database, ())),
+                )
+            )
         except MaintenanceError as exc:
             finished = ", ".join(d.path.name for d in done) or "nothing"
             raise MaintenanceError(
@@ -615,7 +692,13 @@ def backup(
     return report
 
 
-def _dump_one(mysql: MysqlDocker, database: str, target: Path) -> Dump:
+def _dump_one(
+    mysql: MysqlDocker,
+    database: str,
+    target: Path,
+    game: Game,
+    ignore: tuple[str, ...] = (),
+) -> Dump:
     """Dump one database to `target`, via a `.partial` that is only renamed if it verifies.
 
     The rename is the whole point. The guide's `> file` redirect creates the
@@ -629,9 +712,32 @@ def _dump_one(mysql: MysqlDocker, database: str, target: Path) -> Dump:
         raise MaintenanceError(f"{target} already exists; refusing to overwrite a backup")
     partial = target.with_name(target.name + ".partial")
     try:
+        record = f"-- yulon-backup: game={game.id}"
+        if GAME_RECORD.fullmatch(record) is None:
+            raise MaintenanceError(f"{game.id!r} is not a game id a backup can record")
         with partial.open("wb") as sink:
-            mysql.dump_into(database, sink)
+            sink.write(record.encode() + b"\n")
+            # mysqldump writes to the file DESCRIPTOR, not through this object, so
+            # a record still in Python's buffer would land after the dump (found on
+            # a live mariadb-dump, 2026-10-09; a fake that writes through `sink` hides it).
+            sink.flush()
+            if ignore:
+                # Only a call that leaves something out passes the argument, so a
+                # container that takes none (a double, a fork) keeps working.
+                mysql.dump_into(database, sink, ignore=ignore)  # type: ignore[call-arg]
+            else:
+                mysql.dump_into(database, sink)
+        if partial.stat().st_size == len(record) + 1:
+            # Only our own line: mysqldump wrote nothing. Said as `verify_dump()` says
+            # an empty file, which the record in front of it would otherwise hide.
+            raise MaintenanceError(f"{partial.name} is empty, so nothing was dumped")
         verify_dump(partial, database)
+        # Read back through the reader a restore will use: a record that does not
+        # read back as this game is a backup no restore could vouch for.
+        if backup_game(partial) != game.id:
+            raise MaintenanceError(
+                f"{target.name} did not take its game record, so it was not kept"
+            )
     except MaintenanceError:
         partial.unlink(missing_ok=True)
         raise
@@ -764,6 +870,95 @@ def _read_edge(path: Path, offset: int) -> bytes:
         return fh.read(_EDGE_BYTES)
 
 
+def backup_game(path: Path) -> str | None:
+    """The game id a backup records, or None when it records none (T603).
+
+    Read ONLY from the preamble above the dump's own banner, the stretch
+    `_only_dump_preamble()` has vouched for, and never from what follows it: the
+    rows of a table can hold any text, a line shaped like the record included,
+    and a record taken from there would let a table's contents relabel the dump.
+    Call it on a file `verify_dump()` has accepted; a file with no banner has no
+    record to read and answers None.
+
+    Raises:
+        MaintenanceError: the preamble holds a record that does not read (a
+            garbled one is not "no record": that would pass as an old backup),
+            or two records that name different games.
+    """
+    try:
+        head = _read_edge(path, 0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {path}: {exc}") from exc
+    return _game_in_head(head, path.name)
+
+
+def game_recorded_in(head: bytes, name: str) -> str | None:
+    """The game record in the first bytes of a dump already in hand (T601).
+
+    The public spelling of what `backup_game()` and `restore()` read, for a caller that
+    holds the head of a file it never put on disk (a member of a move package).
+    """
+    return _game_in_head(head, name)
+
+
+def _game_in_head(head: bytes, name: str) -> str | None:
+    """`backup_game()`'s reading, of the first bytes of a file already in hand.
+
+    Split out so `restore()` can read the record from the very handle it then loads,
+    rather than from a path the file may have been replaced behind.
+    """
+    match = _DUMP_HEADER.search(head)
+    if match is None:
+        return None
+    found: list[str] = []
+    for line in head[: match.start()].split(b"\n"):
+        line = line.rstrip(b" \t\r")
+        if not line.startswith(_GAME_RECORD_LEAD):
+            continue
+        record = _GAME_RECORD_BYTES.fullmatch(line)
+        if record is None:
+            raise MaintenanceError(
+                f"The game record in {name} cannot be read, so Yu'lon cannot tell which "
+                "game it is from and will not restore it."
+            )
+        game_id = record.group(1).decode("ascii")
+        if game_id not in found:
+            found.append(game_id)
+    if len(found) > 1:
+        raise MaintenanceError(
+            f"{name} names two different games ({found[0]} and {found[1]}), so it cannot "
+            "be trusted to belong to either. Yu'lon will not restore it."
+        )
+    return found[0] if found else None
+
+
+@lru_cache(maxsize=1)
+def _catalog_names() -> dict[str, str]:
+    from yulon.catalog.catalog import load_catalog
+
+    return {entry.id: entry.name for entry in load_catalog().games}
+
+
+def _name_of_game(game_id: str) -> str:
+    """What to call a game in a sentence: the catalog's name, or its id if this build has none."""
+    return _catalog_names().get(game_id, game_id)
+
+
+def _wrong_game_refusal(found: str, game: Game) -> str:
+    return (
+        f"This backup is from {_name_of_game(found)}, and this server is {game.name}. "
+        "Restoring it here would put another game's data into this server, so Yu'lon will "
+        f"not do it. Restore it on a {_name_of_game(found)} server instead."
+    )
+
+
+UNLABELED_BACKUP = (
+    "This backup does not say which game it is from. It was made before Yu'lon wrote that "
+    "down. Restore it only if you made it on this server: a backup from another game would "
+    "damage this one."
+)
+
+
 # ----------------------------------------------------------------- restore
 
 
@@ -824,6 +1019,25 @@ class RestorePlan:
     keeping is that restore's, not one taken now. It says nothing about any
     other database: `restore()` still dumps everything it is about to overwrite
     that this marker does not already hold a usable copy of."""
+    game_unproven: bool = False
+    """The backup carries no game record, so nothing proves it is from this game (T603).
+
+    Not a refusal: every backup made before the record existed is like this, and
+    Yu'lon cannot tell its game from its schema names. It is a question the player
+    answers once (`with_unlabeled_accepted()`); `restore()` will not load such a
+    file until they have."""
+    content_digest: str = ""
+    """SHA-256 of the file as `plan_restore()` read it, taken in the scan it already makes.
+
+    In the token, so a file replaced by one of the same length and schemas is no longer
+    the file that was checked or agreed to (T603, Codex review): the acknowledgement of an
+    unlabelled backup is an answer about THIS file."""
+    unlabeled_accepted: bool = False
+    """The player said yes to `game_unproven`. Set only by `with_unlabeled_accepted()`.
+
+    Not part of `token`: it is an answer about the file, not part of the file's
+    identity, and a token that carried it would make the plan the tab showed unable
+    to confirm the restore the player then agreed to."""
     starts_database: bool = False
     """The database container was down and the caller can start it alone (T216).
 
@@ -839,6 +1053,17 @@ class RestorePlan:
     def allowed(self) -> bool:
         return not self.refusals
 
+    def with_unlabeled_accepted(self) -> RestorePlan:
+        """This plan, once the player has agreed to restore a backup that names no game.
+
+        A plan whose backup DOES name its game is returned as it is. An answer to a
+        question that was never asked would stay on the plan and cover a file swapped
+        for an unlabelled one of the same size, which keeps the token (Codex review).
+        """
+        if not self.game_unproven:
+            return self
+        return dataclasses.replace(self, unlabeled_accepted=True)
+
     @property
     def token(self) -> str:
         """What `restore(confirm=...)` must be handed.
@@ -846,11 +1071,13 @@ class RestorePlan:
         Derived from the file's identity and length plus the schemas it names,
         so a caller cannot restore a file it never inspected, and a plan cannot
         be reused against a file that has been replaced by one of a different
-        size. It is not a content hash and does not claim to notice a
-        same-length substitution — `restore()` re-plans for that. What it does
-        buy is that no confirmation can be spelled `True`.
+        size, and (T603) one replaced by a different file of the same size. What it
+        also buys is that no confirmation can be spelled `True`.
         """
-        material = f"{self.backup.resolve()}|{self.size_bytes}|{','.join(self.databases)}"
+        material = (
+            f"{self.backup.resolve()}|{self.size_bytes}|{','.join(self.databases)}"
+            f"|{self.content_digest}"
+        )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
@@ -938,6 +1165,7 @@ def plan_restore(
     backup_file: Path,
     server_dir: Path,
     *,
+    game: Game,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
@@ -974,11 +1202,18 @@ def plan_restore(
       download or a `.gz` shows up.
     * the file names no database. With no `USE`/`CREATE DATABASE` in it there is
       no telling where its contents would land.
+    * the backup records a different game from `game` (T603). WotLK and Unbound
+      share `acore_*`, TBC and Vanilla share `realmd/characters/mangos`, so the
+      schema names say nothing; the record is the only thing that does. A backup
+      with NO record is not refused (all old ones are like that) and is marked
+      `game_unproven` for the player to answer.
     """
     refusals: list[str] = []
     databases: tuple[str, ...] = ()
     size = 0
     starts_database = False
+    game_unproven = False
+    digest = ""
 
     if backup_file.suffix == ".gz":
         refusals.append(
@@ -993,12 +1228,21 @@ def plan_restore(
         except MaintenanceError as exc:
             refusals.append(str(exc))
         else:
-            databases = _databases_named_in(backup_file)
+            databases, digest = _scan_dump(backup_file)
             if not databases:
                 refusals.append(
                     f"{backup_file.name} names no database (no USE or CREATE DATABASE), so "
                     "there is no telling what it would overwrite"
                 )
+            try:
+                recorded = backup_game(backup_file)
+            except MaintenanceError as exc:
+                refusals.append(str(exc))
+            else:
+                if recorded is None:
+                    game_unproven = True
+                elif recorded != game.id:
+                    refusals.append(_wrong_game_refusal(recorded, game))
 
     try:
         names = _census(running, wsl_distro=wsl_distro)
@@ -1031,6 +1275,8 @@ def plan_restore(
         refusals=tuple(refusals),
         interrupted=interrupted_restore(server_dir),
         starts_database=starts_database,
+        game_unproven=game_unproven,
+        content_digest=digest,
     )
     if refusals:
         logger.info(f"restore of {backup_file.name} refused: {'; '.join(refusals)}")
@@ -1041,6 +1287,7 @@ def restore(
     plan: RestorePlan,
     mysql: MysqlDocker,
     *,
+    game: Game,
     confirm: str,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     core_databases: Sequence[str] = CORE_DATABASES,
@@ -1098,16 +1345,70 @@ def restore(
             "the restore was not confirmed against this backup, so nothing was changed"
         )
     fresh = plan_restore(
-        plan.backup, plan.server_dir, spec=spec, running=running, wsl_distro=wsl_distro
+        plan.backup, plan.server_dir, game=game, spec=spec, running=running, wsl_distro=wsl_distro
     )
     if fresh.refusals:
         raise MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
+    if fresh.game_unproven and not plan.unlabeled_accepted:
+        # Judged on the FRESH plan, which read the file now: an acknowledgement given
+        # for the file as it was says nothing about a file that was replaced since.
+        raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
     if fresh.token != plan.token:
         raise MaintenanceError(
             f"{plan.backup.name} is not the file that was checked — it changed in between. "
             "Nothing was restored; look at it again."
         )
 
+    # The file is opened ONCE and kept: what is checked below and what is loaded at the
+    # end are this one handle, so a file replaced after this point cannot change what
+    # loads, however long the safety copy takes (T603, Codex review).
+    try:
+        source = plan.backup.open("rb")
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {plan.backup}: {exc}") from exc
+    with source:
+        return _restore_from(
+            source,
+            plan,
+            fresh,
+            mysql,
+            game=game,
+            spec=spec,
+            core_databases=core_databases,
+            running=running,
+            wsl_distro=wsl_distro,
+            now=now,
+            safety_label=safety_label,
+            before_load=before_load,
+        )
+
+
+def _restore_from(
+    source: IO[bytes],
+    plan: RestorePlan,
+    fresh: RestorePlan,
+    mysql: MysqlDocker,
+    *,
+    game: Game,
+    spec: docker.ContainerSpec,
+    core_databases: Sequence[str],
+    running: RunningNames | None,
+    wsl_distro: str | None,
+    now: datetime | None,
+    safety_label: str,
+    before_load: Callable[[], object] | None,
+) -> RestoreReport:
+    """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
+    recorded = _recorded_game_of(source, plan.backup.name)
+    if recorded is not None and recorded != game.id:
+        raise MaintenanceError(f"restore refused: {_wrong_game_refusal(recorded, game)}")
+    if recorded is None and not plan.unlabeled_accepted:
+        raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
+    if _digest_of(source, plan.backup.name) != fresh.content_digest:
+        raise MaintenanceError(
+            f"{plan.backup.name} is not the file that was checked — it changed in between. "
+            "Nothing was restored; look at it again."
+        )
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     # `fresh`, not `plan`: the marker is the one thing here that can appear
@@ -1128,6 +1429,7 @@ def restore(
         plan,
         mysql,
         kept,
+        game=game,
         label=safety_label,
         spec=spec,
         core_databases=core_databases,
@@ -1160,8 +1462,8 @@ def restore(
     try:
         if before_load is not None:
             before_load()
-        with plan.backup.open("rb") as source:
-            mysql.load_from(source)
+        source.seek(0)
+        mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
         # A sentence of ours reads in place; a program's words go to `detail` (T194 R1).
         said = f" {exc}" if isinstance(exc, MaintenanceError) else ""
@@ -1202,6 +1504,35 @@ def restore(
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
+
+
+def _digest_of(source: IO[bytes], name: str) -> str:
+    """SHA-256 of an open file, then rewound: the handle's own answer to "is this the file checked".
+
+    One more read of the file, hashing only. It is what closes the gap between the
+    re-plan's scan (by path) and the open that follows it: what is loaded is the content
+    that was hashed and agreed to, not whatever the path names by then.
+    """
+    digest = hashlib.sha256()
+    try:
+        source.seek(0)
+        while chunk := source.read(_SCAN_CHUNK):
+            digest.update(chunk)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _recorded_game_of(source: IO[bytes], name: str) -> str | None:
+    """The game record of an open file, read from its first bytes, then rewound."""
+    try:
+        source.seek(0)
+        head = source.read(_EDGE_BYTES)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return _game_in_head(head, name)
 
 
 def _usable_copies(earlier: InterruptedRestore | None) -> dict[str, Path]:
@@ -1247,6 +1578,7 @@ def _safety_backup(
     mysql: MysqlDocker,
     kept: dict[str, Path],
     *,
+    game: Game,
     label: str,
     spec: docker.ContainerSpec,
     core_databases: Sequence[str],
@@ -1289,6 +1621,7 @@ def _safety_backup(
         report = backup(
             plan.server_dir,
             mysql,
+            game=game,
             only=to_dump,
             label=label,
             spec=spec,
@@ -1429,7 +1762,15 @@ def drop_tables_not_in(mysql: SchemaMysql, database: str, keep: Sequence[str]) -
 
 
 def _databases_named_in(path: Path) -> tuple[str, ...]:
-    """Every schema a dump file writes into, in the order it first names them.
+    """Every schema a dump file writes into, in the order it first names them."""
+    return _scan_dump(path)[0]
+
+
+def _scan_dump(path: Path) -> tuple[tuple[str, ...], str]:
+    """`(schemas the file writes into, SHA-256 of the file)`, in one pass.
+
+    The scan reads the whole file already, so the digest costs one hash per chunk
+    on top of the regexes and no second read.
 
     The whole file is scanned, not just the head. The guide's own backup command
     puts three databases in one file (`--databases acore_characters acore_auth
@@ -1441,18 +1782,20 @@ def _databases_named_in(path: Path) -> tuple[str, ...]:
     found: list[str] = []
     seen: set[str] = set()
     carry = b""
+    digest = hashlib.sha256()
     with path.open("rb") as fh:
         while True:
             chunk = fh.read(_SCAN_CHUNK)
             if not chunk:
                 break
+            digest.update(chunk)
             data = carry + chunk
             for name in _databases_named_in_bytes(data):
                 if name not in seen:
                     seen.add(name)
                     found.append(name)
             carry = data[-_SCAN_OVERLAP:]
-    return tuple(found)
+    return tuple(found), digest.hexdigest()
 
 
 def _databases_named_in_bytes(data: bytes) -> list[str]:

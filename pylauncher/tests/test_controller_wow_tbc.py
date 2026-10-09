@@ -657,7 +657,7 @@ def test_a_restores_safety_dump_reports_missing_in_this_cores_spelling(
     server_dir = tmp_path
     backup_file = server_dir / "20260904_000000_characters.sql"
     backup_file.parent.mkdir(parents=True, exist_ok=True)
-    backup_file.write_bytes(good_dump("characters"))
+    backup_file.write_bytes(good_dump("characters", game="wow-tbc"))
     mysql = FakeMysql(("realmd", "characters", "mangos", "logs"))
     plan = maintenance.plan_restore(backup_file, server_dir, running=lambda: [ENTRY.containers.db])
     assert plan.refusals == (), plan.refusals

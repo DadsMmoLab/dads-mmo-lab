@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from yulon import server_build_presses
+
 BUTTON_LABEL = "Remove from Yu'lon…"
 """The tab menu's entry and the Server tab's button (`controller_view.REMOVE_FROM_YULON`)."""
 
@@ -90,10 +92,141 @@ RESTORE_HOLDS_THE_DATABASES = (
     "A restore is writing into this server's databases on its Maintenance tab. Wait for "
     "it to finish, then try again."
 )
+MOVE_HOLDS_THE_SERVER = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
+    "with the database started on its own for it. Wait for that to finish, then try again. "
+    "Nothing was started or stopped."
+)
+MOVE_HOLDS_THE_DATABASES = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance "
+    "tab. Wait for that to finish, then try again."
+)
+MOVE_RUNNING = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance "
+    "tab, and removing the server now would leave its databases half-written. Wait for it "
+    "to finish, then try again. Nothing was removed."
+)
+# T604: the Maintenance tab deleting old backups holds the databases' lease like a Backup does,
+# so a dump cannot start into a folder being cleared.
+PRESS_DELETE_BACKUPS = "Delete backups"
+DELETE_HOLDS_THE_DATABASES = (
+    "Old backups are being deleted on this server's Maintenance tab. Wait for that to "
+    "finish, then try again."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."
 )
+
+
+# T568: what a press refused by another Yu'lon's reservation of the server says
+# (`docker.server_claim()`). Each leads with who holds it and ends with what to do.
+PRESS_START = "Start"
+PRESS_STOP = "Stop"
+PRESS_BACKUP = "Backup"
+PRESS_RESTORE = "Restore"
+"""The two press names the reservation's own lifecycle commands carry; the sentence below
+says "starting" and "stopping" for them and quotes any other press by name."""
+
+
+def _doing(press: str, label: str) -> str:
+    if press == PRESS_START:
+        return f"is starting {label} right now"
+    if press == PRESS_STOP:
+        return f"is stopping {label} right now"
+    return f"is working on {label} right now: \u201c{press or 'a job'}\u201d"
+
+
+def server_busy_elsewhere(
+    label: str, press: str, since: str, who: str, this_press: str, *, anyway: bool = False
+) -> str:
+    """The refusal when another Yu'lon's reservation holds the server (T568 section 6).
+
+    `since` is what the daemon's own creation stamp reads as ("14:02 (3 minutes ago)"), or
+    empty when it could not be read; `who` is "user@host (OS)". `anyway` is the Stop's own
+    question: it asks instead of refusing, and says what stopping now ends.
+    """
+    started = f", started {since}" if since else ""
+    by = f" by {who}" if who else ""
+    if anyway:
+        worse = {
+            PRESS_RESTORE: " A restore that is loading the databases would be left half-loaded:"
+            " restore it again afterwards.",
+            PRESS_BACKUP: " A backup being taken would be left incomplete:"
+            " take it again afterwards.",
+        }.get(press, "")
+        return (
+            f"Another Yu'lon {_doing(press, label)}{started}{by}. Stopping now ends that too, "
+            "wherever it is. A database file it is running may be left part-done, and that "
+            f"Yu'lon will say what it left.{worse}"
+        )
+    return (
+        f"Another Yu'lon {_doing(press, label)}{started}{by}. Nothing was changed. Wait "
+        f"for it to finish, then press \u201c{this_press}\u201d again."
+    )
+
+
+def corrections_held_elsewhere(label: str, press: str, since: str, who: str) -> str:
+    """The Server tab's banner while another Yu'lon holds the server (T607, T568 plan 6).
+
+    A sentence and no button: its world updates may still be running, and a retry offered over
+    them would race them. The banner is asked again, so it goes when the holder does.
+    """
+    started = f", started {since}" if since else ""
+    by = f" by {who}" if who else ""
+    return (
+        f"Another Yu'lon is working on {label} ({press or 'a job'}){started}{by}; its world "
+        "updates may still be running, so no retry is offered. Nothing changes until it is "
+        "done."
+    )
+
+
+def server_reservation_left(label: str, name: str, this_press: str) -> str:
+    """This user's own reservation, left in Docker by a crash Docker kept (T568 section 6)."""
+    return (
+        f"An earlier run of this Yu'lon left its reservation of {label} in Docker ({name}), "
+        f"so nothing was changed. Remove it with the command below, then press "
+        f"\u201c{this_press}\u201d again.\ndocker rm -f {name}"
+    )
+
+
+def server_reservation_unsaid(label: str, name: str, this_press: str) -> str:
+    """Docker refused the name and then would not say whose it is (T543's wording, per server)."""
+    return (
+        f"{label} is reserved in Docker ({name}), and Docker would not say by whom. Nothing "
+        "was changed. Wait for any other Yu'lon's job on it to finish, then press "
+        f"\u201c{this_press}\u201d again."
+    )
+
+
+def reservation_lost_line(press: str) -> str:
+    """What a press says last when its reservation ended from elsewhere while it ran (T568)."""
+    return (
+        f"This server's reservation in Docker ended from elsewhere while \u201c{press}\u201d was "
+        "running (another Yu'lon stopped it, or Docker restarted), so the job ended and "
+        f"started nothing after that. Press Start, or \u201c{server_build_presses.REBUILD}\u201d, "
+        "to bring the server up on what is on disk."
+    )
+
+
+SQL_HOLD_LOST = (
+    "Another Yu'lon stopped this server while this was being applied, so no more SQL was sent. "
+    "The statements before that already ran: press the module's button again once the server "
+    "is stopped."
+)
+
+
+ACTION_HOLD_LOST = (
+    "Another Yu'lon stopped this server while this was being done, so the rest was not done. "
+    "What ran before that stays as it is: press the module's button again once the other "
+    "Yu'lon is done."
+)
+"""A Modules action ended between two of its steps by another Yu'lon's "Stop anyway" (T607)."""
+
+
+def server_reservation_unavailable(label: str, said: str) -> str:
+    """No reservation could be made at all: no Docker, no image, a daemon that would not answer."""
+    return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."
 
 
 def module_running(what: str) -> str:

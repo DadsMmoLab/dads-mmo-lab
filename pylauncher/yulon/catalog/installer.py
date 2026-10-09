@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Collection, Iterable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
@@ -156,6 +157,14 @@ class SelfExplainedError(InstallerError):
 
     A wrapper that would add its own remedy ("press X again") passes this one
     through unchanged: its remedy is the right one, and the wrapper's may not be.
+    """
+
+
+class ScriptsPartlyLaid(SelfExplainedError):
+    """A Lua lay that failed AFTER it had already changed a script on disk (T602).
+
+    The folder holds a mix of the old and the new set. A lay that failed before it
+    changed anything raises a plain `SelfExplainedError`: the old set is intact.
     """
 
 
@@ -1063,6 +1072,10 @@ class InstallEngine(Protocol):
     """
 
     def remove_kept_build(self, options: InstallOptions | None = None) -> str: ...
+
+    def reserved(
+        self, server_dir: Path, press: str
+    ) -> AbstractContextManager[docker.ClaimHeld | None]: ...
 
     """Remove a kept build (`native.PARKED_TAG_SUFFIX`) now: the Server tab's press (T224)."""
 

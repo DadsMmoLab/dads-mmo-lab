@@ -278,7 +278,7 @@ class _FakeMysql:
 
     def dump_into(self, database: str, sink: Any) -> None:
         self.dumped.append(database)
-        sink.write(good_dump(database))
+        sink.write(good_dump(database, game=None))
 
     def load_from(self, source: Any) -> None:
         raise AssertionError("no test here loads a dump")
@@ -304,6 +304,7 @@ def test_a_backup_of_this_cores_schemas_reports_nothing_missing(tmp_path: Path) 
     other = wotlk_maintenance.backup(
         tmp_path / "wotlk",
         _FakeMysql(present),
+        game=wotlk_maintenance.game_of(ENTRY),
         spec=docker_ctl.SPEC,
         running=_running(ENTRY.containers.db),
     )
@@ -315,7 +316,7 @@ def test_a_restore_is_refused_while_this_games_worldserver_is_running(tmp_path: 
     a live mangosd is invisible, and the restore is overwritten by the server's
     own saves minutes later."""
     backup_file = tmp_path / "backup.sql"
-    backup_file.write_bytes(good_dump(ENTRY.databases.characters))
+    backup_file.write_bytes(good_dump(ENTRY.databases.characters, game="wow-tortoise"))
     plan = maintenance.plan_restore(
         backup_file,
         tmp_path,
@@ -327,7 +328,7 @@ def test_a_restore_is_refused_while_this_games_worldserver_is_running(tmp_path: 
 
 def test_a_restore_is_allowed_with_only_this_games_database_up(tmp_path: Path) -> None:
     backup_file = tmp_path / "backup.sql"
-    backup_file.write_bytes(good_dump(ENTRY.databases.characters))
+    backup_file.write_bytes(good_dump(ENTRY.databases.characters, game="wow-tortoise"))
     plan = maintenance.plan_restore(backup_file, tmp_path, running=_running(ENTRY.containers.db))
     assert plan.refusals == ()
     assert plan.allowed is True

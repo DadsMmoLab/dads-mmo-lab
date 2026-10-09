@@ -1136,7 +1136,7 @@
           "ready": {
             "world": "World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login",
             "auth": null,
-            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\\[1146\\] Table .* doesn't exist|Your database structure is not up to date",
+            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\\[1146\\] Table .* doesn't exist|Your database structure is not up to date|Migration \\S+ with hash \\S+ failed to apply|DB AutoUpdater FAILED",
             "regex": true,
             "timeout_s": 10800,
             "restart_loop": 4
@@ -1271,6 +1271,7 @@
                   "keys": {
                     "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
                     "ForcePinAccountRank": "10",
+                    "LogFilter_SQLText": "1",
                     "LogsDir": "\"../logs/\""
                   }
                 }
@@ -1374,7 +1375,15 @@
                 }
               ],
               "marker_db": "tw_world"
-            }
+            },
+            "patches": [
+              {
+                "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
+                "source": "src/tortoise-wow",
+                "obsolete_when_absent": "std::getline(std::cin",
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+              }
+            ]
           }
         }
       },

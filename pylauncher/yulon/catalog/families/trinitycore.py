@@ -90,10 +90,12 @@ from yulon.catalog.installer import (
 from yulon.catalog.native import (
     IMPORT_STAGE_CANCEL_NOTE,
     InstallState,
+    PressCancel,
     Seams,
     ServersDownWork,
     Stage,
     StageContext,
+    _reserving,
     _speaking,
     _stop_control,
     build_cancel_note,
@@ -193,44 +195,6 @@ def reextract_claim_lost(data_dir: Path, name: str) -> str:
         "was restarted, or that container was removed. The extraction was stopped, since "
         "another Yu'lon could now start one in the same folder."
     )
-
-
-class _PressCancel(threading.Event):
-    """A Re-extract's cancel: the player's Stop, or its folder claim lost (T549).
-
-    Read live, not copied by a thread: a tool's watcher or a stage's check sees the
-    claim's loss the moment it is set, as it sees a Stop.
-    """
-
-    def __init__(self, stop: threading.Event | None, lost: threading.Event) -> None:
-        super().__init__()
-        self._stop = stop
-        self._lost = lost
-        anyway = getattr(stop, "anyway", None)
-        if anyway is not None:
-            self.anyway = anyway
-
-    def is_set(self) -> bool:
-        return super().is_set() or self._lost.is_set() or self.player_stopped()
-
-    def player_stopped(self) -> bool:
-        """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
-        return self._stop is not None and self._stop.is_set()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while not self.is_set():
-            step = _PRESS_CANCEL_POLL
-            if deadline is not None:
-                step = min(step, deadline - time.monotonic())
-                if step <= 0:
-                    return False
-            self._lost.wait(step)  # wakes at once on the loss; polls the Stop
-        return True
-
-
-_PRESS_CANCEL_POLL = 0.05
-"""How often `_PressCancel.wait()` looks at the player's Stop. Not a deadline."""
 
 
 def another_yulon_extracting(data_dir: Path, names: Sequence[str] = ()) -> str:
@@ -1613,6 +1577,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     # -- finishing a world update that did not finish (fix round 1) -----------------
 
+    @_reserving(FINISH_WORLD_BUTTON)
     def finish_world_reimport(
         self,
         options: InstallOptions | None = None,
@@ -2087,6 +2052,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     # -- extracting the map data again (Task 6) ---------------------------------
 
+    @_reserving(REEXTRACT_BUTTON)
     def reextract(
         self,
         options: InstallOptions | None = None,
@@ -2168,7 +2134,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             # Stop does -- through the cancel every tool and stage already reads.
             watched = held if isinstance(held, docker.ClaimHeld) else None
             if watched is not None:
-                probe = replace(probe, cancel=_PressCancel(probe.cancel, watched.lost))
+                probe = replace(probe, cancel=PressCancel(probe.cancel, watched.lost))
             yield from self._reextract_claimed(server_dir, probe, data_dir, client, watched)
 
     def _claimed_note(self, data_dir: Path, claimed: docker.FolderClaimed) -> str:

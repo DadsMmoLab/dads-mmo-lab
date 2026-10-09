@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from yulon import docker, module_moves, platform, server_build_presses, wsl
-from yulon.after_stop import StopSaid, TrueAfterStop
+from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
@@ -50,10 +50,12 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
     ComposeRepairRoute,
     ConfCheck,
+    ConfRepaired,
     ConfRepairRoute,
     CorrectionRoute,
     KeptBuildRoute,
@@ -238,6 +240,7 @@ class _MaintenanceSnapshot:
                 report = maintenance.backup(
                     server_dir,
                     self._mysql(server_dir),
+                    game=maintenance.game_of(self.entry),
                     only=tuple(databases),
                     label=SNAPSHOT_LABEL,
                     spec=spec,
@@ -281,11 +284,16 @@ class _MaintenanceSnapshot:
                 self._database_up(server_dir)
                 mysql = self._mysql(server_dir)
                 for path in snapshot.files:
+                    game = maintenance.game_of(self.entry)
                     plan = maintenance.plan_restore(
-                        path, server_dir, spec=spec, wsl_distro=self.wsl_distro
+                        path, server_dir, game=game, spec=spec, wsl_distro=self.wsl_distro
                     )
                     if plan.refusals:
                         raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    # The copy is this server's own, taken moments ago by `take()`, so
+                    # one a Yu'lon older than the game record wrote needs no question
+                    # (T603). A copy that records ANOTHER game is already a refusal above.
+                    plan = plan.with_unlabeled_accepted()
                     # A replacement, not the Maintenance tab's merge: the tables
                     # the copy does not hold -- made by the new build or by its
                     # database updates -- are dropped before the copy loads.
@@ -293,6 +301,7 @@ class _MaintenanceSnapshot:
                     report = maintenance.restore(
                         plan,
                         mysql,
+                        game=game,
                         confirm=plan.token,
                         spec=spec,
                         core_databases=self.entry.core_databases(),
@@ -440,7 +449,6 @@ def with_module_moves(
     lines: Iterator[str],
     server_dir: Path,
     *,
-    cancel: threading.Event | None,
     put_back: ModulePutBack | None,
     kept_settles: bool = True,
     note: ModuleNote | None = None,
@@ -455,7 +463,9 @@ def with_module_moves(
       unbuilt any more (`module_moves.settle()`); so does a build that was KEPT
       after its world came up (`WorldStoppedAfterReadyError`), when
       `kept_settles`;
-    - **Stop** (`StopSaid`, or the cancel event set): nothing changes;
+    - **Stop** (a failure that IS the Stop taking effect: `after_stop.stop_took_effect()`):
+      nothing changes. The cancel event is not asked (T592): a compile error that
+      lands as Stop is pressed is still the compile error, and its module goes back;
     - **a failure the old build is not back from** (`TrueAfterStop`: a
       rollback that stopped half-way, the new build running): nothing
       changes either -- the sources must stay with the build the tags name;
@@ -482,8 +492,7 @@ def with_module_moves(
             _settle(server_dir)
         raise
     except InstallerError as exc:
-        stopped = isinstance(exc, StopSaid) or (cancel is not None and cancel.is_set())
-        if stopped or isinstance(exc, TrueAfterStop):
+        if stop_took_effect(exc) or isinstance(exc, TrueAfterStop):
             raise
         said = ""
         if put_back is not None:
@@ -594,7 +603,6 @@ def rebuild_for_app(
                 InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
             ),
             server_dir,
-            cancel=cancel,
             put_back=put_back,
             note=_core_note(entry, server_dir, wsl_distro),
         )
@@ -754,7 +762,6 @@ def update_to_latest_for_app(
                     options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
                 ),
                 server_dir,
-                cancel=cancel,
                 put_back=None,
                 kept_settles=False,
                 note=partial(module_order_note, press=server_build_presses.UPDATE_TO_LATEST),
@@ -768,7 +775,6 @@ def update_to_latest_for_app(
         yield from with_module_moves(
             engine().update_to_latest(options, to_pin=True, cancel=cancel),
             server_dir,
-            cancel=cancel,
             put_back=None,
             kept_settles=False,
             note=partial(module_order_note, press=server_build_presses.RETURN_TO_PIN),
@@ -983,10 +989,14 @@ def repair_confs_for_app(
             return ConfCheck()
         return azerothcore.conf_check(entry, server_dir)
 
-    return ConfRepairRoute(
-        check=check,
-        repair=lambda: azerothcore.repair_confs(entry, server_dir),
-    )
+    def repair() -> ConfRepaired:
+        # T568: the conf half of "Repair server files…" writes into the server folder like
+        # the compose half does (a press of the engine), so it reserves the server too.
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        with engine.reserved(server_dir, REPAIR_FILES_LABEL):
+            return azerothcore.repair_confs(entry, server_dir)
+
+    return ConfRepairRoute(check=check, repair=repair)
 
 
 def corrections_for_app(

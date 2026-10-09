@@ -350,6 +350,17 @@ class InstanceGuard(QObject):
             _active = None
 
 
+def holds_the_lock() -> bool:
+    """Is this process the one Yu'lon of this user that holds the lock (T568)?
+
+    False for a process that took no claim (the headless harness, a tray-less test) and for
+    one whose claim failed open ("unguarded"): in either, another Yu'lon of this user may be
+    running, so a reservation of "this user's own" is not provably a leftover.
+    """
+    guard = _active
+    return guard is not None and guard._lock.isLocked()
+
+
 @dataclass
 class Handover:
     """What `handed_over()` found on its far side."""

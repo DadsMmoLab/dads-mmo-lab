@@ -18,25 +18,38 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import getpass
 import hashlib
 import inspect
 import io
 import json
 import os
 import re
+import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
+from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
-from yulon import ansi, container_end, platform, runner, server_build_presses, wsl
+from yulon import (
+    ansi,
+    container_end,
+    forgetting,
+    platform,
+    runner,
+    server_build_presses,
+    update_failure,
+    wsl,
+)
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
@@ -541,7 +554,102 @@ def _server_key(server_dir: Path | str) -> str:
 
 
 @contextmanager
-def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
+def _reserved_for(
+    server_dir: Path | str,
+    press: str,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None,
+    label: str | None = None,
+    budget: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> Iterator[None]:
+    """The cross-process reservation for a Backup or Restore block (T568), when it has a spec.
+
+    A caller that names no `spec` (the headless harness, a test) holds in this process only,
+    as before. A reservation that is `moot` (Docker not answering, an unwritable folder) is
+    skipped: the job meets that itself.
+    """
+    if spec is None or not RESERVATIONS_ON:
+        yield
+        return
+    with contextlib.ExitStack() as reserved:
+        try:
+            reserved.enter_context(
+                server_claim(
+                    server_dir,
+                    press=press,
+                    spec=spec,
+                    wsl_distro=wsl_distro,
+                    label=label,
+                    up_timeout=budget,
+                    avoid_images=avoid_images,
+                )
+            )
+        except ServerReservationUnavailable as exc:
+            if not exc.moot:
+                raise
+            logger.warning(f"{press} on {server_dir} without a reservation: {exc}")
+        yield
+
+
+class BudgetedHold(Protocol):
+    """A server hold that may be asked to bound its take: `hold(press)` or `hold(press, budget=)`.
+
+    What `ui.controller_view._server_hold_for` builds and the command channel is handed (T610): a
+    hold that takes only `press` would fail only when a budget is set, so a mis-wired one is a
+    type error instead.
+    """
+
+    def __call__(
+        self, press: str, *, budget: float | None = ...
+    ) -> contextlib.AbstractContextManager[None]: ...
+
+
+GUI_HOLD_BUDGET_SECONDS = 15.0
+"""How long a hold taken on the GUI thread waits to be made (T610): the Tuning saves, the
+channel's roll-back and Repair. Past it the take is the "could not reserve" sentence."""
+
+
+def server_hold(
+    server_dir: Path | str,
+    press: str,
+    *,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None = None,
+    label: str | None = None,
+    budget: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> contextlib.AbstractContextManager[None]:
+    """Reserve the server across processes for a block that writes to it (T607).
+
+    For the feature paths that are not an engine press or an Applier action -- Party's account
+    link, the command channel's account and `enable`, the bot pool rebuild. Another Yu'lon's
+    Start, Update or Rebuild then refuses with this block's `press`, and this block is refused
+    with theirs: `ServerReserved`, whose message is the sentence to show, raised before the
+    block runs. Nested in a reservation this process already holds it shares it. A `spec` of
+    None (a harness with no container names) holds nothing; a reservation that is `moot`
+    (Docker not there or not answering, an unwritable folder) is skipped, as everywhere.
+
+    `budget` (seconds) bounds the take and, as a Stop's does, the release: for a block run on
+    the GUI thread (T610), which must not wait out a press's full 60 s take. Without one the
+    take waits as long as it needs.
+
+    `avoid_images` (T622) names images the block is about to remove, by reference: the
+    reservation container is run from another image if Docker has one, because `docker image rm`
+    refuses an image a running container uses. The uninstall passes its own built refs.
+    """
+    return _reserved_for(server_dir, press, spec, wsl_distro, label, budget, avoid_images)
+
+
+@contextmanager
+def hold_the_server(
+    server_dir: Path | str,
+    reason: str,
+    *,
+    press: str = "A backup or restore",
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
     For the Maintenance tab's restore, and for a backup that started the
@@ -577,9 +685,12 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
     waiting for the database to report healthy has a world container that
     exists and is not running yet, which passes the restore's name census.
 
+    Given a `spec` it also reserves the server across processes (T568), under `press`, for
+    the block: another Yu'lon's Start or Update then refuses with this job's name.
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
-            (`SERVER_IN_MOTION`).
+            (`SERVER_IN_MOTION`), or another Yu'lon holds the server (`ServerReserved`).
     """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
@@ -587,7 +698,8 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
             raise ServerHeldError(SERVER_IN_MOTION)
         _HELD.setdefault(key, []).append(reason)
     try:
-        yield
+        with _reserved_for(server_dir, press, spec, wsl_distro):
+            yield
     finally:
         with _HOLD_LOCK:
             reasons = _HELD[key]
@@ -596,9 +708,61 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
                 del _HELD[key]
 
 
+LOST_RESERVATION = (
+    "This server's reservation in Docker ended from elsewhere while this job was running "
+    "(another Yu'lon stopped it, or Docker restarted), so nothing was started."
+)
+"""Why a start, recreate or remove inside a lost reservation is refused (T568 section 3)."""
+
+_REGARDLESS = threading.local()
+
+
 @contextmanager
-def _in_flight(server_dir: Path | str) -> Iterator[None]:
-    """Mark a lifecycle command for this server as running, unless the server is held."""
+def stopping_regardless() -> Iterator[None]:
+    """A Stop inside the block makes no reservation, and so cannot be refused by one (T568).
+
+    For the one Stop the player confirmed with "Stop anyway" when the holder's reservation
+    could not be removed: "Stop always stops". Thread-local and scoped to the block, so no
+    other Stop, and no other thread, is unreserved by it.
+    """
+    before = getattr(_REGARDLESS, "on", False)
+    _REGARDLESS.on = True
+    try:
+        yield
+    finally:
+        _REGARDLESS.on = before
+
+
+_LIFECYCLE_PRESS = {
+    "start": forgetting.PRESS_START,
+    "start_staged": forgetting.PRESS_START,
+    "recreate_staged": "Restart the server",
+    "stop_servers_staged": forgetting.PRESS_STOP,
+    "stop_staged": forgetting.PRESS_STOP,
+    "remove_staged": "Remove the server's containers",
+}
+"""The press name each lifecycle command carries on its reservation."""
+
+
+@contextmanager
+def _in_flight(
+    server_dir: Path | str,
+    *,
+    press: str = forgetting.PRESS_START,
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
+    """Mark a lifecycle command for this server as running, unless the server is held.
+
+    Held in this process (T216) it refuses with the holder's sentence. Held by ANOTHER
+    process (T568) it refuses with that Yu'lon's: the command reserves the server for its
+    own length, unless this process already holds the reservation (a press running its own
+    stop and recreate), in which case it runs inside it -- and, if that reservation was lost
+    from elsewhere, refuses to start, recreate or remove anything (a stop is never refused).
+    A Stop that cannot get a reservation within `_STOP_RESERVE_TIMEOUT` goes ahead without,
+    and so does any command whose reservation is `moot` (Docker not there, an unwritable
+    folder): it fails on its own, in its own words.
+    """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
         held = _HELD.get(key)
@@ -607,7 +771,27 @@ def _in_flight(server_dir: Path | str) -> Iterator[None]:
             raise ServerHeldError(held[-1])
         _IN_FLIGHT[key] = _IN_FLIGHT.get(key, 0) + 1
     try:
-        yield
+        stopping = press == forgetting.PRESS_STOP
+        with contextlib.ExitStack() as reserved:
+            if RESERVATIONS_ON and not (stopping and getattr(_REGARDLESS, "on", False)):
+                try:
+                    claim = reserved.enter_context(
+                        server_claim(
+                            server_dir,
+                            press=press,
+                            spec=spec,
+                            wsl_distro=wsl_distro,
+                            up_timeout=_STOP_RESERVE_TIMEOUT if stopping else None,
+                        )
+                    )
+                except ServerReservationUnavailable as exc:
+                    if not (stopping or exc.moot):
+                        raise
+                    logger.warning(f"running {press} on {server_dir} without a reservation: {exc}")
+                else:
+                    if claim.lost.is_set() and not stopping:
+                        raise ServerHeldError(LOST_RESERVATION)
+            yield
     finally:
         with _HOLD_LOCK:
             _IN_FLIGHT[key] -= 1
@@ -615,7 +799,13 @@ def _in_flight(server_dir: Path | str) -> Iterator[None]:
                 del _IN_FLIGHT[key]
 
 
-def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]:
+def lifecycle(
+    server_dir: Path | str,
+    *,
+    press: str = "Restart the server",
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> contextlib.AbstractContextManager[None]:
     """One lifecycle command made of several: a restart, a recreate, a bot restart (T216).
 
     `@_a_lifecycle_command` marks each primitive while it runs, so between a
@@ -628,7 +818,7 @@ def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]
     Raises:
         ServerHeldError: the server is held, so not even the first step runs.
     """
-    return _in_flight(server_dir)
+    return _in_flight(server_dir, press=press, spec=spec, wsl_distro=wsl_distro)
 
 
 class MaintenanceLeaseTaken(RuntimeError, SaidByYulon):
@@ -643,7 +833,14 @@ _LEASED: dict[str, str] = {}
 
 
 @contextmanager
-def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
+def maintenance_lease(
+    server_dir: Path | str,
+    reason: str,
+    *,
+    press: str = "A backup or restore",
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
     """One Backup or Restore of this server at a time, for the whole of it (T216 round 3).
 
     Separate from `hold_the_server()`, which is about the containers: a hot
@@ -658,6 +855,9 @@ def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
     one view (T187 gives each server its own launcher window), and a flag on
     one of them would not be seen by the other.
 
+    Given a `spec` it also reserves the server across processes (T568), as
+    `hold_the_server()` does, so a hot Backup in one Yu'lon is not a Restore in another.
+
     Raises:
         MaintenanceLeaseTaken: a Backup or Restore of this server holds it.
     """
@@ -668,7 +868,8 @@ def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
             raise MaintenanceLeaseTaken(holder)
         _LEASED[key] = reason
     try:
-        yield
+        with _reserved_for(server_dir, press, spec, wsl_distro):
+            yield
     finally:
         with _HOLD_LOCK:
             del _LEASED[key]
@@ -681,11 +882,17 @@ def _a_lifecycle_command(command: Callable[_P, _R]) -> Callable[_P, _R]:
     caller -- and every alias a game's `docker_ctl` binds -- goes through it.
     """
     signature = inspect.signature(command)
+    press = _LIFECYCLE_PRESS.get(command.__name__, forgetting.PRESS_START)
 
     @functools.wraps(command)
     def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        server_dir = signature.bind_partial(*args, **kwargs).arguments["server_dir"]
-        with _in_flight(server_dir):
+        given = signature.bind_partial(*args, **kwargs).arguments
+        with _in_flight(
+            given["server_dir"],
+            press=press,
+            spec=given.get("spec"),
+            wsl_distro=given.get("wsl_distro"),
+        ):
             return command(*args, **kwargs)
 
     return run
@@ -3389,6 +3596,15 @@ the loading sentence again once a look reads.
 WORLD_FINISHED_LOADING = "The world has finished loading; stopping it now."
 """Said once the world can hear the stop, if a wait was announced first (T158)."""
 
+WORLD_STUCK_AT_UPDATE_TAIL = (
+    " It is not loading and cannot hear a stop, so Yu'lon is stopping it now instead of waiting."
+)
+"""Follows `update_failure.explain()`'s sentence when a stop finds a world stuck at a failed
+update (T600)."""
+
+_UPDATE_LOG_TAIL = 20
+"""How many lines of a run's log a stop reads to see whether it ends on a failed update."""
+
 WORLD_STOPPED_ANYWAY = (
     "Stopping the world now, as asked, although it had not finished loading. It may be "
     "force-stopped: a world still loading ignores the stop and is killed when the "
@@ -3500,6 +3716,7 @@ def outlives_the_stop(text: str) -> bool:
         sentence in FORCE_STOP_WARNINGS
         or sentence == WORLD_SAVE_UNREAD
         or sentence.startswith(_WORLD_SAVE_FAILED_START)
+        or sentence.startswith(update_failure.OPENING)
     )
 
 
@@ -3517,6 +3734,10 @@ def _how_the_world_ended(world: str, wsl_distro: str | None) -> tuple[str, bool]
     if int(code) == 0:
         return WORLD_SAVED, False
     tail = log_tail(world, _EXIT_LINES, wsl_distro=wsl_distro) or ""
+    # T600: a world that exits 1 at a failed update was not saving anything; say the update.
+    failed_update = _ends_on_a_failed_update(ansi.strip(tail))
+    if failed_update:
+        return details_below(failed_update, ansi.strip(tail).strip()), True
     return details_below(world_save_failed(int(code)), ansi.strip(tail).strip()), True
 
 
@@ -4226,6 +4447,9 @@ def wait_for_the_world_to_load(
       ignore anything, and `docker stop` cancels a pending restart, so the
       stop goes at once.
     * SIGTERM is caught -- the stop goes now. Said only after a wait was said.
+    * the world cannot hear the stop and its log ENDS on a failed world update (T600): the
+      core waits in a read on its console there, so nothing is loading and the signal would
+      be ignored for the whole grace. The world is killed and the stop goes on, saying why.
     * the world was looked at and was NOT seen able to hear the stop, and
       `control.forced()` -- "Stop now anyway". Said as a warning, because the
       stop that follows may be the forced one. A press never makes it skip the
@@ -4320,12 +4544,60 @@ def world_load_steps(
             logger.warning(WORLD_STOPPED_ANYWAY)
             yield WORLD_STOPPED_ANYWAY
             return
+        if caught is False and state.settled:
+            stuck = _stuck_at_a_failed_update(world, run, wsl_distro)
+            if stuck:
+                # Deaf and not loading: tortoise-wow waits in a read on its console after a
+                # failed update (T600), so the stop's SIGTERM is ignored for the whole grace.
+                # Nothing is loading and nothing was saved yet, so the kill loses nothing --
+                # but only for THIS run: a replacement the restart policy started since the
+                # look is loading and must be waited for, so the run is checked again first.
+                again = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+                if again.settled and again.started_at == run:
+                    logger.warning(
+                        f"{world} is stuck at a failed update; killing it, then stopping"
+                    )
+                    try:
+                        kill_container(world, wsl_distro=wsl_distro, timeout=_LOAD_LOOK_TIMEOUT)
+                    except DockerCommandError as exc:
+                        logger.warning(f"could not kill {world}: {exc}")
+                    yield stuck + WORLD_STUCK_AT_UPDATE_TAIL
+                    return
+                logger.info(f"{world} changed run while it was looked at; looking again")
         if caught is None:
             logger.warning(f"could not read whether {world} can hear a stop; asking again")
             yield from say(WORLD_LOAD_UNCHECKED, warn=True)
         else:
             yield from say(WORLD_STILL_LOADING)
         _pause(control, _LOAD_POLL_SECONDS)
+
+
+def _stuck_at_a_failed_update(world: str, run: str, wsl_distro: str | None) -> str:
+    """`update_failure.explain()`'s sentence when run `run`'s log ENDS on a failed update, or `""`.
+
+    Only the last non-empty line counts: the core goes quiet after `failed to apply.` (it waits in
+    a read), while a world that went on printing is a world that is going on (T600).
+    """
+    tail = _logs(
+        world,
+        this_run_only=True,
+        since=run,
+        tail=_UPDATE_LOG_TAIL,
+        timeout=_LOAD_LOOK_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    return _ends_on_a_failed_update(tail)
+
+
+def _ends_on_a_failed_update(tail: str) -> str:
+    """`update_failure.explain()`'s sentence when `tail` ends on the failure line, or `""`."""
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    if not (update_failure.FAILED.search(last) or update_failure.CLOSED.search(last)):
+        return ""
+    return update_failure.explain(tail)
 
 
 def stop_containers(
@@ -4375,15 +4647,18 @@ def stop_containers(
         _run_docker_stop(name, wsl_distro=wsl_distro, deadline=deadline)
 
 
-def kill_container(container: str, *, wsl_distro: str | None = None) -> None:
+def kill_container(
+    container: str, *, wsl_distro: str | None = None, timeout: float | None = None
+) -> None:
     """`docker kill <container>`: the last resort after a stop that failed (T162).
 
     Raises `DockerCommandError` on a non-zero exit, a container that is not
     running included: the caller reads the container's state afterwards
     rather than trusting any exit code, so the words of Docker's refusal need
-    not be matched here.
+    not be matched here. `timeout` bounds the call for a caller inside a loop the person must
+    be able to end (T600); a timeout is a non-zero answer, so it raises like a refusal.
     """
-    _run(["kill", container], wsl_distro=wsl_distro)
+    _run(["kill", container], timeout=timeout, wsl_distro=wsl_distro)
 
 
 @_a_lifecycle_command
@@ -4758,6 +5033,8 @@ def _logs(
     this_run_only: bool = False,
     since: str = "",
     until: str = "",
+    tail: int | None = None,
+    timeout: float | None = None,
     wsl_distro: str | None = None,
 ) -> str:
     """Return a container's logs, or `""` if they can't be read.
@@ -4776,7 +5053,10 @@ def _logs(
     `this_run_only` scopes the read to the current run by asking when that run
     started; `until` ends it there (`docker logs --until`). `--tail` is not an
     alternative: the marker is printed once, so a tail window either misses it or
-    slides past it.
+    slides past it. `timeout` bounds the call (a timeout is a non-zero answer, so `""`), for a
+    caller that polls inside a loop the person must be able to end. `tail` is for the opposite
+    question, what a run's log ENDS on (T600: a world stuck at a failed update), which a window
+    answers exactly.
     """
     argv = ["logs"]
     if this_run_only:
@@ -4788,7 +5068,9 @@ def _logs(
     if until:
         # T581: a bounded read, for a marker printed early in a run that may be days long.
         argv += ["--until", until]
-    proc = _docker([*argv, container], wsl_distro=wsl_distro)
+    if tail is not None:
+        argv += ["--tail", str(tail)]
+    proc = _docker([*argv, container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
         # mid-wait, or an unreadable log driver into eight minutes of "starting"
@@ -7648,6 +7930,21 @@ class ClaimUnavailable(Exception):
     """The folder's claim could not be made, for a reason other than another press (T543)."""
 
 
+class ClaimDockerDown(ClaimUnavailable):
+    """The claim could not be made because Docker itself is not there or not answering (T568)."""
+
+
+class ClaimDockerSilent(ClaimUnavailable):
+    """Docker did not answer in time (T568): it cannot be told whether another Yu'lon holds it.
+
+    Not `ClaimDockerDown`: a daemon that is down cannot be raced on, one that is merely slow can.
+    """
+
+
+class ClaimImageGone(ClaimUnavailable):
+    """The claim could not be made because its image is not in Docker (T568: try the next)."""
+
+
 class ClaimStopped(ClaimUnavailable, StopTookEffect):
     """Stop was pressed while the claim came up (cold review of T543): nothing was touched."""
 
@@ -7669,6 +7966,7 @@ class _Claim:
     container: str
     proc: subprocess.Popen[bytes]
     nonce: str
+    wsl_distro: str | None = None
 
 
 @dataclass(frozen=True)
@@ -7773,7 +8071,7 @@ def _claim_still_ours(held: _Claim) -> bool:
     for attempt in range(_CLAIM_STILL_OURS_ASKS):
         if attempt:
             time.sleep(_CLAIM_ASK_GAP)
-        facts = _claim_facts(held.name, timeout=_CLAIM_ASK_TIMEOUT)
+        facts = _claim_facts(held.name, timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=held.wsl_distro)
         if facts is not None and facts.nonce == held.nonce and facts.status == "running":
             return True
     return False
@@ -7797,8 +8095,21 @@ def _watch_claim(held: _Claim, lost: threading.Event, letting_go: threading.Even
         lost.set()
 
 
-def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
+def _take_claim(
+    name: str,
+    image: str,
+    cancel: threading.Event | None,
+    *,
+    again: bool,
+    labels: Sequence[tuple[str, str]] = (),
+    wsl_distro: str | None = None,
+    up_timeout: float | None = None,
+) -> _Claim:
     """Start the claim `name` and see it running as this press's own.
+
+    `labels` are put on the container after the owner and claim labels (T568: a server
+    reservation says which press, who and which process). `wsl_distro` runs it on that
+    distro's Docker, whose `wsl.exe` holding stdin also keeps the distro up while held.
 
     Raises:
         FolderClaimed: the daemon refused the name: another press holds it.
@@ -7806,12 +8117,12 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
     """
     if cancel is not None and cancel.is_set():
         raise ClaimStopped("Stop was pressed before the folder was reserved.")
-    program = platform.docker_program()
-    if program is None:
-        raise ClaimUnavailable("Docker's command-line tool was not found; start or install Docker.")
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
+        raise ClaimDockerDown("Docker's command-line tool was not found; start or install Docker.")
     nonce = uuid.uuid4().hex
     argv = [
-        program,
+        *prefix,
         "run",
         "--rm",
         "-i",
@@ -7821,6 +8132,7 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         f"{OWNER_LABEL}={owner_id()}",
         "--label",
         f"{CLAIM_LABEL}={nonce}",
+        *[part for key, value in labels for part in ("--label", f"{key}={value}")],
         "--network",
         "none",
         "--entrypoint",
@@ -7829,7 +8141,7 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
         "-c",
         "cat >/dev/null",
     ]
-    logger.info(f"claiming the folder: `docker {' '.join(argv[1:])}`")
+    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix):])}`")
     try:
         proc = subprocess.Popen(
             argv,
@@ -7840,34 +8152,49 @@ def _take_claim(name: str, image: str, cancel: threading.Event | None, *, again:
             creationflags=runner.creationflags(),
         )
     except OSError as exc:
-        raise ClaimUnavailable(f"Docker could not be started ({exc}); is Docker running?") from exc
+        raise ClaimDockerDown(f"Docker could not be started ({exc}); is Docker running?") from exc
     try:
-        return _claim_coming_up(name, image, proc, nonce, cancel, again=again)
+        return _claim_coming_up(
+            name,
+            image,
+            proc,
+            nonce,
+            cancel,
+            again=again,
+            labels=labels,
+            wsl_distro=wsl_distro,
+            up_timeout=up_timeout,
+        )
     except BaseException:
         # Not ours after all, or abandoned while it came up: its CLI goes -- at once,
         # not after the release's wait, for a Stop's sake -- and a claim this press
         # made goes with it (by its nonce, never another's).
         cut_short = proc.poll() is None
         _end_claim_cli(proc, wait=_CLAIM_ABANDON_WAIT)
-        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         removed = False
         if facts is not None and facts.nonce == nonce:
-            removed = _remove_claim(facts.container, timeout=_CLAIM_LOOK_TIMEOUT)
+            removed = _remove_claim(
+                facts.container, timeout=_CLAIM_LOOK_TIMEOUT, wsl_distro=wsl_distro
+            )
         if cut_short and not removed:
             # Ending the CLI does not cancel a `run` the daemon already has (Codex review
             # of the folds): the claim may appear later and would block every press.
-            _start_sweep(name, nonce)
+            _start_sweep(name, nonce, wsl_distro)
         raise
 
 
-def _start_sweep(name: str, nonce: str) -> None:
+def _start_sweep(name: str, nonce: str, wsl_distro: str | None = None) -> None:
     """`_sweep_late_claim()` on a background thread, so nothing waits for it."""
     threading.Thread(
-        target=_sweep_late_claim, args=(name, nonce), name="yulon-claim-sweep", daemon=True
+        target=_sweep_late_claim,
+        args=(name, nonce, wsl_distro),
+        name="yulon-claim-sweep",
+        daemon=True,
     ).start()
 
 
-def _sweep_late_claim(name: str, nonce: str) -> None:
+def _sweep_late_claim(name: str, nonce: str, wsl_distro: str | None = None) -> None:
     """Remove the claim `name` carrying `nonce` if Docker makes it after its press gave up.
 
     Looked for in the background for `_CLAIM_SWEEP_SECONDS`, so a Stop is not held up.
@@ -7877,10 +8204,10 @@ def _sweep_late_claim(name: str, nonce: str) -> None:
     deadline = time.monotonic() + _CLAIM_SWEEP_SECONDS
     try:
         while time.monotonic() < deadline:
-            facts = _claim_facts(name)
+            facts = _claim_facts(name, wsl_distro=wsl_distro)
             if facts is not None and facts.nonce == nonce:
                 logger.info(f"removing the claim {name}, made after its press gave it up")
-                if _remove_claim(facts.container):
+                if _remove_claim(facts.container, wsl_distro=wsl_distro):
                     return
             time.sleep(_CLAIM_SWEEP_POLL)
     except Exception as exc:  # noqa: BLE001 - a background thread has no caller to tell
@@ -7895,15 +8222,19 @@ def _claim_coming_up(
     cancel: threading.Event | None,
     *,
     again: bool,
+    labels: Sequence[tuple[str, str]] = (),
+    wsl_distro: str | None = None,
+    up_timeout: float | None = None,
 ) -> _Claim:
     """Wait for `proc`'s claim to run as this press's own (`nonce`), or say why it did not."""
-    deadline = time.monotonic() + _CLAIM_UP_TIMEOUT
+    limit = _CLAIM_UP_TIMEOUT if up_timeout is None else up_timeout
+    deadline = time.monotonic() + limit
     while True:
         # Before each look, and each look short (Codex review of the cold-review folds):
         # a Docker that does not answer must not hold a Stop for a whole question.
         if cancel is not None and cancel.is_set():
             raise ClaimStopped("Stop was pressed before the folder was reserved.")
-        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+        facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         # Running, not only there (Codex adversarial review, round 3): a claim whose
         # command failed is seen created, with this nonce, before `--rm` takes it.
         if facts is not None and facts.nonce == nonce and facts.status == "running":
@@ -7911,17 +8242,35 @@ def _claim_coming_up(
                 raise ClaimStopped("Stop was pressed before the folder was reserved.")
             with _CLAIMS_LOCK:
                 _CLAIMS_HELD.add(name)
-            return _Claim(name, facts.container, proc, nonce)
+            return _Claim(name, facts.container, proc, nonce, wsl_distro)
         if proc.poll() is not None:
             assert proc.stderr is not None
             said = proc.stderr.read().decode("utf-8", "replace").strip()
             proc.stderr.close()
             if _NAME_IN_USE.search(said):
-                return _claim_in_use(name, image, cancel, again=again)
-            raise ClaimUnavailable(_claim_refused(image, said or f"it exited {proc.returncode}"))
+                return _claim_in_use(
+                    name,
+                    image,
+                    cancel,
+                    again=again,
+                    labels=labels,
+                    wsl_distro=wsl_distro,
+                    # What is left, not the whole again: the retry inside is part of the same
+                    # budget (T607 review).
+                    up_timeout=(
+                        None if up_timeout is None else max(0.05, deadline - time.monotonic())
+                    ),
+                )
+            refused = _claim_refused(image, said or f"it exited {proc.returncode}")
+            kind = (
+                ClaimImageGone
+                if _IMAGE_GONE.search(said)
+                else ClaimDockerDown if _DAEMON_DOWN.search(said) else ClaimUnavailable
+            )
+            raise kind(refused)
         if time.monotonic() > deadline:
             raise ClaimUnavailable(
-                f"Docker had not started its reservation after {_CLAIM_UP_TIMEOUT:.0f} s; "
+                f"Docker had not started its reservation after {limit:.0f} s; "
                 "wait until Docker has started."
             )
         if cancel is not None and cancel.wait(_CLAIM_POLL_SECONDS):
@@ -7943,14 +8292,31 @@ def _claim_refused(image: str, said: str) -> str:
     return f"Docker refused it (Docker said: {said})."
 
 
-def _claim_in_use(name: str, image: str, cancel: threading.Event | None, *, again: bool) -> _Claim:
+def _claim_in_use(
+    name: str,
+    image: str,
+    cancel: threading.Event | None,
+    *,
+    again: bool,
+    labels: Sequence[tuple[str, str]] = (),
+    wsl_distro: str | None = None,
+    up_timeout: float | None = None,
+) -> _Claim:
     """The daemon said `name` is taken: say whose; never remove it (T543)."""
-    facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT)
+    facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT, wsl_distro=wsl_distro)
     if cancel is not None and cancel.is_set():
         raise ClaimStopped("Stop was pressed before the folder was reserved.")
     if facts is None:
         if again:  # it ended between the refusal and the question (a Stop is seen there)
-            return _take_claim(name, image, cancel, again=False)
+            return _take_claim(
+                name,
+                image,
+                cancel,
+                again=False,
+                labels=labels,
+                wsl_distro=wsl_distro,
+                up_timeout=up_timeout,
+            )
         # Refused twice, and twice no answer about whose (cold review): not "another's".
         raise FolderClaimed(name, ours=False, known=False)
     with _CLAIMS_LOCK:
@@ -7965,27 +8331,40 @@ class _ClaimFacts(NamedTuple):
     owner: str
 
 
-def _claim_facts(name: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> _ClaimFacts | None:
+def _claim_facts(
+    name: str, timeout: float = _CLAIM_ASK_TIMEOUT, *, wsl_distro: str | None = None
+) -> _ClaimFacts | None:
     """The claim `name`'s container id, state, nonce and owner; None when none (or no answer)."""
     fmt = (
         f'{{{{.Id}}}}\t{{{{.State.Status}}}}\t{{{{index .Config.Labels "{CLAIM_LABEL}"}}}}'
         f'\t{{{{index .Config.Labels "{OWNER_LABEL}"}}}}'
     )
-    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout)
+    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
         return None
     facts = _ClaimFacts(*([*proc.stdout.strip().split("\t"), "", "", ""])[:4])
     return facts if facts.container else None
 
 
-def _release_claim(held: _Claim) -> None:
-    """End a claim this process holds: its stdin closed, its CLI waited for, its container gone."""
+def _release_claim(held: _Claim, *, quick: bool = False) -> None:
+    """End a claim this process holds: its stdin closed, its CLI waited for, its container gone.
+
+    `quick` (a Stop's reservation, T607) gives each step `_QUICK_RELEASE_SECONDS`: the server
+    is already stopped, and a daemon that is not answering must not hold the Stop.
+    """
     with _CLAIMS_LOCK:
         _CLAIMS_HELD.discard(held.name)
-    _end_claim_cli(held.proc)
-    if not _remove_claim(held.container):
+    if quick:
+        _end_claim_cli(held.proc, wait=_QUICK_RELEASE_SECONDS)
+        removed = _remove_claim(
+            held.container, timeout=_QUICK_RELEASE_SECONDS, wsl_distro=held.wsl_distro
+        )
+    else:
+        _end_claim_cli(held.proc)
+        removed = _remove_claim(held.container, wsl_distro=held.wsl_distro)
+    if not removed:
         # A daemon slow to answer (Codex review of the folds): left to the sweep, by nonce.
-        _start_sweep(held.name, held.nonce)
+        _start_sweep(held.name, held.nonce, held.wsl_distro)
 
 
 def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEASE_TIMEOUT) -> None:
@@ -8004,13 +8383,701 @@ def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEAS
         proc.stderr.close()
 
 
-def _remove_claim(container: str, timeout: float = _CLAIM_ASK_TIMEOUT) -> bool:
+def _remove_claim(
+    container: str, timeout: float = _CLAIM_ASK_TIMEOUT, *, wsl_distro: str | None = None
+) -> bool:
     """`docker rm -f` a claim by its container id; True once it is gone (already gone counts)."""
-    proc = _docker(["rm", "-f", container], timeout=timeout)
+    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
         logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
         return False
     return True
+
+
+# ------------------------------------- T568: one press per server, decided by the daemon
+
+SERVER_CLAIM_PREFIX = "yulon-busy-"
+"""A server reservation's container is `yulon-busy-<folder id of the server folder>` (T568)."""
+
+PRESS_LABEL = "yulon.press"
+"""A reservation's label: the press that holds it, in the words a refused press quotes."""
+
+WHO_LABEL = "yulon.who"
+"""A reservation's label: `user@host (OS)` of the Yu'lon that holds it."""
+
+PID_LABEL = "yulon.pid"
+"""A reservation's label: the holding process's id, with `HOST_LABEL` what "Clear it" checks."""
+
+HOST_LABEL = "yulon.host"
+"""A reservation's label: the holding computer's name (`socket.gethostname()`)."""
+
+RESERVATIONS_ON = True
+"""Whether lifecycle commands and presses reserve their server at all. Production: always.
+
+The test suite's `conftest` turns it off for every test that does not drive a reservation
+(the reservation is a `docker run` that nothing else in the suite fakes); a guard test pins
+that this default stays True."""
+
+_STOP_RESERVE_TIMEOUT = 5.0
+"""How long a Stop gives Docker to make its reservation before it goes ahead without one."""
+
+SILENT_DOCKER = (
+    "Docker is not answering, so Yu'lon cannot tell whether another Yu'lon is working on this "
+    "server; try again."
+)
+"""Why a press is refused when Docker timed out: a slow daemon can be raced on, so nothing runs."""
+
+_GONE_WAIT_SECONDS = 10.0
+"""How long a reservation's container gets to be gone after it was released or removed.
+
+Measured on yulon-ubuntu under load 9 (T568's first live run): the container of a finished press
+was still there ten seconds later (`rm -f` answered "removal ... is already in progress"), so
+the next press was refused as "an earlier run left its reservation" and "Stop anyway" removed
+nothing. On a quiet daemon it is gone in about a second (T543)."""
+
+_GONE_POLL_SECONDS = 0.2
+
+_QUICK_RELEASE_SECONDS = 2.0
+"""How long each step of letting go a Stop's reservation may take (T607): the CLI to end, the
+container to be removed, and it to be gone. A press waits 15 + 5 + 10 s for the same; a Stop
+that has already stopped the server must not hang on a daemon that is not answering. What it
+leaves behind is removed by the sweep (by nonce) or met by the next press's wait for a dying
+container."""
+
+_LISTED_IMAGES = 3
+"""How many `yulon.local/*` images the last resort of the image chain tries."""
+
+
+class ServerReserved(ServerHeldError):
+    """Another process holds this server's reservation (T568).
+
+    `holder` says who: the message is the refused press's sentence, which leads with it.
+    """
+
+    def __init__(self, message: str, holder: ServerHolder) -> None:
+        super().__init__(message)
+        self.holder = holder
+
+
+class ServerReservationUnavailable(ServerHeldError):
+    """No reservation could be made (no Docker, no image, a folder with no id file); T568.
+
+    A press or a Start is refused rather than run unreserved, except when `moot`: Docker is
+    not there or not answering (the command reports that itself, in its own typed words, and
+    nothing can race on a daemon that is not answering), or the folder will not take the id
+    file (a folder Yu'lon cannot write is one it cannot update either -- T152's own line).
+    A Stop goes ahead without a reservation whatever the reason.
+    """
+
+    def __init__(self, message: str, *, moot: bool = False) -> None:
+        super().__init__(message)
+        self.moot = moot
+
+
+@dataclass(frozen=True)
+class ServerHolder:
+    """Who holds a server's reservation, read from the daemon (T568)."""
+
+    name: str
+    container: str
+    press: str = ""
+    who: str = ""
+    pid: str = ""
+    created: str = ""
+    host: str = ""
+    ours: bool = False
+    here: bool = False
+    known: bool = True
+    wsl_distro: str | None = None
+
+    def live_here(self) -> bool | None:
+        """Is the process that holds this a live one on THIS computer? None when it cannot be told.
+
+        "Ours" is only the same config folder: a headless install run, or a second window
+        that got past the single-instance lock, holds a LIVE reservation of its own. Only a
+        holder whose host label is this computer and whose pid is not running is a leftover;
+        anything unlabelled or from another computer cannot be told (T568, Opus review).
+        """
+        if not self.host or self.host != socket.gethostname() or not self.pid.isdigit():
+            return None
+        from yulon.selfupdate.layout import pid_liveness
+
+        return pid_liveness(int(self.pid))
+
+    def since(self, now: float | None = None) -> str:
+        """The daemon's creation stamp as "14:02 (3 minutes ago)"; empty when unreadable."""
+        stamp = self.created.strip()
+        if not stamp:
+            return ""
+        # Docker's RFC 3339 has nanoseconds; `fromisoformat` takes six digits.
+        text = re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00"))
+        try:
+            made = datetime.fromisoformat(text)
+        except ValueError:
+            return ""
+        if made.tzinfo is None:
+            made = made.replace(tzinfo=UTC)
+        asked = time.time() if now is None else now
+        minutes = max(0, int((asked - made.timestamp()) // 60))
+        local = made.astimezone()
+        ago = "just now" if minutes < 1 else f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        return f"{local:%H:%M} ({ago})"
+
+
+@dataclass
+class _Reservation:
+    held: ClaimHeld
+    claim: _Claim
+    letting_go: threading.Event
+    press: str
+    count: int = 1
+
+
+_RESERVATIONS: dict[str, _Reservation] = {}
+"""The reservations this process holds, by name; a nested take shares the outer's."""
+
+_RESERVE_LOCKS: dict[str, threading.Lock] = {}
+_RESERVE_LOCKS_LOCK = threading.Lock()
+
+
+def _reserve_lock(name: str) -> threading.Lock:
+    with _RESERVE_LOCKS_LOCK:
+        return _RESERVE_LOCKS.setdefault(name, threading.Lock())
+
+
+def _who() -> str:
+    """`user@host (OS)` for the reservation's label."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no user database; a label must not stop a press
+        user = "someone"
+    host = socket.gethostname()
+    if platform.in_wsl():
+        where = "WSL"
+    elif sys.platform.startswith("win"):
+        where = "Windows"
+    elif sys.platform == "darwin":
+        where = "macOS"
+    else:
+        where = "Linux"
+    return f"{user}@{host} ({where})"
+
+
+def reservation_name(server_dir: Path | str) -> str | None:
+    """`yulon-busy-<id>` for a folder that has its id file; None, never making one."""
+    ident = _read_folder_id(Path(server_dir) / FOLDER_ID_FILE)
+    return SERVER_CLAIM_PREFIX + ident if ident else None
+
+
+def reservation_held_here(server_dir: Path | str) -> bool:
+    """Does this process hold `server_dir`'s reservation now?"""
+    name = reservation_name(server_dir)
+    return name is not None and name in _RESERVATIONS
+
+
+def reservation_lost(server_dir: Path | str) -> bool:
+    """Is this process's reservation of `server_dir` one that ended from elsewhere (T568)?"""
+    name = reservation_name(server_dir)
+    held = _RESERVATIONS.get(name) if name else None
+    return held is not None and held.held.lost.is_set()
+
+
+def _wait_gone(
+    name: str, wsl_distro: str | None, limit: float | None = None, *, container: str | None = None
+) -> bool:
+    """Poll until the container `name` is gone from Docker; False if it is still there at `limit`.
+
+    With `container` (an id), it is that container being gone that is waited for: a newer
+    holder of the same name (another Yu'lon's Stop anyway took it) is not the one released.
+
+    A daemon that does not answer reads as gone (no container could be shown): this is a wait
+    for a removal in progress, not a proof.
+    """
+    deadline = time.monotonic() + (_GONE_WAIT_SECONDS if limit is None else limit)
+    while True:
+        # Each look no longer than what is left: a daemon that does not answer must not
+        # stretch a short limit (a Stop's release, T607) to its whole question.
+        left = deadline - time.monotonic()
+        facts = _claim_facts(
+            name, timeout=min(_CLAIM_ASK_TIMEOUT, max(0.2, left)), wsl_distro=wsl_distro
+        )
+        if facts is None or (container is not None and facts.container != container):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_GONE_POLL_SECONDS)
+
+
+def _docker_must_answer(proc: subprocess.CompletedProcess[str]) -> None:
+    """Raise `ClaimDockerDown` when `proc` says Docker is not there or not answering (T568)."""
+    if runner.timed_out(proc):
+        raise ClaimDockerSilent(SILENT_DOCKER)
+    if _cli_missing(proc) or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr)):
+        raise ClaimDockerDown(
+            proc.stderr.strip() or "Docker is not answering; start Docker and try again."
+        )
+
+
+def _ask_budget(budget_end: float | None, cap: float) -> float:
+    """How long one Docker question may take: `cap`, or what is left of a Stop's budget (T607).
+
+    Raises:
+        ClaimDockerSilent: the budget is spent.
+    """
+    if budget_end is None:
+        return cap
+    left = budget_end - time.monotonic()
+    if left <= 0:
+        raise ClaimDockerSilent(SILENT_DOCKER)
+    return min(cap, left)
+
+
+def _reservation_images(
+    spec: ContainerSpec | None,
+    images: Sequence[str],
+    wsl_distro: str | None,
+    budget_end: float | None = None,
+    avoid: Sequence[str] = (),
+) -> Iterator[str]:
+    """`_candidate_images`, with the images in `avoid` (and their ids) tried last (T622).
+
+    The uninstall is about to remove its own images and `docker image rm` refuses one a running
+    container uses, so its reservation must not be run from one. If Docker has nothing else, an
+    avoided image is still used: a broken install must be removable, at the price of the image
+    being reported left behind.
+    """
+    if not avoid:
+        yield from _candidate_images(spec, images, wsl_distro, budget_end)
+        return
+    refused = set(avoid)
+    for ref in avoid:
+        proc = _docker(
+            ["image", "inspect", ref, "--format", "{{.Id}}"],
+            timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+            wsl_distro=wsl_distro,
+        )
+        _docker_must_answer(proc)
+        if proc.returncode == 0 and proc.stdout.strip():
+            refused.add(proc.stdout.strip())
+    last_resort: list[str] = []
+    for image in _candidate_images(spec, images, wsl_distro, budget_end, refused):
+        if image in refused:
+            last_resort.append(image)
+        else:
+            yield image
+    yield from last_resort
+
+
+def _candidate_images(
+    spec: ContainerSpec | None,
+    images: Sequence[str],
+    wsl_distro: str | None,
+    budget_end: float | None = None,
+    later: Collection[str] = (),
+) -> Iterator[str]:
+    """The images a reservation may run from, best first (T568 section 3).
+
+    The server's own containers' image first: Docker will not remove an image a container
+    uses, so it is there whenever the server is. Then the built refs the caller names, then
+    whatever `yulon.local/*` image Docker lists.
+    """
+    seen: set[str] = set()
+    if spec is not None:
+        for container in (spec.db, spec.world, spec.auth):
+            proc = _docker(
+                ["inspect", container, "--format", "{{.Image}}"],
+                timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                wsl_distro=wsl_distro,
+            )
+            _docker_must_answer(proc)
+            image = proc.stdout.strip() if proc.returncode == 0 else ""
+            if image and image not in seen:
+                seen.add(image)
+                yield image
+    for ref in images:
+        if ref and ref not in seen:
+            seen.add(ref)
+            yield ref
+    proc = _docker(
+        [
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+            "--filter",
+            "reference=yulon.local/*",
+        ],
+        timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+        wsl_distro=wsl_distro,
+    )
+    _docker_must_answer(proc)
+    if proc.returncode == 0:
+        listed = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        # The ones in `later` go after the rest, so a long list of an install's own images does not
+        # use up the cap before another image is reached (T622).
+        usable = [r for r in listed if "<none>" not in r]
+        usable = [r for r in usable if r not in later] + [r for r in usable if r in later]
+        for ref in usable[:_LISTED_IMAGES]:
+            if ref not in seen:
+                seen.add(ref)
+                yield ref
+
+
+def _server_holder(
+    name: str,
+    *,
+    here: bool,
+    ours: bool,
+    known: bool,
+    wsl_distro: str | None,
+    timeout: float = _CLAIM_ASK_TIMEOUT,
+) -> ServerHolder:
+    """What the daemon says about the reservation `name`: press, who, pid and when."""
+    fmt = "{{.Id}}\t{{.Created}}" + "".join(
+        f'\t{{{{index .Config.Labels "{key}"}}}}'
+        for key in (PRESS_LABEL, WHO_LABEL, PID_LABEL, HOST_LABEL)
+    )
+    proc = _docker(["inspect", name, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
+    parts = (
+        [*proc.stdout.strip().split("\t"), "", "", "", "", "", ""][:6]
+        if proc.returncode == 0
+        else []
+    )
+    if not parts:
+        return ServerHolder(name, "", ours=ours, here=here, known=False, wsl_distro=wsl_distro)
+    return ServerHolder(
+        name,
+        parts[0],
+        press=parts[2],
+        who=parts[3],
+        pid=parts[4],
+        created=parts[1],
+        host=parts[5],
+        ours=ours,
+        here=here,
+        known=known,
+        wsl_distro=wsl_distro,
+    )
+
+
+def _refused(holder: ServerHolder, label: str, this_press: str) -> ServerReserved:
+    """The refusal for a reservation `holder` holds: its sentence, by whose it is."""
+    if holder.ours and not holder.here and holder.live_here() is not True:
+        said = forgetting.server_reservation_left(label, holder.name, this_press)
+    elif not holder.known:
+        said = forgetting.server_reservation_unsaid(label, holder.name, this_press)
+    elif holder.here:
+        said = (
+            f"This Yu'lon is already working on {label} ({holder.press or 'a job'}). Nothing "
+            f"was changed. Wait for it to finish, then press “{this_press}” again."
+        )
+    else:
+        said = forgetting.server_busy_elsewhere(
+            label, holder.press, holder.since(), holder.who, this_press
+        )
+    return ServerReserved(said, holder)
+
+
+@contextmanager
+def server_claim(
+    server_dir: Path | str,
+    *,
+    press: str,
+    images: Sequence[str] = (),
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
+    label: str | None = None,
+    this_press: str | None = None,
+    up_timeout: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> Iterator[ClaimHeld]:
+    """Reserve this server across processes while inside; a press goes ahead only inside one (T568).
+
+    T543's claim, per server: a container `yulon-busy-<server folder id>` that the daemon
+    refuses a second of, so of two Yu'lons on one daemon (a second OS user, a Windows and a
+    WSL one on Docker Desktop) only one runs an Update, Rebuild, Start, Stop or SQL install
+    at a time. It lives exactly as long as this process (`docker run --rm -i ... cat` with
+    a held stdin), so there is no stale lock to time out: a crash ends it in about a second.
+
+    Re-entrant in this process: a nested take (Update -> its own Rebuild, a press's own stop
+    and recreate) shares the one container, its press label and its `lost` event; the last
+    exit releases it. A reservation found in place is never removed here, whoever's.
+
+    Yields a `ClaimHeld`; its `lost` is set by a watcher if the container ends before the
+    press lets it go (Docker restarted, `docker rm -f` from elsewhere).
+
+    Raises:
+        ServerReserved: another process (or an earlier run of this Yu'lon) holds it.
+        ServerReservationUnavailable: no reservation could be made.
+    """
+    this = this_press or press
+    name_of = label or Path(server_dir).name or "this server"
+    if not RESERVATIONS_ON:
+        yield ClaimHeld("", threading.Event())
+        return
+    ident = folder_id(Path(server_dir))
+    if ident is None:
+        raise ServerReservationUnavailable(
+            forgetting.server_reservation_unavailable(
+                name_of,
+                f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
+                "file is there, delete it; if the folder is read-only, make it writable.",
+            ),
+            # A folder that will not take a new id file is one Yu'lon cannot write (T152's
+            # own line); an id file that IS there but cannot be read, or holds no id, is a
+            # managed server two Yu'lons would both go ahead on (Codex review): refused.
+            moot=not os.path.lexists(Path(server_dir) / FOLDER_ID_FILE),
+        )
+    name = SERVER_CLAIM_PREFIX + ident
+    # `up_timeout` is the whole budget of the take (a Stop's, T607): the wait for this
+    # process's other reservation of the name to be made or let go, the image look-ups and the
+    # container coming up. Without one a press waits as long as it takes.
+    budget_end = None if up_timeout is None else time.monotonic() + up_timeout
+    lock = _reserve_lock(name)
+    if budget_end is None:
+        lock.acquire()
+    elif not lock.acquire(timeout=max(0.0, budget_end - time.monotonic())):
+        raise ServerReservationUnavailable(
+            forgetting.server_reservation_unavailable(
+                name_of,
+                "Another job of this Yu'lon was still making or letting go of this "
+                "server's reservation.",
+            )
+        )
+    try:
+        reservation = _RESERVATIONS.get(name)
+        if reservation is not None:
+            reservation.count += 1
+        else:
+            reservation = _new_reservation(
+                name,
+                press,
+                this,
+                name_of,
+                images,
+                spec,
+                wsl_distro,
+                cancel,
+                budget_end,
+                avoid_images,
+            )
+            _RESERVATIONS[name] = reservation
+    finally:
+        lock.release()
+    try:
+        yield reservation.held
+    finally:
+        # The one letting go decides how long to wait, not the press that made it (T607 review):
+        # a Stop that outlives a Rebuild's reservation is the last out, and must not hang.
+        _let_go(
+            name,
+            lock,
+            reservation,
+            quick=budget_end is not None,
+            patient=budget_end is None,
+            wsl_distro=reservation.claim.wsl_distro,
+        )
+
+
+def _let_go(
+    name: str,
+    lock: threading.Lock,
+    reservation: _Reservation,
+    *,
+    quick: bool,
+    patient: bool,
+    wsl_distro: str | None = None,
+) -> None:
+    """Drop one hold on `reservation`; the last one releases the container.
+
+    A `quick` release (a Stop's) gives each step `_QUICK_RELEASE_SECONDS`, and waits that long
+    for the per-name lock: if another job of this process holds it, the release is handed to a
+    background thread that waits as long as it takes, and the Stop goes on.
+    """
+    if patient:
+        lock.acquire()
+    elif not lock.acquire(timeout=_QUICK_RELEASE_SECONDS):
+        threading.Thread(
+            target=_let_go,
+            args=(name, lock, reservation),
+            kwargs={"quick": quick, "patient": True, "wsl_distro": wsl_distro},
+            name="yulon-busy-release",
+            daemon=True,
+        ).start()
+        return
+    try:
+        reservation.count -= 1
+        if not reservation.count:
+            del _RESERVATIONS[name]
+            reservation.letting_go.set()  # before the release ends the CLI
+            _release_claim(reservation.claim, quick=quick)
+            # Gone before the lock is let go: the next press of this process must not
+            # meet it dying (`_GONE_WAIT_SECONDS`).
+            _wait_gone(
+                name,
+                wsl_distro,
+                limit=_QUICK_RELEASE_SECONDS if quick else None,
+                container=reservation.claim.container,
+            )
+    finally:
+        lock.release()
+
+
+def _new_reservation(
+    name: str,
+    press: str,
+    this_press: str,
+    label: str,
+    images: Sequence[str],
+    spec: ContainerSpec | None,
+    wsl_distro: str | None,
+    cancel: threading.Event | None,
+    budget_end: float | None,
+    avoid_images: Sequence[str] = (),
+) -> _Reservation:
+    """Make the container `name`; the daemon's refusal of a second one is the exclusion."""
+    labels = [
+        (PRESS_LABEL, press),
+        (WHO_LABEL, _who()),
+        (PID_LABEL, str(os.getpid())),
+        (HOST_LABEL, socket.gethostname()),
+    ]
+    claim: _Claim | None = None
+    last: ClaimUnavailable | None = None
+    chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
+    waited_for_a_dying_one = False
+    while True:
+        try:
+            image = next(chain, None)
+        except ClaimDockerDown as down:
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(down)), moot=True
+            ) from down
+        except ClaimDockerSilent as silent:
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(silent))
+            ) from silent
+        if image is None:
+            break
+        try:
+            claim = _take_claim(
+                name,
+                image,
+                cancel,
+                again=True,
+                labels=labels,
+                wsl_distro=wsl_distro,
+                up_timeout=(
+                    None if budget_end is None else _ask_budget(budget_end, _CLAIM_UP_TIMEOUT)
+                ),
+            )
+            break
+        except ClaimDockerSilent as silent:  # the budget ran out between two looks
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(silent))
+            ) from silent
+        except FolderClaimed as claimed:
+            # Asked again with the longer bound: the 1 s look that decided "whose" fails twice
+            # on a loaded daemon, and a holder is then not "unknown", only unseen.
+            try:
+                facts = _claim_facts(
+                    name,
+                    timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                    wsl_distro=wsl_distro,
+                )
+            except ClaimDockerSilent as silent:
+                raise ServerReservationUnavailable(
+                    forgetting.server_reservation_unavailable(label, str(silent))
+                ) from silent
+            if (
+                facts is not None
+                and facts.status not in ("running", "created")
+                and not waited_for_a_dying_one
+            ):
+                # Docker is already removing it (a press that ended a moment ago): nobody's
+                # hold. Waited for, then taken once more; never removed here.
+                waited_for_a_dying_one = True
+                if _wait_gone(
+                    name,
+                    wsl_distro,
+                    None if budget_end is None else max(0.0, budget_end - time.monotonic()),
+                ):
+                    chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
+                    continue
+            holder = _server_holder(
+                name,
+                here=claimed.here,
+                ours=claimed.ours if facts is None else facts.owner == owner_id(),
+                known=claimed.known or facts is not None,
+                wsl_distro=wsl_distro,
+                # Of what is left of a Stop's budget, but still long enough to read a holder
+                # for the question Stop asks.
+                timeout=(
+                    _CLAIM_ASK_TIMEOUT
+                    if budget_end is None
+                    else min(_CLAIM_ASK_TIMEOUT, max(0.3, budget_end - time.monotonic()))
+                ),
+            )
+            raise _refused(holder, label, this_press) from claimed
+        except ClaimImageGone as gone:  # the next image of the chain
+            last = gone
+        except ClaimUnavailable as exc:
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(exc)),
+                moot=isinstance(exc, ClaimDockerDown),
+            ) from exc
+    if claim is None:
+        raise ServerReservationUnavailable(
+            forgetting.server_reservation_unavailable(
+                label,
+                "Docker has none of the images this server runs from (the last one asked "
+                f"for was {last.args[0] if last and last.args else 'none'}); press "
+                f"“{server_build_presses.REBUILD}” on the Server tab to make them again.",
+            )
+        )
+    lost = threading.Event()
+    letting_go = threading.Event()
+    threading.Thread(
+        target=_watch_claim, args=(claim, lost, letting_go), name="yulon-busy-watch", daemon=True
+    ).start()
+    held = ClaimHeld(claim.name, lost, lambda: _claim_still_ours(claim))
+    return _Reservation(held, claim, letting_go, press)
+
+
+def end_reservation(holder: ServerHolder, *, wsl_distro: str | None = None) -> bool:
+    """Remove the reservation `holder` read, by the container id it carried; True once gone.
+
+    For "Stop anyway" (the owner's decision of 2026-10-09) and for "Clear it" on this user's
+    own leftover. By id and never by name: a newer reservation of the same name is another
+    press's and is not removed. A holder with no id (Docker would not say) removes nothing.
+    """
+    distro = wsl_distro or holder.wsl_distro
+    if not holder.container:
+        return False
+    removed = _remove_claim(holder.container, wsl_distro=distro)
+    # "Removal already in progress" is not a failure, only not yet done: the Stop that follows
+    # must not meet the container dying.
+    return _wait_gone(holder.name, distro, container=holder.container) if holder.name else removed
+
+
+def reservation_holder(
+    server_dir: Path | str, *, wsl_distro: str | None = None
+) -> ServerHolder | None:
+    """Who holds `server_dir`'s reservation now, or None when nobody does (inspect only; T568)."""
+    name = reservation_name(server_dir)
+    if name is None:
+        return None
+    facts = _claim_facts(name, timeout=_CLAIM_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+    if facts is None:
+        return None
+    return _server_holder(
+        name,
+        here=name in _RESERVATIONS,
+        ours=facts.owner == owner_id(),
+        known=True,
+        wsl_distro=wsl_distro,
+    )
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"

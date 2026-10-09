@@ -33,7 +33,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -45,6 +45,7 @@ from yulon import (
     client_names,
     docker,
     folder_swap,
+    forgetting,
     links,
     module_answers,
     module_moves,
@@ -72,6 +73,7 @@ from yulon.git import (
     HistoryReader,
     ReflogEntry,
     ReflogReader,
+    RefreshGit,
     RemoteReader,
     RevRestorer,
     RunnerGit,
@@ -1086,6 +1088,9 @@ would have no record left. This file outlives the clone: a later Remove of the i
 it back or names it again. A list of `{"item", "addon", "target", "aside"}`, atomic.
 """
 
+
+PUT_FOLDERS_BACK_PRESS = "Put your add-on folders back"
+"""The press another Yu'lon's refusal names while this one writes the asides note (T568)."""
 
 _ADDON_ASIDES_LOCK = threading.RLock()
 """Serialises every read-change-write of `ADDON_ASIDES_FILE` in this process (round 3).
@@ -3369,6 +3374,7 @@ class Applier:
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
@@ -3466,6 +3472,17 @@ class Applier:
         # is `PendingSql`'s closed bug wearing a different hat. Absent means the
         # behaviour every caller had before this landed, byte for byte.
         self._start_database = start_database
+        # T568: "reserve this server across processes while I send SQL" -- a seam for the
+        # same reason as the two above: the primitive is a Docker container
+        # (`docker.server_claim()`) and this module never touches Docker. Called with the
+        # press's name; the context it returns is held from the first running-world reading
+        # to the last statement and its check, so two Yu'lons on one server cannot both send
+        # one package's file (T599: the read-then-send of a ledger entry is inside it too).
+        # Absent means the behaviour every caller had before: no cross-process hold.
+        self._hold_server = hold_server
+        # The `lost` event of the hold this press holds, while it holds one (T568).
+        self._hold_lost: threading.Event | None = None
+        self._held_depth = 0
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -3663,7 +3680,7 @@ class Applier:
         log = _Log()
         if complete is None:
             complete = self._recompleter_for(manifest)
-        with self._says_the_database_is_up(log):
+        with self._held(f"Install {manifest.name}"), self._says_the_database_is_up(log):
             return self._install(
                 manifest,
                 values,
@@ -3816,6 +3833,7 @@ class Applier:
         # T596: nothing at the path before this press, so a completion refused
         # below can take the folder back and "Nothing was changed" stays true.
         first = not os.path.lexists(clone)
+        self._check_hold()
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -3974,8 +3992,11 @@ class Applier:
             if complete is not None:
                 self._refuse_a_players_addon(manifest, replace_addons, log)
             self._refuse_links(manifest, clone)
+            self._check_hold()
             self._deploy(manifest, clone, log)
+            self._check_hold()
             self._folders(manifest, log)
+            self._check_hold()
             self._patches(manifest, clone, vals, "install", log)
             # Both SQL passes are refused as one, BEFORE either runs: the guard's
             # own sentence says no rows were written, and after the install-time
@@ -4000,16 +4021,19 @@ class Applier:
             if moving:
                 # D5: a put-back runs no SQL, and its report says these were kept.
                 module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
+        self._check_hold()
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
         # a `configure()` nothing calls. After `_conf()`, because a configure
         # patch may target the conf that step activates (`mod-ale`'s does),
         # which is the state a later `configure()` always finds.
+        self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
         if first_configure_sql and restore is None:
             self._sql(manifest, clone, vals, "configure", log)
         try:
+            self._check_hold()
             self._client(manifest, clone, log)
             self._dbc(manifest, clone, log)
         except BaseException as failure:
@@ -4053,6 +4077,8 @@ class Applier:
                 ]
             log.skipped.extend(log.client_left_behind)  # an install's report has no left_behind
             log.client_left_behind.clear()
+        # No check here: every file is written by now, and stopping would only leave a complete
+        # install marked unfinished.
         self._finish_claim(
             manifest,
             clone,
@@ -4329,14 +4355,15 @@ class Applier:
             if release is not None
             else None
         )
-        return self.install(
-            manifest,
-            values,
-            first_configure_sql=False,
-            release=release,
-            expect_head=checked,
-            record_move=True,
-        )
+        with self._held(f"Update {manifest.name}"):
+            return self.install(
+                manifest,
+                values,
+                first_configure_sql=False,
+                release=release,
+                expect_head=checked,
+                record_move=True,
+            )
 
     def last_update(self, manifest: Manifest) -> LastUpdate | None:
         """The commit `manifest`'s clone was on before its last update, or None (T557).
@@ -4464,7 +4491,7 @@ class Applier:
             )
         log = _Log()
         try:
-            with self._says_the_database_is_up(log):
+            with self._held(f"Put back {manifest.name}"), self._says_the_database_is_up(log):
                 return self._install(
                     manifest,
                     values,
@@ -4898,6 +4925,10 @@ class Applier:
         primitive it applies is real and its UI is a roadmap item, but do not
         count it when reasoning about what actually guards a user today.
         """
+        with self._held(f"Configure {manifest.name}"):
+            return self._configure(manifest, values)
+
+    def _configure(self, manifest: Manifest, values: Mapping[str, str] | None) -> ApplyReport:
         vals = self._values(manifest, values)
         log = _Log()
         self._check_values(manifest, "configure", vals, log)
@@ -4912,8 +4943,10 @@ class Applier:
             # nothing.
             self._require_own_clone(manifest, clone, "configure")
         self._refuse_checkout_links(manifest, clone, "configure", vals)
+        self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
+        self._check_hold()
         self._conf(manifest, clone, vals, log)
         self._remember(manifest, values, log)
         return self._report("configure", manifest, log)
@@ -4929,6 +4962,10 @@ class Applier:
         """
         self._refuse_a_server_source(manifest)
         self._refuse_a_route_item_that_is_more(manifest)
+        with self._held(f"Remove {manifest.name}"):
+            return self._remove(manifest, values)
+
+    def _remove(self, manifest: Manifest, values: Mapping[str, str] | None) -> ApplyReport:
         vals = self._values(manifest, values)
         relative = reapplies_on_top(manifest)
         applied, _why = self.applied_record(manifest) if relative else (None, "")
@@ -4946,6 +4983,7 @@ class Applier:
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
         self._refuse_checkout_links(manifest, clone, "remove", vals)
+        self._check_hold()
         self._patches(manifest, clone, vals, "remove", log)
         sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
@@ -4972,16 +5010,20 @@ class Applier:
                     "row will keep reading Installed"
                 )
         for step in manifest.deploy:
+            self._check_hold()
             self._undeploy(step, clone, log)
+        self._check_hold()
         self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
         # files are this app's own live in the clone's claim file.
+        self._check_hold()
         self._unclient(manifest, clone, log)
         if clone.exists():
             # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
             # a bare rmtree stops at the first one, having already deleted an
             # unknown part of the checkout. Reported from a real install:
             # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
+            self._check_hold()
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         # T557, after the remove: an update or a skipped version of a module
@@ -5908,6 +5950,59 @@ class Applier:
         log: _Log,
         undo: Mapping[str, str] | None = None,
     ) -> None:
+        """Run this action's SQL under the server's cross-process hold, when it sends any (T568).
+
+        The hold is taken only for an action with a direct SQL step (not `db-import`, which
+        the server's own importer applies), and covers `_sql_held()` whole: the world
+        readings, the database start, any ledger read, and every statement.
+        """
+        direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
+        with self._held(f"{when.capitalize()} {manifest.name}", needed=direct):
+            self._sql_held(manifest, clone, vals, when, log, undo)
+
+    @contextmanager
+    def _held(self, press: str, *, needed: bool = True) -> Iterator[None]:
+        """The server's cross-process hold for the block, shared with an outer one (T568, T607).
+
+        An Install, a Remove and a Configure take it for the whole action: they clone into
+        `modules/`, copy files into the server folder, make folders and edit conf files, which
+        is what another Yu'lon's Rebuild or Update reads while it builds. The SQL inside shares
+        that hold (one reservation, one loss event, the outer press's name); a bare `_sql()`
+        takes its own, and only for an action that sends direct SQL.
+        """
+        if not needed or self._hold_server is None or self._held_depth:
+            yield
+            return
+        with ExitStack() as held:
+            held_by: object = None
+            try:
+                held_by = held.enter_context(self._hold_server(press))
+            except docker.ServerReservationUnavailable as unavailable:
+                # Docker not answering, or a folder that takes no id file: met by the press in
+                # its own words, as every other press does (cold review of T568).
+                if not unavailable.moot:
+                    raise ApplyRefusal(str(unavailable)) from unavailable
+            except SaidByYulon as refused:
+                # The holder's own sentence ("Another Yu'lon is working on ..."), shown as
+                # written; nothing was sent.
+                raise ApplyRefusal(str(refused)) from refused
+            self._hold_lost = getattr(held_by, "lost", None)
+            self._held_depth += 1
+            try:
+                yield
+            finally:
+                self._held_depth -= 1
+                self._hold_lost = None
+
+    def _sql_held(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        when: When,
+        log: _Log,
+        undo: Mapping[str, str] | None = None,
+    ) -> None:
         """Run this action's SQL steps; a relative manifest's as one recorded text (T115).
 
         A `reapplies_on_top()` manifest's install or remove goes through
@@ -6519,6 +6614,22 @@ class Applier:
             return None, f"{type(exc).__name__}: {exc}"
         return bool(rows.strip()), ""
 
+    def _check_hold(self) -> None:
+        """Between an action's steps: stop at once if another Yu'lon's "Stop anyway" ended the hold.
+
+        The SQL checks between its statements (`_refuse_if_the_hold_was_lost`); this is the same
+        for the rest of an Install, Remove or Configure -- the clone, the copies, the folders,
+        the patches and the conf edits -- so nothing more is written under a server that
+        another Yu'lon has just stopped (T607 review).
+        """
+        if self._hold_lost is not None and self._hold_lost.is_set():
+            raise ApplyRefusal(forgetting.ACTION_HOLD_LOST)
+
+    def _refuse_if_the_hold_was_lost(self) -> None:
+        """No statement is sent once another Yu'lon's Stop anyway ended this press's hold (T568)."""
+        if self._hold_lost is not None and self._hold_lost.is_set():
+            raise ApplyRefusal(forgetting.SQL_HOLD_LOST)
+
     def _precondition_met(self, step: SqlStep, log: _Log) -> bool:
         """Whether this step's turn has come — and if not, why, in the report.
 
@@ -6546,6 +6657,7 @@ class Applier:
           precondition is about ONE step's own tables; a manifest's other steps
           are not implicated and are not held back by it.
         """
+        self._refuse_if_the_hold_was_lost()
         if step.precondition is None:
             return True
         found, why = self._ask_db(step.precondition)
@@ -6733,6 +6845,63 @@ class Applier:
             log.done.append(f"client {step.src} → {step.dest}")
         log.client_copies = list(log.current_copies.values())
 
+    def _missing_addon_files(self, manifest: Manifest) -> list[tuple[Path, Path]]:
+        """`(clone file, client path)` for each file of an `addons` step the client lacks (T612).
+
+        Reads the existing clone and the client folder and nothing else: no git, no network.
+        A file still there under any spelling of its name (`_plan_onto()`) is not missing,
+        whatever the player did to its contents.
+        """
+        clone = self.clone_dir(manifest)
+        if self.client_dir is None or not clone.is_dir():
+            return []
+        lacking: list[tuple[Path, Path]] = []
+        for step in manifest.client:
+            src = clone / step.src
+            if step.dest != "addons" or not src.is_dir():
+                continue
+            _look_again(clone, step.src)
+            target = self._client_target(step, src)
+            lacking.extend(
+                (source, dest)
+                for source, dest in _plan_onto(src, target)
+                if not os.path.lexists(dest)
+            )
+        return lacking
+
+    def client_files_missing(self, manifest: Manifest) -> tuple[Path, ...]:
+        """The client files of `manifest`'s add-on steps that its clone has and the client lacks.
+
+        T612. A deleted ready-to-play client, made again, or an add-on folder deleted by hand,
+        leaves the clone installed and the files gone. Local reads only.
+        """
+        return tuple(dest for _source, dest in self._missing_addon_files(manifest))
+
+    def put_back_client_files(self, manifest: Manifest) -> tuple[Path, ...]:
+        """Copy back, from the existing clone, each add-on file the client lacks; the paths put.
+
+        T612. Never touches git or the network, never overwrites a file that is there (an
+        edit stays), and records nothing: the clone's claim is what it was. Writes through
+        no link (`_link_on_the_way()`).
+
+        Raises:
+            ApplyError: a link now stands on the way to a file, or a file could not be copied.
+        """
+        ready = self.client_dir is not None and self._writes_a_ready_client()
+        put: list[Path] = []
+        for source, dest in self._missing_addon_files(manifest):
+            link = self._link_on_the_way(dest, ready, file=True)
+            if link is not None:
+                raise ApplyError(
+                    f"{link} is a link to another place, so {manifest.id} was not put back "
+                    "into your game client there: writing through it would change what it "
+                    "points to."
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _copy_unshared(source, dest)
+            put.append(dest)
+        return tuple(put)
+
     def _set_addon_folder_aside(
         self, step: ClientFile, target: Path, log: _Log, item_id: str
     ) -> None:
@@ -6752,20 +6921,28 @@ class Applier:
                 "note where it would move it, so it was not moved and nothing was copied over it."
             )
         key = str(target)
-        log.current_copies[key] = ClientCopy(
-            step=step.src, path=key, sha256="", aside=str(aside), addon=target.name, folder=True
-        )
-        note = {"item": item_id, "addon": target.name, "target": key, "aside": str(aside)}
-        noted: list[dict[str, str]] | None = None
-        try:
-            log.persist(self._claim_copies(log))
-            noted = _add_addon_aside(self.server_dir, note)
-            os.rename(target, aside)
-        except BaseException:
-            self._unplan(log, key, None)
-            if noted is not None:
-                self._forget_addon_aside(note["aside"])
-            raise
+        # The note is this server's shared state: written under the server's cross-process hold
+        # (T568), which an Install already holds (`_held()` is shared with an outer one).
+        with self._held(f"Set your {target.name} add-on aside"):
+            log.current_copies[key] = ClientCopy(
+                step=step.src,
+                path=key,
+                sha256="",
+                aside=str(aside),
+                addon=target.name,
+                folder=True,
+            )
+            note = {"item": item_id, "addon": target.name, "target": key, "aside": str(aside)}
+            noted: list[dict[str, str]] | None = None
+            try:
+                log.persist(self._claim_copies(log))
+                noted = _add_addon_aside(self.server_dir, note)
+                os.rename(target, aside)
+            except BaseException:
+                self._unplan(log, key, None)
+                if noted is not None:
+                    self._forget_addon_aside(note["aside"])
+                raise
         log.new_asides[key] = str(aside)
         log.done.append(
             f"set your own {target.name} add-on aside as {aside.name} in {target.parent}"
@@ -7619,14 +7796,16 @@ class Applier:
         note stays, so a later Remove can do it. `noting=False` (Uninstall, which deletes
         the server folder and the note with it) names the path and promises no note.
         """
-        with _ADDON_ASIDES_LOCK:
+        # The server's note and the player's folders: under the server's cross-process hold
+        # (T568) as well as this process's lock. Shared with an Install's or Remove's own hold.
+        with self._held(PUT_FOLDERS_BACK_PRESS), _ADDON_ASIDES_LOCK:
             self._put_players_folders_back_locked(
                 copies, log, item_id=item_id, keep=keep, noting=noting
             )
 
     def _forget_addon_aside(self, aside: str) -> None:
-        """Drop one aside's note, under the lock; logged when it cannot be."""
-        with _ADDON_ASIDES_LOCK:
+        """Drop one aside's note, under the server hold and the lock; logged when it cannot be."""
+        with self._held(PUT_FOLDERS_BACK_PRESS), _ADDON_ASIDES_LOCK:
             noted = read_addon_asides(self.server_dir)
             left = [e for e in noted if _path_key(Path(e["aside"])) != _path_key(Path(aside))]
             try:
@@ -7947,6 +8126,9 @@ class Applier:
         if self.sql is None:
             log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
             return
+        # T568 (Codex review): the relative text is a sent statement too, and a record is
+        # marked pending before it; a hold another Yu'lon's Stop anyway ended sends neither.
+        self._refuse_if_the_hold_was_lost()
         db, text = self._relative_text(manifest, when, vals, undo)
         after = (
             {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}
@@ -8681,6 +8863,8 @@ def cached_module_updates(
     newest_release: Callable[[str], upstream.Release | None] | None = None,
     compare_commits: CompareCommits | None = None,
     now: int | None = None,
+    cancel: threading.Event | None = None,
+    keep_count_on_failure: bool = False,
 ) -> tuple[ModuleUpdate, ...]:
     """`module_updates()`, with each row kept for a day -- T124's rule, for modules (T126).
 
@@ -8695,10 +8879,25 @@ def cached_module_updates(
 
     A clone whose HEAD cannot be read is counted every time and never cached:
     there is nothing to say what a cached row would be valid for.
+
+    **The background refresh (T621) asks with two more arguments.** `cancel`, once set,
+    stops the walk before the next clone is asked, and the clone being asked when it was set
+    is not cached at all (neither as a count nor as a failure): its answer is a cut-off
+    fetch's. `keep_count_on_failure` makes a clone that could not be asked keep the count
+    it had, while it is still the same commit, and be asked again after `RETRY_SECONDS`
+    (the hour an unanswered row has always waited): a dead line at breakfast must not
+    blank the chip the player saw yesterday. The Check press passes neither and still shows
+    a failure as a failure.
     """
     reader: CountingGit = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     clock = upstream.now_unix() if now is None else now
     resolve = newest_release if newest_release is not None else _github_newest_release
+    if cancel is not None:
+        resolve = _abandoned_on_cancel(resolve, cancel)
+        compare_commits = _abandoned_on_cancel(
+            compare_commits if compare_commits is not None else _github_compare_or_refused,
+            cancel,
+        )
     kept = _read_module_updates(server_dir, clock)
     root = server_dir / CLONE_DIRS[kind]
     try:
@@ -8709,13 +8908,15 @@ def cached_module_updates(
     github = _github_counts(server_dir, compare_commits, clock)
     rows: list[ModuleUpdate] = []
     asked = False
+    stale = _read_module_updates_any_age(server_dir) if keep_count_on_failure else {}
     for path in entries:
         head = reader.head_sha(path) if (path / ".git").is_dir() else None
         old = kept.get((kind, path.name))
         if head is not None and old is not None and old.head == head:
             rows.append(replace(old, path=path))
             continue
-        asked = True
+        if cancel is not None and cancel.is_set():
+            break
         row = _module_update(
             path,
             kind,
@@ -8725,11 +8926,115 @@ def cached_module_updates(
             resolve,
             github,
         )
-        rows.append(replace(row, head=head or "", checked_unix=clock))
-    rows = github.settle(rows)
+        if cancel is not None and cancel.is_set():
+            break
+        asked = True
+        counted = replace(row, head=head or "", checked_unix=clock)
+        before = stale.get((kind, path.name))
+        if (
+            counted.behind is None
+            and counted.is_checkout
+            and head is not None
+            and before is not None
+            and before.head == head
+            and before.behind is not None
+        ):
+            # Expires after `RETRY_SECONDS`, by the day's own freshness rule.
+            counted = replace(
+                before,
+                path=path,
+                checked_unix=clock - upstream.MAX_AGE_SECONDS + upstream.RETRY_SECONDS,
+            )
+        rows.append(counted)
+    if cancel is not None and cancel.is_set():
+        # No more GitHub asks, and a row that still owes GitHub its question (a number a
+        # shallow checkout cannot prove) is left out of the cache, not kept as answered.
+        rows = [row for row in rows if not isinstance(row.behind, Behind)]
+    else:
+        rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(_without_put_back_tips(server_dir, rows))
+
+
+_CANCEL_POLL_SECONDS = 0.2
+"""How often `_abandoned_on_cancel()` looks at its `cancel` while a call is out."""
+
+
+def _abandoned_on_cancel(call: Callable[..., Any], cancel: threading.Event) -> Callable[..., Any]:
+    """`call`, which a cancel stops waiting for within `_CANCEL_POLL_SECONDS` (T621).
+
+    GitHub's two lookups are bounded only by their own ten-second timeout, and a Quit must
+    not wait on that. The call runs on a daemon thread; once `cancel` is set the caller gets
+    `None` ("no answer") at once and the thread finishes its one GET and ends by itself.
+    """
+
+    def ask(*args: Any) -> Any:
+        if cancel.is_set():
+            return None
+        answer: list[Any] = []
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                answer.append(call(*args))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                answer.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="update-refresh-lookup", daemon=True).start()
+        while not done.wait(_CANCEL_POLL_SECONDS):
+            if cancel.is_set():
+                return None
+        if isinstance(answer[0], BaseException):
+            raise answer[0]
+        return answer[0]
+
+    return ask
+
+
+def refresh_module_updates(
+    server_dir: Path,
+    *,
+    kind: ManifestType,
+    cancel: threading.Event,
+    git: CountingGit | None = None,
+    branches: Mapping[str, str | None] | None = None,
+    releases: Mapping[str, str] | None = None,
+    newest_release: Callable[[str], upstream.Release | None] | None = None,
+    compare_commits: CompareCommits | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """The Modules tab's counts, kept up to date in the background (T621).
+
+    `cached_module_updates()` with a leash: every fetch is bounded and ends when `cancel` is
+    set (`RefreshGit`), a clone that cannot be asked keeps its last count, and a clone
+    counted within the day is not asked at all -- so this may be called as often as a timer
+    likes and goes to the network once per clone per day. The rows land in the same file the
+    Check press and the Tortoise addon note read.
+
+    Host git only: where the host has none, the Check press falls back to a container, and a
+    `docker run` is not something to start unasked, so nothing is counted. Returns `()` for
+    that and for a run that was cancelled; the caller keeps what it had.
+    """
+    if git is None:
+        if not git_available():
+            return ()
+        git = RefreshGit(cancel)
+    rows = cached_module_updates(
+        server_dir,
+        kind=kind,
+        git=git,
+        branches=branches,
+        releases=releases,
+        newest_release=newest_release,
+        compare_commits=compare_commits,
+        now=now,
+        cancel=cancel,
+        keep_count_on_failure=True,
+    )
+    return () if cancel.is_set() else rows
 
 
 def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:

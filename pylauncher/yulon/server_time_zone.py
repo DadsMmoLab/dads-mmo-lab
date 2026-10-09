@@ -19,6 +19,8 @@ the view runs them on its job runner.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -283,16 +285,31 @@ class TimeZoneRoute:
 
     entry: CatalogEntry
     server_dir: Path
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None
+    """The server's cross-process hold (T622): the write is made inside it, and another Yu'lon
+    working on the server refuses it with `docker.ServerHeldError`, nothing written. The read
+    takes none. `None`, as in a harness, holds nothing."""
 
     def read(self) -> Reading:
         return read(self.entry, self.server_dir)
 
     def write(self, zone: str) -> Written:
-        return write(self.entry, self.server_dir, zone)
+        if self.hold_server is None:
+            return write(self.entry, self.server_dir, zone)
+        with self.hold_server(HOLD_PRESS):
+            return write(self.entry, self.server_dir, zone)
 
 
-def time_zone_route(entry: CatalogEntry, server_dir: Path) -> TimeZoneRoute | None:
+HOLD_PRESS = "Set the server's time zone"
+
+
+def time_zone_route(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+) -> TimeZoneRoute | None:
     """This install's route, or `None` for a game whose compose files Yu'lon does not make."""
     if not time_zone.services(entry):
         return None
-    return TimeZoneRoute(entry, server_dir)
+    return TimeZoneRoute(entry, server_dir, hold_server)

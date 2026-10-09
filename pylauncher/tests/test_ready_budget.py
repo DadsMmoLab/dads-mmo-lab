@@ -42,7 +42,7 @@ import pytest
 from tests.support_native import ENTRY, TBC, Recorder
 from yulon import docker, resources
 from yulon.catalog import native
-from yulon.catalog.catalog import CatalogEntry, ReadyMarkers
+from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 
@@ -124,6 +124,8 @@ class FakeWorld:
     print_every_s: float = 60.0
     restart_every_s: float | None = None
     fatal_after_s: float | None = None
+    fatal_text: str = "Correct *.map files not found in data directory."
+    """What the world prints once `fatal_after_s` has passed (one or more lines)."""
     status: str = "running"
 
     aborts_after_ready_s: float | None = None
@@ -220,7 +222,7 @@ class FakeWorld:
             # makes every healthy server look restarted.
             lines.append(BANNER_LINE)
         if self.fatal_after_s is not None and self.elapsed >= self.fatal_after_s:
-            lines.append("Correct *.map files not found in data directory.")
+            lines.extend(self.fatal_text.splitlines())
         if abort_at is not None and self.elapsed >= abort_at:
             lines += list(ABORT_LINES)
         restarts = 0 if self.restart_every_s is None else int(self.elapsed / self.restart_every_s)
@@ -400,6 +402,34 @@ def test_a_fatal_line_ends_the_wait_and_the_whole_line_is_quoted_back() -> None:
 
     assert "Correct *.map files not found in data directory." in str(caught.value)
     assert "Database .* not found" not in str(caught.value), "the pattern, not the line"
+
+
+def test_a_failed_world_update_is_refused_in_one_sentence_naming_the_file_and_the_error() -> None:
+    """T600: the install's wait says which update failed and what MariaDB said.
+
+    Mutation: let `_dying_words()` quote the bare `failed to apply.` line, and the file name
+    and the error are not in the refusal.
+    """
+    world = FakeWorld(
+        boot_s=float("inf"),
+        fatal_after_s=0.0,
+        fatal_text=(
+            "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+            "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+            "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply."
+        ),
+    )
+    tortoise = load_catalog().get("wow-tortoise")
+    assert tortoise.install.native is not None
+    markers = tortoise.install.native.ready
+    installer = _installer(world, tortoise)
+    with pytest.raises(InstallerError) as caught:
+        list(installer.wait_for_ready(_ctx(), markers))
+
+    message = str(caught.value)
+    assert "20260903063722_world.sql" in message
+    assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in message
+    assert "means it never will" not in message
 
 
 def test_a_server_that_prints_forever_is_stopped_at_the_ceiling() -> None:

@@ -11,7 +11,9 @@ particular module does; that is all in `manifests/wow-wotlk/` (§3).
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -21,6 +23,7 @@ from yulon.apply import (
     Applier,
     ApplyReport,
     ComposeDbc,
+    CountingGit,
     DbcCopier,
     DockerSql,
     FolderSource,
@@ -34,6 +37,7 @@ from yulon.apply import (
     read_ledger,
 )
 from yulon.apply import module_updates as apply_updates
+from yulon.apply import refresh_module_updates as refresh_cached
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git, RunnerGit
@@ -299,6 +303,7 @@ def applier(
     *,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
@@ -341,6 +346,7 @@ def applier(
         dbc=dbc,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
     )
 
 
@@ -374,6 +380,38 @@ def module_updates(
     press, each against what its manifest follows, and keeps each row a day.
     """
     reader: BehindReader = git if git is not None else RunnerGit()
+    branches, releases = _follows(user_game)
+    return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
+
+
+def refresh_module_updates(
+    server_dir: Path,
+    cancel: threading.Event,
+    *,
+    git: CountingGit | None = None,
+    user_game: str = GAME,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """The same count as `module_updates()`, in the background and bounded (T621).
+
+    Unlike the Check press (uncached since 8.7a) the background refresh keeps each row for a
+    day in the file Tortoise's rows already use (`apply.MODULE_UPDATES_FILE`), which is what
+    makes it once a day and lets a restart show yesterday's counts without a fetch.
+    """
+    branches, releases = _follows(user_game)
+    return refresh_cached(
+        server_dir,
+        kind="module",
+        cancel=cancel,
+        git=git,
+        branches=branches,
+        releases=releases,
+        now=now,
+    )
+
+
+def _follows(user_game: str) -> tuple[dict[str, str | None], dict[str, str]]:
+    """Each module's branch, and the GitHub slug of each that follows its releases (T126)."""
     branches: dict[str, str | None] = {}
     # T126: the modules whose manifest follows its releases, by GitHub slug.
     releases: dict[str, str] = {}
@@ -390,7 +428,7 @@ def module_updates(
                     releases[manifest.id] = slug
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
         logger.warning(f"could not read the wow-wotlk manifests for their branches: {exc}")
-    return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
+    return branches, releases
 
 
 def apply_module(

@@ -46,11 +46,11 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
-from yulon.ui import single_instance
+from yulon.ui import folder_picker, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon
-from yulon.ui.message_box import FittedMessageBox, show_information, show_warning
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import COLOR_TEXT_GOLD
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
@@ -60,6 +60,30 @@ logger = get_logger(__name__)
 
 QWIDGETSIZE_MAX = 16777215
 """Qt's "no maximum" for a widget dimension (`QWIDGETSIZE_MAX` in C++)."""
+
+BRING_FROM_ANOTHER = "Bring from another computer…"
+"""The tile press that builds a whole server from a move package (T601 level 2)."""
+MOVE_IN_FILE = ".yulon-move-in.json"
+"""`catalog.native.MOVE_IN_FILE` (pinned equal by a test): a folder a whole-server move is building.
+
+Spelled here, not imported, so this view does not import the install engine at module scope.
+"""
+MOVE_PACKAGE_FILTER = "Move packages (*.zip)"
+
+PackagePicker = Callable[[QWidget, str, Path], Path | None]
+YesNo = Callable[[QWidget, str, str], bool]
+
+
+def _unfinished_move(server_dir: Path) -> str:
+    return (
+        f"{server_dir} is a server being brought from another computer, and that did not "
+        f"finish. Press {BRING_FROM_ANOTHER} with the same file and this folder to carry on."
+    )
+
+
+def _qt_package_picker(parent: QWidget, title: str, start: Path) -> Path | None:
+    return folder_picker.pick_open_file(parent, title, start, MOVE_PACKAGE_FILTER)
+
 
 InstallerFactory = Callable[[CatalogEntry], InstallEngine]
 """What builds the engine for one entry.
@@ -444,9 +468,19 @@ class CatalogView(QWidget):
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
         wsl_distros: Callable[[], tuple[str, ...]] = platform.wsl_distros,
         dir_problem: Callable[[Path], str | None] = platform.server_dir_problem,
+        move_in: object | None = None,
+        pick_package: PackagePicker = _qt_package_picker,
+        ask_yes: YesNo = ask_yes_no,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # T601 level 2: `ui.move_in.MoveIn` (a plan for a file, the engine for a plan), or None
+        # to draw no "Bring from another computer…" press. Typed loosely here so this view
+        # does not import the move engine at module scope.
+        self._move_in = move_in
+        self._pick_package = pick_package
+        self._ask_yes = ask_yes
+        self._move_buttons: dict[str, QPushButton] = {}
         self._platform_id = platform_id
         self._dir_problem = dir_problem
         self._catalog = catalog
@@ -644,6 +678,21 @@ class CatalogView(QWidget):
         existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing(e))
         box.addWidget(existing)
         self._existing_buttons[entry.id] = existing
+        if self._move_in is not None:
+            bring = QPushButton(BRING_FROM_ANOTHER, frame)
+            bring.setIcon(dadcraft_icon("download", COLOR_TEXT_GOLD, 14))
+            bring.setObjectName(f"move-in-{entry.id}")
+            bring.setToolTip(
+                f"Build a {entry.name} server from a file packed on another computer with Pack "
+                "the whole server…: the same version, modules, settings, world and characters."
+            )
+            bring.clicked.connect(
+                lambda _checked=False, e=entry: self.bring_from_another_computer(e)
+            )
+            box.addWidget(bring)
+            self._move_buttons[entry.id] = bring
+            if entry.id in self._gated or entry.id in self._installed_dirs:
+                bring.setEnabled(False)
 
         # Only where a WSL-resident server can exist. On Linux, macOS, and on a
         # Windows box with no distros, this button would be an offer the machine
@@ -688,6 +737,11 @@ class CatalogView(QWidget):
         button = self._buttons[game_id]
         button.setText("Installed")
         button.setEnabled(False)
+        # A second server of one game cannot run beside the first (container names are
+        # global per game), so a whole server brought in is offered only where Install is.
+        bring = getattr(self, "_move_buttons", {}).get(game_id)
+        if bring is not None:
+            bring.setEnabled(False)
         button.setToolTip(
             f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
         )
@@ -796,6 +850,9 @@ class CatalogView(QWidget):
             self, f"Select the folder where {entry.name} is installed", start
         )
         if server_dir is None:
+            return False
+        if (server_dir / MOVE_IN_FILE).exists():
+            show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
         if compose_file(server_dir) is None:
             show_warning(
@@ -1001,6 +1058,19 @@ class CatalogView(QWidget):
             show_information(self, "Not available on this platform", message)
             self.install_finished.emit(entry.id, False, message)
             return False
+        folders = self._ask_folders(entry)
+        if folders is None:
+            return False
+        server_dir, client_dir = folders
+        if (server_dir / MOVE_IN_FILE).exists():
+            # T601 level 2: a plain install would finish the build and never put the modules,
+            # settings or data in, and then the tile could no longer bring the server in.
+            show_information(self, "A move that did not finish", _unfinished_move(server_dir))
+            return False
+        return self._run_install(entry, server_dir, client_dir, self._make_installer(entry))
+
+    def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:
+        """The server folder (the suggestion, or a pick) and, where needed, the client folder."""
         # Offered BEFORE the picker, because the picker cannot offer it. The
         # suggestion does not exist yet on a first install and
         # `getExistingDirectory()` returns only folders that do, so the name
@@ -1010,17 +1080,13 @@ class CatalogView(QWidget):
         suggested = default_server_dir(entry, self._home)
         taken = self._ask_suggestion(self, entry.name, suggested)
         if taken is None:
-            return False
+            return None
         if taken:
             server_dir: Path | None = suggested
         else:
-            server_dir = self._pick_dir(
-                self,
-                f"Where should {entry.name} be installed?",
-                suggested,
-            )
+            server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
         if server_dir is None:
-            return False
+            return None
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             client_dir = self._pick_dir(
@@ -1029,9 +1095,68 @@ class CatalogView(QWidget):
                 self._home,
             )
             if client_dir is None:
-                return False
+                return None
+        return server_dir, client_dir
+
+    def bring_from_another_computer(self, entry: CatalogEntry) -> bool:
+        """Build a whole server from a move package (T601 level 2). False if not started.
+
+        The file first, then the folders, then the plan (read without changing anything), then
+        one question showing it, then the run in the log panel as an install, so the server is
+        remembered when it ends exactly as an installed one is.
+        """
+        if self._move_in is None:
+            return False
+        if self._log.running:
+            show_information(self, "Busy", "Another job is still running.")
+            return False
+        if not entry.install.supports(self._platform_id()):
+            show_information(
+                self,
+                "Not available on this platform",
+                unsupported_platform_message(entry, self._platform_id()),
+            )
+            return False
+        path = self._pick_package(self, "Choose the file packed on the other computer", self._home)
+        if path is None:
+            return False
+        folders = self._ask_folders(entry)
+        if folders is None:
+            return False
+        server_dir, client_dir = folders
+        plan = self._move_in.plan(path, server_dir)  # type: ignore[attr-defined]
+        if not plan.allowed:
+            show_information(self, "This server cannot be brought in", plan.text())
+            return False
+        if plan.entry is None or plan.entry.id != entry.id:
+            name = plan.entry.name if plan.entry is not None else "another game"
+            show_information(
+                self,
+                "Another game",
+                f"This file holds a {name} server. Use the {name} tile's {BRING_FROM_ANOTHER}",
+            )
+            return False
+        if not self._ask_yes(self, "Bring this server in?", plan.text()):
+            return False
+        installer = self._move_in.installer(plan)  # type: ignore[attr-defined]
+        return self._run_install(
+            entry,
+            server_dir,
+            client_dir,
+            installer,
+            title=f"Bringing {entry.name} from another computer",
+        )
+
+    def _run_install(
+        self,
+        entry: CatalogEntry,
+        server_dir: Path,
+        client_dir: Path | None,
+        installer: InstallEngine,
+        *,
+        title: str | None = None,
+    ) -> bool:
         options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
-        installer = self._make_installer(entry)
         # No synchronous preflight here: `run()` re-preflights on the worker
         # thread, and preflight can mean full Docker provisioning — minutes of
         # work that used to freeze the window (review finding, 2026-08-21).
@@ -1052,7 +1177,7 @@ class CatalogView(QWidget):
         prompter.bind_cancel(cancel)
         started = self._log.run(
             lambda: installer.run(options, cancel=cancel, ask=prompter.ask),
-            title=f"Installing {entry.name}",
+            title=title or f"Installing {entry.name}",
             cancel=cancel,
             record_as=f"install-{entry.id}",
         )

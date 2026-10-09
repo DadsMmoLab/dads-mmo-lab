@@ -27,10 +27,14 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yulon import docker
 from yulon.catalog import composegen
 from yulon.log import get_logger
+
+if TYPE_CHECKING:
+    from yulon.support.redact import Redactor
 
 logger = get_logger(__name__)
 
@@ -185,7 +189,41 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
         ).values
     except Exception as exc:  # noqa: BLE001 - redaction must never stop a stop
         logger.warning(f"could not gather this install's passwords for the snapshot: {exc}")
-    return Redactor.build(values, home=Path.home(), also_home=homes).redact(text)
+    return _vouched(Redactor.build(values, home=Path.home(), also_home=homes), text)
+
+
+_REMOVED_LINE = "[a line was removed: Yu'lon could not be sure it was free of secrets]\n"
+"""Stands where a line the cleaner could not vouch for was (T606)."""
+_REMOVED_ALL = (
+    "[this log was removed: Yu'lon could not be sure it was free of secrets. "
+    "Read it in the container with docker logs.]\n"
+)
+
+
+def _vouched(redactor: Redactor, text: str) -> str:
+    """`redactor.checked(text)`, line by line when the whole text is refused (T606).
+
+    The file stays on disk and is attached to bug reports by hand, so it is as strict
+    as the support zip (T595): a line the cleaner half-masked is replaced by a marker,
+    never written. If even the lines together are refused, the whole log goes.
+    """
+    from yulon.support.redact import Unredactable
+
+    try:
+        return redactor.checked(text)
+    except Unredactable:
+        pass
+    kept: list[str] = []
+    for line in text.splitlines(keepends=True):
+        try:
+            kept.append(redactor.checked(line))
+        except Unredactable:
+            kept.append(_REMOVED_LINE)
+    joined = "".join(kept)
+    try:
+        return redactor.checked(joined)
+    except Unredactable:
+        return _REMOVED_ALL
 
 
 class Recorder:

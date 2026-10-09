@@ -15,9 +15,44 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
+- A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
+- A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
 - Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
 - On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.
+- **Pack for another computer…** moves accounts and characters into a server of the same game on another computer.
+- **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
+- Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
+- **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
+
+### Fixed
+- A module update that breaks the build is still put back when you pressed Stop just as the build failed.
+- A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
+- A database password typed inside escaped or joined quotes no longer slips into a support zip.
+- Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
+- A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
+- On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
+- On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
+- On Tortoise, **Remove** of an add-on you added takes back its files, keeping any you changed and your saved settings.
+- Restore refuses a backup made on another game, such as WotLK onto Unbound, and asks about an old one.
+- Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
+- Modules, Party links, channel setup and bot rebuilds refuse while another Yu'lon works on the server.
+- **Stop** no longer waits long on a slow Docker to reserve the server; it goes ahead after a few seconds.
+- Account, character and settings changes refuse while another Yu'lon works on the server, and name who holds it.
+- The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
+- **Save logs for support…** now says how many logs it left out of the zip, and why, before you send it.
+- A Tortoise world that fails a database update now stops and names the file and error, instead of hanging.
+- The realm badge says UPDATE FAILED, not STARTING, for a Tortoise world stuck at a failed database update.
+- An older Tortoise server is offered **Turn it off** for its SQL log spam on the Tuning tab, without a full reset.
+- Saving settings no longer freezes the window.
+- Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
+- Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
+
+### Changed
+
+## v0.9.15-Public — 2026-10-09
+
+### New
 - **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
 - WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
 - The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.
@@ -27,9 +62,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
-- On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
-- On Tortoise, **Remove** of an add-on you added takes back its files, keeping any you changed and your saved settings.
-- On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
 - Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
 - A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.
 - A new Tortoise server no longer fills its log with every database query; older ones get this with **Reset to defaults**.

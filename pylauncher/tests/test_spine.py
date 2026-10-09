@@ -2426,6 +2426,24 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "never the copy just taken, so a backup the player took is never named as one. An "
         "OSError listing it names none, and the sentence then says nothing about older copies"
     ),
+    ("backup_shelf.py", "_rows_in"): (
+        "T604. Lists this server's own `sql_scripts/backups/` to show the Maintenance tab's "
+        "Backups rows and to plan a Delete or a Clean up. It decides a DELETE, bounded five "
+        "times: top-level entries only (no walk), a regular file that is not a link, a name "
+        "that is a dump (`<stamp>_<...>.sql`), `.sql.partial` or `.sql.gz`, and a file that no "
+        "protection names; and nothing is removed until `carry_out()` has taken the "
+        "maintenance lease and read the folder again and found the file unchanged. An "
+        "OSError listing it shows an empty list and removes nothing"
+    ),
+    ("backup_shelf.py", "_installed_here"): (
+        "T604 review. Lists the directory names inside this server's own clone folders "
+        "(`modules/`, `ale_scripts/`, `sql_scripts/clones/`) to learn which items are installed, "
+        "because the undo copy taken before an installed item is never deleted. It decides no "
+        "write and no refusal of its own: a folder that is not there is empty, and any other "
+        "failure to list raises, which makes the shelf KEEP every item's undo copy "
+        "(`docker.clone_names()` answers 'nothing installed' for a folder it cannot list, "
+        "which is the wrong way round for a delete)"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
@@ -3087,6 +3105,19 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "by the user pressing a button. It does not decide whether the app may write somewhere "
         "it does not own, so it is not `native._listing()`. A folder that cannot be listed "
         "answers no files, so the tab shows the cards' own files and the server's, as before"
+    ),
+    ("move_server.py", "_lua_members"): (
+        "T601 level 2. Walks the Lua engine's own script folder (`env/dist/etc/modules/"
+        "lua_scripts`, refused when it or a folder on the way is a link; links and dot-files "
+        "inside are skipped) to READ the player's scripts into a move package. It decides no "
+        "write: the files are read, never changed, and the package is written elsewhere"
+    ),
+    ("move_flows.py", "_backup_for_the_package"): (
+        "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
+        "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
+        "not there before, and only `*_move_*`, the label the pack gives them). It decides no "
+        "write outside the install: those files are the run's own, in the install's own "
+        "backups folder, and an auth dump with every verifier must not stay behind"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "

@@ -54,7 +54,9 @@ worth writing down, and without the files the Modules tab prints
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -73,6 +75,9 @@ from yulon.apply import (
     cached_module_update,
     cached_module_updates,
     clone_release,
+)
+from yulon.apply import (
+    refresh_module_updates as refresh_cached,
 )
 from yulon.catalog.native import read_state
 from yulon.catalog.upstream import Comparison, Release, github_slug
@@ -383,6 +388,7 @@ def applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
     sql_backup: SqlBackup | None = None,
@@ -423,6 +429,7 @@ def applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
         git=git,
         client_dir=client_dir,
         sql_backup=sql_backup,
@@ -463,6 +470,13 @@ def apply_module(
 ADDON_ID = "tortoise-bots-manager"
 """The client addon whose release is paired with the server's bot module (T126)."""
 
+DEFAULT_ADDONS = ("tortoise-bots-manager", "tortoise-gm-manager")
+"""The two client addons a Tortoise server puts into the game client by itself (T612).
+
+A new install and every Play ask `yulon.default_addons.put_in()` for them; a player's Remove
+of either is remembered per server and Play never puts it back.
+"""
+
 BOTS_REPO = "Sagiroth/TortoiseBots"
 """The catalog source the addon's release is compared against (T126).
 
@@ -493,21 +507,8 @@ def module_updates(
     nothing answered) and the press costs GitHub nothing while nothing moved.
     """
     rows: list[ModuleUpdate] = []
-    kinds: tuple[ManifestType, ...] = ("mod", "module")
-    for kind in kinds:
-        branches: dict[str, str | None] = {}
-        releases: dict[str, str] = {}
-        try:
-            for manifest in store().load_all(kind):
-                if manifest.source is None:
-                    continue
-                branches[manifest.id] = manifest.source.branch
-                if manifest.source.follow == "releases":
-                    slug = github_slug(manifest.source.repo)
-                    if slug is not None:
-                        releases[manifest.id] = slug
-        except Exception as exc:  # boundary: a broken manifest tree must not stop the count
-            logger.warning(f"could not read the wow-tortoise {kind}s for what they follow: {exc}")
+    for kind in _COUNTED_KINDS:
+        branches, releases = _follows(kind)
         rows += cached_module_updates(
             server_dir,
             kind=kind,
@@ -519,6 +520,63 @@ def module_updates(
             now=now,
         )
     return tuple(rows)
+
+
+def refresh_module_updates(
+    server_dir: Path,
+    cancel: threading.Event,
+    *,
+    git: CountingGit | None = None,
+    newest_release: Callable[[str], Release | None] | None = None,
+    compare_commits: Callable[[str, str, str], Comparison | None] | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """The same count as `module_updates()`, in the background and bounded (T621).
+
+    Fills the day's cache the Check press and the addon note read; see
+    `apply.refresh_module_updates()` for what a failure, a cancel and a missing git do.
+    Mods and modules both (T596), as the press counts them; a cancel between the two
+    answers `()`, like a cancel inside either.
+    """
+    rows: list[ModuleUpdate] = []
+    for kind in _COUNTED_KINDS:
+        branches, releases = _follows(kind)
+        rows += refresh_cached(
+            server_dir,
+            kind=kind,
+            cancel=cancel,
+            git=git,
+            branches=branches,
+            releases=releases,
+            newest_release=newest_release,
+            compare_commits=compare_commits,
+            now=now,
+        )
+        if cancel.is_set():
+            return ()
+    return tuple(rows)
+
+
+_COUNTED_KINDS: tuple[ManifestType, ...] = ("mod", "module")
+"""What "Check for updates" and the background refresh count on Tortoise (T596, T621)."""
+
+
+def _follows(kind: ManifestType) -> tuple[dict[str, str | None], dict[str, str]]:
+    """Each `kind` item's branch, and the GitHub slug of each that follows its releases (T126)."""
+    branches: dict[str, str | None] = {}
+    releases: dict[str, str] = {}
+    try:
+        for manifest in store().load_all(kind):
+            if manifest.source is None:
+                continue
+            branches[manifest.id] = manifest.source.branch
+            if manifest.source.follow == "releases":
+                slug = github_slug(manifest.source.repo)
+                if slug is not None:
+                    releases[manifest.id] = slug
+    except Exception as exc:  # boundary: a broken manifest tree must not stop the count
+        logger.warning(f"could not read the wow-tortoise {kind}s for what they follow: {exc}")
+    return branches, releases
 
 
 def release_note(

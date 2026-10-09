@@ -596,6 +596,7 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
+    from yulon.ui.move_in import move_in_for_app
     from yulon.ui.sidebar import SidebarPins, server_tab_icon
     from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
@@ -764,6 +765,8 @@ def build_window() -> object:
         # thing that knows: the view cannot look at a folder it was never told
         # about. Same list `add_controller()` just built the tabs from.
         installed_games=state.installed_dirs(),
+        # T601 level 2: "Bring from another computer…" on each tile.
+        move_in=move_in_for_app(catalog),
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
@@ -1541,6 +1544,8 @@ def build_window() -> object:
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()
+        # T621: every tab that opens, saved or new, counts its add-ons and modules a little later.
+        view.refresh_updates_later()
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,
         # so two installs under different parents both read "WoW WotLK —
@@ -1566,6 +1571,9 @@ def build_window() -> object:
                 install.wsl_distro,
                 install.play_client_dir,
             )
+            opened = controllers.get((install.game, install.server_dir))
+            if opened is not None:
+                opened.put_default_addons_later()  # T612: off the Play path, a few seconds on
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
     # The Catalog was made current before `currentChanged` was connected, so
@@ -1626,6 +1634,7 @@ def build_window() -> object:
         view = controllers.get((game, Path(str(server_dir))))
         if view is not None:
             view.settle_channel_after_install()
+            view.put_default_addons_in()
 
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
         """A server adopted from a WSL distro, which is remembered with it.

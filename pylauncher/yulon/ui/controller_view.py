@@ -34,11 +34,11 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, assert_never, cast
+from typing import Any, NamedTuple, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 
 from yulon import (
     addon_archive,
+    backup_shelf,
     botlist,
     channel_setup,
     client_addons,
@@ -80,13 +81,19 @@ from yulon import (
     client_names,
     client_packs,
     commands,
+    conf_dist,
     database_presence,
     dbreads,
+    default_addons,
     docker,
     docker_advice,
+    forgetting,
     install_wiring,
     logsnap,
     module_moves,
+    move,
+    move_flows,
+    move_server,
     networking,
     party,
     platform,
@@ -99,6 +106,7 @@ from yulon import (
     server_rates,
     server_time_zone,
     serverlock,
+    sql_log_offer,
     tuning,
     unbound_settings,
     useraccounts,
@@ -161,11 +169,11 @@ from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import Behind, RunnerGit, is_behind
 from yulon.log import get_logger
-from yulon.manifest import ConfKey, Manifest, Prompt, When
+from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
-from yulon.ui import lines
+from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
@@ -181,6 +189,7 @@ from yulon.ui.theme import (
     PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
+from yulon.ui.widgets.clean_up_dialog import CleanUpDialog
 from yulon.ui.widgets.client_addons_box import AddonRow, ClientAddonsBox
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.details import Details
@@ -196,6 +205,7 @@ from yulon.ui.widgets.modules_panel import (
     build_module_rows,
     moved_by_server_update,
 )
+from yulon.ui.widgets.move_panel import MovePanel
 from yulon.ui.widgets.page import (
     RowsList,
     RowsScroll,
@@ -1727,7 +1737,12 @@ class Pathfinding:
 
 
 def _pathfinding(
-    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None,
+    hold: docker.BudgetedHold,
+    poll_hold: docker.BudgetedHold,
 ) -> Pathfinding | None:
     """The job's seam where the entry makes its movement maps in the background.
 
@@ -1735,13 +1750,20 @@ def _pathfinding(
     every game the way the time zone is. Not for a server inside a WSL distro: the
     job runs on THIS host's Docker (`mmaps.DockerRunner`), which would be asked about
     a container it has never heard of.
+
+    T623: the job runs for hours and never holds the server for its run. Start and Stop hold
+    while they write (`hold`; a held server says the holder's sentence and starts or stops
+    nothing); the status poll is handed `poll_hold` (bounded) and takes it only for a transition
+    it must record.
     """
     if wsl_distro is not None or mmaps.background_block(entry) is None:
         return None
     return Pathfinding(
-        status=lambda: mmaps.mmaps_status(server_dir, entry),
-        start=lambda: mmaps.start_mmaps(server_dir, entry),
-        stop=lambda: mmaps.stop_mmaps(server_dir, entry),
+        status=lambda: mmaps.mmaps_status(server_dir, entry, hold=poll_hold),
+        start=_under_the_hold(
+            hold, mmaps.START_PRESS, lambda: mmaps.start_mmaps(server_dir, entry)
+        ),
+        stop=_under_the_hold(hold, PATHFINDING_STOP, lambda: mmaps.stop_mmaps(server_dir, entry)),
     )
 
 
@@ -1811,6 +1833,19 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    hold_server: Callable[[str], contextlib.AbstractContextManager[None]] | None = None
+    """Reserves this server across processes for a write the view makes itself (T610).
+
+    The Tuning tab saves and reverts its conf files as jobs (T622) and takes this around the
+    write, on the job's thread; the account and character writes take it inside their own seams.
+    `None` (a harness) holds nothing.
+    """
+    shelf: backup_shelf.Seam | None = None
+    """This install's backups folder as the tab lists, deletes from and cleans up (T604).
+
+    `None` lists the folder the way it was listed before: file names only, no Delete or
+    Clean up. Every shipped entry wires it.
+    """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
 
@@ -1830,6 +1865,12 @@ class ControllerServices:
     A small object rather than two callables because the two questions belong
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
+    """
+    move: move_flows.MoveServices | None = None
+    """Pack this server's accounts and characters, and bring such a file in (T601).
+
+    `None` draws no Move group on the Maintenance tab. Every shipped game wires it, because the
+    engine under it (the Maintenance tab's backup and restore) is the same for all of them.
     """
     database_alone: DatabaseAlone | None = None
     """How to bring this install's database up for a backup, and put it back (T76).
@@ -1930,6 +1971,14 @@ class ControllerServices:
     because everything else the run needs — which container, which folder,
     which refusals — belongs below this seam, in `docker.apply_module_sql()`,
     which is where 8.7a's "not while the world is running" guard lives.
+    """
+    module_refresh: Callable[[threading.Event], tuple[apply_module.ModuleUpdate, ...]] | None = None
+    """The same counts as `module_updates`, kept up to date in the background (T621).
+
+    Takes the `Event` that ends it (a Quit, or a press that starts) and returns the rows of
+    the day's cache: a clone counted within the day is not asked again, one that could not be
+    asked keeps its count, and `()` means "nothing to say". Bounded: every fetch it runs
+    ends on a timeout. `refresh_updates()` runs it on a worker; Play never does.
     """
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None
     """How far behind each installed module is, or None for a game with no modules.
@@ -2057,6 +2106,14 @@ class ControllerServices:
 
     `Applier.replacement_question()` is the whole of it; this seam exists so the
     view can ask without holding an applier (style-guide §3).
+    """
+    default_addons: tuple[str, ...] = ()
+    """The Modules-tab client addons this game puts into the game client by itself (T612).
+
+    A fresh install (`put_default_addons_in()`) and every Play (`_prepare_client()`) put
+    each one in through `default_addons.put_in()`, unless the player removed it:
+    the Modules tab's own Remove is remembered per server (`_module_done()`). Empty for
+    every game but Tortoise, which names its two Sagiroth addons.
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -2486,6 +2543,11 @@ def _with_client_addons(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=distro
             ),
+            # The add-on writes, and the per-server note of a player's folder set aside, under
+            # this server's cross-process hold, as every other applier the app builds (T568).
+            hold_server=lambda press: docker.server_claim(
+                server_dir, press=press, spec=spec, wsl_distro=distro, label=entry.name
+            ),
         )
         applier.client_origins = origins
         applier.client_game = entry.id if origins else ""
@@ -2824,6 +2886,80 @@ def _database_alone(
     )
 
 
+def _move_services(
+    entry: CatalogEntry,
+    server_dir: Path,
+    mysql: wotlk_maintenance.DockerMysql,
+    controller: Controller,
+    *,
+    wsl_distro: str | None,
+    store: ManifestStore | None = None,
+) -> move_flows.MoveServices:
+    """The Move group's four presses, over the same engine the Backup and Restore buttons use.
+
+    Built here, with the factories' own `mysql`, `controller` and `wsl_distro`, so the move
+    cannot reach a different daemon than the buttons beside it (the 2026-08-27 report: a
+    census asked the wrong Docker). The database is brought up alone by the same
+    `_database_alone()` Backup uses; the server is stopped and started by the tab's own
+    controller, which does the save-first and the evidence a Stop always does.
+    """
+
+    def running() -> list[str]:
+        return list(docker.status(wsl_distro=wsl_distro))
+
+    def bot_marker() -> move_flows.BotMarker | None:
+        answer = dbreads.resolve_marker(entry, server_dir)
+        return move_flows.BotMarker(answer.marker.prefix) if answer.marker is not None else None
+
+    backup, plan_restore, restore = move_flows.engine_for(
+        entry, server_dir, mysql, running=running, wsl_distro=wsl_distro
+    )
+    alone = _database_alone(entry.container_spec(), server_dir, wsl_distro=wsl_distro)
+
+    def load_manifest(kind: ManifestType, item_id: str) -> Manifest | None:
+        if store is None:
+            return None
+        try:
+            return store.load(kind, item_id)
+        except Exception as exc:  # noqa: BLE001 - not a module this tab can name: said by the pack
+            logger.info(f"no description of {kind}/{item_id} for the move: {exc}")
+            return None
+
+    def whole() -> move.ServerFacts:
+        """What a whole-server package holds besides the databases (T601 level 2)."""
+        generated = entry.install.password.mode == "generated"
+        return move_server.gather_server_facts(
+            entry,
+            server_dir,
+            load_manifest=load_manifest,
+            secret_password=entry.install.db_password(server_dir) if generated else None,
+        )
+
+    return move_flows.services_for(
+        move_flows.MoveWorld(
+            entry=entry,
+            game=wotlk_maintenance.game_of(entry),
+            server_dir=server_dir,
+            mysql=mysql,
+            backup=backup,
+            plan_restore=plan_restore,
+            restore=restore,
+            running=running,
+            ownership=lambda: native.read_claim(server_dir, valid=()).ownership,
+            stop_server=controller.stop,
+            start_server=controller.start,
+            bring_up=alone.bring_up,
+            take_down=alone.take_down,
+            channel_account=channel_setup.account_name(composegen.install_id(server_dir)),
+            marker=bot_marker,
+            # The cross-process hold for the move's database stretch (lead's decision, 2026-10-09).
+            spec=entry.container_spec(),
+            wsl_distro=wsl_distro,
+        ),
+        whole=whole,
+    )
+
+
 def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
     """None, and a warning if the catalog has since said otherwise.
 
@@ -2858,6 +2994,58 @@ def _steam_seam(
     )
 
 
+def _server_hold_for(
+    entry: CatalogEntry,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    *,
+    wsl_distro: str | None,
+    budget: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> docker.BudgetedHold:
+    """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
+
+    A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it. A
+    caller may pass its own per call (`hold(press, budget=...)`): the channel's roll-back does.
+    """
+
+    def hold(
+        press: str, *, budget: float | None = budget
+    ) -> contextlib.AbstractContextManager[None]:
+        return docker.server_hold(
+            server_dir,
+            press,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            label=entry.name,
+            budget=budget,
+            avoid_images=avoid_images,
+        )
+
+    return hold
+
+
+_R = TypeVar("_R")
+
+
+def _under_the_hold(
+    hold: Callable[[str], contextlib.AbstractContextManager[None]],
+    press: str,
+    call: Callable[..., _R],
+) -> Callable[..., _R]:
+    """`call` run inside the server's hold; a held server raises its sentence, nothing written.
+
+    The sentence is `docker.ServerHeldError`'s, raised before `call` runs (T610, T622). For the
+    seams a job runs: the wait for the hold is then off the GUI thread.
+    """
+
+    def held(*args: Any, **kwargs: Any) -> _R:
+        with hold(press):
+            return call(*args, **kwargs)
+
+    return held
+
+
 def _assemble(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2884,6 +3072,9 @@ def _assemble(
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
+    module_refresh: (
+        Callable[[threading.Event], tuple[apply_module.ModuleUpdate, ...]] | None
+    ) = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None,
@@ -2894,6 +3085,8 @@ def _assemble(
     module_install_custom: CustomModuleInstall | None = None,
     module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
+    default_addons: tuple[str, ...] = (),
+    mysql: wotlk_maintenance.DockerMysql | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -2920,8 +3113,24 @@ def _assemble(
         network_plan=lambda mode: networking.plan(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
-        network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
-        create_account=create_account,
+        # T622: the realmlist row and the applied mode's file are written under the server's hold.
+        network_apply=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Apply the network plan",
+            lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        ),
+        # T610: the account row is written under the server's cross-process hold, in the shared
+        # half so that every game's factory gets it (five of them pass their own writer).
+        create_account=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Create an account",
+            create_account,
+        ),
+        # The Tuning tab's saves are jobs (T622); the take is still bounded, so one that cannot
+        # be made says so in 15 s and not after a press's full minute.
+        hold_server=_server_hold_for(
+            entry, server_dir, spec, wsl_distro=wsl_distro, budget=docker.GUI_HOLD_BUDGET_SECONDS
+        ),
         backup=backup,
         # HERE, in the shared half, for the rebuild's reason one line further
         # down: bringing a database up for a backup takes no per-game decision
@@ -2932,11 +3141,17 @@ def _assemble(
         # four times. Four copies is how `_for_tortoise` came to be the one
         # factory that never bound `play`.
         database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+        move=(
+            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro, store=store)
+            if mysql is not None
+            else None
+        ),
         backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
         plan_restore=plan_restore,
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+        shelf=backup_shelf.Seam(server_dir, entry.id, spec=spec, wsl_distro=wsl_distro),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         uninstall=uninstall,
@@ -2951,10 +3166,20 @@ def _assemble(
         # would all have to pass as None is a keyword that says nothing. What
         # the WotLK factory passes instead is spelled there, next to the
         # `import_service` it is conditional on.
-        module_sql=module_sql,
+        # T622: the importer's `compose run` writes the world database and is no Applier path.
+        module_sql=(
+            None
+            if module_sql is None
+            else _under_the_hold(
+                _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                "Apply module SQL",
+                module_sql,
+            )
+        ),
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
+        module_refresh=module_refresh,
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
@@ -2979,6 +3204,7 @@ def _assemble(
         # to the games that have such clones and to no other.
         module_replacement_question=module_replacement_question,
         module_forget=module_forget,
+        default_addons=default_addons,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
         # `catalog.json` by `installer_for()`, and every family's stage tuple
@@ -3023,7 +3249,12 @@ def _assemble(
         # T94. HERE for the rebuild's reason: the file set and how each default
         # is made are catalog facts every game's tab reads the same way. The
         # WSL refusal lives in the route, where the distro is known.
-        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T622: written under the server's hold, as the Tuning saves are.
+        reset_settings=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Put settings back to how they were",
+            reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        ),
         # T106. Here for the rebuild's reason: which installs are offered it is a
         # fact of `catalog.json` (the family) and of the install (its distro),
         # both answered in `install_wiring`.
@@ -3049,13 +3280,33 @@ def _assemble(
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
-        bot_population=botpop.bot_count_route(entry, server_dir),
+        bot_population=botpop.bot_count_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T171. HERE for T99's reason: the file and the services are catalog
         # facts, and it is files only, so a server inside a WSL distro is served.
-        time_zone=server_time_zone.time_zone_route(entry, server_dir),
+        time_zone=server_time_zone.time_zone_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T179. HERE for T171's reason: whether a server makes its movement maps
         # in the background is a catalog fact (`mmaps.background_block`).
-        pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
+        pathfinding=_pathfinding(
+            entry,
+            server_dir,
+            wsl_distro=wsl_distro,
+            hold=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            poll_hold=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                budget=docker.GUI_HOLD_BUDGET_SECONDS,
+            ),
+        ),
         # T179 Task 6. HERE for the same reason: whether an update can leave the
         # map data or the world tables owing is the entry's engine's fact.
         world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
@@ -3291,6 +3542,9 @@ def _for_wotlk(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         # The scheme is the entry's or nothing: `or "azerothcore"` stood here
         # until 2026-09-09, which handed an entry whose scheme is unmeasured the
@@ -3336,6 +3590,7 @@ def _for_wotlk(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4a. The Characters tab, over the same channel the account writes use
@@ -3346,6 +3601,7 @@ def _for_wotlk(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     # One applier for the Modules tab, named here so the custom-module seam
     # below is built over the SAME object the shipped route installs with.
@@ -3385,6 +3641,10 @@ def _for_wotlk(
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
             ),
+            # T568: the SQL a Modules press sends is sent under this server's reservation.
+            hold_server=lambda press: docker.server_claim(
+                server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
             db_container=spec.db,
         )
         if entry.has_manifests
@@ -3395,6 +3655,7 @@ def _for_wotlk(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3422,6 +3683,10 @@ def _for_wotlk(
             # cannot be called through it. Without this line the control could
             # only ever say it has no route.
             link_writer=sql,
+            # T607: the link is written under this server's cross-process reservation.
+            hold_server=lambda press: docker.server_hold(
+                server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
             # T26 round 2, and the second line of this factory the ticket needs.
             # `members()` unions the bot marker's rows with the characters this
             # app added through `add_named`, and that record has to outlive the
@@ -3448,6 +3713,14 @@ def _for_wotlk(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
@@ -3530,6 +3803,16 @@ def _for_wotlk(
             if entry.has_manifests
             else None
         ),
+        # T621: the same counts in the background, bounded, once a day per clone.
+        module_refresh=(
+            (
+                lambda cancel: wotlk_modules.refresh_module_updates(
+                    server_dir, cancel, user_game=user_game
+                )
+            )
+            if entry.has_manifests
+            else None
+        ),
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
         # no modules folder — keep a list of the catalog and nothing else.
@@ -3602,6 +3885,7 @@ def _for_wotlk(
         backup=lambda: wotlk_maintenance.backup(
             server_dir,
             mysql,
+            game=wotlk_maintenance.game_of(entry),
             spec=spec,
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
@@ -3609,6 +3893,7 @@ def _for_wotlk(
         plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
             path,
             server_dir,
+            game=wotlk_maintenance.game_of(entry),
             spec=spec,
             wsl_distro=wsl_distro,
             can_start_database=can_start_database,
@@ -3620,6 +3905,7 @@ def _for_wotlk(
         restore=lambda plan: wotlk_maintenance.restore(
             plan,
             mysql,
+            game=wotlk_maintenance.game_of(entry),
             confirm=plan.token,
             spec=spec,
             # Bound here for the same reason `backup` binds it four lines up, and
@@ -3683,6 +3969,9 @@ def _for_tbc(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tbc_accounts.create_account(sql, name, pw, gm_level=level),
@@ -3705,6 +3994,7 @@ def _for_tbc(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4b. The same seam as 8.4a over this tree's own measured facts: its
@@ -3716,12 +4006,14 @@ def _for_tbc(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3768,6 +4060,10 @@ def _for_tbc(
                 world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+                # T568: the SQL a Modules press sends is sent under this server's reservation.
+                hold_server=lambda press: docker.server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
                 ),
             )
             if entry.has_manifests
@@ -3832,6 +4128,9 @@ def _for_vanilla(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: vanilla_accounts.create_account(
@@ -3854,6 +4153,7 @@ def _for_vanilla(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4c. The same seam as 8.4a and 8.4b over facts read from THIS install's
@@ -3871,12 +4171,14 @@ def _for_vanilla(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -3903,6 +4205,14 @@ def _for_vanilla(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
@@ -3941,6 +4251,10 @@ def _for_vanilla(
                 world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+                # T568: the SQL a Modules press sends is sent under this server's reservation.
+                hold_server=lambda press: docker.server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
                 ),
             )
             if entry.has_manifests
@@ -4006,6 +4320,9 @@ def _for_centurion(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: centurion_accounts.create_account(
@@ -4025,6 +4342,7 @@ def _for_centurion(
             server_dir,
             sql=sql,
             channel_for_saved=channel.live_channel,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             app_account=channel_setup.account_name(composegen.install_id(server_dir)),
         )
         if entry.accounts.level is not None
@@ -4041,6 +4359,7 @@ def _for_centurion(
             server_dir,
             sql=sql,
             channel_for_saved=channel.live_channel,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             withheld=withheld,
         )
         if entry.play is not None
@@ -4051,6 +4370,7 @@ def _for_centurion(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick if watcher is not None else None,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4069,6 +4389,14 @@ def _for_centurion(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            # The reservation must not run from an image this uninstall removes (T622).
+            hold_server=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
+            ),
         ),
         controller=centurion_controller.CenturionController(
             entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -4245,6 +4573,9 @@ def _for_tortoise(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tortoise_accounts.create_account(
@@ -4263,6 +4594,7 @@ def _for_tortoise(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     characters_admin = play_module.InstallPlay(
@@ -4270,6 +4602,7 @@ def _for_tortoise(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     lifecycle = tortoise_controller.controller_for(
         server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -4300,6 +4633,10 @@ def _for_tortoise(
             world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+            ),
+            # T568: the SQL a Modules press sends is sent under this server's reservation.
+            hold_server=lambda press: docker.server_claim(
+                server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
             ),
             # T30. `applier()` has taken this keyword since 8.7d and this
             # factory was the one caller that swallowed it, so a manifest
@@ -4336,6 +4673,7 @@ def _for_tortoise(
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
+        mysql=mysql,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4379,6 +4717,12 @@ def _for_tortoise(
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # T621: the same counts in the background, bounded, once a day per clone.
+        module_refresh=(
+            (lambda cancel: tortoise_modules.refresh_module_updates(server_dir, cancel))
+            if entry.has_manifests
+            else None
+        ),
         # T380: the folders AND the settings-only mods (Experience Rates, Message
         # of the Day, Performance Stats), which leave no folder.
         installed_modules=(
@@ -4396,6 +4740,8 @@ def _for_tortoise(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
         module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        # T612: the two Sagiroth client addons go in by themselves (new install, every Play).
+        default_addons=tortoise_modules.DEFAULT_ADDONS if entry.has_manifests else (),
         applier=module_applier,
         # T596: an add-on or a database package from a link or a folder, over
         # the SAME guarded applier the shipped rows use (WotLK's rule), so the
@@ -4458,6 +4804,8 @@ def _for_tortoise(
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
         image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
+        # T607: the whole rebuild is held under this server's cross-process reservation.
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return replace(
         services,
@@ -4491,6 +4839,25 @@ def _knowing_its_server_sources(
         services.applier.server_sources = native.server_source_folders(entry)
         services.applier.server_name = entry.name
     return services
+
+
+def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
+    """The Modules tab's manifest store for a server of `entry`, as its factory builds it (T601).
+
+    For a whole server brought from another computer, whose modules are looked up before the
+    server (and so its tab) exists. The same calls the factories below make, by game.
+    """
+    if not entry.has_manifests:
+        return None
+    if _FACTORIES.get(entry.id) is _for_wotlk:
+        return wotlk_modules.store(user_game=entry.id)
+    stores: dict[str, Callable[[], ManifestStore]] = {
+        "wow-tbc": tbc_modules.store,
+        "wow-vanilla": vanilla_modules.store,
+        "wow-tortoise": tortoise_modules.store,
+    }
+    make = stores.get(entry.id)
+    return make() if make is not None else None
 
 
 _FACTORIES: dict[str, _Factory] = {
@@ -4866,6 +5233,17 @@ STOP_ANYWAY_TIP = (
 )
 """T158: the only way to end a load wait early, shown only while one is running."""
 
+STOP_OVER_ANOTHER_TITLE = "Another Yu'lon is working on this server"
+STOP_OVER_ANOTHER_BUTTON = "Stop anyway"
+CLEAR_RESERVATION_LABEL = "Clear it"
+CLEAR_RESERVATION_TIP = (
+    "Remove the reservation an earlier run of this Yu'lon left in Docker. Only offered "
+    "when no other Yu'lon of yours is running."
+)
+RESERVATION_CLEARED = "The leftover reservation was removed. Press it again."
+"""T568: a Stop asks once when another Yu'lon holds the server, then stops anyway; a leftover
+reservation of this user's own is cleared by a button, another user's by its command only."""
+
 STOPPING_FOR_REMOVAL = "Stopping the server first, then removing it from Yu'lon…"
 STOPPING_FOR_REMOVAL_WAIT = (
     "Stopping the server before it is removed from Yu'lon. A server still loading its "
@@ -4932,6 +5310,11 @@ _corrections_clock = time.monotonic
 """The clock the waits above are measured on; a test moves its own."""
 
 
+BUSY_ASKED_AGAIN_AFTER = 30.0
+"""Seconds before a corrections reading of `busy` (another Yu'lon holds the server) is asked
+again, for as long as it stays so (T607). One `docker inspect` and the ledger read each time."""
+
+
 class _AskAgain:
     """One reading's ask-again schedule (T381, T420): when it is due, and how often it was asked.
 
@@ -4942,25 +5325,40 @@ class _AskAgain:
     def __init__(self) -> None:
         self.due: float | None = None
         self.count = 0
+        self._busy = False
 
     def forget(self) -> None:
         """The database went down or came back: nothing is owed, nothing was asked."""
         self.due = None
         self.count = 0
+        self._busy = False
 
     def arm(self) -> bool:
         """Arm the next wait after an unreadable answer. False once the waits are spent."""
         if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
             return False
         self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
+        self._busy = False
         return True
+
+    def arm_for_busy(self) -> None:
+        """Ask again in `BUSY_ASKED_AGAIN_AFTER` seconds, however often it has been asked (T607).
+
+        The answer was "another Yu'lon holds this server": it ends when that Yu'lon's job does,
+        which no bounded wait can promise, and a banner that never lifts is worse than a look
+        every half minute while it stands.
+        """
+        self.due = _corrections_clock() + BUSY_ASKED_AGAIN_AFTER
+        self._busy = True
 
     def is_due(self) -> bool:
         """True once, when the wait is over; the ask it permits is counted."""
         if self.due is None or _corrections_clock() < self.due:
             return False
         self.due = None
-        self.count += 1
+        if not self._busy:  # a busy re-ask is not one of the unreadable reading's bounded waits
+            self.count += 1
+        self._busy = False
         return True
 
 
@@ -5096,6 +5494,11 @@ VERDICT_UNREADABLE = (
 APPLY_DID_NOT_FINISH = "Apply did not finish. Details below says why."
 PLAN_DID_NOT_FINISH = "Yu'lon could not work out the plan. Details below says why."
 MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
+DELETE_BACKUP_LABEL = "Delete\u2026"
+CLEAN_UP_LABEL = "Clean up\u2026"
+DELETE_PICK = "Pick a backup to delete."
+CLEAN_UP_NO_FOLDER_ACCESS = "Yu'lon cannot list the backups yet."
+MAINTENANCE_DELETE_FAILED = "The backups were not deleted. Details below says why."
 MAINTENANCE_RESTORE_FAILED = "The restore did not finish. Details below says why."
 MAINTENANCE_PLAN_FAILED = "Yu'lon could not check this backup. Details below says why."
 MAINTENANCE_FORGET_FAILED = (
@@ -6597,6 +7000,33 @@ TUNING_FILE_SAVED = "Wrote {file}. A backup of it as it was is beside it at {bac
 
 TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
 
+TUNING_WRITE_RUNNING = (
+    "Wait: the earlier change to the settings is still being written. Press it again once it "
+    "has finished."
+)
+"""T622: a second Save or Revert while one is on the job runner."""
+TUNING_WRITE_BROKE = "The settings were not written. Details below says why."
+"""T622: a Save or Revert job that broke (a bug: refusals are answers, not exceptions)."""
+
+
+@dataclass(frozen=True)
+class TuningWrite:
+    """What a Tuning save or revert job did, for the view to show on the GUI thread (T622).
+
+    The job holds the server, checks and writes; it touches no widget. This is everything the
+    view then does, in the order the synchronous slots did it: the report, the backup that arms
+    Revert, the files that now owe a restart, the failure for the app log, the file reopened in
+    the editor and the cards read again.
+    """
+
+    report: str
+    failed: str = ""
+    owed: tuple[str, ...] = ()
+    backup: str = ""
+    reopen: str = ""
+    reload: bool = False
+
+
 TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
 
 MODULE_ACTION_STEPS: dict[str, When] = {
@@ -6649,6 +7079,36 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 """The Tuning tab's banner (T44 item 8), naming the DEAREST job owed and its files."""
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
+
+TUNING_LOG_OFFER = (
+    "{files} {make} this server print every database statement it runs into its log "
+    "({key} is off), which fills the log and can slow a busy world. Turn it off? "
+    "Only that one line changes, and a backup of {each} is kept."
+)
+"""The Tuning tab's one-line offer (T619) for a server installed before the key was set.
+
+Worded for one file or several by `_sql_log_words()`: the offer can name mangosd.conf and
+realmd.conf together."""
+TUNING_LOG_OFFER_OFF = "Turn it off"
+TUNING_LOG_OFFER_KEEP = "Keep it as it is"
+TUNING_LOG_OFFER_WROTE = (
+    "Set {key} to on in {file}. A backup of the file as it was is beside it at {backup}.\n{rule}"
+)
+TUNING_LOG_OFFER_FAILED = "{files} {was} not changed: {why}"
+TUNING_LOG_OFFER_KEPT = "Left {files} as {it}. Yu'lon will not ask again."
+
+
+def _sql_log_words(names: Sequence[str]) -> dict[str, str]:
+    """The SQL-log offer's file list and the words that agree with how many it names."""
+    one = len(names) == 1
+    return {
+        "files": " and ".join(names),
+        "make": "makes" if one else "make",
+        "each": "the file" if one else "each file",
+        "it": "it is" if one else "they are",
+        "was": "was" if one else "were",
+    }
+
 
 TUNING_RESTARTING = (
     "restarting the server… then waiting for the world server to report ready and stay up."
@@ -7183,6 +7643,18 @@ MODULE_UPDATES_NO_MODULES = (
 )
 """Why the button is dead on the three CMaNGOS games — `MODULE_SQL_NO_IMPORTER`'s reason."""
 
+REFRESH_FIRST_MS = 20_000
+"""How long after a tab opens the background update refresh first looks (T621).
+
+After the window is up and after T612's add-on put-in (5 s), so neither waits for a fetch.
+"""
+
+REFRESH_LET_GO_SECONDS = 1.0
+"""How long a starting Modules job waits for a cancelled refresh to end (T621)."""
+
+REFRESH_AGAIN_MS = 60 * 60 * 1000
+"""How often a tab left open looks again. The cache makes the answer once a day per clone."""
+
 MODULE_UPDATES_RUNNING = "Asking each installed module's upstream how far behind it is…"
 
 MODULE_UPDATES_NONE = (
@@ -7708,6 +8180,8 @@ class ControllerView(QWidget):
         # the last status poll's answer, so either one landing second can set the
         # badge. A crash-looping world is in `docker ps` between its restarts.
         self._world_loops = False
+        # T608: whether the last verdict shown carried a failed database update (T600).
+        self._world_failed = False
         # T451: whether the last verdict shown said the world is up AND printed its
         # ready marker. Until one does, all-containers-running reads STARTING.
         self._world_ready = False
@@ -7735,6 +8209,12 @@ class ControllerView(QWidget):
         # the first to finish clears it while a second runs, so the guards that keep a
         # Rebuild off the record of module updates read this count instead.
         self._module_jobs = 0
+        # T621: the background update refresh. One at a time; `_refresh_cancel` is the
+        # running one's (a fresh Event per run), set by whatever should not wait for it.
+        self._refresh_running = False
+        self._refresh_cancel = threading.Event()
+        self._refresh_ended = threading.Event()
+        self._refresh_again_ms = REFRESH_AGAIN_MS
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -7782,6 +8262,12 @@ class ControllerView(QWidget):
         # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
         # Undo the last reset); `run_restore()` refuses while it is, on Tortoise.
         self._put_back_running = False
+        # T622: a Tuning save or revert is on the job runner. One at a time (they share a file's
+        # backup), and the tab is not read again until it lands (`reload_tuning`).
+        self._tuning_writing = False
+        self._tuning_write_put_back = False
+        self._tuning_write_card: tuple[str, str] | None = None
+        self._tuning_reload_asked = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -7793,6 +8279,7 @@ class ControllerView(QWidget):
         # `busy_reason()` nor `_busy` sees them, and a removal must.
         self._backup_running = False
         self._restore_running = False
+        self._move_panel: MovePanel | None = None  # T601: `forget_refusal()` reads `.running`
         self._network_applying = False
         self._import_running = False
         self._uninstall_running = False
@@ -7905,6 +8392,8 @@ class ControllerView(QWidget):
         self._stop_forced = ""
         self._stop_forced_details = ""
         self._stop_words_shown = False
+        self._leftover: docker.ServerHolder | None = None  # T568: [Clear it]'s target
+        self._stop_asked = False  # T568: Stop asks once about another Yu'lon's hold
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
         self.dashboard_log: LogPanel | None = None
@@ -8217,6 +8706,10 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T568: shown only beside a refusal that names this user's own leftover reservation.
+        self.clear_reservation_button = QPushButton(CLEAR_RESERVATION_LABEL, tab)
+        self.clear_reservation_button.setToolTip(CLEAR_RESERVATION_TIP)
+        self.clear_reservation_button.setVisible(False)
         # T377: hidden until a Start or Rebuild is refused because Docker no
         # longer has the database. Nothing is imported until Repair is pressed:
         # the player may have meant to restore a backup instead.
@@ -8354,6 +8847,7 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.clear_reservation_button.clicked.connect(self.clear_the_leftover_reservation)
         self.repair_database_button.clicked.connect(self.repair_database)
         self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
@@ -8407,7 +8901,14 @@ class ControllerView(QWidget):
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
-        realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
+        realm_column.addWidget(
+            _bar(
+                realm,
+                self.stop_anyway_button,
+                self.stop_other_button,
+                self.clear_reservation_button,
+            )
+        )
         realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
         box.addWidget(realm)
 
@@ -8654,6 +9155,8 @@ class ControllerView(QWidget):
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
         self._closed = True
+        # T621: the background refresh ends first, so the join below is not held by a fetch.
+        self._stop_update_refresh()
         # T158: a stop still waiting for a world to load gives up at its next
         # look and sends nothing, so the joins below are not held by a load
         # and the world is left running rather than signalled mid-load.
@@ -8872,6 +9375,9 @@ class ControllerView(QWidget):
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
+        # A stopped verdict only keeps the sentence on the tab (T608); it is not a world that
+        # sits at the update, and the next run, started outside Yu'lon, must not inherit it.
+        self._world_failed = bool(result.failure) and result.state != "stopped"
         self._world_ready = result.state == "up" and result.ready
         if self._last_polled is not None:
             # T391: a loop seen after the poll takes REALM ONLINE down now, and
@@ -8888,6 +9394,10 @@ class ControllerView(QWidget):
         """
         if self._world_loops and status.world:
             return "loop"
+        if self._world_failed and status.world:
+            # T608: a world stuck at a failed update is in `docker ps` and prints no ready
+            # marker, so the poll said running and T451 said starting, for ever.
+            return "failed"
         word = _realm_badge_status(status)
         if word == "running" and not self._world_ready and self.services.dashboard is not None:
             # T451: `docker ps` calls the world running seconds, or a whole map
@@ -8907,6 +9417,7 @@ class ControllerView(QWidget):
         self.verdict_label.setVisible(False)
         self.last_verdict = None
         self._world_loops = False
+        self._world_failed = False
         self._world_ready = False
 
     # ------------------------------------------- the movement-map job (T179)
@@ -9005,7 +9516,11 @@ class ControllerView(QWidget):
         self.pathfinding_start_button.setEnabled(
             can_start and not self._busy and not self._pathfinding_pressing
         )
-        self.pathfinding_stop_button.setEnabled(can_stop and not self._pathfinding_pressing)
+        # T623: not beside a press of this app either. Its server hold is shared with the job's
+        # own, so only the view keeps the two apart; the press stops the job itself.
+        self.pathfinding_stop_button.setEnabled(
+            can_stop and not self._busy and not self._pathfinding_pressing
+        )
 
     @Slot()
     def start_pathfinding(self) -> None:
@@ -9019,7 +9534,7 @@ class ControllerView(QWidget):
     def stop_pathfinding(self) -> None:
         """Stop a running job: its container goes, its finished tiles stay, nothing switches on."""
         seam = self.services.pathfinding
-        if seam is None or self._pathfinding_pressing:
+        if seam is None or self._busy or self._pathfinding_pressing:
             return
         self._press_pathfinding(seam.stop, None)
 
@@ -9543,6 +10058,8 @@ class ControllerView(QWidget):
             return forgetting.BACKUP_RUNNING
         if self._restore_running:
             return forgetting.RESTORE_RUNNING
+        if self._move_panel is not None and self._move_panel.running:
+            return forgetting.MOVE_RUNNING
         if self._module_job_running():
             return forgetting.module_running(self._module_pending or "a Modules tab action")
         if self._network_applying:
@@ -9851,6 +10368,7 @@ class ControllerView(QWidget):
         """
         waited = wait_for(self._busy_job) if self._busy else None
         if busy:
+            self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
         self._busy = busy
         self._busy_job = job if busy else ""
@@ -9939,6 +10457,9 @@ class ControllerView(QWidget):
             self.tuning_banner_button.setEnabled(False)
             # T94: a reset writes the same confs, and its undo puts them back.
             self.tuning_reset_button.setEnabled(False)
+            # T619: and so does the SQL-log offer's "Turn it off" -- it writes mangosd.conf
+            # under whatever is running. "Keep it as it is" writes no conf and stays live.
+            set_enabled_why(self.tuning_log_offer_off_button, wait_for(job))
             self.compose_banner_button.setEnabled(False)
             # T99: the bot count is one of those confs (or the compose override
             # a recreate is reading), and its owed-job button is the banner's.
@@ -9987,6 +10508,8 @@ class ControllerView(QWidget):
             self._set_time_zone_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
+            # T619: "Turn it off" is back, if the offer is still made.
+            self._refresh_sql_log_offer()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -10064,10 +10587,106 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._stop_forced = ""
         self._stop_forced_details = ""
+        self._stop_asked = False
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+
+    def _offer_to_stop_over_another(self, exc: object) -> bool:
+        """T568: another Yu'lon holds this server: ask once, then stop anyway if told to.
+
+        The owner's decision of 2026-10-09 ("Stop always stops"): the question names who is
+        doing what and since when, and says what stopping now ends. Yes removes that holder's
+        reservation by the id it was read with and stops here; the other Yu'lon's press ends
+        at its next check and says what it left. Only for a holder Docker could name, which
+        is not this process's own (that is T216's in-process rule). Asked once per press.
+        """
+        if not isinstance(exc, docker.ServerReserved) or self._stop_asked:
+            return False
+        holder = exc.holder
+        if holder.here or not holder.container:
+            return False
+        self._stop_asked = True
+        text = forgetting.server_busy_elsewhere(
+            self.entry.name, holder.press, holder.since(), holder.who, "Stop", anyway=True
+        )
+        if _ask_with(self, STOP_OVER_ANOTHER_TITLE, text, STOP_OVER_ANOTHER_BUTTON) != "yes":
+            return False
+        self._set_busy(True, "Stop")
+        self.status_label.setText("Stopping…")
+        self._hold_badge("stopping")
+        self._run(lambda: self._stop_over(holder), self._stop_done, self._stop_failed)
+        return True
+
+    def _stop_over(self, holder: docker.ServerHolder) -> bool:
+        """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
+        if docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro):
+            try:
+                return self.services.controller.stop()
+            except docker.ServerReserved as newcomer:
+                # Another Yu'lon took the server between the removal and this Stop (Codex
+                # review): the confirmed Stop is not asked about twice, and still stops.
+                logger.warning(f"{holder.name} was taken again before the Stop: {newcomer}")
+        else:
+            # The holder's reservation would not go (Docker slow, a refused removal).
+            logger.warning(f"{holder.name} could not be removed; stopping without one")
+        # "Stop always stops": the Stop the player confirmed runs without a reservation of
+        # its own, for this one Stop only.
+        with docker.stopping_regardless():
+            return self.services.controller.stop()
+
+    def _offer_to_clear_a_leftover(self, exc: object) -> None:
+        """T568: a refusal naming this user's own leftover reservation offers [Clear it].
+
+        Only when it is this user's own, left by an earlier run (not a live process of this
+        one), and this Yu'lon holds the single-instance lock, so no other Yu'lon of this
+        user can be the one holding it. Another user's leftover shows its command only.
+        """
+        self.clear_reservation_button.setVisible(False)
+        self._leftover = None
+        if not isinstance(exc, docker.ServerReserved):
+            return
+        holder = exc.holder
+        # Not a live process of this user's on this computer (a headless run, a second window
+        # that got past the lock): only a holder known to be dead is cleared (Opus review).
+        if (
+            holder.ours
+            and not holder.here
+            and holder.container
+            and holder.live_here() is False
+            and single_instance.holds_the_lock()
+        ):
+            self._leftover = holder
+            self.clear_reservation_button.setEnabled(True)
+            self.clear_reservation_button.setVisible(True)
+
+    @Slot()
+    def clear_the_leftover_reservation(self) -> None:
+        """Remove the leftover reservation [Clear it] was offered for (by its container id)."""
+        holder = self._leftover
+        if holder is None or self._busy:
+            return
+        self.clear_reservation_button.setEnabled(False)
+        self._run(
+            lambda: docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro),
+            self._leftover_cleared,
+            self._leftover_clear_failed,
+        )
+
+    @Slot(object)
+    def _leftover_cleared(self, removed: object) -> None:
+        self.clear_reservation_button.setVisible(False)
+        self._leftover = None
+        self.problem_label.setText(
+            RESERVATION_CLEARED if removed else "Docker would not remove it."
+        )
+        self.refresh_status()
+
+    @Slot(object)
+    def _leftover_clear_failed(self, exc: object) -> None:
+        self.clear_reservation_button.setEnabled(True)
+        self.problem_label.setText(f"The reservation could not be removed: {exc}")
 
     @Slot()
     def restart_from_server_tab(self) -> None:
@@ -10116,6 +10735,7 @@ class ControllerView(QWidget):
         elif isinstance(exc, DatabaseMissing):
             self._start_failed(exc)  # refused before the Stop; Start's offer is the repair
         else:
+            self._stop_asked = True  # T568: a Restart is not a Stop; "Stop anyway" is Stop's
             self._stop_failed(exc)
 
     @Slot(object)
@@ -10361,6 +10981,7 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
+        self._offer_to_clear_a_leftover(exc)
         if isinstance(exc, DatabaseMissing):
             self._offer_to_repair_the_database(str(exc))
         raw = str(exc)
@@ -10725,8 +11346,11 @@ class ControllerView(QWidget):
         the silent bug it replaced looked like (review, 2026-08-22).
         """
         self._set_busy(False)
+        if self._offer_to_stop_over_another(exc):
+            return
         msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
+        self._offer_to_clear_a_leftover(exc)
         # T248: a refusal's command (`docker compose ls`) is under Details, not on the line.
         detail = self._stop_failure_detail(exc, msg)
         self.problem_details.set_text(detail)
@@ -11834,6 +12458,7 @@ class ControllerView(QWidget):
         """
         if self.services.set_play_client_dir is None or self._play_pending:
             return
+        self._stop_update_refresh()  # T621: Play is network-free; a refresh does not run beside it
         if self.services.play_client_dir is None:
             self.make_play_client()
             return
@@ -11962,9 +12587,13 @@ class ControllerView(QWidget):
         # packs or a patched exe: step 1 takes them out. And for the launcher's picks
         # alone (T187): on an entry with no client data -- every shipped game today --
         # its display and account choices are Config.wtf keys only the pipeline writes.
-        if has_client_data(self.entry.client) or (
-            recorded is not None
-            and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
+        if (
+            has_client_data(self.entry.client)
+            or bool(self.services.default_addons)
+            or (
+                recorded is not None
+                and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
+            )
         ):
             self._skipped = frozenset()
             self._play_prepare()
@@ -12053,6 +12682,11 @@ class ControllerView(QWidget):
             if cancelled():
                 raise client_packs.Cancelled("Cancelled. Nothing was started.")
 
+        # 0. The game's default client addons (T612), before anything else is written: put in
+        # when missing, updated when behind, never put back once the player removed them. A
+        # failure is a line in the Play log and never a stop: Play must start the game.
+        check_cancel()
+        notes += self._default_addons_work(say, clone=False)
         wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
         # "Play without" a pack whose update was cut half way: its files are a mix of old
         # and new, so they go (and the entry) before the game starts.
@@ -12261,6 +12895,85 @@ class ControllerView(QWidget):
             seeded = True
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
+
+    def _default_addons_work(self, say: Callable[[str], None], *, clone: bool) -> tuple[str, ...]:
+        """Off the GUI thread: this game's default client addons, put in (T612).
+
+        Through the Modules tab's own applier and manifests, so what lands in the game client
+        is what the tab shows installed and what its Remove takes back. `clone=False` is Play:
+        no git and no network, only the files a clone on disk has and the client lacks.
+        `clone=True` (a fresh install, a tab opening) also installs an add-on with no clone.
+        Never raises: the lines come back as Play notes.
+        """
+        services = self.services
+        ids = services.default_addons
+        if not ids or services.applier is None or services.store is None:
+            return ()
+        try:
+            outcome = default_addons.put_in(
+                services.controller.server_dir,
+                services.applier,
+                services.store.load_all("mod"),
+                ids,
+                clone=clone,
+                say=say,
+            )
+        except Exception as exc:  # boundary: the addons are a courtesy, Play is the job
+            logger.warning(f"default client addons: {exc}")
+            return (f"Could not check your client addons ({exc}). Play goes on without them.",)
+        return outcome.notes()
+
+    def put_default_addons_later(self, milliseconds: int = 5000) -> None:
+        """A tab opened at start-up: ask `put_default_addons_in()` a few seconds on (T612).
+
+        How an existing server that has no clone of its addons yet gets them, off the Play
+        path: Play itself never clones. Nothing happens when they are all there, removed, or
+        failed within the day.
+        """
+        if self.services.default_addons:
+            QTimer.singleShot(milliseconds, self, self.put_default_addons_in)
+
+    def put_default_addons_in(self) -> None:
+        """A fresh install ended: put this game's default client addons in (T612).
+
+        Hung off `fresh_install` like `settle_channel_after_install()` and for the same reason:
+        an install is a press that is allowed to write, "Use existing…" is not. Nothing is
+        started while a server job, a module job or a Play is on, or when the folder the
+        files would go into is not this server's; the next Play puts them in then.
+        """
+        if not self.services.default_addons or getattr(self, "_closed", False):
+            return
+        if self._busy or self._module_job_running() or self._play_pending:
+            return
+        if (
+            self.services.play_client_dir is not None
+            and self._usable_play_client(offer_remake=False) is None
+        ):
+            return
+        self._module_pending = "put in the client addons"
+        self.module_report.setPlainText("Putting the client addons in…")
+        self._run_module_job(
+            lambda: self._default_addons_work(lambda _line: None, clone=True),
+            self._default_addons_done,
+            self._default_addons_failed,
+        )
+
+    @Slot(object)
+    def _default_addons_done(self, result: object) -> None:
+        self._module_job_ended()
+        self._module_pending = None
+        lines = result if isinstance(result, tuple) else ()
+        self.module_report.setPlainText(
+            "\n".join(lines) if lines else "The client addons are already in place."
+        )
+        self.reload_modules()
+
+    @Slot(object)
+    def _default_addons_failed(self, exc: object) -> None:
+        self._module_job_ended()
+        self._module_pending = None
+        logger.warning(f"default client addons: {exc}")
+        self.module_report.setPlainText(f"Could not put the client addons in: {exc}")
 
     def _download_progress(self, pack: ClientPack) -> Callable[[int, int], None]:
         """A progress callback for `pack`'s download: at most five lines a second."""
@@ -12880,6 +13593,7 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
+        self.clear_reservation_button.setVisible(False)
         self._restore_plan = None
         self.restore_button.setEnabled(False)
         if not self._import_running:
@@ -14161,7 +14875,12 @@ class ControllerView(QWidget):
     @Slot(object)
     def _account_failed(self, exc: object) -> None:
         self.create_account_button.setEnabled(True)
-        self.account_report.setText(f"Could not create the account: {exc}")
+        # Another Yu'lon holds the server (T610): its sentence says what was not done.
+        self.account_report.setText(
+            str(exc)
+            if isinstance(exc, docker.ServerHeldError)
+            else f"Could not create the account: {exc}"
+        )
         self.action_failed.emit(str(exc))
 
     # --------------------------------------------------------------- bots tab
@@ -14613,6 +15332,9 @@ class ControllerView(QWidget):
             or self._bot_count_writing
         ):
             return
+        if self._tuning_writing:  # the bot card's Save writes the same conf (T622)
+            self.bot_count_report.setText(TUNING_WRITE_RUNNING)
+            return
         n = self.bot_count_box.value()
         if not self._confirm(BOT_COUNT_TITLE, botpop.question(self.entry, reading, n)):
             return
@@ -14644,7 +15366,11 @@ class ControllerView(QWidget):
     def _bot_count_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and the box read again."""
         self._bot_count_writing = False
-        self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.bot_count_report.setText(str(exc))
+        else:
+            self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
         self.action_failed.emit(str(exc))
         self._look_up_bot_count()
 
@@ -14888,6 +15614,9 @@ class ControllerView(QWidget):
             or self._time_zone_writing
         ):
             return
+        if self._tuning_writing:  # a Save writes the compose override too (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         if not self._confirm(TIME_ZONE_TITLE, server_time_zone.question(self.entry, reading, zone)):
             return
         self._time_zone_writing = True
@@ -14916,7 +15645,10 @@ class ControllerView(QWidget):
     def _time_zone_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
         self._time_zone_writing = False
-        if isinstance(exc, server_time_zone.TimeZoneSettingError):
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.tuning_report.setPlainText(str(exc))
+        elif isinstance(exc, server_time_zone.TimeZoneSettingError):
             self.tuning_report.setPlainText(f"The time zone was not changed: {exc}")
         else:  # T214: a bug's words are Details' and the log's
             self.tuning_report.setPlainText(TIME_ZONE_BROKE)
@@ -15409,9 +16141,26 @@ class ControllerView(QWidget):
         self.restore_reasons = ReasonLine(tab)
         set_enabled_why(self.restore_button, RESTORE_PICK, self.restore_reasons)
         self.restore_reasons.watch(self.backup_button)
+        # T604: Delete and Clean up, only where the shelf is wired. Greyed with their reason on
+        # the same line as Restore's.
+        self.delete_backup_button = QPushButton(DELETE_BACKUP_LABEL, tab)
+        self.clean_up_button = QPushButton(CLEAN_UP_LABEL, tab)
+        self.delete_backup_button.clicked.connect(self.delete_selected_backup)
+        self.clean_up_button.clicked.connect(self.clean_up_backups)
+        self.delete_backup_button.setVisible(self.services.shelf is not None)
+        self.clean_up_button.setVisible(self.services.shelf is not None)
+        self._shelf: backup_shelf.Shelf | None = None
+        self._shelf_job = ""
+        self._retain_after_backup = False
         actions.addWidget(self.plan_restore_button)
         actions.addWidget(self.restore_button)
         actions.addStretch(1)
+        # A row of their own: beside Restore the four presses cut "Show restore plan" short at
+        # the app's 960 px minimum width and below.
+        shelf_row = QHBoxLayout()
+        shelf_row.addWidget(self.delete_backup_button)
+        shelf_row.addWidget(self.clean_up_button)
+        shelf_row.addStretch(1)
 
         self.maintenance_report = QPlainTextEdit(tab)
         self.maintenance_report.setReadOnly(True)
@@ -15426,10 +16175,15 @@ class ControllerView(QWidget):
         self.plan_restore_button.setParent(backups)
         self.restore_button.setParent(backups)
         self.restore_reasons.setParent(backups)
+        self.delete_backup_button.setParent(backups)
+        self.clean_up_button.setParent(backups)
+        self.restore_reasons.watch(self.delete_backup_button)
+        self.restore_reasons.watch(self.clean_up_button)
         backups_box = QVBoxLayout(backups)
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
         backups_box.addLayout(actions)
+        backups_box.addLayout(shelf_row)
         backups_box.addWidget(self.restore_reasons)
 
         restore = QGroupBox("Restore", tab)
@@ -15449,6 +16203,19 @@ class ControllerView(QWidget):
         columns.addWidget(backups, 3)
         columns.addWidget(restore, 2)
         box.addLayout(columns)
+        if self.services.move is not None:
+            # T601: pack and bring in accounts and characters. Its report goes to the same box
+            # a backup's and a restore's do, and a finished move re-lists the backups (the
+            # copy taken before a bring-in is one).
+            self._move_panel = MovePanel(
+                self.services.move,
+                jobs=self._jobs,
+                report=self.maintenance_report.setPlainText,
+                failed=self._maintenance_failed,
+                changed=self.refresh_backups,
+                parent=tab,
+            )
+            box.addWidget(self._move_panel)
         self._add_panel_tab(tab, "maintenance", "Maintenance")
         self.refresh_backups()
 
@@ -15464,6 +16231,7 @@ class ControllerView(QWidget):
         """A plan belongs to one file. Selecting another must not carry it over."""
         self._restore_plan = None
         set_enabled_why(self.restore_button, self._restore_waits_for())
+        self._settle_shelf_buttons()
 
     def _restore_waits_for(self) -> str:
         """Why Restore is greyed while no plan allows it: no backups, or none planned yet.
@@ -15484,12 +16252,16 @@ class ControllerView(QWidget):
         self._restore_plan = None
         self.backup_list.clear()
         directory = self.services.backups_dir()
-        for path in sorted(directory.glob("*.sql"), reverse=True):
-            size = path.stat().st_size / (1024 * 1024)
-            item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            self.backup_list.addItem(item)
+        if self.services.shelf is not None:
+            self._list_the_shelf(self.services.shelf)
+        else:
+            for path in sorted(directory.glob("*.sql"), reverse=True):
+                size = path.stat().st_size / (1024 * 1024)
+                item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
+                item.setData(Qt.ItemDataRole.UserRole, str(path))
+                self.backup_list.addItem(item)
         set_enabled_why(self.restore_button, self._restore_waits_for())
+        self._settle_shelf_buttons()
         # A10 (T195): an empty report beside a list of backups says what to do.
         self.maintenance_report.setPlaceholderText(RESTORE_PICK if self.backup_list.count() else "")
         none_yet = f"No backups yet in {directory}."
@@ -15499,6 +16271,189 @@ class ControllerView(QWidget):
             # Backups arrived since: the hint above is what the empty box says now.
             self.maintenance_report.setPlainText("")
         self._show_interrupted()
+
+    # ------------------------------------------------ delete and clean up (T604)
+
+    def _list_the_shelf(self, seam: backup_shelf.Seam) -> None:
+        """Fill the Backups list from the shelf: date, database, size, what made it, game."""
+        try:
+            shelf = seam.read()
+        except Exception as exc:  # noqa: BLE001 - an unreadable folder is an empty list, said
+            logger.warning(f"could not read the backups folder: {exc}")
+            self._shelf = None
+            return
+        self._shelf = shelf
+        for r in shelf.rows:
+            text = backup_shelf.describe(r, shelf.game_id)
+            item = QListWidgetItem(f"{text} \u00b7 kept" if r.kept_because else text)
+            item.setData(Qt.ItemDataRole.UserRole, str(shelf.folder / r.name))
+            item.setData(Qt.ItemDataRole.UserRole + 1, r.name)
+            item.setToolTip(
+                f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip()
+            )
+            if r.kept_because or r.cannot_delete:
+                item.setForeground(QColor(COLOR_TEXT_MUTED))
+            self.backup_list.addItem(item)
+
+    def _selected_row(self) -> backup_shelf.ShelfRow | None:
+        item = self.backup_list.currentItem()
+        shelf = self._shelf
+        if item is None or shelf is None:
+            return None
+        name = item.data(Qt.ItemDataRole.UserRole + 1)
+        return next((r for r in shelf.rows if r.name == name), None)
+
+    def _shelf_waits_for(self) -> str | None:
+        """Why Delete and Clean up are greyed whatever is selected: a job is in flight."""
+        if self._shelf_job:
+            return wait_for(self._shelf_job)
+        if self._backup_running:
+            return wait_for("the backup")
+        if self._backup_before_update:
+            return wait_for("the backup before the update")
+        if self._busy:
+            return wait_for(self._busy_job)
+        return None
+
+    def _settle_shelf_buttons(self) -> None:
+        """Grey Delete and Clean up with their reasons, or enable them (T604)."""
+        if self.services.shelf is None:
+            return
+        shelf = self._shelf
+        waits = self._shelf_waits_for()
+        clean = waits
+        delete = waits
+        if clean is None and (shelf is None or not shelf.rows):
+            clean = delete = "There are no backups to delete."
+        elif clean is None and shelf is not None and shelf.delete_refused:
+            clean = delete = shelf.delete_refused
+        if delete is None:
+            row = self._selected_row()
+            if row is None:
+                delete = DELETE_PICK
+            elif row.cannot_delete:
+                delete = row.cannot_delete
+        set_enabled_why(self.delete_backup_button, delete, self.restore_reasons)
+        set_enabled_why(self.clean_up_button, clean, self.restore_reasons)
+
+    @Slot()
+    def delete_selected_backup(self) -> None:
+        """Delete the selected backup after one question that names it (worker thread does it)."""
+        seam = self.services.shelf
+        row = self._selected_row()
+        shelf = self._shelf
+        if seam is None or shelf is None or row is None:
+            self.maintenance_report.setPlainText(DELETE_PICK)
+            return
+        try:
+            plan = backup_shelf.plan_delete(shelf, row.name)
+        except backup_shelf.ShelfRefusal as exc:
+            self.maintenance_report.setPlainText(str(exc))
+            return
+        lines = [
+            f"Delete {row.name} ({backup_shelf.size_text(row.size)}) from this server's "
+            "backups folder?",
+            "It is deleted for good: it does not go to the trash.",
+        ]
+        if row.read_only:
+            lines.append("It is marked read-only. Yu'lon will clear that mark to delete it.")
+        if not row.usable:
+            lines.append(f"It cannot be restored: {row.problem}")
+        if row.kept_because:
+            lines.append(f"Yu'lon would have kept it: {row.kept_because}")
+        if not ask_yes_no(self, "Delete this backup?", "\n\n".join(lines)):
+            return
+        self._run_shelf_job("the delete", lambda: seam.delete(plan), "Deleting\u2026")
+
+    @Slot()
+    def clean_up_backups(self) -> None:
+        """Choose a rule in the dialog, then let the worker re-check and delete."""
+        seam = self.services.shelf
+        if seam is None:
+            return
+        try:
+            shelf = seam.read()
+        except Exception as exc:  # noqa: BLE001
+            self.maintenance_report.setPlainText(f"{CLEAN_UP_NO_FOLDER_ACCESS} ({exc})")
+            return
+        self._shelf = shelf
+        if shelf.delete_refused:
+            self.maintenance_report.setPlainText(shelf.delete_refused)
+            return
+        dialog = CleanUpDialog(shelf, keep_now=seam.keep(), parent=self)
+        try:
+            agreed = dialog.exec() == int(QDialog.DialogCode.Accepted)
+            plan = dialog.plan
+            changed, value = dialog.keep_wanted()
+        finally:
+            dialog.deleteLater()
+        if not agreed:
+            return
+        if changed:
+            try:
+                seam.set_keep(value)
+            except (backup_shelf.ShelfRefusal, OSError) as exc:
+                self.maintenance_report.setPlainText(f"The setting was not saved: {exc}")
+                return
+        if plan is None or not plan.names:
+            self.maintenance_report.setPlainText("Saved. Nothing was deleted.")
+            return
+        self._run_shelf_job("the clean-up", lambda: seam.delete(plan), "Cleaning up\u2026")
+
+    def _run_shelf_job(self, job: str, work: Callable[[], object], said: str) -> None:
+        self._shelf_job = job
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(said)
+        self._run(work, self._shelf_done, self._shelf_failed)
+
+    @Slot(object)
+    def _shelf_done(self, result: object) -> None:
+        self._shelf_job = ""
+        self.refresh_backups()
+        if not isinstance(result, backup_shelf.Removed):
+            return
+        n = len(result.names)
+        freed = backup_shelf.size_text(result.freed)
+        lines = [f"Deleted {n} file{'' if n == 1 else 's'}, freeing {freed}:"]
+        lines += [f"  {name}" for name in result.names]
+        self.maintenance_report.setPlainText("\n".join(lines))
+
+    @Slot(object)
+    def _shelf_failed(self, exc: object) -> None:
+        self._shelf_job = ""
+        self.refresh_backups()  # some files may have gone before the one that would not
+        self._maintenance_failed(exc, MAINTENANCE_DELETE_FAILED)
+        self._settle_shelf_buttons()
+
+    def _retain_the_newest(self, seam: backup_shelf.Seam) -> None:
+        """After a Back up now, the automatic keep (off unless turned on); worker thread."""
+        if seam.keep() is None:
+            return
+        self._shelf_job = "the clean-up after the backup"
+        self._settle_shelf_buttons()
+        self._run(seam.retain, self._retained, self._retention_failed)
+
+    @Slot(object)
+    def _retained(self, result: object) -> None:
+        self._shelf_job = ""
+        before = self.maintenance_report.toPlainText()
+        self.refresh_backups()
+        text = before
+        if isinstance(result, backup_shelf.Removed) and result.names:
+            n = len(result.names)
+            text += (
+                f"\nKept only the newest copies, as you asked: removed {n} older "
+                f"file{'' if n == 1 else 's'} ({backup_shelf.size_text(result.freed)})."
+            )
+        self.maintenance_report.setPlainText(text)
+
+    @Slot(object)
+    def _retention_failed(self, exc: object) -> None:
+        self._shelf_job = ""
+        before = self.maintenance_report.toPlainText()
+        self.refresh_backups()
+        self.maintenance_report.setPlainText(f"{before}\nOlder backups were not cleaned up: {exc}")
+        self.action_failed.emit(f"Older backups were not cleaned up: {exc}")
 
     def _show_interrupted(self) -> None:
         """Surface a restore that never finished, and offer to put the record down."""
@@ -15574,10 +16529,14 @@ class ControllerView(QWidget):
             try:
                 leased.enter_context(
                     docker.maintenance_lease(
-                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES
+                        self.services.controller.server_dir,
+                        forgetting.BACKUP_HOLDS_THE_DATABASES,
+                        press=forgetting.PRESS_BACKUP,
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
-            except docker.MaintenanceLeaseTaken as exc:
+            except (docker.MaintenanceLeaseTaken, docker.ServerHeldError) as exc:
                 raise wotlk_maintenance.MaintenanceError(f"{exc} No backup was taken.") from exc
             return self._back_up_under_the_lease()
 
@@ -15597,7 +16556,11 @@ class ControllerView(QWidget):
             try:
                 held.enter_context(
                     docker.hold_the_server(
-                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+                        self.services.controller.server_dir,
+                        forgetting.BACKUP_HOLDS_THE_SERVER,
+                        press=forgetting.PRESS_BACKUP,
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -15619,18 +16582,25 @@ class ControllerView(QWidget):
         set_enabled_why(self.backup_button, wait_for("the backup"))
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
         self._backup_running = True  # T95: `forget_refusal()` reads it
+        self._retain_after_backup = True  # T604: the automatic keep follows THIS press only
+        self._settle_shelf_buttons()
         self._run(self._backup_with_the_database, self._backup_done, self._backup_failed)
 
     @Slot(object)
     def _backup_failed(self, exc: object) -> None:
         self._backup_running = False
+        self._retain_after_backup = False
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
+        self._settle_shelf_buttons()
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
         self._backup_running = False
+        retain = self._retain_after_backup
+        self._retain_after_backup = False
         self.backup_button.setEnabled(True)
         if not isinstance(result, wotlk_maintenance.BackupReport):
+            self._settle_shelf_buttons()
             return
         lines = [f"Backed up to {result.directory}:"]
         lines += [
@@ -15646,6 +16616,10 @@ class ControllerView(QWidget):
         # the one thing the user just asked for (caught by its own test).
         self.refresh_backups()
         self.maintenance_report.setPlainText("\n".join(lines))
+        if retain and self.services.shelf is not None:
+            self._retain_the_newest(self.services.shelf)
+        else:
+            self._settle_shelf_buttons()
 
     @Slot()
     def show_restore_plan(self) -> None:
@@ -15739,10 +16713,14 @@ class ControllerView(QWidget):
             try:
                 leased.enter_context(
                     docker.maintenance_lease(
-                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_DATABASES
+                        self.services.controller.server_dir,
+                        forgetting.RESTORE_HOLDS_THE_DATABASES,
+                        press=forgetting.PRESS_RESTORE,
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
-            except docker.MaintenanceLeaseTaken as exc:
+            except (docker.MaintenanceLeaseTaken, docker.ServerHeldError) as exc:
                 raise wotlk_maintenance.MaintenanceError(f"{exc} Nothing was restored.") from exc
             return self._restore_under_the_lease(plan)
 
@@ -15755,7 +16733,11 @@ class ControllerView(QWidget):
             try:
                 held.enter_context(
                     docker.hold_the_server(
-                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_SERVER
+                        self.services.controller.server_dir,
+                        forgetting.RESTORE_HOLDS_THE_SERVER,
+                        press=forgetting.PRESS_RESTORE,
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -15889,6 +16871,10 @@ class ControllerView(QWidget):
                 "into the databases it names rather than returning them to the state the backup "
                 "was taken from. Press Restore to go ahead."
             )
+            if result.game_unproven:
+                # T603: said before the press, and asked again at it.
+                lines.append("")
+                lines.append(wotlk_maintenance.UNLABELED_BACKUP)
             if warning:
                 lines.append("")
                 lines.append(warning)
@@ -15913,6 +16899,20 @@ class ControllerView(QWidget):
             # restore's take-back writes (`_put_back_refused`, the other order).
             self.maintenance_report.setPlainText(RESTORE_DURING_PUT_BACK)
             return
+        if plan.game_unproven:
+            # T603: an old backup names no game and Yu'lon cannot tell it from the
+            # schema names. One question, defaulting to No; `restore()` itself refuses
+            # an unproven plan that was not answered, so this is not the only guard.
+            if not self._confirm(
+                "Restore a backup that does not say which game it is from?",
+                f"{wotlk_maintenance.UNLABELED_BACKUP}\n\nRestore {plan.backup.name} anyway?",
+            ):
+                self.maintenance_report.setPlainText(
+                    f"Nothing was restored: {plan.backup.name} does not say which game it is from "
+                    "and you did not agree to restore it."
+                )
+                return
+            plan = plan.with_unlabeled_accepted()
         set_enabled_why(self.restore_button, wait_for("the restore"))
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
@@ -17474,6 +18474,12 @@ class ControllerView(QWidget):
             )
         )
         self._note_session_facts(result, acted_on)
+        # T612: a Remove (or a hand Install) of a default client addon is kept per server,
+        # so the next Play does not put back what the player took out.
+        if self.services.default_addons:
+            default_addons.remember(
+                self.services.controller.server_dir, result, self.services.default_addons
+            )
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
         # a remove that then failed, leaving a folder on disk with no row in the
@@ -17576,6 +18582,19 @@ class ControllerView(QWidget):
         self._module_pending = None
         self._acting_on = None
         if acted_on is not None:
+            # T612: a Remove that stopped half way (the clone may be gone, or half of it) is
+            # still the player's Remove: noted, so Play does not put the addon back over it.
+            # A refusal changed nothing, so it is not.
+            if (
+                what.startswith("remove ")
+                and acted_on.id in self.services.default_addons
+                and acted_on.type == "mod"
+                and not isinstance(exc, apply_module.ApplyRefusal)
+            ):
+                try:
+                    default_addons.decline(self.services.controller.server_dir, acted_on.id)
+                except OSError as note_exc:
+                    logger.warning(f"could not note the removal of {acted_on.id}: {note_exc}")
             # A failure is not "nothing happened" (round 2). `install()` fetches
             # and RESETS the checkout first and then runs deploy, patches, SQL,
             # conf and the client copy; any of those can raise with the folder
@@ -17644,6 +18663,11 @@ class ControllerView(QWidget):
     ) -> None:
         """`_run()` for a Modules tab job: counted until its done or failed slot ends it."""
         self._module_jobs += 1
+        self._stop_update_refresh()  # T621: a press that writes into the clones goes first
+        if self._refresh_running:
+            # Its fetch ends within a fifth of a second of the cancel; give it up to a second
+            # to let go of the clone before this job's git starts in the same one.
+            self._refresh_ended.wait(REFRESH_LET_GO_SECONDS)
         self._run(work, on_done, on_error)
 
     def _module_job_ended(self) -> None:
@@ -17741,6 +18765,77 @@ class ControllerView(QWidget):
         self._note_session_facts(result, acted_on)
         self.reload_modules()
 
+    def refresh_updates_later(self, milliseconds: int = REFRESH_FIRST_MS) -> None:
+        """A tab opened at start-up: count the add-ons and modules a little later (T621).
+
+        Not on the spot, so the window and the work T612 does at start (`put_default_addons_
+        later()`) come first; and again every `REFRESH_AGAIN_MS` for as long as the tab stays
+        open. What makes it once a day is the cache the route reads, not this timer: a look
+        that finds every clone counted within the day asks nobody anything.
+        """
+        if self.services.module_refresh is not None and not getattr(self, "_closed", False):
+            QTimer.singleShot(milliseconds, self, self._refresh_tick)
+
+    @Slot()
+    def _refresh_tick(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self.refresh_updates()
+        QTimer.singleShot(self._refresh_again_ms, self, self._refresh_tick)
+
+    def refresh_updates(self) -> None:
+        """Count how far behind the installed add-ons and modules are, quietly (T621).
+
+        Off the GUI thread, one at a time, and only when nothing else is going on: not
+        while a server job, a Modules tab job or a Play is under way (those may write into
+        the very clones it fetches into, and Play is the path T612 made network-free), and
+        never when the tab is closing. It shows nothing of its own: the module report is
+        not touched, no button changes. What it finds becomes the update chips, as if
+        Check for updates had been pressed; a run that failed, found nothing or was cancelled
+        changes nothing, and the old counts stay.
+
+        A job that starts while it runs ends it (`_stop_update_refresh()`), and so does a
+        Quit: its fetches take their `cancel` and end within a fifth of a second.
+        """
+        route = self.services.module_refresh
+        if route is None or getattr(self, "_closed", False) or self._refresh_running:
+            return
+        if self._busy or self._module_job_running() or self._play_pending:
+            return
+        if self._waits_for_the_distro("update-refresh", self.refresh_updates):
+            return
+        cancel = threading.Event()
+        ended = threading.Event()
+        self._refresh_cancel, self._refresh_ended = cancel, ended
+        self._refresh_running = True
+
+        def work() -> tuple[apply_module.ModuleUpdate, ...]:
+            try:
+                return route(cancel)
+            finally:
+                ended.set()  # the worker has let go of the clones
+
+        self._run(work, self._refresh_done, self._refresh_failed)
+
+    def _stop_update_refresh(self) -> None:
+        """Tell a running background refresh to stop; its answer, when it comes, is dropped."""
+        self._refresh_cancel.set()
+
+    @Slot(object)
+    def _refresh_done(self, result: object) -> None:
+        self._refresh_running = False
+        if self._refresh_cancel.is_set() or getattr(self, "_closed", False):
+            return
+        if not isinstance(result, tuple) or not result:
+            return
+        self._note_counts(result)
+        self.reload_modules()
+
+    @Slot(object)
+    def _refresh_failed(self, exc: object) -> None:
+        self._refresh_running = False
+        logger.warning(f"background update refresh: {exc}")
+
     @Slot()
     def check_module_updates(self) -> None:
         """Ask each installed module how far behind its upstream it is (checklist 8.7a).
@@ -17788,8 +18883,15 @@ class ControllerView(QWidget):
         # client addons in `sql_scripts/clones/`).
         # `Behind.UNCOUNTED` is kept (T147): a shallow checkout that is behind
         # by a number it cannot prove still has an update to offer.
+        self._note_counts(result)
+        self.reload_modules()
+
+    def _note_counts(self, result: Sequence[apply_module.ModuleUpdate]) -> None:
+        """Keep what the rows counted, for the chips: the Check press's and the refresh's."""
         self._behind = {
-            (row.family, row.key): row.behind for row in result if is_behind(row.behind)
+            (row.family, row.key): row.behind
+            for row in result
+            if row.behind is not None and is_behind(row.behind)
         }
         self._put_back_tip = {
             (row.family, row.key): row.put_back_tip for row in result if row.put_back_tip
@@ -17800,7 +18902,6 @@ class ControllerView(QWidget):
             for row in result
             if row.release and row.release == row.installed_release
         }
-        self.reload_modules()
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
@@ -18456,6 +19557,9 @@ class ControllerView(QWidget):
 
     def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
         """T381: an `unreadable` corrections reading is asked again (`_arm_ask_again`)."""
+        if result.state == "busy" and self._import_asked:
+            self._ask_again_corrections.arm_for_busy()
+            return
         self._arm_ask_again(
             self._ask_again_corrections, result.state == "unreadable", "corrections"
         )
@@ -18473,10 +19577,17 @@ class ControllerView(QWidget):
 
     def _refresh_corrections_banner(self) -> None:
         check = self._corrections
+        if check is not None and check.state == "busy":
+            # Another Yu'lon holds the server (T607): the sentence, and no button to race it.
+            self.corrections_banner_label.setText(check.why)
+            self.corrections_banner_button.setVisible(False)
+            self.corrections_banner.setVisible(True)
+            return
         if check is None or check.state != "stale":
             self.corrections_banner.setVisible(False)
             return
         self.corrections_banner_label.setText(native.corrections_banner_text(check))
+        self.corrections_banner_button.setVisible(True)
         self.corrections_banner.setVisible(True)
 
     def apply_database_corrections(self) -> bool:
@@ -18773,7 +19884,10 @@ class ControllerView(QWidget):
             # nothing about the running server changed.
             self._rebuild_owed.clear()
             self.reload_modules()
-        if not ok and not self.rebuild_log.cancelled:
+        if not ok:
+            # `ok` alone, not the panel's `cancelled` (T592): a Stop that took effect
+            # arrives as ok=True, so a failure here is a real one -- even one that
+            # landed as Stop was pressed, which still put its module back.
             self._reload_after_a_failed_build()
         if not ok:
             self.action_failed.emit(message)
@@ -18806,7 +19920,7 @@ class ControllerView(QWidget):
         recorded as put back has a clone on another commit than the one its count
         and its version were read at. Those are dropped before the redraw, as an
         Update drops them, and every version is read again (a local `rev-parse` per
-        clone, off the GUI thread). Not on a Stop: nothing is put back on one.
+        clone, off the GUI thread). A Stop that took effect never gets here: it ends ok=True.
         """
         if self._waits_for_the_distro(
             "modules after a failed build", self._reload_after_a_failed_build
@@ -18949,6 +20063,26 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.tuning_banner.setVisible(False)
+        # T619: the offer to stop an old server printing every SQL statement. Its own
+        # strip and not the banner above: the banner is for jobs OWED, this one asks.
+        self.tuning_log_offer = QWidget(tab)
+        log_offer_box = QHBoxLayout(self.tuning_log_offer)
+        log_offer_box.setContentsMargins(8, 6, 8, 6)
+        self.tuning_log_offer_label = QLabel("", self.tuning_log_offer)
+        self.tuning_log_offer_label.setWordWrap(True)
+        self.tuning_log_offer_off_button = QPushButton(TUNING_LOG_OFFER_OFF, self.tuning_log_offer)
+        self.tuning_log_offer_off_button.clicked.connect(self.turn_off_sql_log)
+        self.tuning_log_offer_keep_button = QPushButton(
+            TUNING_LOG_OFFER_KEEP, self.tuning_log_offer
+        )
+        self.tuning_log_offer_keep_button.clicked.connect(self.keep_sql_log)
+        log_offer_box.addWidget(self.tuning_log_offer_label, 1)
+        log_offer_box.addWidget(self.tuning_log_offer_off_button)
+        log_offer_box.addWidget(self.tuning_log_offer_keep_button)
+        self.tuning_log_offer.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.tuning_log_offer.setVisible(False)
         # The same shape as the Modules tab, so the same rule (T73): the cards
         # are what grows, the report is what the last press did and no taller.
         self.tuning_report = _ReportBox(tab)
@@ -18958,6 +20092,7 @@ class ControllerView(QWidget):
         self.tuning_report_strip = _ReportStrip(self.tuning_report, tab)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
+        box.addWidget(self.tuning_log_offer)
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
@@ -18981,6 +20116,8 @@ class ControllerView(QWidget):
         # The raw editor's file exactly as read (T573 item 2); see `tuning.save_text`.
         self._tuning_raw = ""
         self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
+        # T590: cards for installed modules whose conf declares no keys, read off the `.conf.dist`.
+        self._outside_rows: tuple[tuning.TuningRow, ...] = ()
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
         # and forgotten on restart for the same reason: a persisted marker is
@@ -19008,17 +20145,35 @@ class ControllerView(QWidget):
         Reads files and nothing else -- no git, no docker, no database -- so it
         is cheap enough to run after every install and every save.
         """
+        if self._tuning_writing:
+            # A write is on the job runner (T622): the cards are drawn from the file when it has
+            # landed, not from the half it has written, and the pressed card keeps its mark.
+            self._tuning_reload_asked = True
+            return
         if self._waits_for_the_distro("tuning", self.reload_tuning):
             # A card's Save or Revert that led here still redraws as that card's (T190).
             self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
-        rows = tuning.rows_for(
-            manifests,
-            self._installed_clones() or {},
-            self.services.controller.server_dir,
-        )
+        # One reading of what is installed for both builders, so the declared cards and
+        # the `.conf.dist` ones come from the same snapshot.
+        installed = self._installed_clones() or {}
+        rows = tuning.rows_for(manifests, installed, self.services.controller.server_dir)
         self._tuning_rows = rows
+        # T590: a module whose conf declares no keys (one added by link or folder) gets a
+        # card from its `.conf.dist`; the server's own confs and any file a card already
+        # declares keys for are left out.
+        server_dir = self.services.controller.server_dir
+        self._outside_rows = conf_dist.rows_for(
+            manifests,
+            installed,
+            server_dir,
+            core_files=self._tuning_core_files(),
+            declared_files=tuple(dict.fromkeys(row.file for row in rows)),
+            clone_dir=lambda manifest: (
+                server_dir / apply_module.CLONE_DIRS[manifest.type] / manifest.id
+            ),
+        )
         # T302: the world conf's rates, read in the same pass -- one file, no job.
         self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
         # T554: WoW Unbound's three switches, from the same pass over its own conf.
@@ -19040,6 +20195,81 @@ class ControllerView(QWidget):
         self._look_up_bot_count()
         # T171: and the time zone, which a reset keeps but a hand edit moves.
         self._look_up_time_zone()
+        self._refresh_sql_log_offer()
+
+    def _refresh_sql_log_offer(self) -> None:
+        """Show the SQL-log offer for the confs that still owe an answer (T619); else hide it.
+
+        Two small file reads, like the rates rows beside it. While a job runs the strip is
+        still shown, with "Turn it off" greyed (`_set_busy`): that button writes a conf.
+        """
+        offered = sql_log_offer.offers(self.entry, self.services.controller.server_dir)
+        self._sql_log_offered = tuple(o.file for o in offered)
+        if not offered:
+            self.tuning_log_offer.setVisible(False)
+            return
+        self.tuning_log_offer_label.setText(
+            TUNING_LOG_OFFER.format(
+                key=sql_log_offer.KEY, **_sql_log_words([Path(o.file).name for o in offered])
+            )
+        )
+        set_enabled_why(
+            self.tuning_log_offer_off_button, wait_for(self._busy_job) if self._busy else None
+        )
+        self.tuning_log_offer.setVisible(True)
+
+    @Slot()
+    def turn_off_sql_log(self) -> None:
+        """The offer's "Turn it off": that one key, a backup first, a restart owed (T619).
+
+        A conf write like Save file's, so it goes through `_write_tuning()` (T622): on the job
+        runner, inside the server's cross-process hold, and refused while another Tuning write
+        is still going.
+        """
+        if self._busy:  # the button is greyed then; this is for a press that gets past it
+            return
+        if self._tuning_write_refused():
+            return
+        entry = self.entry
+        server_dir = self.services.controller.server_dir
+        offered = self._sql_log_offered
+        before = self.tuning_report.toPlainText()
+
+        def body() -> TuningWrite:
+            try:
+                done = sql_log_offer.turn_off(entry, server_dir, offered)
+            except (tuning.TuningError, OSError) as exc:
+                return TuningWrite(
+                    TUNING_LOG_OFFER_FAILED.format(why=exc, **_sql_log_words(offered)),
+                    failed=str(exc),
+                )
+            said = [
+                TUNING_LOG_OFFER_WROTE.format(
+                    key=sql_log_offer.KEY,
+                    file=one.file,
+                    backup=one.backup.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(one.file)),
+                )
+                for one in done
+            ]
+            return TuningWrite(
+                "\n".join(said) if said else before,
+                owed=tuple(one.file for one in done),
+                reload=True,
+            )
+
+        self._write_tuning("Turn off the SQL log", body)
+
+    @Slot()
+    def keep_sql_log(self) -> None:
+        """The offer's "Keep it as it is": write nothing and do not ask again (T619)."""
+        sql_log_offer.keep(self.entry, self.services.controller.server_dir, self._sql_log_offered)
+        self.tuning_report.setPlainText(
+            TUNING_LOG_OFFER_KEPT.format(
+                **_sql_log_words([Path(f).name for f in self._sql_log_offered])
+            )
+        )
+        self._refresh_sql_log_offer()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
         """The Server rates card (T302), the modules' rows, then the server's own bot keys
@@ -19054,7 +20284,7 @@ class ControllerView(QWidget):
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
         rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
-        return rates + self._unbound_rows + modules + self._bot_rows
+        return rates + self._unbound_rows + modules + self._outside_rows + self._bot_rows
 
     def _read_unbound_rows(self) -> tuple[tuning.TuningRow, ...]:
         """The Unbound card's rows: only for an entry that makes `mod_unbound.conf`, and only
@@ -19387,6 +20617,9 @@ class ControllerView(QWidget):
         """
         if self._busy:
             return
+        if self._tuning_writing:  # it writes the confs and the compose files too (T622)
+            self.problem_label.setText(TUNING_WRITE_RUNNING)
+            return
         if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
             return
@@ -19593,7 +20826,9 @@ class ControllerView(QWidget):
         controller = self.services.controller
         # T179, T377: before the stop, so a refusal leaves it running.
         controller.refuse_before_a_stop()
-        with docker.lifecycle(controller.server_dir):
+        with docker.lifecycle(
+            controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
+        ):
             was_up = controller.stop()
             if stopped is None:
                 controller.start()
@@ -19613,7 +20848,12 @@ class ControllerView(QWidget):
         # T179, T377: before the removal, so a refusal leaves it as it was.
         controller.refuse_before_a_stop()
         # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
-        with docker.lifecycle(controller.server_dir):
+        with docker.lifecycle(
+            controller.server_dir,
+            press="Remove the server's containers",
+            spec=controller.spec,
+            wsl_distro=controller.wsl_distro,
+        ):
             removed = controller.remove()
             controller.start()
         return removed
@@ -19764,6 +21004,9 @@ class ControllerView(QWidget):
         route = self.services.reset_settings
         if route is None or self._busy or not files:
             return
+        if self._tuning_writing:  # a Save or Revert writes these files now (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         chosen = tuple(files)
         # Owner decision 5: the keys installed modules keep in these files,
         # from this tab's OWN rows (`tuning.rows_for`), whose `file` is the
@@ -19831,6 +21074,9 @@ class ControllerView(QWidget):
         route = self.services.reset_settings
         if route is None or self._busy:
             return
+        if self._tuning_writing:  # a Save began while the facts were read (T622)
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return
         facts = answer.facts
         if not self._confirm(
             TUNING_RESET_LABEL, reset_defaults.question(chosen, modules, facts=facts)
@@ -19887,6 +21133,12 @@ class ControllerView(QWidget):
         self._reset_running = False
         self._put_back_running = False
         self._set_busy(False)
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): nothing was written, so the last reset's
+            # record stands, the Undo stays on offer, and there is nothing to read again.
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         self.tuning_report.setPlainText(TUNING_RESET_BROKE)
         self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
@@ -19964,12 +21216,18 @@ class ControllerView(QWidget):
         self._put_back_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
+        undo = partial(
+            _undo_still_undoable,
+            self.services.controller.server_dir,
+            items,
+            self.services.bot_pool_rebuild,
+        )
+        hold = self.services.hold_server
         self._run(
-            partial(
-                _undo_still_undoable,
-                self.services.controller.server_dir,
-                items,
-                self.services.bot_pool_rebuild,
+            (
+                undo
+                if hold is None
+                else _under_the_hold(hold, "Put back what the last reset replaced", undo)
             ),
             self._undo_done,
             self._reset_failed,
@@ -20066,7 +21324,11 @@ class ControllerView(QWidget):
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
-        return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
+        declared = {
+            key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys
+        }
+        # T590: a conf the manifest declares no keys for is a card made from its `.conf.dist`.
+        return declared or conf_dist.conf_keys(self._outside_rows, family, module_id, file)
 
     def _raw_file_keys(self, file: str) -> dict[str, ConfKey]:
         """Every key any catalog manifest declares for this file, first declaration winning."""
@@ -20077,6 +21339,97 @@ class ControllerView(QWidget):
                     for key in conf.keys:
                         keys.setdefault(key.key, key)
         return keys
+
+    def _tuning_write_refused(self) -> bool:
+        """Refuse a Save or Revert while a write to the same files is still going (T622).
+
+        An earlier Save or Revert, a Reset to default or its Undo, a bot count or a time zone:
+        all write the confs and the compose override, and inside one process the server hold is
+        shared, so only this keeps them from overlapping.
+        """
+        if (
+            self._tuning_writing
+            or self._reset_running
+            or self._bot_count_writing
+            or self._time_zone_writing
+        ):
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
+        return False
+
+    def _write_tuning(
+        self, press: str, body: Callable[[], TuningWrite], *, put_back: bool = False
+    ) -> None:
+        """Hand a conf write to the job runner, inside the server's cross-process hold (T610/T622).
+
+        `body` runs on the job's thread with the hold taken: it must touch no widget and read no
+        state of the view, only what the press captured. When another Yu'lon holds the server the
+        answer is that Yu'lon's sentence and `body` never runs, so nothing is written or backed
+        up. A view with no hold wired (a harness) holds nothing. Taking the hold costs a Docker
+        round trip or more, which is why none of it happens on the thread that paints.
+        """
+        hold = self.services.hold_server
+
+        def work() -> TuningWrite:
+            if hold is None:
+                return body()
+            try:
+                with hold(press):
+                    return body()
+            except docker.ServerHeldError as refused:
+                return TuningWrite(report=str(refused), failed=str(refused))
+
+        self._tuning_writing = True
+        self._tuning_write_put_back = put_back
+        if put_back:
+            self._put_back_running = True  # `run_restore()` refuses while this runs (T145)
+        # The card whose button was pressed: marked for the redraw only if the job changes the file.
+        self._tuning_write_card = self.tuning_panel.pressed_card()
+        self._run(work, self._tuning_write_done, self._tuning_write_failed)
+
+    def _tuning_write_ended(self) -> None:
+        self._tuning_writing = False
+        if self._tuning_write_put_back:
+            self._tuning_write_put_back = False
+            self._put_back_running = False
+
+    @Slot(object)
+    def _tuning_write_done(self, result: object) -> None:
+        """Show what the job did, in the order the synchronous slots did it."""
+        self._tuning_write_ended()
+        asked = self._tuning_reload_asked
+        self._tuning_reload_asked = False
+        card, self._tuning_write_card = self._tuning_write_card, None
+        if not isinstance(result, TuningWrite):
+            return
+        self.tuning_report.setPlainText(result.report)
+        if result.backup:
+            # The backup's name on the tab and not only in the report, because it is what arms
+            # Revert beside Save file (T44 item 15).
+            self.tuning_panel.set_backup(result.backup)
+        for file in result.owed:
+            self._note_tuning_owed(file)
+        if result.failed:
+            self.action_failed.emit(result.failed)
+        if result.reopen:
+            self.open_tuning_file(result.reopen)
+        if result.reload:
+            # The file changed: the pressed card is drawn from it, not from what was typed. A
+            # refusal or a failed write leaves the typing for the redraw that comes next.
+            self.tuning_panel.owe_redraw(card)
+        if result.reload or asked:
+            self.reload_tuning()
+
+    @Slot(object)
+    def _tuning_write_failed(self, exc: object) -> None:
+        """Only a bug reaches here: a refusal or a failed write is a `TuningWrite`."""
+        self._tuning_write_ended()
+        self._tuning_reload_asked = False
+        self._tuning_write_card = None
+        self.tuning_report.setPlainText(TUNING_WRITE_BROKE)
+        self.tuning_details.set_text(str(exc))
+        self.action_failed.emit(str(exc))
+        self.reload_tuning()
 
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
@@ -20100,7 +21453,6 @@ class ControllerView(QWidget):
         for row in card.card.rows:
             if row.key in edits:
                 per_file.setdefault(row.file, {})[row.key] = edits[row.key]
-        said: list[str] = []
         server_dir = self.services.controller.server_dir
         # Every file's values FIRST, across the whole card, before any of them is
         # opened. `tuning.write()` makes the same promise per file, which is not
@@ -20131,82 +21483,98 @@ class ControllerView(QWidget):
                 self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
                 self.action_failed.emit(str(exc))
                 return
-        for file, values in per_file.items():
-            try:
-                if (family, module_id) == unbound_settings.CARD:
-                    # Only `0` and `1` reach the file: a switch flipped from a hand-edited
-                    # `true`/`false` is written back as the module's own 1/0
-                    # (`unbound_settings.write`). Its file's path was checked above, with
-                    # every other card's (T573).
-                    made = unbound_settings.write(server_dir, values)
-                else:
-                    made = tuning.write(
-                        server_dir / file, values, spec=specs[file], root=server_dir
+        if self._tuning_write_refused():
+            return
+        pairs = tuple((file, dict(values)) for file, values in per_file.items())
+        is_unbound = (family, module_id) == unbound_settings.CARD
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file, values in pairs:
+                try:
+                    if is_unbound:
+                        # Only `0` and `1` reach the file: a switch flipped from a hand-edited
+                        # `true`/`false` is written back as the module's own 1/0
+                        # (`unbound_settings.write`). Its file's path was checked above, with
+                        # every other card's (T573).
+                        made = unbound_settings.write(server_dir, values)
+                    else:
+                        made = tuning.write(
+                            server_dir / file, values, spec=specs[file], root=server_dir
+                        )
+                except tuning.TuningError as exc:
+                    # Unreachable through the loop above, which has already checked
+                    # every value on the card. Kept because `tuning.write()` is a
+                    # public seam with its own refusals and a caller that assumed
+                    # otherwise would be the next half-applied save.
+                    return TuningWrite(
+                        TUNING_REFUSED.format(module=module_id, why=exc),
+                        failed=str(exc),
+                        owed=tuple(owed),
                     )
-            except tuning.TuningError as exc:
-                # Unreachable through the loop above, which has already checked
-                # every value on the card. Kept because `tuning.write()` is a
-                # public seam with its own refusals and a caller that assumed
-                # otherwise would be the next half-applied save.
-                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
-                self.action_failed.emit(str(exc))
-                return
-            except OSError as exc:
-                self.tuning_report.setPlainText(
-                    TUNING_REFUSED.format(
-                        module=module_id, why=f"{file} could not be written: {exc}"
+                except OSError as exc:
+                    return TuningWrite(
+                        TUNING_REFUSED.format(
+                            module=module_id, why=f"{file} could not be written: {exc}"
+                        ),
+                        failed=str(exc),
+                        owed=tuple(owed),
+                    )
+                owed.append(file)
+                said.append(
+                    TUNING_SAVED.format(
+                        module=module_id,
+                        keys=", ".join(values),
+                        file=file,
+                        backup=made.name,
+                        rule=tuning.apply_sentence(tuning.file_rule(file)),
                     )
                 )
-                self.action_failed.emit(str(exc))
-                return
-            self._note_tuning_owed(file)
-            said.append(
-                TUNING_SAVED.format(
-                    module=module_id,
-                    keys=", ".join(values),
-                    file=file,
-                    backup=made.name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
-                )
-            )
-        self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Save settings", body)
 
     @Slot(str, str)
     def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         try:
             card = self.tuning_panel.card((family, module_id))
         except KeyError:
             return
         server_dir = self.services.controller.server_dir
-        said: list[str] = []
-        for file in card.card.files:
-            path = server_dir / file
-            backups = tuning.backups_of(path)
-            if not backups:
-                said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
-                continue
-            try:
-                note = self._put_back(backups[-1], path)
-            except (OSError, tuning.TuningError) as exc:
-                said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
-                continue
-            self._note_tuning_owed(file)
-            said.append(
-                TUNING_REVERTED.format(
-                    module=module_id,
-                    file=file,
-                    backup=backups[-1].name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+        files = tuple(card.card.files)
+
+        def body() -> TuningWrite:
+            said: list[str] = []
+            owed: list[str] = []
+            for file in files:
+                path = server_dir / file
+                backups = tuning.backups_of(path)
+                if not backups:
+                    said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
+                    continue
+                try:
+                    note = self._put_back(backups[-1], path)
+                except (OSError, tuning.TuningError) as exc:
+                    said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
+                    continue
+                owed.append(file)
+                said.append(
+                    TUNING_REVERTED.format(
+                        module=module_id,
+                        file=file,
+                        backup=backups[-1].name,
+                        rule=tuning.apply_sentence(tuning.file_rule(file)),
+                    )
                 )
-            )
-            if note:
-                said.append(note)
-        self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+                if note:
+                    said.append(note)
+            return TuningWrite("\n".join(said), owed=tuple(owed), reload=True)
+
+        self._write_tuning("Put settings back", body, put_back=True)
 
     def _put_back_refused(self, press: str) -> bool:
         """Refuse a put-back of a Tuning backup now, saying why. True if refused (T145 round 6).
@@ -20218,6 +21586,9 @@ class ControllerView(QWidget):
         aiplayerbot.conf off on its worker (`_restore_with_the_bot_request`),
         the very file a put-back writes. Other games' restores write no conf.
         """
+        if self._tuning_writing:
+            self.tuning_report.setPlainText(TUNING_WRITE_RUNNING)
+            return True
         if self._busy:
             self.tuning_report.setPlainText(TUNING_PUT_BACK_WHILE_BUSY.format(press=press))
             return True
@@ -20332,7 +21703,7 @@ class ControllerView(QWidget):
         very change the user is trying to undo. `tuning.restore()` copies
         rather than moves, so a second Revert still has something to restore.
         """
-        if self._put_back_refused("Revert"):
+        if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
         if not file or tuning.is_one_of(
@@ -20348,25 +21719,25 @@ class ControllerView(QWidget):
             gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
             self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
-        try:
-            note = self._put_back(backups[-1], path)
-        except tuning.TuningError as exc:
-            self.tuning_report.setPlainText(str(exc))
-            self.action_failed.emit(str(exc))
-            return
-        except OSError as exc:
-            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-            self.action_failed.emit(str(exc))
-            return
-        said = TUNING_REVERTED_FILE.format(
-            file=file,
-            backup=backups[-1].name,
-            rule=tuning.apply_sentence(tuning.file_rule(file)),
-        )
-        self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
-        self._note_tuning_owed(file)
-        self.open_tuning_file(file)
-        self.reload_tuning()
+        newest = backups[-1]
+
+        def body() -> TuningWrite:
+            try:
+                note = self._put_back(newest, path)
+            except tuning.TuningError as exc:
+                return TuningWrite(str(exc), failed=str(exc))
+            except OSError as exc:
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            said = TUNING_REVERTED_FILE.format(
+                file=file,
+                backup=newest.name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
+            return TuningWrite(
+                f"{said}\n{note}" if note else said, owed=(file,), reopen=file, reload=True
+            )
+
+        self._write_tuning("Put a setting file back", body, put_back=True)
 
     @Slot(str)
     def save_tuning_file(self, text: str) -> None:
@@ -20398,33 +21769,34 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        if self._tuning_write_refused():
+            return
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        try:
-            # Refuses a link out of the server folder, before any byte moves (T573).
-            made = tuning.backup(path, root=server_dir)
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(tuning.save_text(self._tuning_raw, text))
-        except tuning.TuningError as exc:
-            self.tuning_report.setPlainText(str(exc))
-            self.action_failed.emit(str(exc))
-            return
-        except OSError as exc:
-            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-            self.action_failed.emit(str(exc))
-            return
-        self.tuning_report.setPlainText(
-            TUNING_FILE_SAVED.format(
-                file=file,
+        original = self._tuning_raw
+
+        def body() -> TuningWrite:
+            try:
+                # Refuses a link out of the server folder, before any byte moves (T573).
+                made = tuning.backup(path, root=server_dir)
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(tuning.save_text(original, text))
+            except tuning.TuningError as exc:
+                return TuningWrite(str(exc), failed=str(exc))
+            except OSError as exc:
+                return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            return TuningWrite(
+                TUNING_FILE_SAVED.format(
+                    file=file,
+                    backup=made.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                ),
                 backup=made.name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
+                owed=(file,),
+                reload=True,
             )
-        )
-        # The backup's name on the tab and not only in the report, because it
-        # is what arms Revert beside Save file (T44 item 15).
-        self.tuning_panel.set_backup(made.name)
-        self._note_tuning_owed(file)
-        self.reload_tuning()
+
+        self._write_tuning("Save a setting file", body)
 
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)
@@ -20531,6 +21903,12 @@ class ControllerView(QWidget):
     def _apply_failed(self, exc: object) -> None:
         """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon is working on this server (T622): its own sentence, nothing applied.
+            self.network_text.appendPlainText("\n" + str(exc))
+            self.action_failed.emit(str(exc))
+            self.apply_button.setEnabled(True)
+            return
         self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
         plan = self._plan
         held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]

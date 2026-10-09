@@ -47,6 +47,7 @@ CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
 TORTOISE = CATALOG.get("wow-tortoise")
 SPEC = WOTLK.container_spec()
+GAME = maintenance.game_of(WOTLK)
 EVERYTHING = {SPEC.db, SPEC.auth, SPEC.world}
 
 PLANNED_START = (
@@ -146,14 +147,18 @@ def _real_maintenance(
 
     def plan_restore(path: Path, *, can_start_database: bool = False) -> RestorePlan:
         return maintenance.plan_restore(
-            path, tmp_path, running=stack.census, can_start_database=can_start_database
+            path,
+            tmp_path,
+            game=GAME,
+            running=stack.census,
+            can_start_database=can_start_database,
         )
 
     return replace(
         _services(_Ps(), tmp_path, []),
         plan_restore=plan_restore,
         restore=lambda plan: maintenance.restore(
-            plan, mysql, confirm=plan.token, running=stack.census
+            plan, mysql, game=GAME, confirm=plan.token, running=stack.census
         ),
         interrupted_restore=lambda: maintenance.interrupted_restore(tmp_path),
         database_alone=stack.alone() if seam else None,
@@ -1087,6 +1092,8 @@ def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_pat
 
     class Lifecycle:
         server_dir = tmp_path
+        spec = None  # T568: a lifecycle command reserves by spec; none here
+        wsl_distro = None
 
         def refuse_start(self) -> None:
             """No start is refused here: the hold is what is under test (T197)."""
@@ -1109,6 +1116,8 @@ def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) ->
 
     class Lifecycle:
         server_dir = tmp_path
+        spec = None  # T568: a lifecycle command reserves by spec; none here
+        wsl_distro = None
 
         def refuse_start(self) -> None:
             """No start is refused here: the hold is what is under test (T197)."""

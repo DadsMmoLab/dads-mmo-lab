@@ -435,7 +435,7 @@ def test_a_stop_is_not_held_up_by_a_slow_docker_question(
     folder.mkdir()
     (fake_docker / "claim-slow").write_text("", encoding="utf-8")
 
-    def slow(_name: str, timeout: float = docker._ASK_AGAIN_TIMEOUT) -> None:
+    def slow(_name: str, timeout: float = docker._ASK_AGAIN_TIMEOUT, **_kw: object) -> None:
         time.sleep(timeout)  # Docker does not answer: the question runs to its bound
 
     monkeypatch.setattr(docker, "_claim_facts", slow)
@@ -503,7 +503,7 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
     looks_after_stop = [0]
     removed: list[str] = []
 
-    def facts(_name: str, timeout: float = 5.0) -> object:
+    def facts(_name: str, timeout: float = 5.0, **_kw: object) -> object:
         if not cancel.is_set():
             return None
         looks_after_stop[0] += 1
@@ -514,7 +514,9 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
         return docker._ClaimFacts("late-id", "created", nonce, docker.owner_id())
 
     monkeypatch.setattr(docker, "_claim_facts", facts)
-    monkeypatch.setattr(docker, "_remove_claim", lambda c, timeout=5.0: removed.append(c) is None)
+    monkeypatch.setattr(
+        docker, "_remove_claim", lambda c, timeout=5.0, **_kw: removed.append(c) is None
+    )
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
     outcome: list[BaseException] = []
@@ -567,7 +569,7 @@ def test_a_stop_during_the_look_that_finds_the_claim_running_is_a_stop(
     cancel = threading.Event()
     real = docker._claim_facts
 
-    def look(name: str, timeout: float = 5.0) -> object:
+    def look(name: str, timeout: float = 5.0, **_kw: object) -> object:
         facts = real(name, timeout=timeout)
         if facts is not None and facts.status == "running":
             cancel.set()  # pressed while Docker answered
@@ -598,12 +600,12 @@ def test_a_late_claim_whose_first_removal_fails_is_swept_again(
     tries: list[str] = []
     gone = threading.Event()
 
-    def facts(_name: str, timeout: float = 5.0) -> object:
+    def facts(_name: str, timeout: float = 5.0, **_kw: object) -> object:
         if not cancel.is_set() or gone.is_set():
             return None
         return docker._ClaimFacts("mine-id", "created", nonce, docker.owner_id())
 
-    def remove(container: str, timeout: float = 5.0) -> bool:
+    def remove(container: str, timeout: float = 5.0, **_kw: object) -> bool:
         tries.append(container)
         if len(tries) > 1:
             gone.set()
@@ -660,7 +662,7 @@ def test_a_released_claim_whose_removal_failed_is_swept(
     gone = threading.Event()
     real_remove = docker._remove_claim
 
-    def remove(container: str, timeout: float = 5.0) -> bool:
+    def remove(container: str, timeout: float = 5.0, **_kw: object) -> bool:
         tries.append(container)
         if len(tries) == 1:
             return False  # the release's own try: the daemon did not answer in time
@@ -734,7 +736,9 @@ def test_one_slow_answer_about_a_held_claim_does_not_lose_it(
         real = docker._claim_facts
         timeouts: list[float] = []
 
-        def first_slow(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+        def first_slow(
+            name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT, **_kw: object
+        ) -> object:
             timeouts.append(timeout)
             return None if len(timeouts) == 1 else real(name, timeout=timeout)
 
@@ -759,7 +763,9 @@ def test_the_two_asks_about_a_held_claim_are_a_moment_apart(
         events: list[str] = []
         asked = [0]
 
-        def transient(name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT) -> object:
+        def transient(
+            name: str, timeout: float = docker._CLAIM_ASK_TIMEOUT, **_kw: object
+        ) -> object:
             events.append("ask")
             asked[0] += 1
             return None if asked[0] == 1 else real(name, timeout=timeout)

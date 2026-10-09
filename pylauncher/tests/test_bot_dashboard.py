@@ -147,6 +147,8 @@ class _Lifecycle:
     # The real one is a `Controller`; since T216 a restart is one lifecycle command
     # keyed by its server folder (`docker.lifecycle()`), so the double carries one.
     server_dir = Path("srv")
+    spec = None  # T568: a lifecycle command reserves by spec; none here
+    wsl_distro = None
 
     def __init__(self) -> None:
         self.calls: list[str] = []

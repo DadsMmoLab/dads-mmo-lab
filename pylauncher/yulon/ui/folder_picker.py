@@ -184,6 +184,17 @@ def build_save_dialog(
     return dialog
 
 
+def build_open_dialog(
+    parent: QWidget | None, title: str, start: Path | None, name_filter: str
+) -> QFileDialog:
+    """An open-a-file dialog set up as `QFileDialog.getOpenFileName()` sets one up (T601)."""
+    dialog = QFileDialog(parent, title, str(start) if start else "", name_filter)
+    dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+    dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+    dialog.setSupportedSchemes(["file"])
+    return dialog
+
+
 def _run_dialog(dialog: QFileDialog) -> bool:
     """Show `dialog` modally; True when the user chose a folder."""
     return bool(dialog.exec() == QDialog.DialogCode.Accepted.value)
@@ -236,3 +247,16 @@ def pick_save_file(
         chosen, _filter = QFileDialog.getSaveFileName(parent, title, str(suggested), name_filter)
         return chosen or None
     return _choose(build_save_dialog(parent, title, suggested, name_filter))
+
+
+def pick_open_file(
+    parent: QWidget | None, title: str, start: Path | None, name_filter: str
+) -> Path | None:
+    """An existing file the user chose, or None if they cancelled (T601: a move package)."""
+    if platform.detect() != "linux":
+        chosen, _filter = QFileDialog.getOpenFileName(
+            parent, title, str(start) if start else "", name_filter
+        )
+        return Path(chosen) if chosen else None
+    chosen_path = _choose(build_open_dialog(parent, title, start, name_filter))
+    return Path(chosen_path) if chosen_path else None

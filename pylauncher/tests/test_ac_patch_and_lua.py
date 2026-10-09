@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -713,6 +713,123 @@ def test_an_update_whose_new_source_lost_its_scripts_is_put_back(
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
 
 
+NEW_LUA = 'print("new")\n'
+
+
+def watch_the_lua(rec: Recorder, server_dir: Path) -> list[tuple[str, str | None]]:
+    """What the laid script holds at each stop and each replace of the world (T562).
+
+    The fake seams answer `stop_servers` and `recreate` in the order the press asks,
+    so a script that changed between two entries was laid between those two asks.
+    """
+    seen: list[tuple[str, str | None]] = []
+
+    def at(what: str) -> Callable[[object], None]:
+        def snap(_control: object) -> None:
+            laid = server_dir / LAID
+            seen.append((what, laid.read_text(encoding="utf-8") if laid.exists() else None))
+
+        return snap
+
+    rec.on_stop_servers = at("stop")
+    rec.on_recreate = at("replace")
+    return seen
+
+
+def test_a_rebuild_lays_the_new_lua_only_after_the_old_world_stopped(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    (server_dir / MODULE / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    rec.calls.clear()
+    seen = watch_the_lua(rec, server_dir)
+
+    said = list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA)], seen
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate"), rec.calls
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert f"Updated {LAID}." in said, said
+
+
+def test_an_update_lays_the_new_lua_only_after_the_old_world_stopped(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+
+    rec.on_clone = fetched
+    seen = watch_the_lua(rec, server_dir)
+
+    said = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA)], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert f"Updated {LAID}." in said, said
+
+
+def test_a_rebuild_with_unchanged_lua_lays_nothing(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    written: list[Path] = []
+    real = scriptdeploy._publish
+    monkeypatch.setattr(scriptdeploy, "_publish", lambda t, d: (written.append(t), real(t, d)))
+
+    said = list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert written == [], written
+    assert not [line for line in said if LAID in line or "Lua scripts" in line], said
+
+
+def test_a_rebuild_whose_lua_source_is_a_link_refuses_before_anything_is_touched(
+    tmp_path: Path, installers: Path
+) -> None:
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    source = server_dir / MODULE / "lua_scripts" / LUA_NAME
+    elsewhere = tmp_path / "elsewhere.lua"
+    elsewhere.write_text(NEW_LUA, encoding="utf-8")
+    source.unlink()
+    source.symlink_to(elsewhere)
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError, match="is a link"):
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert not {"build", "stop_servers", "recreate"} & set(rec.calls), rec.calls
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+
+
+def test_a_script_that_cannot_be_laid_with_the_world_stopped_rolls_the_rebuild_back(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    (server_dir / MODULE / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    monkeypatch.setattr(
+        scriptdeploy, "_publish", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError, match="could not be laid"):
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate"), rec.calls
+    assert rec.calls.count("recreate") == 1, "only the rollback's start: the new build never began"
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+
+
 def _spec(src: str) -> Any:
     from yulon.catalog.catalog import LuaScripts
 
@@ -1151,16 +1268,29 @@ def test_a_linked_script_folder_never_has_its_record_rewritten(tmp_path: Path) -
     assert sorted(p.name for p in elsewhere.iterdir()) == [scriptdeploy.RECORD_FILE]
 
 
-def failed_compile_after_laying(
+def failed_start_after_laying(
     tmp_path: Path, installers: Path
-) -> tuple[Recorder, Path, list[str]]:
-    """An update whose new checkout changes one script and adds one, then fails to compile."""
+) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]]]:
+    rec, server_dir, said, seen, _error, _made = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
+    return rec, server_dir, said, seen
+
+
+def failed_start_after_laying_with_error(
+    tmp_path: Path, installers: Path
+) -> tuple[Recorder, Path, list[str], list[tuple[str, str | None]], str, AzerothCoreInstaller]:
+    """An update whose new checkout changes one script and adds one; the new world never comes up.
+
+    The old world is stopped, the new scripts are laid, the new build fails its ready
+    wait, and the rollback starts the old build again (it answers ready).
+    """
     rec, server_dir, made = ready_to_update(tmp_path, installers)
 
     def fetched(dest: Path) -> None:
         lay_tree(server_dir)(dest)
         if dest == server_dir / MODULE:
-            (dest / "lua_scripts" / LUA_NAME).write_text('print("new")\n', encoding="utf-8")
+            (dest / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
             (dest / "lua_scripts" / "extra.lua").write_text("extra\n", encoding="utf-8")
 
     def checkout_force(dest: Path, rev: str) -> None:
@@ -1169,33 +1299,73 @@ def failed_compile_after_laying(
             (dest / "lua_scripts" / "extra.lua").unlink(missing_ok=True)
         lay_tree(server_dir)(dest)
 
+    answers = [False, True]
+
+    def wait_ready(_spec: object, _ready: object) -> bool:
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
     rec.on_clone = fetched
-    made._seams = rec.seams(restore_rev=checkout_force)
-    rec.build_result = docker.AttachedRun(1, ("boom",))
+    made._seams = rec.seams(restore_rev=checkout_force, wait_ready=wait_ready)
+    seen = watch_the_lua(rec, server_dir)
     said: list[str] = []
-    with pytest.raises(InstallerError):
+    with pytest.raises(InstallerError) as raised:
         for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
             said.append(line)
-    return rec, server_dir, said
+    return rec, server_dir, said, seen, str(raised.value), made
 
 
-def test_a_failed_compile_after_laying_puts_the_old_scripts_back(
+def test_a_failed_start_after_laying_puts_the_old_scripts_back_with_the_servers_down(
     tmp_path: Path, installers: Path
 ) -> None:
     """Rollback re-lays the OLD set: the checkout goes back, so the scripts must follow it.
 
     The put-back tests above refuse in `check_carried_patches` before anything is
     laid, so "LAID unchanged" proves nothing there. Here the new checkout's scripts
-    ARE laid (one changed, one new), the compile then fails, and the old bytes come
-    back, the new-only file goes, and the record agrees with the disk.
+    ARE laid (one changed, one new) with the old world stopped, the new world then
+    fails its ready wait, the rollback stops it again, and the old bytes are back
+    BEFORE the old build starts; the new-only file goes, and the record agrees with
+    the disk.
     """
-    rec, server_dir, said = failed_compile_after_laying(tmp_path, installers)
+    rec, server_dir, said, seen = failed_start_after_laying(tmp_path, installers)
 
     assert f"Updated {LAID}." in said and f"Laid {LUA_DEST}/extra.lua." in said, said
+    assert seen == [
+        ("stop", LUA_BODY),
+        ("replace", NEW_LUA),
+        ("stop", NEW_LUA),
+        ("replace", LUA_BODY),
+    ], seen
     assert rec.heads[server_dir / MODULE] == OLD
     assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
     assert not (server_dir / LUA_DEST / "extra.lua").exists()
     assert scriptdeploy.read_record(server_dir) == {LAID: scriptdeploy._sha(LUA_BODY.encode())}
+
+
+def test_a_failed_compile_never_lays_the_new_scripts(tmp_path: Path, installers: Path) -> None:
+    """The old world runs through the compile, so it must still be reading the old scripts."""
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+
+    def checkout_force(dest: Path, rev: str) -> None:
+        rec.restore_rev(dest, rev)
+        lay_tree(server_dir)(dest)
+
+    rec.on_clone = fetched
+    made._seams = rec.seams(restore_rev=checkout_force)
+    rec.build_result = docker.AttachedRun(1, ("boom",))
+    seen = watch_the_lua(rec, server_dir)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+
+    assert seen == [], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not [line for line in said if line.startswith(("Updated", "Laid"))], said
 
 
 def test_a_rollback_that_cannot_save_the_script_record_says_that_not_the_patch(
@@ -1204,7 +1374,7 @@ def test_a_rollback_that_cannot_save_the_script_record_says_that_not_the_patch(
     """The re-lay's own sentence goes through; "press again" would not mend a full disk."""
     fail_the_final_record_write(monkeypatch, on_call=3)
 
-    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+    _rec, _server_dir, said, _seen = failed_start_after_laying(tmp_path, installers)
 
     back = next(line for line in said if "back on their old commits, but" in line)
     assert scriptdeploy.RECORD_FILE in back and "delete" in back, back
@@ -1272,10 +1442,14 @@ def test_a_rebuild_of_an_entry_that_dropped_its_scripts_removes_them(
 ) -> None:
     rec, server_dir, _made, _said = installed(tmp_path, installers)
     assert (server_dir / LAID).exists()
+    rec.images = True
+    rec.on_clone = None
     dropped = make(scratch_entry(**{**FULL, "lua_scripts": []}), rec, installers)
+    seen = watch_the_lua(rec, server_dir)
 
-    said = list(dropped.before_rebuild(server_dir, "rebuild"))
+    said = list(dropped.rebuild(InstallOptions(server_dir=server_dir)))
 
+    assert seen == [("stop", LUA_BODY), ("replace", None)], seen
     assert not (server_dir / LAID).exists()
     assert not scriptdeploy.record_path(server_dir).exists()
     assert f"Removed {LAID}: this server no longer ships it." in said, said
@@ -1546,9 +1720,16 @@ def test_the_laying_failures_name_the_press_and_never_claim_the_server_was_not_s
         assert "would start without" not in str(raised.value), raised.value
 
 
-def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
+def test_a_rollback_that_cannot_lay_the_old_scripts_leaves_the_old_build_stopped(
     tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The old build never starts on the new build's scripts (T562 cold review).
+
+    The update laid the new set with the servers down, the new world failed its ready
+    wait, and the rollback's re-lay of the OLD set failed on the fourth script write.
+    The disk still holds the new scripts, so the old binary must not be started on
+    them: the servers stay stopped and the sentence names the press that lays them again.
+    """
     from yulon import server_build_presses
 
     real = scriptdeploy._publish
@@ -1563,11 +1744,60 @@ def test_a_rollback_that_cannot_write_a_script_names_the_press_not_the_patch(
 
     monkeypatch.setattr(scriptdeploy, "_publish", fourth_script_fails)
 
-    _rec, _server_dir, said = failed_compile_after_laying(tmp_path, installers)
+    _rec, server_dir, said, seen, error, made = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
 
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
     back = next(line for line in said if "back on their old commits, but" in line)
-    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in back, back
+    assert rebuild in back, back
     assert "source patch" not in back and "not started" not in back, back
+    # The old world was never started: the only start after the new world's stop is
+    # none, and the new scripts are still the ones on the disk.
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA), ("stop", NEW_LUA)], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert "STOPPED" in error and rebuild in error, error
+    # A later Start is refused too, not only this rollback's own start...
+    assert made.start_refusal(server_dir) == native.SCRIPTS_NOT_BACK_REFUSAL
+    # ...until a Rebuild, once the disk works again, lays the old set from the sources.
+    monkeypatch.setattr(scriptdeploy, "_publish", real)
+    list(made.rebuild(InstallOptions(server_dir=server_dir)))
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not (server_dir / LUA_DEST / "extra.lua").exists()
+    assert made.start_refusal(server_dir) is None
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError(28, "no space left"), InstallerError("the record would not save")]
+)
+def test_a_rollback_whose_re_lay_raises_a_plain_error_also_leaves_the_old_build_stopped(
+    tmp_path: Path,
+    installers: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    """The re-lay's other two failures (not a `SelfExplainedError`) are held to the same rule."""
+    from yulon import server_build_presses
+
+    real = scriptdeploy.lay
+    calls: list[int] = []
+
+    def third_lay_fails(*args: Any, **kwargs: Any) -> Iterator[str]:
+        calls.append(1)
+        if len(calls) >= 3:  # the install, the update's, then the rollback's
+            raise failure
+        yield from real(*args, **kwargs)
+
+    monkeypatch.setattr(scriptdeploy, "lay", third_lay_fails)
+
+    _rec, server_dir, _said, seen, error, _made = failed_start_after_laying_with_error(
+        tmp_path, installers
+    )
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert seen == [("stop", LUA_BODY), ("replace", NEW_LUA), ("stop", NEW_LUA)], seen
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert "STOPPED" in error and rebuild in error, error
 
 
 def test_a_pending_only_record_is_cleared_by_an_entry_with_no_scripts(tmp_path: Path) -> None:
@@ -1608,3 +1838,344 @@ def test_a_failed_record_save_with_no_folders_does_not_name_an_empty_list(
         list(scriptdeploy.lay(server_dir, []))
 
     assert "delete  " not in str(raised.value) and "delete that file" in str(raised.value)
+
+
+# -- T602: a plain Rebuild whose lay fails part-way ---------------------------
+
+FIRST_NAME = "a_first.lua"
+FIRST_BODY = "first\n"
+
+
+def rebuild_whose_second_script_cannot_be_laid(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Recorder, Path, AzerothCoreInstaller, list[str], str]:
+    """A Rebuild of a checkout with one new script (sorts first) and one changed; disk fails on #2.
+
+    The old world is stopped, `a_first.lua` is written, then `scratch_mentor.lua`
+    cannot be: the disk now holds a mix of the old and the new set.
+    """
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    lua = server_dir / MODULE / "lua_scripts"
+    (lua / FIRST_NAME).write_text(FIRST_BODY, encoding="utf-8")
+    (lua / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    real = scriptdeploy._publish
+    scripts: list[str] = []
+
+    def second_script_fails(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(target.name)
+            if len(scripts) >= 2:
+                raise OSError(28, "no space left on device")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", second_script_fails)
+    rec.calls.clear()
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in made.rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert scripts == [FIRST_NAME, LUA_NAME], scripts
+    return rec, server_dir, made, said, str(raised.value)
+
+
+def test_a_rebuild_whose_lay_fails_after_the_first_script_leaves_the_old_build_stopped(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk holds a mixed old/new set, so the old build must not be started on it (T602)."""
+    from yulon import server_build_presses
+
+    rec, server_dir, _made, _said, error = rebuild_whose_second_script_cannot_be_laid(
+        tmp_path, installers, monkeypatch
+    )
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert (server_dir / LUA_DEST / FIRST_NAME).read_text(encoding="utf-8") == FIRST_BODY
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY  # the mix
+    assert "recreate" not in rec.calls, f"the old build was started on the mixed set: {rec.calls}"
+    assert "STOPPED" in error and rebuild in error, error
+
+
+def test_a_rebuild_whose_lay_fails_part_way_refuses_a_hand_start_until_a_rebuild_works(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import server_build_presses
+
+    _rec, server_dir, made, _said, _error = rebuild_whose_second_script_cannot_be_laid(
+        tmp_path, installers, monkeypatch
+    )
+
+    # Durable: not only this press's own rollback, every later Start is refused too...
+    refusal = made.start_refusal(server_dir)
+    assert refusal == native.SCRIPTS_NOT_BACK_REFUSAL
+    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in refusal
+    assert (server_dir / native.START_REFUSED_FILE).exists()
+    # ...but the Rebuild press is not (it is the repair), and a good one clears it.
+    assert made.start_refusal(server_dir, rebuilding=True) is None
+    monkeypatch.undo()
+    list(made.rebuild(InstallOptions(server_dir=server_dir)))
+    assert (server_dir / LAID).read_text(encoding="utf-8") == NEW_LUA
+    assert (server_dir / LUA_DEST / FIRST_NAME).read_text(encoding="utf-8") == FIRST_BODY
+    assert made.start_refusal(server_dir) is None
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+
+
+def test_a_rebuild_whose_lay_fails_before_writing_anything_still_restarts_the_old_build(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing was written, so the old set is intact: the existing rollback stands (T602)."""
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    lua = server_dir / MODULE / "lua_scripts"
+    (lua / FIRST_NAME).write_text(FIRST_BODY, encoding="utf-8")
+    (lua / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+
+    def first_script_fails(target: Path, data: bytes) -> None:
+        raise OSError(28, "no space left on device")
+
+    monkeypatch.setattr(scriptdeploy, "_publish", first_script_fails)
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError, match="could not be laid") as raised:
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert rec.calls.count("recreate") == 1, rec.calls  # the rollback's start of the old build
+    assert "STOPPED" not in str(raised.value), raised.value
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not (server_dir / LUA_DEST / FIRST_NAME).exists()
+    assert made.start_refusal(server_dir) is None
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+
+
+def test_a_rebuild_whose_first_script_was_already_current_has_written_nothing(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A script found current is not a write: a failure on the next one still rolls back."""
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = True
+    rec.on_clone = None
+    lua = server_dir / MODULE / "lua_scripts"
+    (lua / "z_second.lua").write_text("second\n", encoding="utf-8")
+    # The first script (scratch_mentor.lua) is unchanged; the second (new) cannot be laid.
+    monkeypatch.setattr(
+        scriptdeploy, "_publish", lambda *_a: (_ for _ in ()).throw(OSError(28, "full"))
+    )
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError, match="could not be laid"):
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert rec.calls.count("recreate") == 1, rec.calls
+    assert made.start_refusal(server_dir) is None
+
+
+def _two_scripts(tmp_path: Path) -> Path:
+    server_dir = _plain_source(tmp_path)
+    (server_dir / "modules/m/lua/b.lua").write_text("b\n", encoding="utf-8")
+    return server_dir
+
+
+def test_lay_says_a_part_way_failure_with_its_own_type_and_a_clean_one_with_the_plain_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.installer import ScriptsPartlyLaid
+
+    server_dir = _two_scripts(tmp_path)
+    real = scriptdeploy._publish
+    scripts: list[str] = []
+
+    def nth(limit: int) -> Callable[[Path, bytes], None]:
+        def publish(target: Path, data: bytes) -> None:
+            if target.name != scriptdeploy.RECORD_FILE:
+                scripts.append(target.name)
+                if len(scripts) >= limit:
+                    raise OSError(28, "No space left on device")
+            real(target, data)
+
+        return publish
+
+    monkeypatch.setattr(scriptdeploy, "_publish", nth(1))
+    with pytest.raises(InstallerError, match="could not be laid") as clean:
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+    assert not isinstance(clean.value, ScriptsPartlyLaid), clean.value
+
+    scripts.clear()
+    monkeypatch.setattr(scriptdeploy, "_publish", nth(2))
+    with pytest.raises(ScriptsPartlyLaid, match="could not be laid"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+
+def test_lay_that_wrote_everything_but_could_not_save_its_record_is_part_way_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.installer import ScriptsPartlyLaid
+
+    server_dir = _two_scripts(tmp_path)
+    fail_the_final_record_write(monkeypatch)
+    with pytest.raises(ScriptsPartlyLaid, match=scriptdeploy.RECORD_FILE):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+
+def test_lay_that_removed_a_stale_script_and_then_failed_is_part_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.installer import ScriptsPartlyLaid
+
+    server_dir = _two_scripts(tmp_path)
+    (server_dir / "modules/m/lua/c.lua").write_text("c\n", encoding="utf-8")
+    list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+    (server_dir / "modules/m/lua/a.lua").unlink()
+    (server_dir / "modules/m/lua/b.lua").unlink()
+    real_unlink = Path.unlink
+    removed: list[str] = []
+
+    def second_removal_fails(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.parent == server_dir / LUA_SCRIPTS_DIR / "m" and self.suffix == ".lua":
+            removed.append(self.name)
+            if len(removed) >= 2:  # the first stale script goes, the second will not
+                raise PermissionError(13, "denied")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", second_removal_fails)
+    with pytest.raises(ScriptsPartlyLaid):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+
+
+def test_lay_whose_link_appears_after_a_script_was_written_is_part_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.installer import ScriptsPartlyLaid
+
+    server_dir = _two_scripts(tmp_path)
+    real = scriptdeploy._through_a_link
+
+    def link_before_b(root: Path, target: Path) -> Path | None:
+        if target.name == "b.lua":
+            return root / LUA_SCRIPTS_DIR / "m"
+        return real(root, target)
+
+    monkeypatch.setattr(scriptdeploy, "_through_a_link", link_before_b)
+    with pytest.raises(ScriptsPartlyLaid, match="is a link"):
+        list(scriptdeploy.lay(server_dir, [_spec("modules/m/lua")]))
+    assert (server_dir / LUA_SCRIPTS_DIR / "m" / "a.lua").exists()
+
+
+def test_an_update_whose_lay_fails_part_way_is_put_back_whole_and_may_start(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal marker is the plain Rebuild's: the update route re-lays the old set (T602).
+
+    Its checkout goes back, `back()` lays the OLD scripts over the half-laid new ones, and
+    the old build starts on a whole set; refusing a Start would be wrong there.
+    """
+    rec, server_dir, made = ready_to_update(tmp_path, installers)
+
+    def fetched(dest: Path) -> None:
+        lay_tree(server_dir)(dest)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+            (dest / "lua_scripts" / FIRST_NAME).write_text(FIRST_BODY, encoding="utf-8")
+
+    def checkout_force(dest: Path, rev: str) -> None:
+        rec.restore_rev(dest, rev)
+        if dest == server_dir / MODULE:
+            (dest / "lua_scripts" / FIRST_NAME).unlink(missing_ok=True)
+        lay_tree(server_dir)(dest)
+
+    rec.on_clone = fetched
+    made._seams = rec.seams(restore_rev=checkout_force)
+    real = scriptdeploy._publish
+    scripts: list[str] = []
+
+    def second_script_fails_once(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(target.name)
+            if len(scripts) == 2:
+                raise OSError(28, "no space left on device")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", second_script_fails_once)
+
+    with pytest.raises(InstallerError, match="could not be laid") as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    assert scripts[:2] == [FIRST_NAME, LUA_NAME], scripts
+    assert "STOPPED" not in str(raised.value), raised.value
+    assert (server_dir / LAID).read_text(encoding="utf-8") == LUA_BODY
+    assert not (server_dir / LUA_DEST / FIRST_NAME).exists()
+    assert made.start_refusal(server_dir) is None
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+    assert rec.calls.count("recreate") == 1, "the rollback started the old build"
+
+
+def refuse_the_start_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full disk: the file that blocks a hand Start cannot be written either (T602 review)."""
+    real = Path.write_text
+
+    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name.startswith(native.START_REFUSED_FILE):
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+
+
+def test_a_part_way_lay_still_leaves_the_old_build_stopped_when_the_marker_cannot_be_saved(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk that filled under script 2 refuses the marker too: the fact is kept in memory."""
+    from yulon import server_build_presses
+
+    refuse_the_start_marker(monkeypatch)
+    rec, server_dir, made, said, error = rebuild_whose_second_script_cannot_be_laid(
+        tmp_path, installers, monkeypatch
+    )
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert "recreate" not in rec.calls, f"the old build was started on the mixed set: {rec.calls}"
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+    assert "STOPPED" in error and rebuild in error, error
+    # Said plainly: nothing will block a hand Start, so the player is told not to press it.
+    assert "could not be saved" in error and "Start is NOT blocked" in error, error
+    assert any(START_NOT_SAVED in line for line in said), said
+
+
+START_NOT_SAVED = "nothing stops this server being started"
+
+
+def test_a_rebuild_with_no_rollback_whose_lay_fails_part_way_says_start_is_refused(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import server_build_presses
+
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = False  # no build to keep as a rollback
+    rec.on_clone = None
+    lua = server_dir / MODULE / "lua_scripts"
+    (lua / FIRST_NAME).write_text(FIRST_BODY, encoding="utf-8")
+    (lua / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    real = scriptdeploy._publish
+    scripts: list[str] = []
+
+    def second_script_fails(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(target.name)
+            if len(scripts) >= 2:
+                raise OSError(28, "no space left on device")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", second_script_fails)
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError) as raised:
+        list(made.rebuild(InstallOptions(server_dir=server_dir), missing_images_ok=True))
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    error = str(raised.value)
+    assert scripts == [FIRST_NAME, LUA_NAME], scripts
+    assert "recreate" not in rec.calls, rec.calls
+    assert "run the new build" not in error, error  # the containers were never replaced
+    assert "Start is refused" in error and rebuild in error, error
+    assert made.start_refusal(server_dir) == native.SCRIPTS_NOT_BACK_REFUSAL
