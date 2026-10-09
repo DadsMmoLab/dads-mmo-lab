@@ -146,16 +146,22 @@ class Outcome:
     failed: dict[str, str] = field(default_factory=dict)
     restart_recommended: bool = False
     rebuild_required: bool = False
+    names: dict[str, str] = field(default_factory=dict)
+    """Display names, for an add-on the player brought (the two defaults have `_NAMES`)."""
+
+    def _name(self, item: str) -> str:
+        return _NAMES.get(item, self.names.get(item, item))
 
     def notes(self) -> tuple[str, ...]:
         """Plain sentences for the Play log; empty when nothing happened."""
-        out = [f"Put {_NAMES.get(item, item)} into your game client." for item in self.installed]
+        name = self._name
+        out = [f"Put {name(item)} into your game client." for item in self.installed]
         out += [
-            f"Put the missing files of {_NAMES.get(item, item)} back into your game client."
+            f"Put the missing files of {name(item)} back into your game client."
             for item in self.restored
         ]
         out += [
-            f"Could not set up {_NAMES.get(item, item)} in your game client ({why}). "
+            f"Could not set up {name(item)} in your game client ({why}). "
             "Play goes on without it."
             for item, why in self.failed.items()
         ]
@@ -182,7 +188,8 @@ def put_in(
     because a game that cannot reach GitHub must still start. Nothing is done without a client
     folder to put the files in, or a clone would read as installed with no files.
     """
-    out = Outcome()
+    manifests = list(manifests)
+    out = Outcome(names={m.id: m.name for m in manifests})
     if applier.client_dir is None:
         return out
     read = _read(server_dir)

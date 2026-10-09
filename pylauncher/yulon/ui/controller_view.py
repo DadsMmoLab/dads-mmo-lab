@@ -12616,6 +12616,7 @@ class ControllerView(QWidget):
         if (
             has_client_data(self.entry.client)
             or bool(self.services.default_addons)
+            or self._has_outside_addons()
             or (
                 recorded is not None
                 and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
@@ -12713,6 +12714,7 @@ class ControllerView(QWidget):
         # failure is a line in the Play log and never a stop: Play must start the game.
         check_cancel()
         notes += self._default_addons_work(say, clone=False)
+        notes += self._outside_addons_work(say)
         wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
         # "Play without" a pack whose update was cut half way: its files are a mix of old
         # and new, so they go (and the entry) before the game starts.
@@ -12948,6 +12950,43 @@ class ControllerView(QWidget):
             logger.warning(f"default client addons: {exc}")
             return (f"Could not check your client addons ({exc}). Play goes on without them.",)
         return outcome.notes()
+
+    def _outside_addons_work(self, say: Callable[[str], None]) -> tuple[str, ...]:
+        """Off the GUI thread: put back the add-ons the player brought that this client lacks.
+
+        A ready-to-play client made again starts without them, and a folder deleted by hand is
+        the same. Only from the copy Yu'lon keeps (no git, no network): an add-on whose copy is
+        gone is left alone, and a removed one has no record, so it stays removed. Never raises.
+        """
+        route = self.services.client_addons
+        if route is None:
+            return ()
+        try:
+            manifests = route.installed()
+            if not manifests:
+                return ()
+            outcome = default_addons.put_in(
+                self.services.controller.server_dir,
+                route.applier,
+                manifests,
+                [m.id for m in manifests],
+                clone=False,
+                say=say,
+            )
+        except Exception as exc:  # boundary: the add-ons are a courtesy, Play is the job
+            logger.warning(f"outside client add-ons: {exc}")
+            return (f"Could not check the add-ons you brought ({exc}). Play goes on without them.",)
+        return outcome.notes()
+
+    def _has_outside_addons(self) -> bool:
+        route = self.services.client_addons
+        if route is None:
+            return False
+        try:
+            return bool(route.installed())
+        except Exception as exc:  # boundary: a broken record must not stop Play
+            logger.warning(f"outside client add-ons: {exc}")
+            return False
 
     def put_default_addons_later(self, milliseconds: int = 5000) -> None:
         """A tab opened at start-up: ask `put_default_addons_in()` a few seconds on (T612).
