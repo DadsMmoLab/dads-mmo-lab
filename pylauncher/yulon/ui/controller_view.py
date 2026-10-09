@@ -15471,10 +15471,14 @@ class ControllerView(QWidget):
             try:
                 leased.enter_context(
                     docker.maintenance_lease(
-                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES
+                        self.services.controller.server_dir,
+                        forgetting.BACKUP_HOLDS_THE_DATABASES,
+                        press="Backup",
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
-            except docker.MaintenanceLeaseTaken as exc:
+            except (docker.MaintenanceLeaseTaken, docker.ServerHeldError) as exc:
                 raise wotlk_maintenance.MaintenanceError(f"{exc} No backup was taken.") from exc
             return self._back_up_under_the_lease()
 
@@ -15494,7 +15498,11 @@ class ControllerView(QWidget):
             try:
                 held.enter_context(
                     docker.hold_the_server(
-                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+                        self.services.controller.server_dir,
+                        forgetting.BACKUP_HOLDS_THE_SERVER,
+                        press="Backup",
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -15636,10 +15644,14 @@ class ControllerView(QWidget):
             try:
                 leased.enter_context(
                     docker.maintenance_lease(
-                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_DATABASES
+                        self.services.controller.server_dir,
+                        forgetting.RESTORE_HOLDS_THE_DATABASES,
+                        press="Restore",
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
-            except docker.MaintenanceLeaseTaken as exc:
+            except (docker.MaintenanceLeaseTaken, docker.ServerHeldError) as exc:
                 raise wotlk_maintenance.MaintenanceError(f"{exc} Nothing was restored.") from exc
             return self._restore_under_the_lease(plan)
 
@@ -15652,7 +15664,11 @@ class ControllerView(QWidget):
             try:
                 held.enter_context(
                     docker.hold_the_server(
-                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_SERVER
+                        self.services.controller.server_dir,
+                        forgetting.RESTORE_HOLDS_THE_SERVER,
+                        press="Restore",
+                        spec=self.services.controller.spec,
+                        wsl_distro=self.services.controller.wsl_distro,
                     )
                 )
             except docker.ServerHeldError as exc:

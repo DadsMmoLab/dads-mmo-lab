@@ -6723,6 +6723,12 @@ class StagedInstaller:
                     label=self.entry.name,
                 )
             )
+        except docker.ServerReservationUnavailable as unavailable:
+            if not unavailable.moot:
+                raise InstallerError(str(unavailable)) from unavailable
+            # Docker is not there (or not answering) or the folder will not take the id
+            # file: the press meets that itself, in its own words, and nothing can race.
+            logger.warning(f"{press} on {server_dir} without a reservation: {unavailable}")
         except docker.ServerHeldError as refused:
             raise InstallerError(str(refused)) from refused
         with stack:

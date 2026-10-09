@@ -545,7 +545,42 @@ def _server_key(server_dir: Path | str) -> str:
 
 
 @contextmanager
-def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
+def _reserved_for(
+    server_dir: Path | str,
+    press: str,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None,
+) -> Iterator[None]:
+    """The cross-process reservation for a Backup or Restore block (T568), when it has a spec.
+
+    A caller that names no `spec` (the headless harness, a test) holds in this process only,
+    as before. A reservation that is `moot` (Docker not answering, an unwritable folder) is
+    skipped: the job meets that itself.
+    """
+    if spec is None or not RESERVATIONS_ON:
+        yield
+        return
+    with contextlib.ExitStack() as reserved:
+        try:
+            reserved.enter_context(
+                server_claim(server_dir, press=press, spec=spec, wsl_distro=wsl_distro)
+            )
+        except ServerReservationUnavailable as exc:
+            if not exc.moot:
+                raise
+            logger.warning(f"{press} on {server_dir} without a reservation: {exc}")
+        yield
+
+
+@contextmanager
+def hold_the_server(
+    server_dir: Path | str,
+    reason: str,
+    *,
+    press: str = "A backup or restore",
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
     For the Maintenance tab's restore, and for a backup that started the
@@ -581,9 +616,12 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
     waiting for the database to report healthy has a world container that
     exists and is not running yet, which passes the restore's name census.
 
+    Given a `spec` it also reserves the server across processes (T568), under `press`, for
+    the block: another Yu'lon's Start or Update then refuses with this job's name.
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
-            (`SERVER_IN_MOTION`).
+            (`SERVER_IN_MOTION`), or another Yu'lon holds the server (`ServerReserved`).
     """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
@@ -591,7 +629,8 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
             raise ServerHeldError(SERVER_IN_MOTION)
         _HELD.setdefault(key, []).append(reason)
     try:
-        yield
+        with _reserved_for(server_dir, press, spec, wsl_distro):
+            yield
     finally:
         with _HOLD_LOCK:
             reasons = _HELD[key]
@@ -632,7 +671,9 @@ def _in_flight(
     own length, unless this process already holds the reservation (a press running its own
     stop and recreate), in which case it runs inside it -- and, if that reservation was lost
     from elsewhere, refuses to start, recreate or remove anything (a stop is never refused).
-    A Stop that cannot get a reservation within `_STOP_RESERVE_TIMEOUT` goes ahead without.
+    A Stop that cannot get a reservation within `_STOP_RESERVE_TIMEOUT` goes ahead without,
+    and so does any command whose reservation is `moot` (Docker not there, an unwritable
+    folder): it fails on its own, in its own words.
     """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
@@ -656,9 +697,9 @@ def _in_flight(
                         )
                     )
                 except ServerReservationUnavailable as exc:
-                    if not stopping:
+                    if not (stopping or exc.moot):
                         raise
-                    logger.warning(f"stopping {server_dir} without a reservation: {exc}")
+                    logger.warning(f"running {press} on {server_dir} without a reservation: {exc}")
                 else:
                     if claim.lost.is_set() and not stopping:
                         raise ServerHeldError(LOST_RESERVATION)
@@ -704,7 +745,14 @@ _LEASED: dict[str, str] = {}
 
 
 @contextmanager
-def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
+def maintenance_lease(
+    server_dir: Path | str,
+    reason: str,
+    *,
+    press: str = "A backup or restore",
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
     """One Backup or Restore of this server at a time, for the whole of it (T216 round 3).
 
     Separate from `hold_the_server()`, which is about the containers: a hot
@@ -719,6 +767,9 @@ def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
     one view (T187 gives each server its own launcher window), and a flag on
     one of them would not be seen by the other.
 
+    Given a `spec` it also reserves the server across processes (T568), as
+    `hold_the_server()` does, so a hot Backup in one Yu'lon is not a Restore in another.
+
     Raises:
         MaintenanceLeaseTaken: a Backup or Restore of this server holds it.
     """
@@ -729,7 +780,8 @@ def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
             raise MaintenanceLeaseTaken(holder)
         _LEASED[key] = reason
     try:
-        yield
+        with _reserved_for(server_dir, press, spec, wsl_distro):
+            yield
     finally:
         with _HOLD_LOCK:
             del _LEASED[key]
@@ -7715,6 +7767,10 @@ class ClaimUnavailable(Exception):
     """The folder's claim could not be made, for a reason other than another press (T543)."""
 
 
+class ClaimDockerDown(ClaimUnavailable):
+    """The claim could not be made because Docker itself is not there or not answering (T568)."""
+
+
 class ClaimImageGone(ClaimUnavailable):
     """The claim could not be made because its image is not in Docker (T568: try the next)."""
 
@@ -7893,7 +7949,7 @@ def _take_claim(
         raise ClaimStopped("Stop was pressed before the folder was reserved.")
     prefix = platform.docker_prefix(wsl_distro)
     if prefix is None:
-        raise ClaimUnavailable("Docker's command-line tool was not found; start or install Docker.")
+        raise ClaimDockerDown("Docker's command-line tool was not found; start or install Docker.")
     nonce = uuid.uuid4().hex
     argv = [
         *prefix,
@@ -7926,7 +7982,7 @@ def _take_claim(
             creationflags=runner.creationflags(),
         )
     except OSError as exc:
-        raise ClaimUnavailable(f"Docker could not be started ({exc}); is Docker running?") from exc
+        raise ClaimDockerDown(f"Docker could not be started ({exc}); is Docker running?") from exc
     try:
         return _claim_coming_up(
             name,
@@ -8032,7 +8088,12 @@ def _claim_coming_up(
                     up_timeout=up_timeout,
                 )
             refused = _claim_refused(image, said or f"it exited {proc.returncode}")
-            raise (ClaimImageGone if _IMAGE_GONE.search(said) else ClaimUnavailable)(refused)
+            kind = (
+                ClaimImageGone
+                if _IMAGE_GONE.search(said)
+                else ClaimDockerDown if _DAEMON_DOWN.search(said) else ClaimUnavailable
+            )
+            raise kind(refused)
         if time.monotonic() > deadline:
             raise ClaimUnavailable(
                 f"Docker had not started its reservation after {limit:.0f} s; "
@@ -8190,8 +8251,16 @@ class ServerReserved(ServerHeldError):
 class ServerReservationUnavailable(ServerHeldError):
     """No reservation could be made (no Docker, no image, a folder with no id file); T568.
 
-    The press is refused rather than run unreserved; only a Stop goes ahead without one.
+    A press or a Start is refused rather than run unreserved, except when `moot`: Docker is
+    not there or not answering (the command reports that itself, in its own typed words, and
+    nothing can race on a daemon that is not answering), or the folder will not take the id
+    file (a folder Yu'lon cannot write is one it cannot update either -- T152's own line).
+    A Stop goes ahead without a reservation whatever the reason.
     """
+
+    def __init__(self, message: str, *, moot: bool = False) -> None:
+        super().__init__(message)
+        self.moot = moot
 
 
 @dataclass(frozen=True)
@@ -8423,7 +8492,8 @@ def server_claim(
                 name_of,
                 f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
                 "file is there, delete it; if the folder is read-only, make it writable.",
-            )
+            ),
+            moot=True,
         )
     name = SERVER_CLAIM_PREFIX + ident
     with _reserve_lock(name):
@@ -8486,7 +8556,8 @@ def _new_reservation(
             last = gone
         except ClaimUnavailable as exc:
             raise ServerReservationUnavailable(
-                forgetting.server_reservation_unavailable(label, str(exc))
+                forgetting.server_reservation_unavailable(label, str(exc)),
+                moot=isinstance(exc, ClaimDockerDown),
             ) from exc
     if claim is None:
         raise ServerReservationUnavailable(

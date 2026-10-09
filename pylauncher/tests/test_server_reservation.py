@@ -217,6 +217,64 @@ def test_the_in_process_hold_is_still_answered_first(fake_docker: Path, server: 
     assert [line for line in fake_calls(fake_docker) if line.startswith("run ")] == []
 
 
+def test_a_docker_that_is_not_there_does_not_refuse_a_start_it_will_fail_itself(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no docker CLI the command runs and meets that in its own typed words.
+
+    Mutation this catches: a `moot` reservation refused, which put "could not reserve" in
+    front of the Docker banner's advice (`DockerCliMissingError`).
+    """
+    monkeypatch.setattr(platform, "docker_program", lambda: None)
+    start_staged(SPEC, server)
+    assert ran == ["start"]
+
+
+def test_a_folder_that_takes_no_id_file_does_not_refuse_a_start(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "folder_id", lambda _folder: None)
+    start_staged(SPEC, server)
+    assert ran == ["start"]
+
+
+def test_docker_up_but_no_image_to_reserve_with_refuses_a_start(
+    fake_docker: Path, server: Path
+) -> None:
+    (fake_docker / "missing-images").write_text(IMAGE, encoding="utf-8")
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        start_staged(SPEC, server)
+    assert refused.value.moot is False
+    assert ran == []
+
+
+def test_a_backup_or_restore_with_a_spec_reserves_the_server_and_without_one_does_not(
+    fake_docker: Path, server: Path
+) -> None:
+    with docker.hold_the_server(server, "a restore", press="Restore", spec=SPEC):
+        assert docker.reservation_held_here(server)
+    with docker.maintenance_lease(server, "a backup", press="Backup", spec=SPEC):
+        assert docker.reservation_held_here(server)
+    _wait_for(fake_docker, _name(server), there=False)
+    with docker.hold_the_server(server, "a restore"):
+        assert not [c for c in fake_calls(fake_docker) if c.startswith("run ")][2:]
+
+
+def test_a_restore_under_another_yulons_reservation_is_refused(
+    fake_docker: Path, server: Path
+) -> None:
+    theirs = _another_yulon_holds(fake_docker, _name(server))
+    try:
+        with pytest.raises(docker.ServerReserved):
+            with docker.hold_the_server(server, "a restore", press="Restore", spec=SPEC):
+                pytest.fail("a restore went ahead under another Yu'lon's hold")
+        # and the in-process hold it took first is let go again
+        with docker.hold_the_server(server, "a later one"):
+            pass
+    finally:
+        theirs.kill()
+
+
 # ------------------------------------------------------------------ Stop always stops
 
 
@@ -338,6 +396,33 @@ def test_every_press_refuses_under_another_yulons_reservation_before_it_sends_an
     assert taken == [press]
     assert "Another Yu'lon is working on WoW" in str(refused.value), str(refused.value)
     assert rec.calls == [], "the press sent something past the refusal"
+
+
+def test_a_press_whose_reservation_is_moot_runs_unreserved(tmp_path: Path) -> None:
+    @contextmanager
+    def no_docker(server_dir: Path, *, press: str, **_kw: Any) -> Iterator[None]:
+        raise docker.ServerReservationUnavailable("Docker is not running.", moot=True)
+        yield
+
+    installer = engine(Recorder(), server_claim=no_docker)
+    ran_inside: list[str] = []
+    with installer._reservation(_installed(tmp_path), "Rebuild"):
+        ran_inside.append("body")
+    assert ran_inside == ["body"]
+
+
+def test_a_press_whose_reservation_cannot_be_made_for_a_real_reason_is_refused(
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def no_image(server_dir: Path, *, press: str, **_kw: Any) -> Iterator[None]:
+        raise docker.ServerReservationUnavailable("Docker has none of the images.")
+        yield
+
+    installer = engine(Recorder(), server_claim=no_image)
+    with pytest.raises(InstallerError, match="none of the images"):
+        with installer._reservation(_installed(tmp_path), "Rebuild"):
+            pytest.fail("the body ran")
 
 
 def test_a_press_on_a_folder_with_no_record_reserves_nothing(tmp_path: Path) -> None:

@@ -331,9 +331,11 @@ def restart_world(controller: Controller) -> None:
     # started, which is what `StopFailed` tells the caller.
     with contextlib.ExitStack() as composite:
         try:
-            composite.enter_context(docker.lifecycle(
+            composite.enter_context(
+                docker.lifecycle(
                     controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
-                ))
+                )
+            )
             controller.stop()
         except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
             raise StopFailed(str(exc)) from exc
