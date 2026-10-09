@@ -22,6 +22,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 
 ### Fixed
+- Account, character and settings changes wait for another Yu'lon; stopping another project leaves its folder alone.
 - Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
 - Modules, Party links, channel setup and bot rebuilds wait for another Yu'lon too; **Stop** never hangs on Docker.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
