@@ -1,4 +1,5 @@
 name: discord-issues
+# Registered again by T614 (GitHub had not registered this file).
 
 # One Discord post per issue. Every run reads the issue as it is NOW and renders
 # that, so whichever run executes last shows the true state. No trusted message
