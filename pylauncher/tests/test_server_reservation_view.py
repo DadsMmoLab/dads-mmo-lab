@@ -233,6 +233,30 @@ def test_stop_anyway_stops_even_when_the_holders_reservation_would_not_be_remove
     assert ran == ["stop"], "the confirmed Stop did not stop"
 
 
+def test_stop_anyway_stops_when_another_yulon_took_the_server_after_the_removal(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review: the holder was removed, a newcomer reserved before the Stop, and the
+    confirmed Stop (asked once) was refused. It falls back to the one unreserved Stop.
+
+    Mutation this catches: no fallback for a `ServerReserved` after a successful removal.
+    """
+    from tests.test_server_reservation import ran, stop_staged
+
+    ran.clear()
+    monkeypatch.setattr(controller_view_module, "_ask_with", _Asked("yes"))
+    monkeypatch.setattr(docker, "end_reservation", lambda holder: True)
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    monkeypatch.setattr(docker, "server_claim", _always_held)  # a newcomer holds it again
+    monkeypatch.setattr(
+        view.services.controller, "stop", lambda: stop_staged(_SPEC, tmp_path) or True
+    )
+
+    view._stop_failed(_refused(HOLDER))
+
+    assert ran == ["stop"]
+
+
 def test_a_later_stop_is_not_unreserved(
     view: ControllerView, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

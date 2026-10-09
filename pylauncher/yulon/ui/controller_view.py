@@ -9911,11 +9911,17 @@ class ControllerView(QWidget):
     def _stop_over(self, holder: docker.ServerHolder) -> bool:
         """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
         if docker.end_reservation(holder):
-            return self.services.controller.stop()
-        # The holder's reservation would not go (Docker slow, a refused removal): the Stop the
-        # player confirmed still stops -- "Stop always stops" -- without a reservation of its
-        # own, for this one Stop only.
-        logger.warning(f"{holder.name} could not be removed; stopping without a reservation")
+            try:
+                return self.services.controller.stop()
+            except docker.ServerReserved as newcomer:
+                # Another Yu'lon took the server between the removal and this Stop (Codex
+                # review): the confirmed Stop is not asked about twice, and still stops.
+                logger.warning(f"{holder.name} was taken again before the Stop: {newcomer}")
+        else:
+            # The holder's reservation would not go (Docker slow, a refused removal).
+            logger.warning(f"{holder.name} could not be removed; stopping without one")
+        # "Stop always stops": the Stop the player confirmed runs without a reservation of
+        # its own, for this one Stop only.
         with docker.stopping_regardless():
             return self.services.controller.stop()
 
