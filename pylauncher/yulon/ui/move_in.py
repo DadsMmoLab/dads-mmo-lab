@@ -18,6 +18,7 @@ from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import ManifestStore
+from yulon.move_flows import MoveError
 
 logger = get_logger(__name__)
 
@@ -75,12 +76,12 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
 
         services = ControllerServices.for_entry(entry, server_dir, client_dir)
         if services.move is None or services.move.world is None:
-            raise move_server.MoveError(f"{entry.name} has no Maintenance engine here.")
+            raise MoveError(f"{entry.name} has no Maintenance engine here.")
         store = services.store
 
         def persist(manifest: Manifest) -> None:
             if store is None or store.user_root is None:
-                raise move_server.MoveError(
+                raise MoveError(
                     f"{manifest.name} was added from a link, and this Yu'lon has nowhere to keep "
                     "its description."
                 )
@@ -126,7 +127,7 @@ def move_in_for_app(catalog: Catalog) -> MoveIn:
                 native.SourceRev(r.repo, r.built, pin=r.pin, ahead=r.ahead)
                 for r in rows  # type: ignore[attr-defined]
             ]
-            return engine.record_source_rows(server_dir, revs)  # type: ignore[attr-defined]
+            return bool(engine.record_source_rows(server_dir, revs))  # type: ignore[attr-defined]
 
         return move_server.MovedInInstall(
             chosen,

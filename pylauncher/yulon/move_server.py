@@ -29,7 +29,7 @@ import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from yulon import apply, module_answers, move
 from yulon.catalog.catalog import (
@@ -136,7 +136,9 @@ def _modules_of(
                     f"could not install the same version. {_NOT_PACKED}"
                 )
                 continue
-            origin = "link" if manifest.origin is not None else "catalog"
+            origin: Literal["catalog", "link"] = (
+                "link" if manifest.origin is not None else "catalog"
+            )
             modules.append(
                 PackedModule(
                     type=manifest.type,

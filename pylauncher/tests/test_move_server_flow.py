@@ -717,3 +717,33 @@ def test_a_conf_folder_that_is_a_link_is_never_written_through(tmp_path: Path) -
     with pytest.raises(MoveError, match="is a link, so Yu'lon will not write through it"):
         mv.run()
     assert list(outside.iterdir()) == []
+
+
+def test_no_rebuild_when_no_module_needs_one(tmp_path: Path) -> None:
+    mv = Move(tmp_path)
+
+    def install(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+        mv.events.append(f"module:{manifest.id}")
+        return apply.ApplyReport(
+            action="install", item_id=manifest.id, family=manifest.type, rebuild_required=False
+        )
+
+    mv.applier.install = install  # type: ignore[method-assign]
+    lines = mv.run()
+    assert mv.rebuilds == 0
+    assert "No module needs the server built again." in lines
+
+
+def test_the_server_is_stopped_before_a_conf_is_laid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mv = Move(tmp_path)
+    real = move_server._write_bytes
+
+    def write(target: Path, data: bytes) -> None:
+        mv.events.append(f"write:{target.name}")
+        real(target, data)
+
+    monkeypatch.setattr(move_server, "_write_bytes", write)
+    mv.run()
+    assert mv.events.index("stop") < mv.events.index("write:worldserver.conf")

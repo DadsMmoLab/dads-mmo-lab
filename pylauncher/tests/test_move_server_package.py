@@ -250,7 +250,9 @@ def test_two_file_members_on_one_target_are_refused_by_the_writer(tmp_path: Path
 
 
 def test_files_on_a_characters_package_are_refused_by_the_writer(tmp_path: Path) -> None:
-    with pytest.raises(MovePackageError):
+    with pytest.raises(
+        MovePackageError, match="^Only a whole-server package carries files besides its databases"
+    ):
         write_package(
             tmp_path / "c.zip",
             header(),
@@ -277,3 +279,14 @@ def test_the_written_manifest_is_valid_json_with_the_server_section(tmp_path: Pa
             "catalog_pin": SHA_CORE,
         }
     )
+
+
+def test_a_manifest_listing_one_file_twice_is_not_a_package(tmp_path: Path) -> None:
+    good = server_pack(
+        tmp_path, files=(PackFile(kind="lua", target="lua_scripts/a.lua", data=b"x"),)
+    )
+    raw = manifest_of(good)
+    raw["server"]["files"] = raw["server"]["files"] * 2
+    with pytest.raises(MovePackageError) as raised:
+        read_package(rewrite(good, tmp_path / "bad.zip", manifest=raw))
+    assert str(raised.value) == move.NOT_A_PACKAGE
