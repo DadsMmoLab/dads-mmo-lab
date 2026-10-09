@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker, module_health, realm_flag, unbound_settings
+from yulon import dbreads, docker, module_health, realm_flag, unbound_settings, update_failure
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
@@ -219,6 +219,14 @@ class Verdict:
     badge follows it. True when the install has no marker to look for, since
     nothing could ever say otherwise.
     """
+    failure: str = ""
+    """The sentence for a world that stopped at a database update it could not apply (T600).
+
+    Read from this run's own log (`update_failure.explain()`), so it outranks the
+    uptime rule that calls a silent world ready after `SETTLED_AFTER`: a world stuck at
+    a failed update has no port, no SOAP and no bots, and the population read goes to a
+    database that is up. Set means `ready` is False and `stable` is False.
+    """
     module_line: str = ""
     """A module's own health sentence (`module_health`), once this run is ready; empty before
     that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
@@ -255,7 +263,12 @@ class Verdict:
         And so is a run that has only just replaced a crash loop, for the reason
         `after_a_loop` gives.
         """
-        return self.state == "up" and not self.database_unreachable and not self.after_a_loop
+        return (
+            self.state == "up"
+            and not self.database_unreachable
+            and not self.after_a_loop
+            and not self.failure
+        )
 
 
 def line(verdict: Verdict) -> str:
@@ -281,7 +294,11 @@ def line(verdict: Verdict) -> str:
             "(it was removed, or has not been created yet)"
         )
     parts: list[str] = []
-    if verdict.state == "restart_loop":
+    if verdict.failure:
+        parts.append(verdict.failure)
+        if verdict.uptime is not None:
+            parts[-1] += f" ({uptime_text(verdict.uptime)})"
+    elif verdict.state == "restart_loop":
         head = f"restart loop — {verdict.restarts} restarts"
         parts.append(head + (f", this run {uptime_text(verdict.uptime)}" if verdict.uptime else ""))
     else:
@@ -385,6 +402,14 @@ class Dashboard:
         self._login_read_at: datetime | None = None
         self._wrong_client_at: datetime | None = None
         self._banner = _ready_banner(entry)
+        self._reads_update_failures = _reads_update_failures(entry)
+        # T600: what this run's log said about a failed update, kept per run. `_failure_text`
+        # is the sentence ("" for none), `_failure_settled` that no later read can change it.
+        self._failure_run: str | None = None
+        self._failure_text = ""
+        self._failure_settled = False
+        self._ticks = 0
+        self._run_log_cache: tuple[int, str, str] | None = None
         self._now = now or (lambda: datetime.now(UTC))
         self._missing_table_said = dbreads.MissingTableSaid()
         self._last_restarts: int | None = None
@@ -472,10 +497,13 @@ class Dashboard:
                 or (uptime is not None and uptime >= SETTLED_AFTER)
                 or self._ready_run == state.started_at
             )
+            if ready and self._failure_run == state.started_at and self._failure_text:
+                ready = False  # T600: no uptime rule outranks a failed update in this run's log
             realm.after_tick(state.status, state.started_at, ready, begun)
         return verdict
 
     def _tick(self) -> Verdict:
+        self._ticks += 1
         state = self._state_of(self.spec.world)
         self._seen = state
         uptime = self._uptime(state.started_at)
@@ -543,6 +571,9 @@ class Dashboard:
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
+        failure = self._update_failure(state.started_at, uptime)
+        if failure:
+            verdict = replace(verdict, ready=False, failure=failure)
         if verdict.ready:
             line = self._module_line(state.started_at)
             if line:
@@ -698,11 +729,55 @@ class Dashboard:
         if self._banner is None:
             return False
         if self._ready_run != run:
-            if not self._banner.search(self._log_of(self.spec.world, run)):
+            if not self._banner.search(self._run_log(run)):
                 return False
             self._ready_run = run
             self._ready_seen_at = self._now()
         return True
+
+    def _run_log(self, run: str) -> str:
+        """Run `run`'s whole log, read once per tick however many questions are put to it."""
+        cached = self._run_log_cache
+        if cached is not None and cached[0] == self._ticks and cached[1] == run:
+            return cached[2]
+        text = self._log_of(self.spec.world, run)
+        self._run_log_cache = (self._ticks, run, text)
+        return text
+
+    def _update_failure(self, run: str, uptime: timedelta | None) -> str:
+        """The sentence for a failed update in run `run`'s own log, or `""` (T600).
+
+        Asked only for an entry whose catalog `ready.fatal` covers the core's failure line,
+        and only while the run has not said ready: the marker ends the question, and so does
+        a run that outlived `READY_READ_SPAN` once that span has been read. A run younger
+        than the span is read whole, as `_saw_ready()` reads it (one read per tick, shared);
+        an older one is read bounded to its first span, like the realm keeper's, because the
+        updater runs in the first minutes and a long-lived world's log is large. A log that
+        could not be read says nothing and is asked again next tick.
+        """
+        if not self._reads_update_failures:
+            return ""
+        if self._failure_run != run:
+            self._failure_run, self._failure_text, self._failure_settled = run, "", False
+        if self._failure_text:
+            return self._failure_text
+        if self._failure_settled or self._ready_run == run:
+            return ""
+        young = uptime is None or uptime < READY_READ_SPAN
+        try:
+            if young:
+                log = self._run_log(run)
+            else:
+                started = _run_start(run)
+                until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
+                log = self._ready_log_of(self.spec.world, run, until)
+        except Exception as exc:  # noqa: BLE001 - an unreadable log is no answer, not a crash
+            logger.warning(f"could not read {self.entry.id}'s world log for a failed update: {exc}")
+            return ""
+        self._failure_text = update_failure.explain(log)
+        if not young:
+            self._failure_settled = True
+        return self._failure_text
 
     def _docker_is_restoring(self, new_run: bool) -> bool:
         """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker restarted (T306).
@@ -818,6 +893,24 @@ def _ready_banner(entry: CatalogEntry) -> re.Pattern[str] | None:
     except InstallerError as exc:
         logger.warning(f"the dashboard cannot read {entry.id}'s ready marker: {exc}")
         return None
+
+
+def _reads_update_failures(entry: CatalogEntry) -> bool:
+    """Whether `entry`'s catalog `ready.fatal` covers the core's failed-update line (T600).
+
+    Opt-in by the catalog and not by game id: only a core whose updater logs that line, and
+    whose entry says so, has its start-up log read for it.
+    """
+    block = entry.install.native
+    fatal = block.ready.fatal if block is not None else None
+    if fatal is None:
+        return False
+    if not block.ready.regex:
+        return fatal in update_failure.PROBE
+    try:
+        return re.search(fatal, update_failure.PROBE) is not None
+    except re.error:
+        return False
 
 
 def _run_start(started_at: str) -> datetime | None:

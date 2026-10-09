@@ -90,6 +90,7 @@ from yulon import (
     runner,
     server_build_presses,
     serverlock,
+    update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
 from yulon.catalog import (
@@ -5043,6 +5044,19 @@ def _line_around(text: str, found: re.Match[str]) -> str:
     return (text[start:] if end < 0 else text[start:end]).strip()
 
 
+def _fatal_words(text: str, found: re.Match[str]) -> str:
+    """What a refusal quotes for a `fatal` match: its line, or the sentence when it is a failed update.
+
+    T600: a failed world update is quoted as the sentence naming its file and MariaDB's error
+    (`update_failure.explain()`), which reads the lines before it in `text`; the bare line names
+    no error. Every other fatal match is the whole line, as `_line_around()` says.
+    """
+    line = _line_around(text, found)
+    if update_failure.FAILED.search(line) or update_failure.CLOSED.search(line):
+        return update_failure.explain(text) or line
+    return line
+
+
 def _spell_elapsed(seconds: float) -> str:
     """`31 -> "31 seconds"`, `70 -> "1 minute 10 seconds"`, `180 -> "3 minutes"` (T223).
 
@@ -5252,7 +5266,7 @@ def _read_world(
         return "gone", now.status
     found = re.search(fatal, now.text) if fatal is not None else None
     if found is not None:
-        return "fatal", _line_around(now.text, found)
+        return "fatal", _fatal_words(now.text, found)
     if now == before:
         return ("quiet" if now.status else "unreadable"), None
     return "alive", None
@@ -5352,7 +5366,7 @@ def _dying_words(texts: Sequence[str], fatal: str | None) -> str:
     for text in texts:
         found = re.search(fatal, text) if fatal is not None else None
         if found is not None:
-            return _line_around(text, found)
+            return _fatal_words(text, found)
     for text in texts:
         said = [line.strip() for line in text.splitlines() if line.strip()]
         if said:
@@ -13355,9 +13369,14 @@ class StagedInstaller:
                     detail=read_it,
                 )
             if verdict == "fatal":
+                # T600: a failed world update is already a whole sentence (file, MariaDB's error).
+                printed = (
+                    detail
+                    if detail.startswith(update_failure.OPENING)
+                    else f"It printed a line that means it never will: {detail!r}."
+                )
                 raise InstallerError(
-                    f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest.{kept}"
+                    f"{never_ready}. {printed} {logs} has the rest.{kept}"
                     f"{_corrections_hint(self.entry, now.text)}",
                     detail=read_it,
                 )

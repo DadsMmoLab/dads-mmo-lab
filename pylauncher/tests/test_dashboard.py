@@ -2027,3 +2027,103 @@ def test_a_clock_that_goes_backwards_does_not_hold_a_replayed_reading(tmp_path: 
     watch.tick()
 
     assert sql.tables_asked == 2, "a reading stamped in the future was replayed"
+
+
+# ------------------------------------------- T600: a world stopped at a failed update
+
+TORTOISE = catalog_module.load_catalog().get("wow-tortoise")
+FAILED_UPDATE_LOG = (
+    "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+    "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+    "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+)
+
+
+def _tortoise_watch(
+    tmp_path: Path, *, age: timedelta, log: str, asked: list[str] | None = None
+) -> dashboard.Dashboard:
+    run = _stamp(NOW - age)
+    sql = _FakeSql()
+    return dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=sql,
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: (asked.append(since) if asked is not None else None)
+        or log,
+        now=lambda: NOW,
+    )
+
+
+def test_a_world_that_stopped_at_a_failed_update_is_not_called_up_after_ten_minutes(
+    tmp_path: Path,
+) -> None:
+    """The 10-minute rule calls a silent world ready; it must never outrank this run's own log.
+
+    Mutation: delete the `_update_failure()` check in `_tick()` and this reads `up`.
+    """
+    watch = _tortoise_watch(
+        tmp_path, age=dashboard.SETTLED_AFTER + timedelta(minutes=1), log=FAILED_UPDATE_LOG
+    )
+
+    verdict = watch.tick()
+
+    assert verdict.ready is False
+    assert verdict.stable is False
+    said = dashboard.line(verdict)
+    assert "20260903063722_world.sql" in said
+    assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in said
+    assert not said.startswith("up")
+
+
+def test_a_world_that_stopped_at_a_failed_update_is_not_called_ready_while_young_either(
+    tmp_path: Path,
+) -> None:
+    verdict = _tortoise_watch(tmp_path, age=timedelta(minutes=2), log=FAILED_UPDATE_LOG).tick()
+    assert verdict.ready is False and "20260903063722_world.sql" in dashboard.line(verdict)
+
+
+def test_the_realm_keeper_is_not_told_a_failed_world_is_ready(tmp_path: Path) -> None:
+    told: list[bool] = []
+
+    class _Keeper:
+        said_ready = None
+
+        def begin(self) -> int:
+            return 0
+
+        def after_tick(self, _status: str, _run: str, ready: bool, _begun: int) -> None:
+            told.append(ready)
+
+    watch = _tortoise_watch(
+        tmp_path, age=dashboard.SETTLED_AFTER + timedelta(minutes=1), log=FAILED_UPDATE_LOG
+    )
+    watch._realm = _Keeper()  # type: ignore[assignment]
+    watch.tick()
+    assert told == [False]
+
+
+def test_a_healthy_tortoise_world_is_up_and_its_log_is_not_read_again_once_ready(
+    tmp_path: Path,
+) -> None:
+    asked: list[str] = []
+    watch = _tortoise_watch(
+        tmp_path,
+        age=timedelta(minutes=3),
+        log="World server is up and running! Loading time: 1 minutes\n",
+        asked=asked,
+    )
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1
+    assert dashboard.line(watch.tick()).startswith("up")
+
+
+def test_a_run_past_the_read_span_is_read_once_and_then_remembered(tmp_path: Path) -> None:
+    asked: list[str] = []
+    watch = _tortoise_watch(
+        tmp_path, age=dashboard.READY_READ_SPAN * 2, log="quiet\n", asked=asked
+    )
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1
