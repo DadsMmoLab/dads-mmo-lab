@@ -94,7 +94,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -339,8 +339,8 @@ class DockerMysql:
             if name
         )
 
-    def dump_into(self, database: str, sink: IO[bytes]) -> None:
-        proc = self._exec(self._dump_argv(database), stdout=sink)
+    def dump_into(self, database: str, sink: IO[bytes], ignore: Sequence[str] = ()) -> None:
+        proc = self._exec(self._dump_argv(database, ignore), stdout=sink)
         if proc.returncode != 0:
             raise MaintenanceError(
                 f"The backup of {database} did not finish.", detail=_stderr(proc)
@@ -386,7 +386,27 @@ class DockerMysql:
         if proc.returncode != 0:
             raise MaintenanceError(f"the statement failed: {_stderr(proc)}")
 
-    def _dump_argv(self, database: str) -> list[str]:
+    def query(self, sql: str) -> str:
+        """Run one read statement and return what the client printed (T601).
+
+        Tab-separated rows, no header, as `--batch --skip-column-names` writes them. The
+        statement goes over stdin like every other here, never into argv. For the move's
+        reads of a server's version and counts; a write goes through `execute()`.
+        """
+        proc = self._exec(
+            [
+                mysql_client(self.db_container, client=self.client),
+                "-uroot",
+                "--batch",
+                "--skip-column-names",
+            ],
+            input_text=sql if sql.endswith("\n") else sql + "\n",
+        )
+        if proc.returncode != 0:
+            raise MaintenanceError(f"the query failed: {_stderr(proc)}")
+        return (proc.stdout or b"").decode("utf-8", "replace")
+
+    def _dump_argv(self, database: str, ignore: Sequence[str] = ()) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
 
         `--databases` (rather than a bare name) is what makes the file
@@ -430,6 +450,10 @@ class DockerMysql:
         Not compressed. Compression would put this process back in the data path
         for the whole payload, and the plain `.sql` produced here is exactly
         what the guide's own restore line consumes.
+
+        `ignore` names tables of THIS database to leave out (T601: the auth dump of a
+        move package leaves `realmlist` behind, because the realm row belongs to the
+        server the package lands on). Empty, the argv is what it always was.
         """
         return [
             mysql_client(self.db_container, "mysqldump", client=self.client),
@@ -438,6 +462,7 @@ class DockerMysql:
             "--routines",
             "--events",
             "--triggers",
+            *(f"--ignore-table={database}.{table}" for table in ignore),
             "--databases",
             database,
         ]
@@ -565,6 +590,7 @@ def backup(
     game: Game,
     only: Sequence[str] | None = None,
     label: str | None = None,
+    ignore_tables: Mapping[str, Sequence[str]] | None = None,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
@@ -591,6 +617,10 @@ def backup(
             the copy taken automatically before a restore is not mistaken for
             one the user asked for (`wow-manage.sh` does the same with
             `pre_restore`).
+        ignore_tables: Tables to leave out of a database's dump, by schema (T601).
+            Only the move package uses it: its auth dump has no `realmlist`. A
+            backup taken with this is not a complete copy of that schema, so it is
+            for a caller that owns the file and says what is missing.
         wsl_distro: Which daemon holds this install's containers, for the
             census. `mysql` carries the same fact for the dump itself; both are
             needed, because they are two different questions asked of docker.
@@ -636,7 +666,13 @@ def backup(
     for database in wanted:
         try:
             done.append(
-                _dump_one(mysql, database, directory / f"{stamp}_{middle}{database}.sql", game)
+                _dump_one(
+                    mysql,
+                    database,
+                    directory / f"{stamp}_{middle}{database}.sql",
+                    game,
+                    tuple((ignore_tables or {}).get(database, ())),
+                )
             )
         except MaintenanceError as exc:
             finished = ", ".join(d.path.name for d in done) or "nothing"
@@ -656,7 +692,13 @@ def backup(
     return report
 
 
-def _dump_one(mysql: MysqlDocker, database: str, target: Path, game: Game) -> Dump:
+def _dump_one(
+    mysql: MysqlDocker,
+    database: str,
+    target: Path,
+    game: Game,
+    ignore: tuple[str, ...] = (),
+) -> Dump:
     """Dump one database to `target`, via a `.partial` that is only renamed if it verifies.
 
     The rename is the whole point. The guide's `> file` redirect creates the
@@ -679,7 +721,12 @@ def _dump_one(mysql: MysqlDocker, database: str, target: Path, game: Game) -> Du
             # a record still in Python's buffer would land after the dump (found on
             # a live mariadb-dump, 2026-10-09; a fake that writes through `sink` hides it).
             sink.flush()
-            mysql.dump_into(database, sink)
+            if ignore:
+                # Only a call that leaves something out passes the argument, so a
+                # container that takes none (a double, a fork) keeps working.
+                mysql.dump_into(database, sink, ignore=ignore)  # type: ignore[call-arg]
+            else:
+                mysql.dump_into(database, sink)
         if partial.stat().st_size == len(record) + 1:
             # Only our own line: mysqldump wrote nothing. Said as `verify_dump()` says
             # an empty file, which the record in front of it would otherwise hide.
@@ -843,6 +890,15 @@ def backup_game(path: Path) -> str | None:
     except OSError as exc:
         raise MaintenanceError(f"could not read {path}: {exc}") from exc
     return _game_in_head(head, path.name)
+
+
+def game_recorded_in(head: bytes, name: str) -> str | None:
+    """The game record in the first bytes of a dump already in hand (T601).
+
+    The public spelling of what `backup_game()` and `restore()` read, for a caller that
+    holds the head of a file it never put on disk (a member of a move package).
+    """
+    return _game_in_head(head, name)
 
 
 def _game_in_head(head: bytes, name: str) -> str | None:
