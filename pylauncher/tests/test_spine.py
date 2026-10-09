@@ -2435,6 +2435,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "maintenance lease and read the folder again and found the file unchanged. An "
         "OSError listing it shows an empty list and removes nothing"
     ),
+    ("backup_shelf.py", "_installed_here"): (
+        "T604 review. Lists the directory names inside this server's own clone folders "
+        "(`modules/`, `ale_scripts/`, `sql_scripts/clones/`) to learn which items are installed, "
+        "because the undo copy taken before an installed item is never deleted. It decides no "
+        "write and no refusal of its own: a folder that is not there is empty, and any other "
+        "failure to list raises, which makes the shelf KEEP every item's undo copy "
+        "(`docker.clone_names()` answers 'nothing installed' for a folder it cannot list, "
+        "which is the wrong way round for a delete)"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
