@@ -726,20 +726,20 @@ def test_merged_workflow_has_no_concurrency_group_that_could_drop_a_run():
 
 
 def test_issue_workflow_queues_per_issue_without_cancelling():
-    conc = load_workflow("discord-issues.yml")["concurrency"]
+    conc = load_workflow("discord-issue-posts.yml")["concurrency"]
     assert "github.event.issue.number" in conc["group"]
     assert conc["cancel-in-progress"] is False
 
 
 def test_release_workflow_passes_the_run_to_the_script_and_gates_on_success_and_tag():
-    job = load_workflow("discord-release.yml")["jobs"]["notify"]
+    job = load_workflow("discord-release-posts.yml")["jobs"]["notify"]
     cond = job["if"]
     assert "run_attempt" not in cond  # the script decides, from the earlier attempts
     assert "workflow_dispatch" in cond
     assert "workflow_run.conclusion == 'success'" in cond
     assert "startsWith(github.event.workflow_run.head_branch, 'v')" in cond
     env = job["steps"][-1]["env"]
-    assert load_workflow("discord-release.yml")["permissions"]["actions"] == "read"
+    assert load_workflow("discord-release-posts.yml")["permissions"]["actions"] == "read"
     assert env["RELEASE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
     assert env["RELEASE_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
 
@@ -783,7 +783,7 @@ def test_a_first_attempt_and_a_manual_repost_post_without_asking(world, monkeypa
 
 
 def test_workflows_never_put_event_fields_inside_run_scripts():
-    for name in ("discord-merged.yml", "discord-issues.yml", "discord-release.yml"):
+    for name in ("discord-merged.yml", "discord-issue-posts.yml", "discord-release-posts.yml"):
         for job in load_workflow(name)["jobs"].values():
             for step in job["steps"]:
                 assert "${{" not in step.get("run", ""), name
@@ -857,7 +857,7 @@ REPO_GUARD = "github.repository == 'DadsMmoLab/dads-mmo-lab'"
 def test_every_discord_job_runs_only_in_the_main_repository():
     # A fork carries the workflows after a sync and may hold its own secrets: without
     # this guard its sync pushes and test tags would post to the channel a second time.
-    for name in ("discord-merged.yml", "discord-issues.yml", "discord-release.yml"):
+    for name in ("discord-merged.yml", "discord-issue-posts.yml", "discord-release-posts.yml"):
         for job in load_workflow(name)["jobs"].values():
             cond = " ".join(str(job.get("if", "")).split())
             assert cond == REPO_GUARD or guards_the_whole_condition(cond), (name, cond)
@@ -1043,7 +1043,7 @@ def test_merged_and_issue_posts_stay_on_the_main_webhook(world, monkeypatch):
 
 
 def test_release_workflow_passes_the_second_channel_secret_var_and_input():
-    wf = load_workflow("discord-release.yml")
+    wf = load_workflow("discord-release-posts.yml")
     dispatch = wf[True]["workflow_dispatch"]["inputs"]["only_release_channel"]
     assert dispatch["type"] == "boolean" and dispatch["default"] is False
     assert dispatch["required"] is False
@@ -1059,7 +1059,7 @@ def test_release_workflow_passes_the_second_channel_secret_var_and_input():
 
 
 def test_only_the_release_workflow_gets_the_second_webhook():
-    for name in ("discord-merged.yml", "discord-issues.yml"):
+    for name in ("discord-merged.yml", "discord-issue-posts.yml"):
         assert "DISCORD_RELEASE_WEBHOOK_URL" not in (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
