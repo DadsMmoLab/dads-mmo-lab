@@ -148,7 +148,11 @@ if args[:1] == ["create"]:
         sys.stderr.write("Unable to find image 'yulon.local/nope:native' locally\\n")
         sys.stderr.write("Error response from daemon: pull access denied\\n")
         sys.exit(125)
-    box.write_text("created", encoding="utf-8")
+    # Made whole and put in place at once (T610): `write_text` truncates first, and a reader
+    # in that instant found an empty file, which `running()` reads as started.
+    pending = state / f".{{name}}.{{os.getpid()}}"
+    pending.write_text("created", encoding="utf-8")
+    os.replace(pending, box)
     if "--label" in args:
         # Cold review of the stop-paths branch: whose Yu'lon made it and which folders it
         # writes, one `key=value` per line, read back by `ps`.

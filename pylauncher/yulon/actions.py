@@ -7,7 +7,13 @@ than one feature reaching into another's internals for a private name.
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
+from typing import Any, TypeVar
+
+from yulon.said import SaidByYulon
 
 
 @dataclass(frozen=True)
@@ -66,3 +72,39 @@ def outcome_of(answer: object) -> Outcome:
             ),
         )
     return Outcome(False, problem=reason)
+
+
+ServerHold = Callable[[str], AbstractContextManager[None]]
+"""The seam that reserves a server across processes for a block, named by the press (T607)."""
+
+_M = TypeVar("_M", bound=Callable[..., Outcome])
+
+
+def holding(press: str) -> Callable[[_M], _M]:
+    """Run a write method of a class with `self._hold_server` under that server hold (T610).
+
+    The method is run inside the server's cross-process reservation under `press`. When another
+    Yu'lon holds the server, nothing runs and the answer is a refusal `Outcome` that says the
+    holder's own sentence, so a tab shows it like any other refusal. A class built with no hold
+    (a harness, a test) runs the method as before. The decorator marks the function with
+    `server_hold_press`, which is what the guard test over every public method looks for: a new
+    write method of such a class that forgets it fails there.
+    """
+
+    def decorate(method: _M) -> _M:
+        @functools.wraps(method)
+        def held(self: Any, *args: Any, **kwargs: Any) -> Outcome:
+            hold: ServerHold | None = getattr(self, "_hold_server", None)
+            if hold is None:
+                return method(self, *args, **kwargs)
+            with ExitStack() as reserved:
+                try:
+                    reserved.enter_context(hold(press))
+                except SaidByYulon as refused:
+                    return Outcome(False, problem=str(refused))
+                return method(self, *args, **kwargs)
+
+        held.server_hold_press = press  # type: ignore[attr-defined]
+        return held  # type: ignore[return-value]
+
+    return decorate

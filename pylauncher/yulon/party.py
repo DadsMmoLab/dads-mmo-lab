@@ -3056,7 +3056,7 @@ class InstallParty:
         level_setter: LevelSetter | None = None,
         link_writer: SqlWriter | None = None,
         altbots: AltbotMemory | None = None,
-        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -3095,7 +3095,12 @@ class InstallParty:
         self.level_setter: LevelSetter = (
             level_setter
             or play.InstallPlay(
-                entry, server_dir, sql=sql, channel_for_saved=channel_for_saved
+                entry,
+                server_dir,
+                sql=sql,
+                channel_for_saved=channel_for_saved,
+                # T610: the level is a write to the server, under its cross-process hold.
+                hold_server=hold_server,
             ).set_level
         )
 

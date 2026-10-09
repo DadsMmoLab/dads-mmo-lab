@@ -57,12 +57,13 @@ import secrets
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from yulon import bot_population, commands, platform, soap, winacl
+from yulon import bot_population, commands, docker, platform, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
@@ -294,6 +295,13 @@ class ServerHeldElsewhere(RuntimeError):
 
 CHANNEL_SETUP_PRESS = "Set up the command channel"
 """The press name on the reservation the channel's account create and reset take (T607)."""
+
+_HOLD_BUDGET: ContextVar[float | None] = ContextVar("channel_hold_budget", default=None)
+"""The budget a hold of this thread's call is taken within (T610), or None to wait as long as it
+takes. Set by `roll_back()` and `repair()`, which the GUI thread calls."""
+
+CHANNEL_ROLLBACK_PRESS = "Turn the command channel back off"
+"""The press name on the reservation `roll_back` takes (T610)."""
 
 CHANNEL_ENABLE_PRESS = "Turn on the command channel"
 """The press name on the reservation `enable` takes (T607)."""
@@ -1334,7 +1342,7 @@ class InstallChannel:
         exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
-        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+        hold_server: Callable[..., AbstractContextManager[object]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -1373,11 +1381,25 @@ class InstallChannel:
             yield
             return
         with ExitStack() as held:
+            budget = _HOLD_BUDGET.get()
             try:
-                held.enter_context(self._hold_server(press))
+                held.enter_context(
+                    self._hold_server(press)
+                    if budget is None
+                    else self._hold_server(press, budget=budget)
+                )
             except SaidByYulon as refused:
                 raise ServerHeldElsewhere(str(refused)) from refused
             yield
+
+    @contextmanager
+    def _within_the_gui_budget(self) -> Iterator[None]:
+        """Holds taken inside the block wait at most `docker.GUI_HOLD_BUDGET_SECONDS` (T610)."""
+        token = _HOLD_BUDGET.set(docker.GUI_HOLD_BUDGET_SECONDS)
+        try:
+            yield
+        finally:
+            _HOLD_BUDGET.reset(token)
 
     def _held_call(self, call: _C) -> _C:
         """`call` run under the hold, as the account create and reset are (T607)."""
@@ -1578,8 +1600,12 @@ class InstallChannel:
         return self._state
 
     def repair(self) -> State:
-        """`_repair()`, and the same note as `check()`."""
-        return self._noted(self._repair())
+        """`_repair()`, and the same note as `check()`.
+
+        Pressed on the GUI thread, so the hold its reset takes is within the GUI budget (T610).
+        """
+        with self._within_the_gui_budget():
+            return self._noted(self._repair())
 
     def _repair(self) -> State:
         """Give the account this install already has a password that works.
@@ -1676,6 +1702,15 @@ class InstallChannel:
         return self._channel_for(saved)
 
     def roll_back(self) -> bool:
+        """`_roll_back()` under the server's cross-process hold (T610).
+
+        Raises `ServerHeldElsewhere`, with nothing written, when another Yu'lon holds the server;
+        the Start that failed on the port reports the sentence beside the port's.
+        """
+        with self._within_the_gui_budget(), self._held(CHANNEL_ROLLBACK_PRESS):
+            return self._roll_back()
+
+    def _roll_back(self) -> bool:
         """Undo this install's own press, and give its host port back.
 
         Hands `roll_back()` the text the press would write NOW, so a file that

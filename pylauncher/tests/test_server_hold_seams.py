@@ -38,7 +38,7 @@ class _Hold:
         self.refuse = refuse
 
     @contextmanager
-    def __call__(self, press: str) -> Iterator[None]:
+    def __call__(self, press: str, budget: float | None = None) -> Iterator[None]:
         if self.refuse:
             raise docker.ServerReserved(HELD, docker.ServerHolder("yulon-busy-x", "id"))
         self.events.append(f"hold:{press}")

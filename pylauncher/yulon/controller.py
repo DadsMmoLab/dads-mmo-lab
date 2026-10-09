@@ -522,12 +522,12 @@ class Controller:
     def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
         """The server folders (by compose working dir) of `containers`, each with one container.
 
-        A folder this host can see -- a path on this host, or, when this server's Docker lives in
-        a WSL distro (`wsl_distro`), a Linux path in that distro read through its
+        A folder this host can see: a path on this host, or -- when this server's Docker lives
+        in a WSL distro (`wsl_distro`) -- a Linux path in that distro, read through its
         `\\\\wsl.localhost` share (T607; the other server's Docker is this one's, so its path is
-        in this distro) -- and that Yu'lon built (it has `native.STATE_FILE`). A working dir this
-        host cannot see, one Docker has no label for, or the user's own compose project is skipped
-        (and logged), since Yu'lon writes no id file into a folder that is not its own.
+        in this distro). A working dir this host cannot see, or one Docker has no label for, is
+        skipped (and logged). So is a folder Yu'lon did not build (no `native.STATE_FILE`): the
+        user's own compose project; Yu'lon writes no id file into a folder that is not its own.
         """
         found: dict[Path, str] = {}
         for name in containers:
