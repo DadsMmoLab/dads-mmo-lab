@@ -728,7 +728,7 @@ def cmd_release(tag: str, only_release_channel: bool = False) -> int:
     )
     embed = {
         "title": clip(release.get("name") or tag, EMBED_TITLE_MAX),
-        "url": release.get("html_url") or f"{server_url()}/{repo()}/releases/tag/{tag}",
+        "url": release.get("html_url") or f"{server_url()}/{repo()}/releases/tag/{quoted}",
         "description": description,
         "color": COLOR_RELEASE,
         "footer": {"text": tag},
@@ -748,6 +748,36 @@ def cmd_release(tag: str, only_release_channel: bool = False) -> int:
 # --- the release post's shape -------------------------------------------------
 
 _BULLET_RE = re.compile(r"[-*] +(\S.*)")
+_CONTENT_RE = re.compile(
+    r"`"  # code: a fence would swallow the link line under the lists
+    r"|\]\("  # a markdown link
+    r"|<[@#]"  # a user, role or channel mention
+    r"|https?://|www\.",  # a raw URL
+    re.IGNORECASE,
+)
+_BREAK_BEFORE = re.compile(r" \u2014 |; ")
+
+
+def shorten(text: str, limit: int = RELEASE_BULLET_MAX) -> str:
+    """One bullet at most `limit` characters, cut where a reader will not trip over it.
+
+    Backticks are dropped (a code fence would swallow the link line). A bullet that is too
+    long is first shortened to the text before its first " \u2014 " or "; " when that fits,
+    else cut at the last word that fits and ended with an ellipsis; a word longer than
+    that is cut hard. A cut that leaves a ``**`` bold mark open loses all its marks.
+    """
+    text = " ".join(text.replace("`", "").split())
+    if len(text) <= limit:
+        return text
+    found = _BREAK_BEFORE.search(text)
+    if found and 0 < found.start() <= limit:
+        out = text[: found.start()].rstrip()
+    else:
+        out = text[: limit - 1]
+        if text[limit - 1] != " " and " " in out:
+            out = out.rsplit(" ", 1)[0]
+        out = out.rstrip(" ,;:-\u2014") + "\u2026"
+    return out if out.count("**") % 2 == 0 else out.replace("**", "")
 
 
 def release_items(section: str) -> tuple[list[str], list[str]]:
@@ -763,7 +793,8 @@ def release_items(section: str) -> tuple[list[str], list[str]]:
     for line in section.splitlines():
         line = line.rstrip()
         if line.startswith("### "):
-            target = fixes if line[4:].strip().lower() in ("fixed", "fixes", "fix") else new
+            name = line[4:].strip().rstrip(":").strip().lower()
+            target = fixes if name in ("fixed", "fixes", "fix") else new
             continue
         found = _BULLET_RE.fullmatch(line)
         if found:
@@ -779,7 +810,7 @@ def render_release(new: list[str], fixes: list[str]) -> str:
     """
     lines: list[str] = []
     for heading, items in ((NEW_HEADING, new), (FIXES_HEADING, fixes)):
-        kept = [clip(i.strip(), RELEASE_BULLET_MAX) for i in items if i.strip()]
+        kept = [shorten(i) for i in items if i.strip()]
         if kept:
             lines.append(heading)
             lines += [f"- {i}" for i in kept[:RELEASE_MAX_BULLETS]]
@@ -807,6 +838,8 @@ def shape_release_reply(reply: str) -> str | None:
                 return None
             seen.append(line)
             target = lists[line]
+        elif _CONTENT_RE.search(line):
+            return None
         elif target is not None and line.startswith("- ") and line[2:].strip():
             target.append(line[2:].strip())
         else:

@@ -1478,3 +1478,137 @@ def test_a_heading_is_not_left_over_a_list_that_lost_all_its_bullets(world, monk
     monkeypatch.setattr(dn, "EMBED_DESC_MAX", 130)
     desc = release_desc(world, f"## v1.1 - d\n### New\n- {'x' * 80}\n### Fixed\n- {'y' * 80}\n")
     assert desc == CHANGELOG_LINK
+
+
+# --- T620 rework: content checks, readable cuts, colon headings, quoted url ----
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [
+        "```python\nprint(1)",
+        "Fixes the `Play` button",
+        "See [the notes](https://example.com/x)",
+        "See [the notes]( and more",
+        "Thanks <@123456789> for it",
+        "Posted in <#123456789>",
+        "Pings <@&123456789>",
+    ],
+    ids=[
+        "code fence",
+        "backtick",
+        "markdown link",
+        "half a markdown link",
+        "user mention",
+        "channel mention",
+        "role mention",
+    ],
+)
+def test_a_reply_with_code_a_link_a_mention_or_a_url_in_it_falls_back_to_the_built_shape(
+    world, bullet
+):
+    reply = "## New:\n- Fine line\n- " + bullet.replace("\n", " ")
+    assert release_lists(world, claude=FakeClaude(text=reply)) == SAMPLE_SHAPE
+
+
+@pytest.mark.parametrize("url", ["https://example.com/x", "http://example.com", "www.example.com"])
+def test_the_validator_itself_refuses_a_raw_url(url):
+    """`summarize` strips URLs first, so none reaches it; this check stands alone."""
+    assert dn.shape_release_reply(f"## New:\n- Read {url} now") is None
+    assert dn.shape_release_reply("## New:\n- Read the notes now") is not None
+
+
+def test_a_code_fence_in_claudes_reply_cannot_swallow_the_changelog_link(world):
+    reply = "## New:\n- ```\n- more"
+    desc = release_desc(world, claude=FakeClaude(text=reply))
+    assert "`" not in desc and desc.endswith(CHANGELOG_LINK)
+
+
+def test_a_backtick_in_a_changelog_line_is_not_carried_into_the_post(world):
+    desc = release_desc(world, "## v1.1 - d\n### New\n- ```Play``` now `works`\n")
+    assert "`" not in desc and "Play now works" in desc
+
+
+V0915 = [
+    "**Restart** on the Server tab and in the tray menu stops a server, saving every character, "
+    "and starts it again.",
+    "The Server tab says whether Unbound loaded and which of its switches are on, or what is "
+    "missing.",
+    "Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or "
+    "**Play**, from the tray icon.",
+]
+
+
+def test_a_long_bullet_is_cut_at_a_word_with_an_ellipsis_and_never_mid_word(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n" + "".join(f"- {b}\n" for b in V0915))
+    for line, source in zip(desc.splitlines()[1:], V0915, strict=True):
+        text = line[2:]
+        assert len(text) <= 90
+        if text != source:
+            assert text.endswith("…")
+            stem = text[:-1]
+            assert source.startswith(stem)
+            assert source[len(stem)] == " " or not source[len(stem) - 1].isalnum()
+
+
+def test_a_cut_never_leaves_a_bold_marker_open(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n" + "".join(f"- {b}\n" for b in V0915))
+    for line in desc.splitlines()[1:]:
+        assert line.count("**") % 2 == 0
+
+
+def test_a_bullet_keeps_its_bold_marks_when_it_fits(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- Press **Play** to start\n")
+    assert desc == "## New:\n- Press **Play** to start"
+
+
+@pytest.mark.parametrize("sep", [" \u2014 ", "; "])
+def test_a_long_bullet_prefers_the_text_before_a_dash_or_semicolon_when_that_fits(world, sep):
+    head = "Tortoise servers stop printing every database statement"
+    tail = "x" * 80
+    desc = release_lists(world, f"## v1.1 - d\n### New\n- {head}{sep}{tail}\n")
+    assert desc == f"## New:\n- {head}"
+
+
+def test_the_text_before_the_dash_is_not_used_when_it_alone_is_too_long(world):
+    head = "word " * 20
+    desc = release_lists(world, f"## v1.1 - d\n### New\n- {head.strip()} \u2014 tail\n")
+    line = desc.splitlines()[1]
+    assert len(line) - 2 <= 90 and line.endswith("…") and "tail" not in line
+
+
+def test_a_short_bullet_with_a_dash_is_kept_whole(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- Fast \u2014 and small\n")
+    assert desc == "## New:\n- Fast \u2014 and small"
+
+
+def test_headings_with_a_trailing_colon_are_read_as_headings(world):
+    desc = release_lists(world, "## v1.1 - d\n### New:\n- Alpha\n### Fixed:\n- Gamma\n")
+    assert desc == "## New:\n- Alpha\n## Fixes:\n- Gamma"
+
+
+def test_the_embed_url_is_url_quoted_when_github_sends_none(world, monkeypatch):
+    real = world.request
+
+    def without_html_url(method, url, payload=None, headers=None):
+        body = real(method, url, payload, headers)
+        if "/releases/tags/" in url:
+            data = json.loads(body)
+            data.pop("html_url")
+            return json.dumps(data)
+        return body
+
+    monkeypatch.setattr(dn, "_request", without_html_url)
+    world.releases = [{"tag_name": "v1 beta+2"}]
+    world.changelog = "## v1 beta+2 - d\n- A change\n"
+    assert dn.cmd_release("v1 beta+2") == 0
+    (post,) = world.discord("POST")
+    assert post[2]["embeds"][0]["url"] == "https://github.com/owner/repo/releases/tag/v1%20beta%2B2"
+
+
+def test_a_cut_inside_a_bold_phrase_leaves_no_open_marker(world):
+    text = "word " * 14 + "**Play the very long bold phrase that runs past the end** and more"
+    desc = release_lists(world, f"## v1.1 - d\n### New\n- {text}\n")
+    line = desc.splitlines()[1]
+    assert line.endswith("…") and len(line) - 2 <= 90
+    assert line.count("**") % 2 == 0
