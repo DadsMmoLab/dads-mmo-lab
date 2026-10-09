@@ -663,7 +663,7 @@ def test_a_world_whose_log_ends_on_a_failed_update_is_stopped_at_once_and_says_w
 
     assert controller.stop() is True
 
-    assert fake.events == ["look 1", "kill"]
+    assert fake.events == ["look 1", "look 2", "kill"]  # the second look re-checks the run
     assert len(said) == 1
     assert "20260903063722_world.sql" in said[0]
     assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in said[0]
@@ -719,3 +719,21 @@ def test_the_update_failure_is_read_from_this_runs_tail_not_the_whole_log(
     docker._logs("tortoise-mangosd", this_run_only=True, since="2026-10-09T01:00:00Z", tail=20)
     assert seen[0][seen[0].index("--tail") + 1] == "20"
     assert "--since" in seen[0]
+
+
+def test_a_world_the_restart_policy_replaced_since_the_look_is_not_killed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The run the failure line was read from must still be the run that is killed.
+
+    Mutation: kill without the second `container_state()` and this kills the new run.
+    """
+    frames: list[Frame] = [
+        ("running", FAILED_UPDATE, LOADING_MASK),
+        ("running", LOADING, LOADING_MASK),
+        ("running", LOADED, LOADED_MASK),
+    ]
+    fake = _install(monkeypatch, "wow-tortoise", frames, started=[STARTED, RESTARTED, RESTARTED])
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert "kill" not in fake.events

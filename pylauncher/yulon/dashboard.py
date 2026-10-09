@@ -299,7 +299,9 @@ def line(verdict: Verdict) -> str:
     parts: list[str] = []
     if verdict.failure:
         parts.append(verdict.failure)
-        if verdict.uptime is not None:
+        if verdict.state == "restart_loop":
+            parts[-1] += f" (restart loop — {verdict.restarts} restarts)"
+        elif verdict.uptime is not None:
             parts[-1] += f" ({uptime_text(verdict.uptime)})"
     elif verdict.state == "restart_loop":
         head = f"restart loop — {verdict.restarts} restarts"
@@ -568,7 +570,13 @@ class Dashboard:
         if state.status == "restarting" or (
             self._looping and self._loop_is_current and state.status == "running"
         ):
-            return Verdict("restart_loop", state.restart_count, state.started_at, uptime)
+            return Verdict(
+                "restart_loop",
+                state.restart_count,
+                state.started_at,
+                uptime,
+                failure=self._update_failure(state.started_at, uptime),
+            )
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
@@ -772,10 +780,11 @@ class Dashboard:
         Asked only for an entry whose catalog `ready.fatal` covers the core's failure line,
         and only while the run has not said ready: the marker ends the question, and so does
         a run that outlived `READY_READ_SPAN` once that span has been read. A run younger
-        than the span is read whole, as `_saw_ready()` reads it (one read per tick, shared);
-        an older one is read bounded to its first span, like the realm keeper's, because the
-        updater runs in the first minutes and a long-lived world's log is large. A log that
-        could not be read says nothing and is asked again next tick.
+        than `SETTLED_AFTER` is read whole, as `_saw_ready()` reads it (one read per tick,
+        shared); an older one is read bounded to its first span, like the realm keeper's,
+        because the updater runs in the first minutes and a long-lived world's log is large.
+        A log that could not be read (an exception, or the empty text `_logs()` answers for a
+        Docker that would not talk) settles nothing and is asked again.
         """
         if not self._reads_update_failures:
             return ""
@@ -790,17 +799,17 @@ class Dashboard:
         try:
             if uptime is None or uptime < SETTLED_AFTER:
                 log = self._run_log(run)  # the same read `_saw_ready()` makes every tick
-            elif uptime < READY_READ_SPAN:
+            else:
                 # Past the tab's settle time the run is called ready anyway, so the log is read
-                # to see what that rule must not outrank: once a `FAILURE_READ_EVERY`.
+                # to see what that rule must not outrank: once a `FAILURE_READ_EVERY` at most.
                 at = self._failure_read_at
                 if at is not None and timedelta(0) <= now - at < FAILURE_READ_EVERY:
                     return ""
                 self._failure_read_at = now
                 log = self._early_log(run, as_keeper=False)
-            else:
-                log = self._early_log(run, as_keeper=False)
-                self._failure_settled = True  # the whole first span has been read
+                # Settled only by a read that returned something: `_logs()` answers "" for a
+                # Docker that would not answer, and no run has an empty first half hour.
+                self._failure_settled = uptime >= READY_READ_SPAN and bool(log.strip())
         except Exception as exc:  # noqa: BLE001 - an unreadable log is no answer, not a crash
             logger.warning(f"could not read {self.entry.id}'s world log for a failed update: {exc}")
             return ""

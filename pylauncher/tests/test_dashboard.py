@@ -2174,3 +2174,52 @@ def test_the_log_read_for_a_failed_update_also_serves_the_realm_keeper_once(
     assert len(asked) == 1
     assert watch._world_said_ready(run) is False  # its next ask is fresh
     assert len(asked) == 2
+
+
+def test_a_world_that_exits_at_a_failed_update_and_is_restarted_says_which_update_t600() -> None:
+    """With the updater patched the world exits instead of hanging; Docker restarts it.
+
+    The verdict is still a restart loop, but it carries the file and the error, which a bare
+    "restart loop" does not. Mutation: drop `failure=` from the `restart_loop` verdict.
+    """
+    tmp_path = Path("/nonexistent-server-dir")
+    run = _stamp(NOW - timedelta(seconds=30))
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: docker.ContainerState("restarting", run, 7),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, _since: FAILED_UPDATE_LOG
+        + "DB AutoUpdater FAILED, cancelling server.\n",
+        now=lambda: NOW,
+    )
+    verdict = watch.tick()
+    assert verdict.state == "restart_loop"
+    said = dashboard.line(verdict)
+    assert "20260903063722_world.sql" in said
+    assert "restart loop" in said and "7 restarts" in said
+
+
+def test_an_unreadable_log_does_not_settle_an_old_run_as_clean(tmp_path: Path) -> None:
+    """`docker._logs()` answers "" when Docker would not talk: not evidence of a clean start.
+
+    Mutation: settle on any read and the failed run below is called up for good.
+    """
+    texts = ["", FAILED_UPDATE_LOG]
+    now = [NOW]
+    run = _stamp(NOW - dashboard.READY_READ_SPAN * 2)
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, _since: texts[0] if len(texts) == 1 else texts.pop(0),
+        now=lambda: now[0],
+    )
+    assert watch.tick().ready is True  # nothing readable yet: the tab's own rule
+    now[0] += dashboard.FAILURE_READ_EVERY
+    assert watch.tick().ready is False  # the next read found it

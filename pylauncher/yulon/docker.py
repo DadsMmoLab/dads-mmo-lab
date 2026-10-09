@@ -4337,14 +4337,21 @@ def world_load_steps(
             if stuck:
                 # Deaf and not loading: tortoise-wow waits in a read on its console after a
                 # failed update (T600), so the stop's SIGTERM is ignored for the whole grace.
-                # Nothing is loading and nothing was saved yet, so the kill loses nothing.
-                logger.warning(f"{world} is stuck at a failed update; killing it, then stopping")
-                try:
-                    kill_container(world, wsl_distro=wsl_distro)
-                except DockerCommandError as exc:
-                    logger.warning(f"could not kill {world}: {exc}")
-                yield stuck + WORLD_STUCK_AT_UPDATE_TAIL
-                return
+                # Nothing is loading and nothing was saved yet, so the kill loses nothing --
+                # but only for THIS run: a replacement the restart policy started since the
+                # look is loading and must be waited for, so the run is checked again first.
+                again = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+                if again.settled and again.started_at == run:
+                    logger.warning(
+                        f"{world} is stuck at a failed update; killing it, then stopping"
+                    )
+                    try:
+                        kill_container(world, wsl_distro=wsl_distro)
+                    except DockerCommandError as exc:
+                        logger.warning(f"could not kill {world}: {exc}")
+                    yield stuck + WORLD_STUCK_AT_UPDATE_TAIL
+                    return
+                logger.info(f"{world} changed run while it was looked at; looking again")
         if caught is None:
             logger.warning(f"could not read whether {world} can hear a stop; asking again")
             yield from say(WORLD_LOAD_UNCHECKED, warn=True)
