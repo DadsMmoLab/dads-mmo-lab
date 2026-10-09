@@ -3,7 +3,7 @@
 
 Subcommands (run by the discord-*.yml workflows):
 
-  merged   one post per commit of a push to Yulon (the PR behind it, if any)
+  merged   one post per merged PR behind a push to Yulon (a push with no PR posts nothing)
   issue    one post per issue, edited in place when it is closed or reopened
   release  one post per release, written from the CHANGELOG section
 
@@ -23,6 +23,7 @@ Stdlib for Discord and GitHub; the official ``anthropic`` SDK for Claude.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -43,10 +44,15 @@ TIMEOUT = 20
 EMBED_TITLE_MAX = 256
 EMBED_DESC_MAX = 4096
 RATE_LIMIT_RETRIES = 3
-SUMMARY_MAX = {"pr": 1000, "issue": 1000, "release": 3000}
+SUMMARY_MAX = {"pr": 1000, "pr_big": 3000, "issue": 1000, "release": 3000}
 RELEASE_MAX_BULLETS = 6
 RELEASE_BULLET_MAX = 90
 CHANGELOG_LINK_TEXT = "Full changelog on GitHub"
+PR_LINK_TEXT = "Full list of changes"
+BIG_PR_CHANGELOG_LINES = 4  # a PR adding this many CHANGELOG lines gets the release shape
+BIG_PR_COMMITS = 10  # ... so does one with more commits than this (and a changelog line)
+MAX_PUSH_LOOKUPS = 50  # commits of one push whose PR is looked up
+MIN_PHRASE = 20  # a cut at a phrase end must keep at least this much
 NEW_HEADING = "## New:"
 FIXES_HEADING = "## Fixes:"
 CHANGED_HEADING = "## Changed:"
@@ -59,12 +65,27 @@ COLOR_DONE = 0x2ECC71
 COLOR_NOT_PLANNED = 0x95A5A6
 
 MARKER_RE = re.compile(r"<!--\s*discord_msg_id:\s*(\d+)\s*-->")
-COMPACT_ABOVE = 10
 BOT_LOGIN = "github-actions[bot]"
 SKIP_CI = ("[skip ci]", "[ci skip]")
 
+_SHAPE_RULE = (
+    "The data is the CHANGELOG lines of a release or of one pull request, grouped "
+    "under '### New', '### Fixed' and '### Changed'. Write exactly this and nothing "
+    "else, with no intro and no closing sentence: a line '## New:', then one line "
+    "per item, each starting with '- '; then a line '## Fixes:', then one line per "
+    "item, each starting with '- '; then a line '## Changed:', then one line per "
+    "item, each starting with '- '. "
+    "Use only the lines of the data, each under the heading it has there ('### New' "
+    "is '## New:', '### Fixed' is '## Fixes:', '### Changed' is '## Changed:'): "
+    "never add an item that is not in the data. "
+    f"At most {RELEASE_MAX_BULLETS} items under each heading, each at most "
+    f"{RELEASE_BULLET_MAX} characters, in plain words for players and hosts, the "
+    "most visible items first. Write no line about the items you leave out; it is "
+    "added for you. Leave out a heading whose list would be empty."
+)
 _PROMPT_TAGS = {
     "pr": ("pr_title", "pr_body"),
+    "pr_big": ("pr_title", "pr_changes"),
     "issue": ("issue_title", "issue_body"),
     "release": ("release_name", "release_text"),
 }
@@ -77,23 +98,15 @@ _KIND_RULES = {
         "The data is a GitHub issue someone just opened. Say in 1-2 plain "
         "sentences what problem or request it describes."
     ),
-    "release": (
-        "The data is the merged pull request titles and the CHANGELOG section "
-        "of a release. Write exactly this and nothing else, with no intro and "
-        "no closing sentence: a line '## New:', then one line per item, each "
-        "starting with '- '; then a line '## Fixes:', then one line per item, "
-        "each starting with '- '; then a line '## Changed:', then one line per "
-        "item, each starting with '- '. "
-        f"At most {RELEASE_MAX_BULLETS} items under each heading, each at most "
-        f"{RELEASE_BULLET_MAX} characters, in plain words for players and "
-        "hosts, the most visible items first. Leave out a heading whose list "
-        "would be empty."
-    ),
+    "release": _SHAPE_RULE,
+    "pr_big": _SHAPE_RULE,
 }
+_SHAPE_REPLY = "Reply with plain text only: no links, no @-mentions, no code blocks."
 _PLAIN_REPLY = "Reply with plain text only: no headings, no links, no @-mentions, no code blocks."
 _REPLY_RULES = {
-    # The release post is the one reply that is made of headings: the two above.
-    "release": "Reply with plain text only: no links, no @-mentions, no code blocks.",
+    # The release post and a big PR's post are made of headings: the lists above.
+    "release": _SHAPE_REPLY,
+    "pr_big": _SHAPE_REPLY,
 }
 
 
@@ -410,80 +423,124 @@ def _find_pr(sha: str) -> dict | None:
     return merged[0] if merged else None
 
 
-def _first_line(commit: dict) -> str:
-    lines = (commit.get("message") or "").splitlines()
-    return lines[0] if lines else commit["id"][:8]
+def _gh_pages(path: str, pages: int = 10) -> list:
+    """A paged GitHub list, up to `pages` pages of 100."""
+    out: list = []
+    for page in range(1, pages + 1):
+        batch = gh_json("GET", f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        out += batch or []
+        if len(batch or []) < 100:
+            break
+    return out
 
 
-def _compact_embed(event: dict, commits: list) -> dict:
-    """One message for a force push or a big push: no PR lookups, no Claude."""
-    forced = bool(event.get("forced"))
-    lines = [f"- {clip(_first_line(c), 100)}" for c in commits[:15]]
-    if len(commits) > 15:
-        lines.append(f"...and {len(commits) - 15} more")
-    count = f"{len(commits)} commit{'s' if len(commits) != 1 else ''}"
-    pusher = (event.get("pusher") or {}).get("name") or "someone"
-    return {
-        "title": f"{count} pushed to Yulon" + (" (force push)" if forced else ""),
-        "url": event.get("compare") or f"{server_url()}/{repo()}/commits/Yulon",
-        "description": "\n".join(lines),
+def _items_text(items) -> str:
+    """The (new, fixed, changed) lists as the data Claude is given."""
+    out = []
+    for name, lines in zip(("New", "Fixed", "Changed"), items, strict=True):
+        if lines:
+            out.append(f"### {name}\n" + "\n".join(f"- {line}" for line in lines))
+    return "\n\n".join(out)
+
+
+def _pr_changelog_items(pr: dict, sha: str) -> tuple[list[str], list[str], list[str]] | None:
+    """The CHANGELOG lines a PR adds under ## Unreleased, as (new, fixed, changed).
+
+    The PR's file diff says which lines it added; the CHANGELOG at the merge commit says
+    under which heading each of them stands. None when that cannot be read.
+    """
+    try:
+        files = _gh_pages(f"/repos/{repo()}/pulls/{pr['number']}/files")
+        entry = next((f for f in files if f.get("filename") == "CHANGELOG.md"), None)
+        if entry is None:
+            return [], [], []
+        added = set()
+        for line in (entry.get("patch") or "").splitlines():
+            found = _BULLET_RE.fullmatch(line[1:].rstrip()) if line.startswith("+") else None
+            if found and not line.startswith("+++"):
+                added.add(found.group(1).strip())
+        changelog = _request(
+            "GET",
+            _gh_url(f"/repos/{repo()}/contents/CHANGELOG.md?ref={sha}"),
+            headers=_gh_headers("application/vnd.github.raw"),
+        )
+    except Exception as exc:
+        log(f"Could not read the CHANGELOG lines of PR #{pr['number']} ({type(exc).__name__}).")
+        return None
+    unreleased = release_items(changelog_section(changelog, "Unreleased"))
+    new, fixed, changed = ([line for line in lines if line in added] for lines in unreleased)
+    return new, fixed, changed
+
+
+def _pr_commit_count(pr: dict) -> int:
+    try:
+        return int(
+            (gh_json("GET", f"/repos/{repo()}/pulls/{pr['number']}") or {}).get("commits", 0)
+        )
+    except Exception as exc:
+        log(f"Could not read the commit count of PR #{pr['number']} ({type(exc).__name__}).")
+        return 0
+
+
+def _is_big(pr: dict, items) -> bool:
+    total = sum(len(lines) for lines in items)
+    if total >= BIG_PR_CHANGELOG_LINES:
+        return True
+    return total > 0 and _pr_commit_count(pr) > BIG_PR_COMMITS
+
+
+def _pr_embed(pr: dict, sha: str) -> dict:
+    """The post of one merged PR: its number as a link, then a short or a big description."""
+    author = (pr.get("user") or {}).get("login", "someone")
+    embed = {
+        "title": pr["title"],
+        "url": pr["html_url"],
         "color": COLOR_MERGED,
-        "footer": {"text": f"Pushed by {pusher}"},
+        "footer": {"text": f"Merged PR #{pr['number']} by {author}"},
     }
+    number = f"[#{pr['number']}]({pr['html_url']})"
+    items = _pr_changelog_items(pr, sha)
+    if items is not None and _is_big(pr, items):
+        summary = summarize("pr_big", pr["title"], _items_text(items))
+        lists = shape_release_reply(summary, items) if summary else None
+        lists = lists or render_release(*items)
+        link = f"[{PR_LINK_TEXT}]({pr['html_url']})"
+        embed["description"] = _fit_link([number, ""], lists.splitlines(), link)
+        return embed
+    summary = summarize("pr", pr["title"], pr.get("body") or "")
+    embed["description"] = number + (f"\n\n{summary}" if summary else "")
+    return embed
 
 
 def cmd_merged() -> int:
+    """One post per merged PR behind the push. A push with no merged PR posts nothing."""
     discord = make_discord("DISCORD_PR_THREAD_ID", "Yu'lon merged")
     if discord is None:
         return 0
     event = load_event()
+    if event.get("forced"):
+        log("Force push: nothing to post.")
+        return 0
     commits = []
     for commit in event.get("commits") or []:
         if any(tag in commit.get("message", "").lower() for tag in SKIP_CI):
             log(f"Skipping {commit.get('id', '')[:8]}: skip-ci commit.")
             continue
         commits.append(commit)
-    if event.get("forced") or len(commits) > COMPACT_ABOVE:
-        try:
-            msg_id = discord.post(_compact_embed(event, commits))
-            log(f"Posted a compact push message ({len(commits)} commits, msg_id={msg_id}).")
-            return 0
-        except Exception as exc:
-            log(f"Discord post failed for the push ({type(exc).__name__}: {exc}).")
-            return 1
     seen: set[int] = set()
     failed = 0
-    for commit in commits:
-        message = commit.get("message", "")
+    for commit in commits[:MAX_PUSH_LOOKUPS]:
         sha = commit["id"]
         pr = _find_pr(sha)
-        if pr is not None:
-            if pr["number"] in seen:
-                continue
-            seen.add(pr["number"])
-            author = (pr.get("user") or {}).get("login", "someone")
-            embed = {
-                "title": pr["title"],
-                "url": pr["html_url"],
-                "color": COLOR_MERGED,
-                "footer": {"text": f"Merged PR #{pr['number']} by {author}"},
-            }
-            summary = summarize("pr", pr["title"], pr.get("body") or "")
-            if summary:
-                embed["description"] = summary
-        else:
-            author = (commit.get("author") or {}).get("username") or (
-                commit.get("author") or {}
-            ).get("name", "someone")
-            embed = {
-                "title": message.splitlines()[0] if message else sha[:8],
-                "url": commit.get("url") or f"{server_url()}/{repo()}/commit/{sha}",
-                "color": COLOR_MERGED,
-                "footer": {"text": f"Pushed by {author}"},
-            }
+        if pr is None:
+            log(f"Skipping {sha[:8]}: no merged PR behind it.")
+            continue
+        if pr["number"] in seen:
+            continue
+        seen.add(pr["number"])
         try:
-            msg_id = discord.post(embed)
-            log(f"Posted {sha[:8]} to Discord (msg_id={msg_id}).")
+            msg_id = discord.post(_pr_embed(pr, sha))
+            log(f"Posted PR #{pr['number']} to Discord (msg_id={msg_id}).")
         except Exception as exc:
             log(f"Discord post failed for {sha[:8]} ({type(exc).__name__}: {exc}).")
             failed += 1
@@ -712,23 +769,18 @@ def cmd_release(tag: str, only_release_channel: bool = False) -> int:
         section = changelog_section(changelog, tag)
     except Exception as exc:
         log(f"Could not read CHANGELOG.md at {tag} ({type(exc).__name__}).")
-    titles = _pr_titles_since(_previous_tag(tag), tag)
-    raw = section or (release.get("body") or "").strip()
-    # The PR titles go first: if the section is ever longer than the cap, it is
-    # the changelog text that is cut, never the titles.
-    text = raw
-    if titles:
-        text = (
-            "Pull requests merged since the last release:\n"
-            + "\n".join(f"- {t}" for t in titles)
-            + "\n\nCHANGELOG section:\n"
-            + raw
-        )
+    # Only the CHANGELOG section's own lines go in the post. The PR titles are the
+    # source only when the section has no lines, then the release's own notes.
+    source = release_items(section)
+    text = section
+    if not any(source):
+        titles = _pr_titles_since(_previous_tag(tag), tag)
+        body = (release.get("body") or "").strip()
+        source = (titles, [], []) if titles else release_items(body)
+        text = _items_text(source) if titles else body
     summary = summarize("release", release.get("name") or tag, text)
     page = f"{server_url()}/{repo()}/releases/tag/{quoted}"
-    description = release_post_text(
-        summary, section, titles, release.get("body") or "", f"[{CHANGELOG_LINK_TEXT}]({page})"
-    )
+    description = release_post_text(summary, source, f"[{CHANGELOG_LINK_TEXT}]({page})")
     embed = {
         "title": clip(release.get("name") or tag, EMBED_TITLE_MAX),
         "url": release.get("html_url") or f"{server_url()}/{repo()}/releases/tag/{quoted}",
@@ -761,26 +813,52 @@ _CONTENT_RE = re.compile(
 _BREAK_BEFORE = re.compile(r" \u2014 |; ")
 
 
+_PHRASE_ENDS = (". ", " \u2014 ", "; ", ", ")
+_WORD_RE = re.compile(r"[a-z0-9']{3,}")
+MATCH_SHARE = 0.6
+
+
 def shorten(text: str, limit: int = RELEASE_BULLET_MAX) -> str:
     """One bullet at most `limit` characters, cut where a reader will not trip over it.
 
-    Backticks are dropped (a code fence would swallow the link line). A bullet that is too
-    long is first shortened to the text before its first " \u2014 " or "; " when that fits,
-    else cut at the last word that fits and ended with an ellipsis; a word longer than
-    that is cut hard. A cut that leaves a ``**`` bold mark open loses all its marks.
+    Backticks and ``**`` bold marks are dropped (a code fence would swallow the link line).
+    A bullet that is too long is cut at the last phrase end that fits (". ", " \u2014 ", "; "
+    or ", ", the mark itself left off) as long as that keeps MIN_PHRASE characters; else at
+    the last word that fits, with an ellipsis; a word longer than that is cut hard.
     """
-    text = " ".join(text.replace("`", "").split())
+    text = " ".join(text.replace("`", "").replace("**", "").split())
     if len(text) <= limit:
         return text
-    found = _BREAK_BEFORE.search(text)
-    if found and 0 < found.start() <= limit:
-        out = text[: found.start()].rstrip()
-    else:
-        out = text[: limit - 1]
-        if text[limit - 1] != " " and " " in out:
-            out = out.rsplit(" ", 1)[0]
-        out = out.rstrip(" ,;:-\u2014") + "\u2026"
-    return out if out.count("**") % 2 == 0 else out.replace("**", "")
+    best = max(text.rfind(sep, 0, limit + len(sep)) for sep in _PHRASE_ENDS)
+    if best >= MIN_PHRASE:
+        return text[:best].rstrip(" ,;:\u2014-")
+    out = text[: limit - 1]
+    if text[limit - 1] != " " and " " in out:
+        out = out.rsplit(" ", 1)[0]
+    return out.rstrip(" ,;:-\u2014") + "\u2026"
+
+
+def _same_word(a: str, b: str) -> bool:
+    return a == b or (min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a)))
+
+
+def is_changelog_line(bullet: str, items: list[str]) -> bool:
+    """True if `bullet` is one of `items`, shortened or reworded a little.
+
+    Most of the bullet's words must be words of one item (a word and its plural or
+    ending count as the same), or the two texts must be alike as a whole.
+    """
+    words = _WORD_RE.findall(bullet.lower().replace("**", ""))
+    for item in items:
+        have = _WORD_RE.findall(item.lower().replace("**", ""))
+        if words and sum(any(_same_word(w, h) for h in have) for w in words) >= MATCH_SHARE * len(
+            words
+        ):
+            return True
+        alike = difflib.SequenceMatcher(None, bullet.lower(), item.lower()).ratio()
+        if alike >= MATCH_SHARE:
+            return True
+    return False
 
 
 def release_items(section: str) -> tuple[list[str], list[str], list[str]]:
@@ -812,23 +890,38 @@ def release_items(section: str) -> tuple[list[str], list[str], list[str]]:
     return new, fixes, changed
 
 
-def render_release(new: list[str], fixes: list[str], changed: list[str] | None = None) -> str:
+def render_release(
+    new: list[str],
+    fixes: list[str],
+    changed: list[str] | None = None,
+    totals: tuple[int, int, int] | None = None,
+) -> str:
     """The post: ``## New:``, ``## Fixes:`` and ``## Changed:`` lists, an empty one left out.
 
     At most RELEASE_MAX_BULLETS bullets under each, each cut to RELEASE_BULLET_MAX
-    characters (`shorten`), no blank lines, no other text.
+    characters (`shorten`), no blank lines, no other text. A list that was cut ends with
+    ``- \u2026and N more``, N the lines left out; `totals` is how many lines each list
+    has at its source when `new`, `fixes` and `changed` are fewer (Claude's pick).
     """
     lines: list[str] = []
     lists = ((NEW_HEADING, new), (FIXES_HEADING, fixes), (CHANGED_HEADING, changed or []))
-    for heading, items in lists:
+    for at, (heading, items) in enumerate(lists):
         kept = [shorten(i) for i in items if i.strip()]
-        if kept:
-            lines.append(heading)
-            lines += [f"- {i}" for i in kept[:RELEASE_MAX_BULLETS]]
+        if not kept:
+            continue
+        shown = kept[:RELEASE_MAX_BULLETS]
+        total = max(totals[at], len(kept)) if totals else len(kept)
+        lines.append(heading)
+        lines += [f"- {i}" for i in shown]
+        if total > len(shown):
+            lines.append(f"- \u2026and {total - len(shown)} more")
     return "\n".join(lines)
 
 
-def shape_release_reply(reply: str) -> str | None:
+_MORE_RE = re.compile(r"(?:\u2026|\.\.\.)\s*and \d+ more", re.IGNORECASE)
+
+
+def shape_release_reply(reply: str, source=None) -> str | None:
     """Claude's reply as the post, or None when it is not in the shape.
 
     The shape: ``## New:``, ``## Fixes:`` and ``## Changed:`` (that order, each at most
@@ -836,6 +929,11 @@ def shape_release_reply(reply: str) -> str | None:
     lines are dropped, a heading with no bullets is dropped and too many or too long
     bullets are cut, as for a built post. Prose, an intro or closing line, numbered
     items, other headings, a wrong order, code, a link and a mention are not accepted.
+
+    With `source` (the (new, fixes, changed) lines of the CHANGELOG) every bullet must be
+    one of the lines under its own heading (`is_changelog_line`), else the reply is
+    refused; a "\u2026and N more" line of Claude's is dropped and ours is added from the
+    source's counts.
     """
     lists: dict[str, list[str]] = {heading: [] for heading in RELEASE_HEADINGS}
     last = -1
@@ -853,36 +951,44 @@ def shape_release_reply(reply: str) -> str | None:
         elif _CONTENT_RE.search(line):
             return None
         elif target is not None and line.startswith("- ") and line[2:].strip():
-            target.append(line[2:].strip())
+            bullet = line[2:].strip()
+            if source is not None and _MORE_RE.fullmatch(bullet):
+                continue
+            target.append(bullet)
         else:
             return None
-    return render_release(*lists.values()) or None
+    if source is not None:
+        for heading, items in zip(RELEASE_HEADINGS, source, strict=True):
+            if not all(is_changelog_line(b, items) for b in lists[heading]):
+                return None
+    totals = tuple(len([i for i in items if i.strip()]) for items in source) if source else None
+    return render_release(*lists.values(), totals=totals) or None
 
 
-def release_post_text(
-    summary: str | None, section: str, titles: list[str], body: str, link: str
-) -> str:
+def _fit_link(head: list[str], lines: list[str], link: str) -> str:
+    """`head`, the list lines, then the link; bullets go from the end when over the limit.
+
+    The link is never dropped, and no heading is left over a list that lost every bullet.
+    """
+    lines = list(lines)
+    while lines and len("\n".join([*head, *lines, link])) > EMBED_DESC_MAX:
+        lines.pop()
+        while lines and lines[-1] in RELEASE_HEADINGS:
+            lines.pop()
+    return "\n".join([*head, *lines, link])
+
+
+def release_post_text(summary: str | None, source, link: str) -> str:
     """What the release embed says: the lists, then the link line.
 
-    The lists are Claude's reply if it is in the shape, else built from the CHANGELOG
-    section; when that gives nothing, from the merged PR titles (all under New), then from
-    the release's own notes; at last one plain sentence. The last line is `link`, always:
-    if the whole is over the embed's limit, bullets are dropped from the end, never the
-    link.
+    The lists are Claude's reply if it is in the shape and holds only lines of `source`
+    (the CHANGELOG section's lines, else the PR titles, else the release notes' bullets),
+    else built from `source`; when that gives nothing, one plain sentence. The last line
+    is `link`, always.
     """
-    shaped = shape_release_reply(summary) if summary else None
-    lists = (
-        shaped
-        or render_release(*release_items(section))
-        or render_release(titles, [], [])
-        or render_release(*release_items(body))
-        or "A new release is out."
-    ).splitlines()
-    while lists and len("\n".join([*lists, link])) > EMBED_DESC_MAX:
-        lists.pop()
-        while lists and lists[-1] in RELEASE_HEADINGS:
-            lists.pop()  # no heading is left over a list that lost every bullet
-    return "\n".join([*lists, link])
+    shaped = shape_release_reply(summary, source) if summary else None
+    lists = shaped or render_release(*source) or "A new release is out."
+    return _fit_link([], lists.splitlines(), link)
 
 
 def main(argv=None) -> int:

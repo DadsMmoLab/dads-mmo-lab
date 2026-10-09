@@ -48,6 +48,9 @@ class FakeWorld:
         self.attempts: dict[str, str] = {}
         self.attempt_calls: list[str] = []
         self.failing_hooks: set[str] = set()
+        self.pr_files: dict[int, list] = {}
+        self.pr_commits: dict[int, int] = {}
+        self.pr_lookups_fail = False
 
     def discord(self, method=None, hook=None):
         return [
@@ -65,6 +68,13 @@ class FakeWorld:
         path = url.split("api.github.com", 1)[1]
         if path.startswith("/repos/owner/repo/commits/") and path.endswith("/pulls"):
             return json.dumps(self.pulls.get(path.split("/")[5], []))
+        if path.startswith("/repos/owner/repo/pulls/"):
+            if self.pr_lookups_fail:
+                raise http_error(500)
+            number = int(path.split("/")[5].split("?")[0])
+            if path.split("?")[0].endswith("/files"):
+                return json.dumps(self.pr_files.get(number, []))
+            return json.dumps({"number": number, "commits": self.pr_commits.get(number, 1)})
         if path.startswith("/repos/owner/repo/issues/") and "/comments" in path:
             if method == "POST":
                 self.comments.append({"user": BOT, "body": payload["body"]})
@@ -300,7 +310,7 @@ def test_merged_pr_posts_title_only_when_claude_fails(world, claude):
     embed = post[2]["embeds"][0]
     assert embed["title"] == "Fix the thing"
     assert embed["url"].endswith("/pull/7")
-    assert "description" not in embed
+    assert embed["description"] == "[#7](https://github.com/owner/repo/pull/7)"
 
 
 def test_merged_pr_post_has_summary_title_link_author(world):
@@ -309,7 +319,9 @@ def test_merged_pr_post_has_summary_title_link_author(world):
     assert dn.cmd_merged() == 0
     (post,) = world.discord("POST")
     embed = post[2]["embeds"][0]
-    assert embed["description"] == "A short summary."
+    assert embed["description"] == (
+        "[#7](https://github.com/owner/repo/pull/7)\n\nA short summary."
+    )
     assert "dev" in embed["footer"]["text"] and "#7" in embed["footer"]["text"]
 
 
@@ -323,17 +335,17 @@ def test_release_falls_back_to_raw_changelog_section(world):
     assert "Raw line one" in desc and "Old" not in desc
 
 
-def test_release_summary_input_has_changelog_and_pr_titles(world):
+def test_release_summary_input_has_the_changelog_section_only(world):
     world.releases = [{"tag_name": "v1.1"}, {"tag_name": "v1.0"}]
     world.compare_commits = ["Add the Y button (#12)"]
     world.changelog = "## v1.1 - d\n- Raw line one\n"
-    world.claude = FakeClaude(text="## New:\n- A short summary.")
+    world.claude = FakeClaude(text="## New:\n- Raw line one")
     assert dn.cmd_release("v1.1") == 0
     sent = world.claude.user_text()
-    assert "Raw line one" in sent and "Add the Y button (#12)" in sent
+    assert "Raw line one" in sent and "Add the Y button (#12)" not in sent
     (post,) = world.discord("POST")
     assert post[2]["embeds"][0]["description"] == (
-        "## New:\n- A short summary.\n"
+        "## New:\n- Raw line one\n"
         "[Full changelog on GitHub](https://github.com/owner/repo/releases/tag/v1.1)"
     )
     assert post[2]["embeds"][0]["url"].endswith("/releases/tag/v1.1")
@@ -367,16 +379,6 @@ def test_text_is_wrapped_as_data_and_cannot_close_its_tag(world):
 # --- a commit with no PR ----------------------------------------------------
 
 
-def test_commit_without_pr_posts_first_line_and_commit_link(world):
-    set_event(world, push_event("Direct fix\n\nlong body"))
-    assert dn.cmd_merged() == 0
-    (post,) = world.discord("POST")
-    embed = post[2]["embeds"][0]
-    assert embed["title"] == "Direct fix"
-    assert embed["url"] == "https://github.com/owner/repo/commit/00"
-    assert world.claude.requests == []
-
-
 def test_skip_ci_commits_are_not_posted_and_one_pr_posts_once(world):
     set_event(world, push_event("Bot bump [skip ci]", "Part one", "Part two"))
     world.pulls["01" + "a" * 38] = [a_pr()]
@@ -385,7 +387,7 @@ def test_skip_ci_commits_are_not_posted_and_one_pr_posts_once(world):
     assert len(world.discord("POST")) == 1
 
 
-def test_pr_lookup_error_falls_back_to_the_commit(world, monkeypatch):
+def test_pr_lookup_error_posts_nothing(world, monkeypatch):
     set_event(world, push_event("Direct fix"))
     real = world.request
 
@@ -396,8 +398,7 @@ def test_pr_lookup_error_falls_back_to_the_commit(world, monkeypatch):
 
     monkeypatch.setattr(dn, "_request", flaky)
     assert dn.cmd_merged() == 0
-    (post,) = world.discord("POST")
-    assert post[2]["embeds"][0]["title"] == "Direct fix"
+    assert world.discord("POST") == []
 
 
 # --- issues -----------------------------------------------------------------
@@ -567,45 +568,6 @@ def test_a_comment_that_cannot_be_stored_fails_the_job(world, monkeypatch):
 # --- merged: open PRs, big pushes, rate limits --------------------------------
 
 
-def test_an_open_pr_is_not_reported_as_merged(world):
-    set_event(world, push_event("Direct fix"))
-    open_pr = a_pr()
-    open_pr["merged_at"] = None
-    world.pulls["00" + "a" * 38] = [open_pr]
-    assert dn.cmd_merged() == 0
-    (post,) = world.discord("POST")
-    embed = post[2]["embeds"][0]
-    assert embed["title"] == "Direct fix"
-    assert "Merged" not in embed["footer"]["text"]
-    assert world.claude.requests == []
-
-
-def test_a_force_push_posts_one_compact_message_without_claude(world):
-    event = push_event("One", "Two")
-    event.update(forced=True, compare="https://github.com/owner/repo/compare/a...b")
-    set_event(world, event)
-    assert dn.cmd_merged() == 0
-    (post,) = world.discord("POST")
-    embed = post[2]["embeds"][0]
-    assert "force push" in embed["title"] and "2 commits" in embed["title"]
-    assert embed["url"].endswith("/compare/a...b")
-    assert "- One" in embed["description"]
-    assert world.claude.requests == []
-    assert not [c for c in world.calls if c[1].endswith("/pulls")]
-
-
-def test_a_big_push_posts_one_compact_message_and_ten_posts_individually(world):
-    set_event(world, push_event(*[f"c{i}" for i in range(11)]))
-    assert dn.cmd_merged() == 0
-    (post,) = world.discord("POST")
-    assert "11 commits" in post[2]["embeds"][0]["title"]
-
-    world.calls.clear()
-    set_event(world, push_event(*[f"c{i}" for i in range(10)]))
-    assert dn.cmd_merged() == 0
-    assert len(world.discord("POST")) == 10
-
-
 def test_rate_limit_is_waited_out_and_retried(world, monkeypatch):
     slept = []
     monkeypatch.setattr(dn.time, "sleep", slept.append)
@@ -621,6 +583,7 @@ def test_rate_limit_is_waited_out_and_retried(world, monkeypatch):
 
     monkeypatch.setattr(dn, "_request", limited)
     set_event(world, push_event("a"))
+    world.pulls[SHA0] = [a_pr()]
     assert dn.cmd_merged() == 0
     assert state["n"] == 3
     assert slept.count(2.5) == 2
@@ -638,6 +601,7 @@ def test_rate_limit_gives_up_after_three_retries(world, monkeypatch):
 
     monkeypatch.setattr(dn, "_request", always)
     set_event(world, push_event("a"))
+    world.pulls[SHA0] = [a_pr()]
     assert dn.cmd_merged() == 1
     assert state["n"] == 4
 
@@ -851,6 +815,7 @@ def test_embed_limits_and_thread_id(world, monkeypatch):
 
 def test_no_thread_id_posts_to_the_channel(world):
     set_event(world, push_event("a"))
+    world.pulls[SHA0] = [a_pr()]
     dn.cmd_merged()
     (post,) = world.discord("POST")
     assert "thread_id" not in post[1]
@@ -877,6 +842,7 @@ def test_discord_failure_fails_the_job(world, monkeypatch):
 
     monkeypatch.setattr(dn, "_request", boom)
     set_event(world, push_event("a"))
+    world.pulls[SHA0] = [a_pr()]
     assert dn.cmd_merged() == 1
 
 
@@ -941,12 +907,12 @@ def release_ready(world, monkeypatch, tag="v1.0", release_hook=RELEASE_WEBHOOK):
 
 def test_release_goes_to_both_channels_with_one_summary(world, monkeypatch):
     release_ready(world, monkeypatch)
-    world.claude = FakeClaude(text="## New:\n- A short summary.")
+    world.claude = FakeClaude(text="## New:\n- A change")
     assert dn.cmd_release("v1.0") == 0
     (main,) = world.discord("POST", hook="111")
     (second,) = world.discord("POST", hook="222")
     assert main[2]["embeds"] == second[2]["embeds"]
-    assert main[2]["embeds"][0]["description"].startswith("## New:\n- A short summary.\n")
+    assert main[2]["embeds"][0]["description"].startswith("## New:\n- A change\n")
     assert len(world.claude.requests) == 1
 
 
@@ -1230,22 +1196,14 @@ def test_release_summary_sees_the_end_of_a_section_longer_than_the_old_cap(world
     assert dn.cmd_release("v1.1") == 0
     sent = world.claude.user_text()
     assert "THE-LAST-LINE" in sent
-    assert "Fix the Z crash (#13)" in sent
     assert "cut" not in sent.lower()
 
 
-def test_release_pr_titles_come_before_the_changelog_text(world):
-    _long_release(world, 500)
-    assert dn.cmd_release("v1.1") == 0
-    sent = world.claude.user_text()
-    assert sent.index("Add the Y button (#12)") < sent.index("xxxx")
-
-
-def test_a_section_over_the_cap_is_cut_at_its_end_and_the_pr_titles_survive(world):
+def test_a_section_over_the_cap_is_cut_at_its_end(world):
     _long_release(world, dn.MAX_INPUT_CHARS * 2)
     assert dn.cmd_release("v1.1") == 0
     sent = world.claude.user_text()
-    assert "Add the Y button (#12)" in sent and "Fix the Z crash (#13)" in sent
+    assert "Add the Y button (#12)" not in sent
     assert "THE-LAST-LINE" not in sent
     assert "cut" in sent.lower()
 
@@ -1273,7 +1231,7 @@ SAMPLE = (
 )
 SAMPLE_SHAPE = (
     "## New:\n"
-    "- **Alpha** is out for players.\n"
+    "- Alpha is out for players.\n"
     "- Beta works now\n"
     "## Fixes:\n"
     "- Gamma no longer crashes\n"
@@ -1310,7 +1268,7 @@ def test_the_no_summary_path_builds_the_same_shape(world, monkeypatch):
 
 
 def test_a_well_formed_reply_from_claude_is_posted_as_it_is(world):
-    reply = "## New:\n- Alpha for players\n## Fixes:\n- Gamma crash gone"
+    reply = "## New:\n- Alpha for players\n- Beta works now\n## Fixes:\n- Gamma crash gone"
     assert release_lists(world, claude=FakeClaude(text=reply)) == reply
 
 
@@ -1318,8 +1276,10 @@ def test_a_section_over_six_bullets_is_cut_to_six_in_the_changelogs_order(world)
     items = "".join(f"- item {n}\n" for n in range(1, 10))
     desc = release_lists(world, f"## v1.1 - d\n### New\n{items}### Fixed\n{items}")
     new, fixes = desc.split("\n## Fixes:\n")
-    assert new.splitlines() == ["## New:"] + [f"- item {n}" for n in range(1, 7)]
-    assert fixes.splitlines() == [f"- item {n}" for n in range(1, 7)]
+    assert new.splitlines() == ["## New:"] + [f"- item {n}" for n in range(1, 7)] + [
+        "- \u2026and 3 more"
+    ]
+    assert fixes.splitlines() == [f"- item {n}" for n in range(1, 7)] + ["- \u2026and 3 more"]
 
 
 def test_a_bullet_over_ninety_characters_is_cut_to_ninety_with_an_ellipsis(world):
@@ -1331,11 +1291,13 @@ def test_a_bullet_over_ninety_characters_is_cut_to_ninety_with_an_ellipsis(world
 
 
 def test_claudes_overlong_list_is_cut_to_the_same_limits_not_thrown_away(world):
-    reply = "## New:\n" + "".join(f"- {'n' * 150} {n}\n" for n in range(9))
-    desc = release_lists(world, claude=FakeClaude(text=reply.strip()))
+    items = "".join(f"- {'n' * 150} {n}\n" for n in range(9))
+    reply = "## New:\n" + items
+    desc = release_lists(world, f"## v1.1 - d\n### New\n{items}", FakeClaude(text=reply.strip()))
     lines = desc.splitlines()
-    assert lines[0] == "## New:" and len(lines) == 7
-    assert all(len(line) - 2 <= 90 for line in lines[1:])
+    assert lines[0] == "## New:" and len(lines) == 8
+    assert lines[-1] == "- \u2026and 3 more"
+    assert all(len(line) - 2 <= 90 for line in lines[1:-1])
     assert lines[1].startswith("- nnnn")
 
 
@@ -1377,9 +1339,9 @@ def test_a_reply_that_is_not_in_the_shape_is_replaced_by_the_built_shape(world, 
 
 
 def test_blank_lines_in_claudes_reply_are_squeezed_out(world):
-    reply = "## New:\n- Alpha\n\n## Fixes:\n\n- Gamma\n"
+    reply = "## New:\n- Alpha\n\n- Beta works now\n## Fixes:\n\n- Gamma\n"
     desc = release_lists(world, claude=FakeClaude(text=reply))
-    assert desc == "## New:\n- Alpha\n## Fixes:\n- Gamma"
+    assert desc == "## New:\n- Alpha\n- Beta works now\n## Fixes:\n- Gamma"
 
 
 def test_an_empty_fixes_section_is_left_out(world):
@@ -1393,8 +1355,10 @@ def test_an_empty_new_section_is_left_out(world):
 
 
 def test_a_heading_claude_left_empty_is_dropped(world):
-    reply = "## New:\n- Alpha\n## Fixes:"
-    assert release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha"
+    reply = "## New:\n- Alpha\n- Beta works now\n## Fixes:"
+    assert (
+        release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha\n- Beta works now"
+    )
 
 
 def test_bare_bullets_with_no_heading_count_as_new(world):
@@ -1415,7 +1379,8 @@ def test_pr_and_issue_summaries_are_untouched_by_the_shape(world):
     world.claude = FakeClaude(text="Plain sentence, not a list.")
     assert dn.cmd_merged() == 0
     (post,) = world.discord("POST")
-    assert post[2]["embeds"][0]["description"] == "Plain sentence, not a list."
+    assert post[2]["embeds"][0]["description"].endswith("\n\nPlain sentence, not a list.")
+    assert "## " not in post[2]["embeds"][0]["description"]
     assert "no headings" in world.claude.requests[0]["system"]
 
 
@@ -1429,7 +1394,7 @@ def test_the_post_ends_with_the_full_changelog_link_after_the_lists(world):
 
 
 def test_the_link_is_on_a_claude_summary_too(world):
-    reply = "## New:\n- Alpha\n## Fixes:\n- Gamma"
+    reply = "## New:\n- Alpha\n- Beta works now\n## Fixes:\n- Gamma"
     assert release_desc(world, claude=FakeClaude(text=reply)) == reply + "\n" + CHANGELOG_LINK
 
 
@@ -1540,27 +1505,22 @@ V0915 = [
 ]
 
 
-def test_a_long_bullet_is_cut_at_a_word_with_an_ellipsis_and_never_mid_word(world):
+def test_a_long_bullet_is_cut_at_a_phrase_end_or_a_word_and_never_mid_word(world):
     desc = release_lists(world, "## v1.1 - d\n### New\n" + "".join(f"- {b}\n" for b in V0915))
     for line, source in zip(desc.splitlines()[1:], V0915, strict=True):
         text = line[2:]
+        plain = source.replace("**", "")
         assert len(text) <= 90
-        if text != source:
-            assert text.endswith("…")
-            stem = text[:-1]
-            assert source.startswith(stem)
-            assert source[len(stem)] == " " or not source[len(stem) - 1].isalnum()
+        stem = text[:-1] if text.endswith("\u2026") else text
+        assert plain.startswith(stem)
+        rest = plain[len(stem) :]
+        assert rest == "" or rest[0] in " ,.;" or not plain[len(stem) - 1].isalnum()
 
 
 def test_a_cut_never_leaves_a_bold_marker_open(world):
     desc = release_lists(world, "## v1.1 - d\n### New\n" + "".join(f"- {b}\n" for b in V0915))
     for line in desc.splitlines()[1:]:
         assert line.count("**") % 2 == 0
-
-
-def test_a_bullet_keeps_its_bold_marks_when_it_fits(world):
-    desc = release_lists(world, "## v1.1 - d\n### New\n- Press **Play** to start\n")
-    assert desc == "## New:\n- Press **Play** to start"
 
 
 @pytest.mark.parametrize("sep", [" \u2014 ", "; "])
@@ -1638,19 +1598,20 @@ def test_the_changed_list_is_cut_to_six_bullets_of_ninety_characters(world):
     items = "".join(f"- {'c' * 120}{n}\n" for n in range(9))
     desc = release_lists(world, f"## v1.1 - d\n### Changed\n{items}")
     lines = desc.splitlines()
-    assert lines[0] == "## Changed:" and len(lines) == 7
-    assert all(len(line) - 2 <= 90 for line in lines[1:])
+    assert lines[0] == "## Changed:" and len(lines) == 8
+    assert lines[-1] == "- \u2026and 3 more"
+    assert all(len(line) - 2 <= 90 for line in lines[1:-1])
 
 
 def test_claudes_reply_with_the_three_lists_in_order_is_posted_as_it_is(world):
-    reply = "## New:\n- Alpha\n## Fixes:\n- Gamma\n## Changed:\n- Delta"
+    reply = "## New:\n- Alpha\n- Beta works now\n## Fixes:\n- Gamma\n## Changed:\n- Delta"
     assert release_lists(world, claude=FakeClaude(text=reply)) == reply
 
 
 @pytest.mark.parametrize(
     "reply",
     [
-        "## New:\n- Alpha\n## Changed:\n- Delta",
+        "## New:\n- Alpha\n- Beta works now\n## Changed:\n- Delta",
         "## Fixes:\n- Gamma\n## Changed:\n- Delta",
         "## Changed:\n- Delta",
     ],
@@ -1683,8 +1644,10 @@ def test_the_three_lists_out_of_order_or_misspelt_fall_back_to_the_built_shape(w
 
 
 def test_a_changed_heading_claude_left_empty_is_dropped(world):
-    reply = "## New:\n- Alpha\n## Changed:"
-    assert release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha"
+    reply = "## New:\n- Alpha\n- Beta works now\n## Changed:"
+    assert (
+        release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha\n- Beta works now"
+    )
 
 
 def test_the_prompt_names_all_three_headings_and_no_longer_files_changed_under_new(world):
@@ -1714,3 +1677,346 @@ def test_when_the_limit_bites_the_changed_list_goes_first_and_the_link_stays(wor
     desc = release_desc(world, body)
     assert len(desc) <= 200 and desc.endswith(CHANGELOG_LINK)
     assert desc.startswith("## New:\n- nnnn")
+
+
+# --- T625: the merged post shows a clickable PR number and, for a big PR, the release shape --
+
+SHA0 = "00" + "a" * 38
+PR_LINK = "[#7](https://github.com/owner/repo/pull/7)"
+FULL_LIST = "[Full list of changes](https://github.com/owner/repo/pull/7)"
+
+
+def merged_pr(world, number=7, new=(), fixed=(), changed=(), commits=1, claude=None, **pr):
+    """A squash-merged PR that adds the given lines under ## Unreleased, with its event."""
+    world.pulls[SHA0] = [a_pr(number, **pr)]
+    world.pr_commits[number] = commits
+
+    def block(name, items):
+        return f"### {name}\n- Existing {name} line\n" + "".join(f"- {i}\n" for i in items) + "\n"
+
+    world.changelog = (
+        "# Changelog\n\n## Unreleased\n\n"
+        + block("New", new)
+        + block("Fixed", fixed)
+        + block("Changed", changed)
+        + "## v1.0 - d\n### New\n- Old line\n"
+    )
+    added = [f"+- {i}" for i in (*new, *fixed, *changed)]
+    patch = "@@ -14,3 +14,9 @@\n ## Unreleased\n-- gone line\n" + "\n".join(added) + "\n context"
+    world.pr_files[number] = [
+        {"filename": "README.md", "patch": "@@ -1 +1 @@\n+- not a changelog line"},
+        {"filename": "CHANGELOG.md", "patch": patch},
+    ]
+    world.claude = claude or FakeClaude(stop_reason="refusal")
+    set_event(world, push_event("Merge PR"))
+
+
+def merged_embed(world):
+    assert dn.cmd_merged() == 0
+    (post,) = world.discord("POST")
+    return post[2]["embeds"][0]
+
+
+def test_a_small_pr_post_opens_with_the_clickable_number_then_the_summary(world):
+    merged_pr(world, claude=FakeClaude(text="Fixes the thing."), new=["a"])
+    embed = merged_embed(world)
+    assert embed["description"] == f"{PR_LINK}\n\nFixes the thing."
+
+
+def test_a_pr_post_without_a_summary_is_just_the_number_link(world):
+    merged_pr(world, new=["a"])
+    assert merged_embed(world)["description"] == PR_LINK
+
+
+def test_the_number_link_points_at_the_prs_own_url(world):
+    merged_pr(world, number=439, new=["a"])
+    embed = merged_embed(world)
+    first = embed["description"].splitlines()[0]
+    assert first == "[#439](https://github.com/owner/repo/pull/439)"
+    assert embed["url"] == "https://github.com/owner/repo/pull/439"
+    assert embed["title"] == "Fix the thing"
+
+
+def test_a_pr_with_three_added_changelog_lines_keeps_the_short_post(world):
+    merged_pr(world, new=["a", "b"], fixed=["c"], claude=FakeClaude(text="Short."))
+    embed = merged_embed(world)
+    assert embed["description"] == f"{PR_LINK}\n\nShort."
+    assert "pr_title" in world.claude.user_text() and "## " not in embed["description"]
+
+
+def test_a_pr_with_four_added_changelog_lines_gets_the_release_shape(world):
+    merged_pr(world, new=["Alpha now", "Beta now"], fixed=["Gamma gone"], changed=["Delta moved"])
+    assert merged_embed(world)["description"] == (
+        f"{PR_LINK}\n\n## New:\n- Alpha now\n- Beta now\n## Fixes:\n- Gamma gone\n"
+        f"## Changed:\n- Delta moved\n{FULL_LIST}"
+    )
+
+
+def test_lines_that_were_already_in_unreleased_do_not_count_towards_big(world):
+    merged_pr(world, new=["a"], fixed=["b"], changed=["c"], claude=FakeClaude(text="Short."))
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_lines_added_to_an_older_release_section_do_not_count(world):
+    merged_pr(world, new=["a"], claude=FakeClaude(text="Short."))
+    world.pr_files[7][1]["patch"] += "\n+- o1\n+- o2\n+- o3\n+- o4"
+    world.changelog += "- o1\n- o2\n- o3\n- o4\n"
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_lines_in_other_files_do_not_count(world):
+    merged_pr(world, new=["a"], claude=FakeClaude(text="Short."))
+    world.pr_files[7][0]["patch"] = "\n".join(f"+- l{i}" for i in range(9))
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_a_pr_with_more_than_ten_commits_is_big_even_with_one_changelog_line(world):
+    merged_pr(world, new=["Only line"], commits=11)
+    assert merged_embed(world)["description"] == (f"{PR_LINK}\n\n## New:\n- Only line\n{FULL_LIST}")
+
+
+def test_a_pr_with_ten_commits_is_not_big_by_commits(world):
+    merged_pr(world, new=["Only line"], commits=10, claude=FakeClaude(text="Short."))
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_many_commits_and_no_changelog_lines_keeps_the_short_post(world):
+    merged_pr(world, commits=30, claude=FakeClaude(text="Short."))
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_a_failed_changelog_lookup_keeps_the_short_post_with_its_link(world):
+    merged_pr(world, new=["a", "b", "c", "d"], claude=FakeClaude(text="Short."))
+    world.pr_lookups_fail = True
+    assert merged_embed(world)["description"] == f"{PR_LINK}\n\nShort."
+
+
+def test_a_big_pr_post_ends_with_the_full_list_link_and_keeps_title_and_url(world):
+    merged_pr(world, new=["a", "b", "c", "d"], title="Yu'lon after-0.9.15 batch")
+    embed = merged_embed(world)
+    assert embed["description"].splitlines()[-1] == FULL_LIST
+    assert embed["title"] == "Yu'lon after-0.9.15 batch"
+    assert embed["url"] == "https://github.com/owner/repo/pull/7"
+    assert "#7" in embed["footer"]["text"]
+
+
+def test_a_big_pr_list_is_cut_to_six_and_ends_with_and_n_more(world):
+    merged_pr(world, new=[f"item {n}" for n in range(1, 10)], fixed=["g"])
+    lines = merged_embed(world)["description"].splitlines()
+    assert lines[2:10] == ["## New:"] + [f"- item {n}" for n in range(1, 7)] + ["- …and 3 more"]
+    assert lines[10:] == ["## Fixes:", "- g", FULL_LIST]
+
+
+def test_a_list_of_exactly_six_has_no_and_more_line(world):
+    merged_pr(world, new=[f"item {n}" for n in range(1, 7)])
+    desc = merged_embed(world)["description"]
+    assert "more" not in desc and desc.count("\n- ") == 6
+
+
+def test_the_more_count_counts_the_lines_left_out_of_that_list_only(world):
+    merged_pr(world, new=[f"n{n}" for n in range(8)], fixed=[f"f{n}" for n in range(7)])
+    desc = merged_embed(world)["description"]
+    assert desc.count("…and 2 more") == 1 and desc.count("…and 1 more") == 1
+
+
+def test_big_pr_bullets_are_cut_with_shorten(world):
+    merged_pr(world, new=["w" * 200, "b", "c", "d"])
+    lines = merged_embed(world)["description"].splitlines()
+    assert lines[3] == "- " + "w" * 89 + "…"
+
+
+def test_claude_is_asked_for_the_shape_with_only_the_prs_own_lines(world):
+    merged_pr(world, new=["Alpha now", "Beta now"], fixed=["Gamma gone"], changed=["Delta moved"])
+    world.claude = FakeClaude(stop_reason="refusal")
+    merged_embed(world)
+    sent = world.claude.user_text()
+    assert "<pr_changes>" in sent and "<pr_title>" in sent
+    for line in ("Alpha now", "Beta now", "Gamma gone", "Delta moved"):
+        assert line in sent
+    assert "Existing New line" not in sent and "Old line" not in sent
+    system = world.claude.requests[0]["system"]
+    assert "## New:" in system and "## Fixes:" in system and "## Changed:" in system
+
+
+def test_a_valid_claude_reply_for_a_big_pr_is_used(world):
+    merged_pr(world, new=["Alpha now", "Beta now"], fixed=["Gamma gone"], changed=["Delta moved"])
+    reply = (
+        "## New:\n- Alpha is now here\n- Beta now\n## Fixes:\n- Gamma gone\n## Changed:\n- Delta"
+    )
+    world.claude = FakeClaude(text=reply)
+    desc = merged_embed(world)["description"]
+    assert desc == f"{PR_LINK}\n\n{reply}\n{FULL_LIST}"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "This PR adds a lot.",
+        "## New:\n- Alpha now\n- Beta `now`",
+        "## New:\n- Alpha now\n- See [x](https://e.com)",
+        "## New:\n- Alpha now <@123>",
+        "## New:\n- Alpha now\n- Read www.e.com",
+        "Intro\n## New:\n- Alpha now",
+        "## Fixes:\n- Gamma gone\n## New:\n- Alpha now",
+    ],
+)
+def test_an_invalid_claude_reply_for_a_big_pr_is_replaced_by_the_built_list(world, reply):
+    merged_pr(world, new=["Alpha now", "Beta now"], fixed=["Gamma gone"], changed=["Delta moved"])
+    world.claude = FakeClaude(text=reply)
+    desc = merged_embed(world)["description"]
+    assert desc == (
+        f"{PR_LINK}\n\n## New:\n- Alpha now\n- Beta now\n## Fixes:\n- Gamma gone\n"
+        f"## Changed:\n- Delta moved\n{FULL_LIST}"
+    )
+
+
+def test_big_pr_text_is_mention_safe(world):
+    merged_pr(world, new=["ping @everyone", "b", "c", "d"])
+    desc = merged_embed(world)["description"]
+    assert "@everyone" not in desc
+
+
+# --- T625 owner: a release or big post uses only the CHANGELOG's own lines ---------------------
+
+
+def test_a_reply_bullet_that_is_not_a_line_of_the_section_is_rejected(world):
+    reply = "## New:\n- Alpha is out for players.\n- A brand new invented feature"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == SAMPLE_SHAPE
+
+
+def test_a_reply_bullet_under_the_wrong_heading_is_rejected(world):
+    reply = "## New:\n- Alpha is out for players.\n## Fixes:\n- Beta works now"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == SAMPLE_SHAPE
+
+
+def test_a_reworded_or_shortened_line_is_accepted(world):
+    reply = "## New:\n- Alpha out for players\n- Beta works\n## Fixes:\n- Gamma no longer crash"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == reply
+
+
+def test_the_release_prompt_sends_only_the_section_and_says_to_add_nothing(world):
+    world.compare_commits = ["Add the Y button (#12)"]
+    release_lists(world, claude=FakeClaude())
+    sent = world.claude.user_text()
+    assert "Alpha" in sent and "Add the Y button" not in sent and "Pull requests" not in sent
+    assert "never add" in world.claude.requests[0]["system"].lower()
+
+
+def test_pr_titles_are_used_only_when_the_section_is_empty(world):
+    world.releases = [{"tag_name": "v1.1"}, {"tag_name": "v1.0"}]
+    world.compare_commits = ["Add the Y button (#12)"]
+    world.changelog = "## v1.1 - d\n## v1.0 - d\n- Old\n"
+    world.claude = FakeClaude(text="## New:\n- Add the Y button")
+    assert dn.cmd_release("v1.1") == 0
+    assert "Add the Y button (#12)" in world.claude.user_text()
+    (post,) = world.discord("POST")
+    assert post[2]["embeds"][0]["description"].startswith("## New:\n- Add the Y button\n")
+
+
+def test_a_release_list_over_six_ends_with_and_n_more_before_the_link(world):
+    items = "".join(f"- item {n}\n" for n in range(1, 10))
+    desc = release_desc(world, f"## v1.1 - d\n### New\n{items}")
+    lines = desc.splitlines()
+    assert lines[-2:] == ["- …and 3 more", CHANGELOG_LINK]
+    assert lines[-3] == "- item 6"
+
+
+def test_claudes_shorter_list_still_counts_what_was_left_out(world):
+    items = "".join(f"- item {n}\n" for n in range(1, 10))
+    reply = "## New:\n" + "".join(f"- item {n}\n" for n in range(1, 5))
+    desc = release_lists(world, f"## v1.1 - d\n### New\n{items}", FakeClaude(text=reply.strip()))
+    assert desc.splitlines()[-1] == "- …and 5 more"
+
+
+def test_an_and_more_line_written_by_claude_is_replaced_by_ours(world):
+    items = "".join(f"- item {n}\n" for n in range(1, 10))
+    reply = "## New:\n" + "".join(f"- item {n} now\n" for n in range(1, 7)) + "- ...and 99 more"
+    desc = release_lists(world, f"## v1.1 - d\n### New\n{items}", FakeClaude(text=reply))
+    assert desc.splitlines()[-1] == "- …and 3 more" and "99" not in desc
+    assert "- item 1 now" in desc  # Claude's reply was used, not the built list
+
+
+def test_no_and_more_line_when_nothing_was_left_out(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- one\n- two\n")
+    assert "more" not in desc
+
+
+def test_built_lines_lose_their_bold_marks(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- Press **Play** to start\n")
+    assert desc == "## New:\n- Press Play to start"
+
+
+def test_a_long_line_is_cut_at_the_last_phrase_end_that_fits():
+    a, b, c = "A" * 30, "B" * 30, "C" * 30
+    assert dn.shorten(f"{a}, {b}, {c}") == f"{a}, {b}"
+    assert dn.shorten(f"{a}. {b}. {c}") == f"{a}. {b}"
+    assert dn.shorten(f"{a} — {b} — {c}") == f"{a} — {b}"
+    assert dn.shorten(f"{a}; {b}; {c}") == f"{a}; {b}"
+
+
+def test_a_line_with_no_phrase_end_is_cut_at_a_word_with_an_ellipsis():
+    out = dn.shorten("word " * 30)
+    assert out.endswith("word…") and len(out) <= 90
+
+
+def test_a_phrase_end_too_early_is_not_used():
+    out = dn.shorten("Yes, " + "word " * 30)
+    assert out.startswith("Yes, word") and out.endswith("…")
+
+
+def test_a_line_that_fits_is_kept_whole_with_its_commas():
+    assert dn.shorten("One, two, and three") == "One, two, and three"
+
+
+# --- T625 owner: the merged job posts only for merged PRs -----------------------------------
+
+
+def test_a_direct_push_with_no_pr_posts_nothing(world):
+    set_event(world, push_event("Direct fix"))
+    assert dn.cmd_merged() == 0
+    assert world.discord("POST") == []
+    assert world.claude.requests == []
+
+
+def test_a_force_push_posts_nothing_and_looks_up_nothing(world):
+    event = push_event("One", "Two")
+    event["forced"] = True
+    set_event(world, event)
+    world.pulls[SHA0] = [a_pr()]
+    assert dn.cmd_merged() == 0
+    assert world.discord("POST") == []
+    assert not [c for c in world.calls if c[1].endswith("/pulls")]
+
+
+def test_a_push_of_more_than_ten_commits_with_no_pr_posts_nothing(world):
+    set_event(world, push_event(*[f"c{i}" for i in range(11)]))
+    assert dn.cmd_merged() == 0
+    assert world.discord("POST") == []
+
+
+def test_a_push_of_many_commits_of_one_merged_pr_posts_that_pr_once(world):
+    merged_pr(world, new=["a"], claude=FakeClaude(text="Short."))
+    set_event(world, push_event(*[f"c{i}" for i in range(12)]))
+    for i in range(12):
+        world.pulls[f"{i:02d}" + "a" * 38] = [a_pr()]
+    assert dn.cmd_merged() == 0
+    (post,) = world.discord("POST")
+    assert post[2]["embeds"][0]["url"].endswith("/pull/7")
+
+
+def test_an_open_pr_commit_posts_nothing(world):
+    set_event(world, push_event("Direct fix"))
+    open_pr = a_pr()
+    open_pr["merged_at"] = None
+    world.pulls[SHA0] = [open_pr]
+    assert dn.cmd_merged() == 0
+    assert world.discord("POST") == []
+
+
+def test_a_push_looks_up_at_most_max_push_lookups_commits(world, monkeypatch):
+    monkeypatch.setattr(dn, "MAX_PUSH_LOOKUPS", 2)
+    set_event(world, push_event("a", "b", "c"))
+    for i in range(3):
+        world.pulls[f"{i:02d}" + "a" * 38] = [a_pr(10 + i)]
+    assert dn.cmd_merged() == 0
+    assert len(world.discord("POST")) == 2
