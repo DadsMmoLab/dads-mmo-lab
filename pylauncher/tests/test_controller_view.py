@@ -6810,7 +6810,9 @@ def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lack
             # there deliberately, because argv is world-readable and a statement
             # can carry a password. The first version of this test read argv for
             # the SQL and found the schema name and nothing else.
-            _asked.append(str(kwargs.get("input") or ""))
+            sent_in = kwargs.get("input") or b""
+            assert isinstance(sent_in, bytes), "the script goes as UTF-8 bytes (T596 review)"
+            _asked.append(sent_in.decode("utf-8"))
             return subprocess.CompletedProcess(list(argv), 0, "0\t0\t0", "")
 
         monkeypatch.setattr(apply_module.subprocess, "run", fake_run)
