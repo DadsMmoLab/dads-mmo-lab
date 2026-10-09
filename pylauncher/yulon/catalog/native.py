@@ -120,6 +120,7 @@ from yulon.catalog.installer import (
     OneShotLeftRunning,
     ReadyWaitStopped,
     RollbackNotDone,
+    ScriptsPartlyLaid,
     SelfExplainedError,
     UnsupportedPlatformError,
     UpdateRefused,
@@ -2671,8 +2672,8 @@ SCRIPTS_NOT_BACK = "scripts"
 
 SCRIPTS_NOT_BACK_REFUSAL = (
     "This server's Lua scripts are not the ones its build was made with: an update or rebuild "
-    "laid the new ones, and the old ones could not be put back. A Start would run the old "
-    "build on them, so it must be rebuilt first: press "
+    "laid new ones, and either stopped part-way or could not put the old ones back. A Start "
+    "would run the old build on them, so it must be rebuilt first: press "
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
 )
 """Why no start is allowed while `START_REFUSED_FILE` says `scripts` (T562).
@@ -8099,7 +8100,20 @@ class StagedInstaller:
                     f"new build: {exc}"
                 ) from exc
             # T562: the scripts the world reads at its start, laid now that nothing runs.
-            yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
+            try:
+                yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
+            except ScriptsPartlyLaid:
+                # T602: a lay that changed some scripts and then failed leaves a mix of the
+                # old and the new set. The update route's rollback lays the old set from the
+                # old checkout; a plain Rebuild has no old checkout, so the rollback must not
+                # start the old build on the mix. Written before the exception travels on:
+                # `_restore_rollback()` asks `start_refusal()` and leaves the servers
+                # stopped, and every later Start is refused until a Rebuild succeeds.
+                if servers_down is None:
+                    warned = owe_start(ctx.server_dir, why=SCRIPTS_NOT_BACK)
+                    if warned:
+                        yield warned
+                raise
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 

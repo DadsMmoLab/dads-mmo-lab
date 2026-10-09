@@ -76,6 +76,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
 - The **A module this app does not ship** box says when a game cannot take your own modules, instead of two dead buttons.
 - Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
+- A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.

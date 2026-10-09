@@ -159,6 +159,14 @@ class SelfExplainedError(InstallerError):
     """
 
 
+class ScriptsPartlyLaid(SelfExplainedError):
+    """A Lua lay that failed AFTER it had already changed a script on disk (T602).
+
+    The folder holds a mix of the old and the new set. A lay that failed before it
+    changed anything raises a plain `SelfExplainedError`: the old set is intact.
+    """
+
+
 class OneShotLeftRunning(InstallerError, TrueAfterStop):
     """A one-shot the engine had to end -- the database importer -- is still running (T539).
 
