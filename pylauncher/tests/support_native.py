@@ -75,7 +75,7 @@ VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec3
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
 TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-187af788"
-"""`src/shared/Database/AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
+"""`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
 
 
 def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:

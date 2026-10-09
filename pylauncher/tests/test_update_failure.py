@@ -42,9 +42,8 @@ def test_a_module_update_names_the_module() -> None:
 def test_the_error_is_the_one_from_this_update_and_not_an_earlier_one() -> None:
     log = (
         "[DB Auto-Updater] Attempting to execute update 20260101000000_world, hash AA.\n"
-        "[1062] Duplicate entry 'old' for key 'PRIMARY'\n" + CORE_FAILURE.replace(
-            "[1062] Duplicate entry '44070' for key 'PRIMARY'\n", ""
-        )
+        "[1062] Duplicate entry 'old' for key 'PRIMARY'\n"
+        + CORE_FAILURE.replace("[1062] Duplicate entry '44070' for key 'PRIMARY'\n", "")
     )
     said = update_failure.explain(log)
     assert "Duplicate entry 'old'" not in said

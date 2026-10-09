@@ -5045,7 +5045,7 @@ def _line_around(text: str, found: re.Match[str]) -> str:
 
 
 def _fatal_words(text: str, found: re.Match[str]) -> str:
-    """What a refusal quotes for a `fatal` match: its line, or the sentence when it is a failed update.
+    """What a refusal quotes for a `fatal` match: its line, or a failed update's sentence.
 
     T600: a failed world update is quoted as the sentence naming its file and MariaDB's error
     (`update_failure.explain()`), which reads the lines before it in `text`; the bare line names
@@ -13372,7 +13372,7 @@ class StagedInstaller:
                 # T600: a failed world update is already a whole sentence (file, MariaDB's error).
                 printed = (
                     detail
-                    if detail.startswith(update_failure.OPENING)
+                    if isinstance(detail, str) and detail.startswith(update_failure.OPENING)
                     else f"It printed a line that means it never will: {detail!r}."
                 )
                 raise InstallerError(

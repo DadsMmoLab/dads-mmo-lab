@@ -1,4 +1,4 @@
-"""The plain sentence for a world server that stopped at a database update it could not apply (T600).
+"""The plain sentence for a world server that stopped at an update it could not apply (T600).
 
 tortoise-wow's start-time updater (`AutoUpdater.cpp`) runs each migration file in a
 transaction. A file whose statement fails is rolled back, the core logs
@@ -41,7 +41,7 @@ PROBE = "[DB Auto-Updater] Migration 0_world with hash 0 failed to apply."
 """A line `explain()` reads as a failure: how a catalog's `ready.fatal` is asked if it covers it."""
 
 OPENING = "The world server stopped"
-"""How every sentence `explain()` returns begins, so a caller can tell one from a quoted log line."""
+"""How every sentence `explain()` returns begins: tells one from a quoted log line."""
 
 _TAIL = "It will not come up until that update applies or is removed."
 

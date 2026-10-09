@@ -86,7 +86,8 @@ def test_the_patch_changes_nothing_else_in_the_file(tmp_path: Path) -> None:
     before = (FIXTURE / REL).read_text(encoding="utf-8").splitlines()
     after = (root / REL).read_text(encoding="utf-8").splitlines()
     removed = [line for line in before if line not in after]
-    assert [line.strip() for line in removed] == ["std::string line;", "std::getline(std::cin, line);"]
+    gone = ["std::string line;", "std::getline(std::cin, line);"]
+    assert [line.strip() for line in removed] == gone
     assert len(after) == len(before)  # two lines out, two comment lines in
 
 

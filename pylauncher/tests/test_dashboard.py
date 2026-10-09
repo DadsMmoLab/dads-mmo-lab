@@ -2122,8 +2122,6 @@ def test_a_healthy_tortoise_world_is_up_and_its_log_is_not_read_again_once_ready
 
 def test_a_run_past_the_read_span_is_read_once_and_then_remembered(tmp_path: Path) -> None:
     asked: list[str] = []
-    watch = _tortoise_watch(
-        tmp_path, age=dashboard.READY_READ_SPAN * 2, log="quiet\n", asked=asked
-    )
+    watch = _tortoise_watch(tmp_path, age=dashboard.READY_READ_SPAN * 2, log="quiet\n", asked=asked)
     assert [watch.tick().ready for _ in range(3)] == [True] * 3
     assert len(asked) == 1

@@ -617,7 +617,7 @@ def _run_the_first(jobs: _Deferred, on_done: object) -> None:
     jobs.run(index)
 
 
-def test_a_world_stuck_at_a_failed_update_answers_fatal_at_once_with_the_file_and_the_error() -> None:
+def test_a_world_stuck_at_a_failed_update_answers_fatal_with_the_file_and_the_error() -> None:
     """T600: running, restarts 0, silent -- the shape that used to read `quiet` after 3 hours.
 
     The wait answers on its first look, and the words are the plain sentence naming the

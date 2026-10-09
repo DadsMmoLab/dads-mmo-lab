@@ -902,9 +902,9 @@ def _reads_update_failures(entry: CatalogEntry) -> bool:
     whose entry says so, has its start-up log read for it.
     """
     block = entry.install.native
-    fatal = block.ready.fatal if block is not None else None
-    if fatal is None:
+    if block is None or block.ready.fatal is None:
         return False
+    fatal = block.ready.fatal
     if not block.ready.regex:
         return fatal in update_failure.PROBE
     try:
