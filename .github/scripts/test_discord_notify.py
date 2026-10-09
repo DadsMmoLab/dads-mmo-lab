@@ -327,11 +327,15 @@ def test_release_summary_input_has_changelog_and_pr_titles(world):
     world.releases = [{"tag_name": "v1.1"}, {"tag_name": "v1.0"}]
     world.compare_commits = ["Add the Y button (#12)"]
     world.changelog = "## v1.1 - d\n- Raw line one\n"
+    world.claude = FakeClaude(text="## New:\n- A short summary.")
     assert dn.cmd_release("v1.1") == 0
     sent = world.claude.user_text()
     assert "Raw line one" in sent and "Add the Y button (#12)" in sent
     (post,) = world.discord("POST")
-    assert post[2]["embeds"][0]["description"] == "A short summary."
+    assert post[2]["embeds"][0]["description"] == (
+        "## New:\n- A short summary.\n"
+        "[Full changelog on GitHub](https://github.com/owner/repo/releases/tag/v1.1)"
+    )
     assert post[2]["embeds"][0]["url"].endswith("/releases/tag/v1.1")
 
 
@@ -937,11 +941,12 @@ def release_ready(world, monkeypatch, tag="v1.0", release_hook=RELEASE_WEBHOOK):
 
 def test_release_goes_to_both_channels_with_one_summary(world, monkeypatch):
     release_ready(world, monkeypatch)
+    world.claude = FakeClaude(text="## New:\n- A short summary.")
     assert dn.cmd_release("v1.0") == 0
     (main,) = world.discord("POST", hook="111")
     (second,) = world.discord("POST", hook="222")
     assert main[2]["embeds"] == second[2]["embeds"]
-    assert main[2]["embeds"][0]["description"] == "A short summary."
+    assert main[2]["embeds"][0]["description"].startswith("## New:\n- A short summary.\n")
     assert len(world.claude.requests) == 1
 
 
@@ -1251,3 +1256,225 @@ def test_a_release_with_no_pr_titles_still_sends_the_section_alone(world):
     assert dn.cmd_release("v1.1") == 0
     sent = world.claude.user_text()
     assert "Only line" in sent and "Pull requests merged" not in sent
+
+
+# --- T620: the release post is one "## New:" and one "## Fixes:" list -----------
+
+SAMPLE = (
+    "## v1.1 - d\n"
+    "### New\n"
+    "- **Alpha** is out for players.\n"
+    "- Beta works now\n"
+    "### Fixed\n"
+    "- Gamma no longer crashes\n"
+    "### Changed\n"
+    "- Delta behaves differently\n"
+    "## v1.0 - d\n- Old\n"
+)
+SAMPLE_SHAPE = (
+    "## New:\n"
+    "- **Alpha** is out for players.\n"
+    "- Beta works now\n"
+    "- Delta behaves differently\n"
+    "## Fixes:\n"
+    "- Gamma no longer crashes"
+)
+
+
+def release_desc(world, changelog=SAMPLE, claude=None):
+    world.releases = [{"tag_name": "v1.1"}, {"tag_name": "v1.0"}]
+    world.changelog = changelog
+    world.claude = claude or FakeClaude(stop_reason="refusal")
+    assert dn.cmd_release("v1.1") == 0
+    (post,) = world.discord("POST")
+    return post[2]["embeds"][0]["description"]
+
+
+def release_lists(world, changelog=SAMPLE, claude=None):
+    """The post without its last line, the link (which the link tests below pin)."""
+    desc = release_desc(world, changelog, claude)
+    body, link = desc.rsplit("\n", 1)
+    assert link.startswith("[Full changelog on GitHub](")
+    return body
+
+
+def test_the_post_is_the_changelog_built_into_new_and_fixes_with_changed_under_new(world):
+    assert release_lists(world) == SAMPLE_SHAPE
+
+
+def test_the_no_summary_path_builds_the_same_shape(world, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert release_lists(world, claude=FakeClaude()) == SAMPLE_SHAPE
+    assert world.claude.requests == []
+
+
+def test_a_well_formed_reply_from_claude_is_posted_as_it_is(world):
+    reply = "## New:\n- Alpha for players\n## Fixes:\n- Gamma crash gone"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == reply
+
+
+def test_a_section_over_six_bullets_is_cut_to_six_in_the_changelogs_order(world):
+    items = "".join(f"- item {n}\n" for n in range(1, 10))
+    desc = release_lists(world, f"## v1.1 - d\n### New\n{items}### Fixed\n{items}")
+    new, fixes = desc.split("\n## Fixes:\n")
+    assert new.splitlines() == ["## New:"] + [f"- item {n}" for n in range(1, 7)]
+    assert fixes.splitlines() == [f"- item {n}" for n in range(1, 7)]
+
+
+def test_a_bullet_over_ninety_characters_is_cut_to_ninety_with_an_ellipsis(world):
+    long = "w" * 200
+    desc = release_lists(world, f"## v1.1 - d\n### New\n- {long}\n- {'s' * 90}\n")
+    cut, whole = desc.splitlines()[1:]
+    assert cut == "- " + "w" * 89 + "…"
+    assert whole == "- " + "s" * 90
+
+
+def test_claudes_overlong_list_is_cut_to_the_same_limits_not_thrown_away(world):
+    reply = "## New:\n" + "".join(f"- {'n' * 150} {n}\n" for n in range(9))
+    desc = release_lists(world, claude=FakeClaude(text=reply.strip()))
+    lines = desc.splitlines()
+    assert lines[0] == "## New:" and len(lines) == 7
+    assert all(len(line) - 2 <= 90 for line in lines[1:])
+    assert lines[1].startswith("- nnnn")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "This release adds Alpha and fixes Gamma.",
+        "Here is the summary:\n## New:\n- Alpha",
+        "## New:\n- Alpha\nThat is all.",
+        "## New:\n1. Alpha\n2. Beta",
+        "## New:\n* Alpha",
+        "### New:\n- Alpha",
+        "## New\n- Alpha",
+        "## Fixed:\n- Alpha",
+        "## Fixes:\n- Gamma\n## New:\n- Alpha",
+        "## New:\n- Alpha\n## New:\n- Beta",
+        "- Alpha\n- Beta",
+        "## New:\n- ",
+        "",
+    ],
+    ids=[
+        "prose",
+        "intro line",
+        "outro line",
+        "numbered",
+        "star bullets",
+        "h3 heading",
+        "no colon",
+        "wrong heading",
+        "wrong order",
+        "heading twice",
+        "no heading",
+        "empty bullet",
+        "empty",
+    ],
+)
+def test_a_reply_that_is_not_in_the_shape_is_replaced_by_the_built_shape(world, reply):
+    assert release_lists(world, claude=FakeClaude(text=reply)) == SAMPLE_SHAPE
+
+
+def test_blank_lines_in_claudes_reply_are_squeezed_out(world):
+    reply = "## New:\n- Alpha\n\n## Fixes:\n\n- Gamma\n"
+    desc = release_lists(world, claude=FakeClaude(text=reply))
+    assert desc == "## New:\n- Alpha\n## Fixes:\n- Gamma"
+
+
+def test_an_empty_fixes_section_is_left_out(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- Alpha\n### Fixed\n")
+    assert desc == "## New:\n- Alpha"
+
+
+def test_an_empty_new_section_is_left_out(world):
+    desc = release_lists(world, "## v1.1 - d\n### Fixed\n- Gamma\n")
+    assert desc == "## Fixes:\n- Gamma"
+
+
+def test_a_heading_claude_left_empty_is_dropped(world):
+    reply = "## New:\n- Alpha\n## Fixes:"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha"
+
+
+def test_bare_bullets_with_no_heading_count_as_new(world):
+    assert release_lists(world, "## v1.1 - d\n- A change\n") == "## New:\n- A change"
+
+
+def test_the_prompt_asks_for_the_shape_and_still_forbids_links(world):
+    release_lists(world, claude=FakeClaude())
+    system = world.claude.requests[0]["system"]
+    assert "## New:" in system and "## Fixes:" in system
+    assert "6" in system and "90" in system
+    assert "no links" in system
+
+
+def test_pr_and_issue_summaries_are_untouched_by_the_shape(world):
+    set_event(world, push_event("a"))
+    world.pulls["00" + "a" * 38] = [a_pr()]
+    world.claude = FakeClaude(text="Plain sentence, not a list.")
+    assert dn.cmd_merged() == 0
+    (post,) = world.discord("POST")
+    assert post[2]["embeds"][0]["description"] == "Plain sentence, not a list."
+    assert "no headings" in world.claude.requests[0]["system"]
+
+
+# --- T620: the post ends with a link to the release page ---------------------------
+
+CHANGELOG_LINK = "[Full changelog on GitHub](https://github.com/owner/repo/releases/tag/v1.1)"
+
+
+def test_the_post_ends_with_the_full_changelog_link_after_the_lists(world):
+    assert release_desc(world) == SAMPLE_SHAPE + "\n" + CHANGELOG_LINK
+
+
+def test_the_link_is_on_a_claude_summary_too(world):
+    reply = "## New:\n- Alpha\n## Fixes:\n- Gamma"
+    assert release_desc(world, claude=FakeClaude(text=reply)) == reply + "\n" + CHANGELOG_LINK
+
+
+def test_the_link_is_on_the_fallbacks_down_to_the_one_plain_sentence(world):
+    world.releases = [{"tag_name": "v1.1"}]
+    world.changelog = ""
+    world.claude = FakeClaude(stop_reason="refusal")
+    assert dn.cmd_release("v1.1") == 0
+    (post,) = world.discord("POST")
+    desc = post[2]["embeds"][0]["description"]
+    assert desc.endswith("\n" + CHANGELOG_LINK)
+    assert desc.startswith("A new release is out.") or desc.startswith("## ")
+
+
+def test_the_link_is_the_same_in_both_channels(world, monkeypatch):
+    release_ready(world, monkeypatch)
+    assert dn.cmd_release("v1.0") == 0
+    (main,) = world.discord("POST", hook="111")
+    (second,) = world.discord("POST", hook="222")
+    for post in (main, second):
+        assert post[2]["embeds"][0]["description"].endswith(
+            "\n[Full changelog on GitHub](https://github.com/owner/repo/releases/tag/v1.0)"
+        )
+
+
+def test_the_tag_in_the_link_is_url_quoted(world):
+    world.releases = [{"tag_name": "v1 beta+2"}]
+    world.changelog = "## v1 beta+2 - d\n- A change\n"
+    assert dn.cmd_release("v1 beta+2") == 0
+    (post,) = world.discord("POST")
+    assert post[2]["embeds"][0]["description"].endswith(
+        "(https://github.com/owner/repo/releases/tag/v1%20beta%2B2)"
+    )
+
+
+def test_when_the_limit_bites_bullets_go_and_the_link_stays(world, monkeypatch):
+    monkeypatch.setattr(dn, "EMBED_DESC_MAX", 200)
+    items = "".join(f"- {'x' * 80} {n}\n" for n in range(6))
+    desc = release_desc(world, f"## v1.1 - d\n### New\n{items}")
+    assert len(desc) <= 200
+    assert desc.endswith(CHANGELOG_LINK)
+    assert desc.splitlines()[:2] == ["## New:", "- " + "x" * 80 + " 0"]
+    assert desc.count("\n- ") == 1
+
+
+def test_a_heading_is_not_left_over_a_list_that_lost_all_its_bullets(world, monkeypatch):
+    monkeypatch.setattr(dn, "EMBED_DESC_MAX", 130)
+    desc = release_desc(world, f"## v1.1 - d\n### New\n- {'x' * 80}\n### Fixed\n- {'y' * 80}\n")
+    assert desc == CHANGELOG_LINK
