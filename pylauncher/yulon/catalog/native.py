@@ -4877,9 +4877,9 @@ def _git_changed_files(
     return git.ContainerGit().changed_files(dest, old, new, paths)
 
 
-def _git_sql_files(dest: Path, rev: str, folder: str) -> dict[str, str] | None:
-    """`{name: SHA-1}` of the `*.sql` straight inside `folder` at `rev`, containerised (T632)."""
-    return git.ContainerGit().sql_files(dest, rev, folder)
+def _git_tree_files(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+    """`{repository path: bytes}` of the files under `path` at `rev`, containerised (T632)."""
+    return git.ContainerGit().tree_files(dest, rev, path)
 
 
 def _git_changed_lines(dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
@@ -6197,12 +6197,13 @@ class Seams:
     the commit a checkout moved from and the one it landed on -- before it lets
     the compile start. `None` is git that could not say, which the route refuses.
     """
-    sql_files: Callable[[Path, str, str], dict[str, str] | None] = _git_sql_files
-    """T632: `{name: upper-case SHA-1}` of the `*.sql` straight inside a folder at a commit.
+    tree_files: Callable[[Path, str, str], dict[str, bytes] | None] = _git_tree_files
+    """T632: `{repository path: bytes}` of the files under a path (file or folder) at a commit.
 
-    Read from git's tree at that commit, never from disk; `{}` is a folder the commit does
-    not have, `None` is git that could not say. What Tortoise's Return asks about both
-    commits to find the migrations its databases' `migrations` table keys by hash.
+    Read from git's tree at that commit, never from disk; `{}` is a path the commit does not
+    have, `None` is git that could not say. What Tortoise's Return asks about both commits
+    to hash the migration files its databases' `migrations` table keys by hash, and to
+    read the module's own install rules for where they go.
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
@@ -6611,7 +6612,7 @@ class Seams:
             commits_since=repo.commits_since,
             restore_rev=repo.restore_rev,
             changed_files=repo.changed_files,
-            sql_files=repo.sql_files,
+            tree_files=repo.tree_files,
             changed_lines=repo.changed_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),

@@ -710,8 +710,8 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
         lambda argv, **_kw: seen.append(argv) or subprocess.CompletedProcess(argv, 0, b"", b""),
     )
     ran = len(seen)
-    native._git_sql_files(dest, "a" * 40, "sql/database_updates/world")
-    assert len(seen) == ran + 1, "the sql-files route reached a container"
+    native._git_tree_files(dest, "a" * 40, "sql/database_updates/world")
+    assert len(seen) == ran + 1, "the tree-files route reached a container"
     native.Seams()
 
     assert made == [{}] * 12, "a production ContainerGit that carries a seam is not bare"

@@ -10,7 +10,7 @@ database whether it holds a hash the target does not ship, before anything is bu
 stopped or copied.
 
 Every test drives the real `update_to_latest(to_pin=True)` on an installed Tortoise
-folder, with git's trees at the `sql_files` seam and the `migrations` ledger at the
+folder, with git's trees at the `tree_files` seam and the `migrations` ledger at the
 `sql_query` seam of `tests.support_native.Recorder`.
 """
 
@@ -42,7 +42,20 @@ CORE_WORLD = "sql/database_updates/world"
 CORE_AUTH = "sql/database_updates/auth"
 CORE_CHAR = "sql/database_updates/character"
 BOTS_WORLD = "data/sql/world"
-BOTS_AUTH = "data/sql/auth"
+BOTS_CHAR = "data/sql/char"
+"""TortoiseBots keeps its character migrations here; the image gets them as `data/sql/character`."""
+BOTS_CMAKE = "TortoiseBots.cmake"
+CMAKE = b"""
+  if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/world")
+    install(DIRECTORY "${TORTOISEBOTS_ROOT}/data/sql/world/"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/world")
+  endif()
+  if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/char")
+    install(DIRECTORY "${TORTOISEBOTS_ROOT}/data/sql/char/"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/character")
+  endif()
+"""
+"""The module's own install rules, as `TortoiseBots.cmake` states them."""
 
 NEWER = b"INSERT INTO `t` VALUES (2);\n"
 NEWER_NAME = "20261001120000_world.sql"
@@ -82,10 +95,12 @@ def _ready(tmp_path: Path) -> tuple[Recorder, Path, native.StagedInstaller]:
     rec, server_dir, made = _cmangos(tmp_path, TORTOISE)
     made._snapshot = FakeSnapshot(rec)  # type: ignore[attr-defined]
     # Both commits ship the one old file; the target has nothing newer.
-    for source, folder, name in ((CORE, CORE_WORLD, OLDER_NAME),):
-        dest = server_dir / source.dest
-        rec.trees[(dest, OLD, folder)] = {name: OLDER}
-        rec.trees[(dest, source.rev or "", folder)] = {name: OLDER}
+    dest = server_dir / CORE.dest
+    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    bots = server_dir / BOTS.dest
+    for rev in (OLD, BOTS_PIN):
+        rec.blobs[(bots, rev, BOTS_CMAKE)] = CMAKE
     return rec, server_dir, made
 
 
@@ -181,6 +196,11 @@ def test_a_changed_migration_counts_as_one_the_target_lacks(tmp_path: Path) -> N
     ran = b"-- the bytes the server ran\n"
     rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: ran}
     rec.migrations["tw_world"] = f":{_hash(ran)}\n"
+    # The target ships a newer file too, and the old name with other bytes.
+    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {
+        OLDER_NAME: b"-- new bytes\n",
+        "20261201000000_world.sql": b"x",
+    }
 
     _said, raised = _return(made, server_dir)
 
@@ -445,6 +465,159 @@ def test_with_no_copy_it_says_the_way_back_is_closed(tmp_path: Path) -> None:
     assert "Restoring loses" not in message
 
 
+# -- the real TortoiseBots layout, the sed'd file, deleted-upstream (cold review) --------------
+
+
+CHAR_NAME = "20260929100000_char.sql"
+CHAR = b"ALTER TABLE `bot_state` ADD COLUMN `z` INT;\n"
+
+
+def test_a_module_character_migration_is_read_from_the_folder_its_install_rule_names(
+    tmp_path: Path,
+) -> None:
+    """TortoiseBots keeps `data/sql/char`; the image's `data/sql/character` is not in the repo."""
+    rec, server_dir, made = _ready(tmp_path)
+    rec.trees[(server_dir / BOTS.dest, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None, "a character migration slipped through because the folder differs"
+    message = str(raised)
+    assert (
+        f"tw_char has 1 migration the tested commit does not have (TortoiseBots/{CHAR_NAME})"
+        in (message)
+    ), (message)
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
+
+
+def test_the_install_rule_is_read_at_each_commit(tmp_path: Path) -> None:
+    """The target's own rules decide where ITS files are; a rule the old commit lacks counts."""
+    rec, server_dir, made = _ready(tmp_path)
+    bots = server_dir / BOTS.dest
+    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
+    # The target ships the same bytes, but its rules install nothing from `char`.
+    rec.trees[(bots, BOTS_PIN, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.split(
+        b'if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/char")'
+    )[0]
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "tw_char has 1 migration" in str(raised)
+
+
+@pytest.mark.parametrize("rev", ["old", "target"])
+def test_a_module_with_sql_and_no_install_rule_refuses(tmp_path: Path, rev: str) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    bots = server_dir / BOTS.dest
+    at = OLD if rev == "old" else BOTS_PIN
+    rec.blobs[(bots, at, BOTS_CMAKE)] = b"# nothing installs data/sql here\n"
+    rec.trees[(bots, at, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None
+    assert "TortoiseBots.cmake at" in str(raised) and "does not say where" in str(raised)
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
+
+
+def test_a_module_cmake_git_cannot_read_refuses(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    del rec.blobs[(server_dir / BOTS.dest, OLD, BOTS_CMAKE)]
+    rec.trees[(server_dir / BOTS.dest, OLD, BOTS_CMAKE)] = None
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "git could not list TortoiseBots.cmake" in str(raised)
+
+
+def test_a_database_the_check_started_goes_down_again_when_nothing_was_applied(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _core_newer(rec, server_dir, applied=False)
+    rec.migrations["tw_world"] = f":{_hash(OLDER)}\n"
+    rec.db_up = False
+
+    said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert any(call.startswith("stop-db:") for call in rec.calls), rec.calls
+    assert any("None of them was applied" in line for line in said)
+
+
+def test_a_database_that_was_up_stays_up_when_nothing_was_applied(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _core_newer(rec, server_dir, applied=False)
+    rec.migrations["tw_world"] = f":{_hash(OLDER)}\n"
+    rec.db_up = True
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert not any(call.startswith("stop-db:") for call in rec.calls), rec.calls
+
+
+def test_a_migration_upstream_deleted_is_older_than_the_target_not_newer(tmp_path: Path) -> None:
+    """A forward Return over a squash: the old commit's file is gone from the target, applied long ago."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    gone = b"-- deleted upstream\n"
+    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260601000000_world.sql": gone}
+    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER, "20261101000000_world.sql": b"x"}
+    rec.migrations["tw_world"] = f":{_hash(gone)}\n:{_hash(OLDER)}\n"
+
+    said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert not _asked(rec), "an old migration upstream deleted was asked about as if it were newer"
+
+
+def test_a_deleted_migration_that_sorts_after_the_target_is_still_newer(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    key = _core_newer(rec, server_dir)
+    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None, key
+
+
+def test_an_undated_deleted_migration_is_never_skipped_for_sorting(tmp_path: Path) -> None:
+    """The date shortcut needs both names to follow the dated pattern."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    odd = b"-- odd name\n"
+    rec.trees[(dest, OLD, CORE_WORLD)] = {"0aaa_odd.sql": odd}
+    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.migrations["tw_world"] = f":{_hash(odd)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "0aaa_odd.sql" in str(raised)
+
+
+def test_the_world_file_the_image_rewrites_is_asked_by_its_rewritten_hash(tmp_path: Path) -> None:
+    """The Dockerfile's `sed` rewrites `INSERT INTO` to `INSERT IGNORE INTO`; the database holds that."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    original = b"INSERT INTO `t` VALUES (7);\n  INSERT INTO `u` VALUES (8);\n"
+    rewritten = b"INSERT IGNORE INTO `t` VALUES (7);\n  INSERT IGNORE INTO `u` VALUES (8);\n"
+    rec.trees[(dest, OLD, CORE_WORLD)] = {"20260903063722_world.sql": original}
+    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {}
+    rec.migrations["tw_world"] = f":{_hash(rewritten)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None, "the rewritten copy's hash was never asked about"
+    assert (
+        "tw_world has 1 migration the tested commit does not have (20260903063722_world.sql)"
+        in (str(raised))
+    )
+
+
 # -- when it is not asked -------------------------------------------------------------------
 
 
@@ -455,7 +628,7 @@ def test_an_update_to_latest_is_not_asked(tmp_path: Path) -> None:
     _said, raised = _return(made, server_dir, to_pin=False)
 
     assert raised is None, raised
-    assert not any(call.startswith("sql-files:") for call in rec.calls)
+    assert not any(call.startswith("tree-files:") for call in rec.calls)
     assert not _asked(rec)
 
 
@@ -475,7 +648,7 @@ def test_a_family_whose_conf_has_no_auto_updater_is_not_asked(tmp_path: Path) ->
     """TBC's `refuse_new` already refuses a move that touches core migrations."""
     rec, server_dir, made = _cmangos(tmp_path, TBC)
     _said, raised = _return(made, server_dir)
-    assert not any(call.startswith("sql-files:") for call in rec.calls)
+    assert not any(call.startswith("tree-files:") for call in rec.calls)
     assert "database migrations" not in str(raised), raised
 
 
@@ -527,18 +700,11 @@ def _tar(files: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
-def test_the_tar_is_hashed_byte_for_byte_straight_inside_the_folder() -> None:
+def test_the_tar_is_read_byte_for_byte() -> None:
     crlf = b"SELECT 1;\r\nSELECT 2;\r\n"
-    raw = _tar(
-        {
-            "sql/u/a.sql": crlf,
-            "sql/u/b.txt": b"no",
-            "sql/u/sub/c.sql": b"nested",
-            "sql/other/d.sql": b"elsewhere",
-        }
-    )
-    assert git.parse_sql_files(raw, "sql/u") == {"a.sql": _hash(crlf)}
-    assert git.parse_sql_files(b"not a tar", "sql/u") is None
+    raw = _tar({"sql/u/a.sql": crlf, "sql/u/sub/c.sql": b"nested"})
+    assert git.parse_tree_files(raw) == {"sql/u/a.sql": crlf, "sql/u/sub/c.sql": b"nested"}
+    assert git.parse_tree_files(b"not a tar") is None
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -565,7 +731,8 @@ def test_real_git_lists_a_commits_files_not_the_disks(tmp_path: Path) -> None:
     (folder / "a.sql").write_bytes(b"edited on disk")
 
     impl = git.RunnerGit()
-    assert impl.sql_files(repo, first, "sql/u") == {"a.sql": _hash(b"one\r\n")}
-    assert impl.sql_files(repo, first, "sql/none") == {}
-    assert impl.sql_files(repo, "f" * 40, "sql/u") is None
-    assert impl.sql_files(tmp_path, first, "sql/u") is None
+    assert impl.tree_files(repo, first, "sql/u") == {"sql/u/a.sql": b"one\r\n"}
+    assert impl.tree_files(repo, first, "sql/u/a.sql") == {"sql/u/a.sql": b"one\r\n"}
+    assert impl.tree_files(repo, first, "sql/none") == {}
+    assert impl.tree_files(repo, "f" * 40, "sql/u") is None
+    assert impl.tree_files(tmp_path, first, "sql/u") is None

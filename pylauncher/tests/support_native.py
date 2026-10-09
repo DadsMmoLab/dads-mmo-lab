@@ -20,7 +20,6 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import subprocess
@@ -403,6 +402,9 @@ class Recorder:
     folder not named is a folder that commit does not have.
     """
 
+    blobs: dict[tuple[Path, str, str], bytes] = field(default_factory=dict)
+    """T632: a single file at `(checkout, commit, path)` for `tree_files()`: its bytes."""
+
     db_up: bool = False
     """T632: whether the database container is up when the route asks (`db_running`)."""
 
@@ -590,12 +592,27 @@ class Recorder:
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
 
-    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
-        self.calls.append(f"sql-files:{dest.name}:{rev[:7]}:{folder}")
-        files = self.trees.get((dest, rev, folder), {})
-        if files is None:
-            return None
-        return {name: hashlib.sha1(data).hexdigest().upper() for name, data in files.items()}
+    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}:{path}")
+        found: dict[str, bytes] = {}
+        for (where, at, folder), files in {**self.trees, **self.blobs}.items():
+            if where != dest or at != rev:
+                continue
+            inside = (
+                folder == path or folder.startswith(f"{path}/") or path.startswith(f"{folder}/")
+            )
+            if folder == path and files is None:
+                return None
+            if not inside or files is None:
+                continue
+            if isinstance(files, bytes):
+                found[folder] = files
+                continue
+            for name, data in files.items():
+                full = f"{folder}/{name}"
+                if full == path or full.startswith(f"{path}/"):
+                    found[full] = data
+        return found
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
@@ -912,7 +929,7 @@ class Recorder:
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
-            sql_files=self.sql_files,
+            tree_files=self.tree_files,
             db_running=lambda container: self.db_up,
             stop_db=lambda containers: self.calls.append(f"stop-db:{','.join(containers)}"),
             changed_lines=self.changed_lines,

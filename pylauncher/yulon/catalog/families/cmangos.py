@@ -64,6 +64,7 @@ rot; the mutation run above is how they were re-checked rather than re-copied.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import posixpath
 import queue
@@ -138,6 +139,14 @@ def _listed(items: Sequence[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+def _hashes_of(data: bytes, *, edited: bool) -> tuple[str, ...]:
+    """Upper-case SHA-1 of a migration file's bytes, and of the image's rewritten copy (T632)."""
+    spellings = [data]
+    if edited:
+        spellings.append(INSERT_IGNORE.sub(rb"\1INSERT IGNORE INTO", data))
+    return tuple(dict.fromkeys(hashlib.sha1(one).hexdigest().upper() for one in spellings))
+
+
 def updates_unread_sentence(source: str, why: str) -> str:
     """The fail-closed refusal: git or the database could not say (T632, T630's shape)."""
     return (
@@ -147,26 +156,25 @@ def updates_unread_sentence(source: str, why: str) -> str:
 
 
 def newer_migrations_refusal(
-    applied: Mapping[str, Sequence[str]],
-    labels: Mapping[str, Mapping[str, str]],
+    applied: Mapping[str, Mapping[str, Sequence[str]]],
     copies: Mapping[str, Path | None],
 ) -> str:
     """Why "Return to the tested pin…" stopped on Tortoise: the databases are ahead (T632).
 
-    `applied` is, per database, the `<module>:<hash>` keys its `migrations` table holds that
-    the tested commit does not ship; `labels` names each key's file; `copies` is the dump
+    `applied` is, per database, the files whose migration its `migrations` table holds that
+    the tested commit does not ship (file label -> the held hashes); `copies` is the dump
     `snapshot.copy_from_before_migrations()` found per database, or None.
     """
     each = []
-    for schema, keys in applied.items():
-        names = [labels[schema][key] for key in keys]
+    for schema, files in applied.items():
+        names = list(files)
         shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
         each.append(
-            f"{schema} has {len(keys)} migration{'' if len(keys) == 1 else 's'} the tested "
+            f"{schema} has {len(names)} migration{'' if len(names) == 1 else 's'} the tested "
             f"commit does not have ({shown})"
         )
     databases = list(applied)
-    total = sum(len(keys) for keys in applied.values())
+    total = sum(len(files) for files in applied.values())
     those = "that migration" if total == 1 else "those migrations"
     head = (
         "Going back to the commit this app was tested against would start the older server "
@@ -183,17 +191,36 @@ def newer_migrations_refusal(
             "server's backups folder, so this server cannot go back to the tested commit: keep "
             f"the build you have ({latest} keeps it current)."
         )
-    files = _listed([f"{path.parent.name}/{path.name}" for path in copies.values() if path])
+    dumps = _listed([f"{path.parent.name}/{path.name}" for path in copies.values() if path])
     back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
     one = len(databases) == 1
     return (
         f"{head} To go back, first put {_listed(databases)} back as "
         f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
-        f"restore {files} on Maintenance (it works with the server stopped), then press "
+        f"restore {dumps} on Maintenance (it works with the server stopped), then press "
         f"{back} again without starting the server in between, since a start would apply "
         f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
         "copy was taken."
     )
+
+
+MODULE_INSTALL_RULE = re.compile(
+    r"install\(\s*DIRECTORY\s+\"[^\"]*/data/sql/(?P<src>[\w.-]+)/?\"\s+"
+    r"DESTINATION\s+\"[^\"]*/data/sql/(?P<dst>[\w.-]+)\"\s*\)",
+    re.IGNORECASE,
+)
+"""A module's `install(DIRECTORY .../data/sql/<repo folder>/ DESTINATION .../data/sql/<image>)`.
+
+The folder the AutoUpdater reads inside the image is the DESTINATION's; the module's repository
+holds it under the source's name (TortoiseBots keeps `data/sql/char` and installs it as
+`data/sql/character`), so the files to hash are the source's (T632)."""
+
+DATED_MIGRATION = re.compile(r"^\d{14}_")
+"""A migration named for the second it was made, `20260903063722_world.sql`: names sort by date."""
+
+INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
+"""What the image's build rewrites in one core world file (`Dockerfile.tmpl`, the `sed` before
+the runtime stage): its database hash is the rewritten copy's, so both spellings are asked."""
 
 
 CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
@@ -549,7 +576,7 @@ class CmangosInstaller(StagedInstaller):
         lacked = self._migrations_the_target_lacks(moved)
         if not lacked:
             return
-        count = sum(len(keys) for keys in lacked.values())
+        count = sum(len(files) for files in lacked.values())
         yield (
             f"The tested commit does not ship {count} database migration"
             f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
@@ -563,26 +590,27 @@ class CmangosInstaller(StagedInstaller):
             was_up = None
         try:
             applied = self._migrations_applied(server_dir, lacked)
-            if not applied:
-                yield "None of them was applied, so the older server can start on your databases."
-                return
-            backups = server_dir / snapshot.BACKUPS_FOLDER
-            copies = {
-                schema: snapshot.copy_from_before_migrations(
-                    backups,
-                    schema,
-                    [key.partition(":")[2] for key in found],
-                    self._of_this_game,
-                )
-                for schema, found in applied.items()
-            }
-            by_schema = {self.entry.schema_map()[role]: keys for role, keys in lacked.items()}
-            raise InstallerError(newer_migrations_refusal(applied, by_schema, copies))
+            if applied:
+                backups = server_dir / snapshot.BACKUPS_FOLDER
+                copies = {
+                    schema: snapshot.copy_from_before_migrations(
+                        backups,
+                        schema,
+                        [h for hashes in found.values() for h in hashes],
+                        self._of_this_game,
+                    )
+                    for schema, found in applied.items()
+                }
+                raise InstallerError(newer_migrations_refusal(applied, copies))
         except BaseException:
             # What this press started it puts back, as the adopt press does.
             if was_up is False:
                 logger.info(self._stop_the_database_again(container))
             raise
+        # The check passed: the same, so a press that goes on finds the database as it was.
+        if was_up is False:
+            logger.info(self._stop_the_database_again(container))
+        yield "None of them was applied, so the older server can start on your databases."
 
     def _of_this_game(self, backup: Path) -> bool:
         """T603's check on a copy the refusal would name: it records this game, or none.
@@ -606,23 +634,53 @@ class CmangosInstaller(StagedInstaller):
                 return value.strip().strip('"')
         return None
 
-    def _update_folders(self, source: EmulatorSource, core: bool) -> dict[Db, tuple[str, str]]:
-        """Per database: (module name, folder inside `source`'s own repository) the updater reads.
-
-        The core's are `Database.AutoUpdate.Path` (inside the image, under
-        `IMAGE_TREE`) plus the folder names the conf gives; a module's are
-        `data/sql/<folder name>` and the key carries the module's directory name
-        (`ProcessModuleUpdates()`).
-        """
-        names = {
-            role: self._conf_value(key)
-            for role, key in (
-                ("auth", "Database.AutoUpdate.AuthUpdateName"),
-                ("characters", "Database.AutoUpdate.CharUpdateName"),
-                ("world", "Database.AutoUpdate.WorldUpdateName"),
+    def _tree(self, dest: Path, rev: str, path: str, *, what: str) -> dict[str, bytes]:
+        """Git's files under `path` at `rev`, or the fail-closed refusal when git cannot say."""
+        found = self._seams.tree_files(dest, rev, path)
+        if found is None:
+            raise InstallerError(
+                updates_unread_sentence(
+                    f"going back takes away in {what}",
+                    f"git could not list {path} at {rev[:7]}",
+                )
             )
-        }
+        return found
+
+    def _folder_names(self) -> dict[Db, str]:
+        """The three folder names the updater reads, from the conf; a catalog error if absent."""
+        names: dict[Db, str] = {}
+        for role, key in (
+            ("auth", "Database.AutoUpdate.AuthUpdateName"),
+            ("characters", "Database.AutoUpdate.CharUpdateName"),
+            ("world", "Database.AutoUpdate.WorldUpdateName"),
+        ):
+            value = self._conf_value(key)
+            if value is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "going back takes away",
+                        "the catalog does not name this server's migration folders",
+                    )
+                )
+            names[role] = value  # type: ignore[index]
+        return names
+
+    def _migrations_at(
+        self, source: EmulatorSource, dest: Path, rev: str, *, core: bool
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file name: the hashes the database may hold for it}` at `rev`.
+
+        The core's files are `Database.AutoUpdate.Path`'s folders inside its own tree. A
+        module's are wherever ITS install rules put them (`MODULE_INSTALL_RULE`, read from
+        `<module>.cmake` at that same commit): TortoiseBots keeps `data/sql/char` and the
+        image gets it as `data/sql/character`, so reading the configured name from the
+        repository finds nothing. A module with files under `data/sql` and no install rule
+        that says where they go is not read, so it refuses.
+        """
+        what = source.repo
+        names = self._folder_names()
         base = self._conf_value("Database.AutoUpdate.Path")
+        where: dict[Db, str | None] = {}
         if core:
             inside = IMAGE_TREE.match(base) if base is not None else None
             if inside is None:
@@ -633,35 +691,54 @@ class CmangosInstaller(StagedInstaller):
                     )
                 )
             root = inside["inside"].strip("/")
-            module = ""
+            where = {role: f"{root}/{name}" for role, name in names.items()}
         else:
-            root = "data/sql"
             module = posixpath.basename(source.dest.rstrip("/"))
-        folders: dict[Db, tuple[str, str]] = {}
-        for role, name in names.items():
-            if name is None:
-                raise InstallerError(
-                    updates_unread_sentence(
-                        "going back takes away",
-                        "the catalog does not name this server's migration folders",
+            text = self._tree(dest, rev, f"{module}.cmake", what=what).get(f"{module}.cmake", b"")
+            rules = {
+                m["dst"]: m["src"]
+                for m in MODULE_INSTALL_RULE.finditer(text.decode("utf-8", "replace"))
+            }
+            if not rules:
+                every = self._tree(dest, rev, "data/sql", what=what)
+                if any(path.endswith(".sql") for path in every):
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} does not say where its migrations "
+                            "are installed",
+                        )
                     )
-                )
-            folders[role] = (module, f"{root}/{name}")  # type: ignore[index]
-        return folders
+            where = {
+                role: (f"data/sql/{rules[name]}" if name in rules else None)
+                for role, name in names.items()
+            }
+        found: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for role, folder in where.items():
+            files = self._tree(dest, rev, folder, what=what) if folder else {}
+            found[role] = {
+                posixpath.basename(path): _hashes_of(data, edited=core)
+                for path, data in files.items()
+                if posixpath.dirname(path) == folder and path.endswith(".sql")
+            }
+        return found
 
     def _migrations_the_target_lacks(
         self, moved: Sequence[tuple[EmulatorSource, Path, str]]
-    ) -> dict[Db, dict[str, str]]:
-        """Per database, `{key: file label}` the running commit has and the target lacks.
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file label: its keys}` the running commit has and the target lacks.
 
         Both lists come from git's tree at each commit (never from disk, where an untracked
         or edited copy hides a removal), per source and per database folder. A key is
         `<module>:<SHA-1>`, so the same bytes under the same module and database count as
         shipped by the target whatever the file is now called; the same bytes in another
-        module's or database's folder do not.
+        module's or database's folder do not. Only a file present at the running commit
+        counts, and a dated one that upstream deleted (the target does not carry its name)
+        and that sorts before the newest dated name the target ships is older than the
+        target, not newer (a Return that moves forward over a squash).
         """
         sources = self.entry.emulator.sources
-        lacked: dict[Db, dict[str, str]] = {}
+        lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
         for source, dest, old in moved:
             new = self._seams.head_sha(dest)
             if new is None:
@@ -672,32 +749,34 @@ class CmangosInstaller(StagedInstaller):
                 )
             if new == old:
                 continue
-            nested = any(
+            core = not any(
                 source.dest.startswith(f"{other.dest.rstrip('/')}/modules/")
                 for other in sources
                 if other is not source
             )
-            for role, (module, folder) in self._update_folders(source, not nested).items():
-                before = self._seams.sql_files(dest, old, folder)
-                after = self._seams.sql_files(dest, new, folder)
-                if before is None or after is None:
-                    raise InstallerError(
-                        updates_unread_sentence(
-                            f"going back takes away in {source.repo}",
-                            f"git could not list {folder} at {old[:7]} and {new[:7]}",
-                        )
+            module = "" if core else posixpath.basename(source.dest.rstrip("/"))
+            before = self._migrations_at(source, dest, old, core=core)
+            after = self._migrations_at(source, dest, new, core=core)
+            for role, files in before.items():
+                shipped = {h for hashes in after[role].values() for h in hashes}
+                dated = [n for n in after[role] if DATED_MIGRATION.match(n)]
+                newest = max(dated, default="")
+                for name, hashes in files.items():
+                    if shipped.intersection(hashes):
+                        continue
+                    older = (
+                        name not in after[role] and DATED_MIGRATION.match(name) and name < newest
                     )
-                shipped = set(after.values())
-                for name, digest in before.items():
-                    if digest not in shipped:
-                        label = f"{module}/{name}" if module else name
-                        lacked.setdefault(role, {})[f"{module}:{digest}"] = label
+                    if older:
+                        continue
+                    label = f"{module}/{name}" if module else name
+                    lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)
         return lacked
 
     def _migrations_applied(
-        self, server_dir: Path, lacked: Mapping[Db, Mapping[str, str]]
-    ) -> dict[str, tuple[str, ...]]:
-        """Per schema, which lacked keys its `migrations` table holds; only those holding any.
+        self, server_dir: Path, lacked: Mapping[Db, Mapping[str, tuple[str, ...]]]
+    ) -> dict[str, dict[str, tuple[str, ...]]]:
+        """Per schema, which lacked files its `migrations` table holds (label -> held hashes).
 
         The database is brought up alone (a stopped server has it down), never the world:
         a start would run the updater. A table that does not exist holds none; a database
@@ -717,10 +796,10 @@ class CmangosInstaller(StagedInstaller):
         client = self._native().db.client
         schemas = self.entry.schema_map()
         ask = self._query_seam()
-        applied: dict[str, tuple[str, ...]] = {}
-        for role, keys in lacked.items():
+        applied: dict[str, dict[str, tuple[str, ...]]] = {}
+        for role, files in lacked.items():
             schema = schemas[role]
-            digests = sorted({key.partition(":")[2] for key in keys})
+            digests = sorted({key.partition(":")[2] for keys in files.values() for key in keys})
             quoted = ", ".join(f"'{digest}'" for digest in digests)
             try:
                 if not ask(spec.db, client, password, schema, MIGRATIONS_TABLE_QUESTION).strip():
@@ -734,7 +813,11 @@ class CmangosInstaller(StagedInstaller):
                     )
                 ) from exc
             held = {line.strip().upper() for line in rows.splitlines() if line.strip()}
-            found = tuple(key for key in keys if key.upper() in held)
+            found = {
+                label: tuple(key.partition(":")[2] for key in keys if key.upper() in held)
+                for label, keys in files.items()
+            }
+            found = {label: hashes for label, hashes in found.items() if hashes}
             if found:
                 applied[schema] = found
         return applied

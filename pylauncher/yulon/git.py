@@ -29,7 +29,6 @@ Two traps are baked in here rather than left for each caller to remember:
 from __future__ import annotations
 
 import enum
-import hashlib
 import io
 import os
 import re
@@ -927,29 +926,27 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
-def sql_files_args(rev: str, folder: str) -> list[str]:
-    """`git archive --format=tar <rev> -- <folder>`: a folder's files at a commit, as bytes."""
-    return ["archive", "--format=tar", rev, "--", folder]
+def tree_files_args(rev: str, path: str) -> list[str]:
+    """`git archive --format=tar <rev> -- <path>`: a file or folder at a commit, as bytes."""
+    return ["archive", "--format=tar", rev, "--", path]
 
 
-def parse_sql_files(raw: bytes, folder: str) -> dict[str, str] | None:
-    """`{name: SHA-1 of the bytes, upper-case hex}` of the `*.sql` DIRECTLY in `folder`, or None.
+def parse_tree_files(raw: bytes) -> dict[str, bytes] | None:
+    """`{repository path: exact bytes}` of every regular file in a `git archive` tar, or None.
 
-    Tortoise's AutoUpdater hashes each regular `*.sql` file straight inside an update
-    folder (not below it, `directory_iterator`) and records the hash in upper-case hex
-    (`ByteArrayToHexStr`, `%02X`). A tar that does not read is "could not ask".
+    Bytes and not text: Tortoise's AutoUpdater hashes each migration file's exact bytes,
+    and a text read would turn CRLF into LF. A tar that does not read is "could not ask".
     """
-    found: dict[str, str] = {}
+    found: dict[str, bytes] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
             for member in archive:
-                parent, _, name = member.name.rstrip("/").rpartition("/")
-                if not member.isreg() or parent != folder.rstrip("/") or not name.endswith(".sql"):
+                if not member.isreg():
                     continue
                 handle = archive.extractfile(member)
                 if handle is None:
                     return None
-                found[name] = hashlib.sha1(handle.read()).hexdigest().upper()  # noqa: S324
+                found[member.name] = handle.read()
     except (tarfile.TarError, OSError, EOFError):
         return None
     return found
@@ -1618,24 +1615,24 @@ class RunnerGit:
             return None
         return parse_changed_files(proc.stdout)
 
-    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
-        """`{name: SHA-1}` of the `*.sql` straight inside `folder` at `rev`, read from git (T632).
+    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`{repository path: bytes}` of the files under `path` (a file or folder) at `rev` (T632).
 
         From the commit's own tree, never from the working tree: an untracked or edited
-        copy on disk is not what that commit ships. A folder the commit does not have is
+        copy on disk is not what that commit ships. A path the commit does not have is
         a real answer, `{}`; git that cannot say is None.
         """
         if not (dest / ".git").is_dir():
             return None
         try:
             proc = runner.run_bytes(
-                ["git", *sql_files_args(rev, folder)], cwd=dest, env=_no_prompt_env()
+                ["git", *tree_files_args(rev, path)], cwd=dest, env=_no_prompt_env()
             )
             if proc.returncode == 0:
-                return parse_sql_files(proc.stdout, folder)
-            tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", folder], cwd=dest)
+                return parse_tree_files(proc.stdout)
+            tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", path], cwd=dest)
         except (GitError, OSError) as exc:
-            logger.debug(f"could not read {folder} at {rev} in {dest}: {exc}")
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
             return None
         return {} if folder_is_absent(tree.stdout) else None
 
@@ -2547,20 +2544,20 @@ class ContainerGit:
             return None
         return parse_changed_files(proc.stdout)
 
-    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
-        """`RunnerGit.sql_files()`, containerised: the read-only container, no network (T632)."""
+    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`RunnerGit.tree_files()`, containerised: the read-only container, no network (T632)."""
         if not (dest / ".git").is_dir():
             return None
         try:
-            argv = self._argv(self._launcher(), dest, sql_files_args(rev, folder), writes=False)
+            argv = self._argv(self._launcher(), dest, tree_files_args(rev, path), writes=False)
             proc = runner.run_bytes(argv, env=_no_prompt_env())
             if proc.returncode == 0:
-                return parse_sql_files(proc.stdout, folder)
+                return parse_tree_files(proc.stdout)
             tree = self._capture(
-                dest, ["ls-tree", "-z", "--name-only", rev, "--", folder], writes=False
+                dest, ["ls-tree", "-z", "--name-only", rev, "--", path], writes=False
             )
         except (GitError, OSError) as exc:
-            logger.debug(f"could not read {folder} at {rev} in {dest}: {exc}")
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
             return None
         return {} if folder_is_absent(tree.stdout) else None
 

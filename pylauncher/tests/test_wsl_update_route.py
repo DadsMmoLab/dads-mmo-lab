@@ -264,7 +264,7 @@ _GIT_FIELDS = {
     "changed_files",
     "changed_lines",
     # T632: Tortoise's Return reads the migration files of both commits.
-    "sql_files",
+    "tree_files",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 
