@@ -54,6 +54,7 @@ import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -705,3 +706,94 @@ def set_keep_setting(server_dir: Path, keep: int | None) -> None:
     temp.write_text(json.dumps({"keep": keep}), encoding="utf-8")
     os.replace(temp, path)
 
+
+
+# ------------------------------------------------------------- what the tab says
+
+_MADE_BY = {
+    None: "a backup you took",
+    "pre-restore": "taken before a restore",
+    "before-new-build": "taken before an update",
+    "after-new-build": "the new build's data, taken as an update went back",
+    "move": "taken for moving to another computer",
+}
+
+
+def what_made_it(r: ShelfRow) -> str:
+    """The row's "what made it" column, in the player's words."""
+    if r.kind == "partial":
+        return "a backup that was cut short"
+    if r.kind == "gz":
+        return "made by wow-manage.sh"
+    if r.item:
+        return f"taken before {r.item} was installed"
+    return _MADE_BY.get(r.label, f"labelled {r.label}")
+
+
+def game_name(game_id: str | None) -> str:
+    """The catalog's name for a game id, the id itself when this build has none."""
+    if game_id is None:
+        return "no game recorded"
+    return _catalog_names().get(game_id, game_id)
+
+
+@lru_cache(maxsize=1)
+def _catalog_names() -> dict[str, str]:
+    from yulon.catalog.catalog import load_catalog
+
+    return {entry.id: entry.name for entry in load_catalog().games}
+
+
+def describe(r: ShelfRow, game_id: str | None = None) -> str:
+    """One line for the Backups list: date · database · size · what made it · game."""
+    when = f"{r.made_at:%Y-%m-%d %H:%M}"
+    size = f"{r.size / (1024 * 1024):.1f} MB"
+    database = r.database or "-"
+    game = game_name(r.game) if r.kind == "dump" else "-"
+    if r.kind == "dump" and _foreign(r, game_id):
+        game += " (another game)"
+    parts = [when, database, size, what_made_it(r), game]
+    if not r.usable and r.kind == "dump":
+        parts.append("cut short or unreadable")
+    return " · ".join(parts)
+
+
+def size_text(n: int) -> str:
+    return f"{n / (1024 * 1024):.1f} MB" if n >= 1024 * 1024 else f"{max(n, 0) / 1024:.0f} KB"
+
+
+@dataclass(frozen=True)
+class Seam:
+    """What the Maintenance tab calls: this install's shelf, bound to its folder and game."""
+
+    server_dir: Path
+    game_id: str | None
+    spec: docker.ContainerSpec | None = None
+    wsl_distro: str | None = None
+
+    def read(self) -> Shelf:
+        return read_shelf(self.server_dir, game_id=self.game_id)
+
+    def carry_out(self, plan: Plan) -> Removed:
+        return carry_out(
+            self.server_dir, plan, game_id=self.game_id, spec=self.spec, wsl_distro=self.wsl_distro
+        )
+
+    def keep(self) -> int | None:
+        return keep_setting(self.server_dir)
+
+    def set_keep(self, keep: int | None) -> None:
+        set_keep_setting(self.server_dir, keep)
+
+    def retain(self) -> Removed | None:
+        """After a Back up now: the automatic keep, when the player turned it on (worker)."""
+        keep = self.keep()
+        if keep is None:
+            return None
+        return clean_up(
+            self.server_dir,
+            Rule(keep_newest=keep),
+            game_id=self.game_id,
+            spec=self.spec,
+            wsl_distro=self.wsl_distro,
+        )

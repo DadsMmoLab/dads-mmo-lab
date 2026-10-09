@@ -38,7 +38,7 @@ from typing import Any, NamedTuple, Protocol, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 from yulon import apply as apply_module
 from yulon import bot_population as botpop
 from yulon import (
+    backup_shelf,
     botlist,
     channel_setup,
     client_build,
@@ -179,6 +180,7 @@ from yulon.ui.theme import (
     PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
+from yulon.ui.widgets.clean_up_dialog import CleanUpDialog
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.details import Details
 from yulon.ui.widgets.docker_banner import DockerBanner
@@ -1794,6 +1796,12 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    shelf: backup_shelf.Seam | None = None
+    """This install's backups folder as the tab lists, deletes from and cleans up (T604).
+
+    `None` lists the folder the way it was listed before: file names only, no Delete or
+    Clean up. Every shipped entry wires it.
+    """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
 
@@ -2805,6 +2813,7 @@ def _assemble(
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+        shelf=backup_shelf.Seam(server_dir, entry.id, spec, wsl_distro),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         uninstall=uninstall,
@@ -4960,6 +4969,11 @@ VERDICT_UNREADABLE = (
 APPLY_DID_NOT_FINISH = "Apply did not finish. Details below says why."
 PLAN_DID_NOT_FINISH = "Yu'lon could not work out the plan. Details below says why."
 MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
+DELETE_BACKUP_LABEL = "Delete\u2026"
+CLEAN_UP_LABEL = "Clean up\u2026"
+DELETE_PICK = "Pick a backup to delete."
+CLEAN_UP_NO_FOLDER_ACCESS = "Yu'lon cannot list the backups yet."
+MAINTENANCE_DELETE_FAILED = "The backups were not deleted. Details below says why."
 MAINTENANCE_RESTORE_FAILED = "The restore did not finish. Details below says why."
 MAINTENANCE_PLAN_FAILED = "Yu'lon could not check this backup. Details below says why."
 MAINTENANCE_FORGET_FAILED = (
@@ -15324,8 +15338,21 @@ class ControllerView(QWidget):
         self.restore_reasons = ReasonLine(tab)
         set_enabled_why(self.restore_button, RESTORE_PICK, self.restore_reasons)
         self.restore_reasons.watch(self.backup_button)
+        # T604: Delete and Clean up, only where the shelf is wired. Greyed with their reason on
+        # the same line as Restore's.
+        self.delete_backup_button = QPushButton(DELETE_BACKUP_LABEL, tab)
+        self.clean_up_button = QPushButton(CLEAN_UP_LABEL, tab)
+        self.delete_backup_button.clicked.connect(self.delete_selected_backup)
+        self.clean_up_button.clicked.connect(self.clean_up_backups)
+        self.delete_backup_button.setVisible(self.services.shelf is not None)
+        self.clean_up_button.setVisible(self.services.shelf is not None)
+        self._shelf = None
+        self._shelf_job = ""
+        self._retain_after_backup = False
         actions.addWidget(self.plan_restore_button)
         actions.addWidget(self.restore_button)
+        actions.addWidget(self.delete_backup_button)
+        actions.addWidget(self.clean_up_button)
         actions.addStretch(1)
 
         self.maintenance_report = QPlainTextEdit(tab)
@@ -15341,6 +15368,10 @@ class ControllerView(QWidget):
         self.plan_restore_button.setParent(backups)
         self.restore_button.setParent(backups)
         self.restore_reasons.setParent(backups)
+        self.delete_backup_button.setParent(backups)
+        self.clean_up_button.setParent(backups)
+        self.restore_reasons.watch(self.delete_backup_button)
+        self.restore_reasons.watch(self.clean_up_button)
         backups_box = QVBoxLayout(backups)
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
@@ -15379,6 +15410,7 @@ class ControllerView(QWidget):
         """A plan belongs to one file. Selecting another must not carry it over."""
         self._restore_plan = None
         set_enabled_why(self.restore_button, self._restore_waits_for())
+        self._settle_shelf_buttons()
 
     def _restore_waits_for(self) -> str:
         """Why Restore is greyed while no plan allows it: no backups, or none planned yet.
@@ -15399,12 +15431,16 @@ class ControllerView(QWidget):
         self._restore_plan = None
         self.backup_list.clear()
         directory = self.services.backups_dir()
-        for path in sorted(directory.glob("*.sql"), reverse=True):
-            size = path.stat().st_size / (1024 * 1024)
-            item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            self.backup_list.addItem(item)
+        if self.services.shelf is not None:
+            self._list_the_shelf(self.services.shelf)
+        else:
+            for path in sorted(directory.glob("*.sql"), reverse=True):
+                size = path.stat().st_size / (1024 * 1024)
+                item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
+                item.setData(Qt.ItemDataRole.UserRole, str(path))
+                self.backup_list.addItem(item)
         set_enabled_why(self.restore_button, self._restore_waits_for())
+        self._settle_shelf_buttons()
         # A10 (T195): an empty report beside a list of backups says what to do.
         self.maintenance_report.setPlaceholderText(RESTORE_PICK if self.backup_list.count() else "")
         none_yet = f"No backups yet in {directory}."
@@ -15414,6 +15450,188 @@ class ControllerView(QWidget):
             # Backups arrived since: the hint above is what the empty box says now.
             self.maintenance_report.setPlainText("")
         self._show_interrupted()
+
+    # ------------------------------------------------ delete and clean up (T604)
+
+    def _list_the_shelf(self, seam: backup_shelf.Seam) -> None:
+        """Fill the Backups list from the shelf: date, database, size, what made it, game."""
+        try:
+            shelf = seam.read()
+        except Exception as exc:  # noqa: BLE001 - an unreadable folder is an empty list, said
+            logger.warning(f"could not read the backups folder: {exc}")
+            self._shelf = None
+            return
+        self._shelf = shelf
+        for r in shelf.rows:
+            text = backup_shelf.describe(r, shelf.game_id)
+            item = QListWidgetItem(f"{text}  \u00b7 kept" if r.kept_because else text)
+            item.setData(Qt.ItemDataRole.UserRole, str(shelf.folder / r.name))
+            item.setData(Qt.ItemDataRole.UserRole + 1, r.name)
+            item.setToolTip(f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip())
+            if r.kept_because or r.cannot_delete:
+                item.setForeground(QColor(COLOR_TEXT_MUTED))
+            self.backup_list.addItem(item)
+
+    def _selected_row(self) -> backup_shelf.ShelfRow | None:
+        item = self.backup_list.currentItem()
+        shelf = self._shelf
+        if item is None or shelf is None:
+            return None
+        name = item.data(Qt.ItemDataRole.UserRole + 1)
+        return next((r for r in shelf.rows if r.name == name), None)
+
+    def _shelf_waits_for(self) -> str | None:
+        """Why Delete and Clean up are greyed whatever is selected: a job is in flight."""
+        if self._shelf_job:
+            return wait_for(self._shelf_job)
+        if self._backup_running:
+            return wait_for("the backup")
+        if self._backup_before_update:
+            return wait_for("the backup before the update")
+        if self._busy:
+            return wait_for(self._busy_job)
+        return None
+
+    def _settle_shelf_buttons(self) -> None:
+        """Grey Delete and Clean up with their reasons, or enable them (T604)."""
+        if self.services.shelf is None:
+            return
+        shelf = self._shelf
+        waits = self._shelf_waits_for()
+        clean = waits
+        delete = waits
+        if clean is None and (shelf is None or not shelf.rows):
+            clean = delete = "There are no backups to delete."
+        elif clean is None and shelf is not None and shelf.delete_refused:
+            clean = delete = shelf.delete_refused
+        if delete is None:
+            row = self._selected_row()
+            if row is None:
+                delete = DELETE_PICK
+            elif row.cannot_delete:
+                delete = row.cannot_delete
+        set_enabled_why(self.delete_backup_button, delete, self.restore_reasons)
+        set_enabled_why(self.clean_up_button, clean, self.restore_reasons)
+
+    @Slot()
+    def delete_selected_backup(self) -> None:
+        """Delete the selected backup after one question that names it (worker thread does it)."""
+        seam = self.services.shelf
+        row = self._selected_row()
+        shelf = self._shelf
+        if seam is None or shelf is None or row is None:
+            self.maintenance_report.setPlainText(DELETE_PICK)
+            return
+        try:
+            plan = backup_shelf.plan_delete(shelf, row.name)
+        except backup_shelf.ShelfRefusal as exc:
+            self.maintenance_report.setPlainText(str(exc))
+            return
+        lines = [
+            f"Delete {row.name} ({backup_shelf.size_text(row.size)}) from this server's "
+            "backups folder?",
+            "It is deleted for good: it does not go to the trash.",
+        ]
+        if row.read_only:
+            lines.append(
+                "It is marked read-only. Yu'lon will clear that mark to delete it."
+            )
+        if not row.usable:
+            lines.append(f"It cannot be restored: {row.problem}")
+        if not ask_yes_no(self, "Delete this backup?", "\n\n".join(lines)):
+            return
+        self._run_shelf_job("the delete", lambda: seam.carry_out(plan), "Deleting\u2026")
+
+    @Slot()
+    def clean_up_backups(self) -> None:
+        """Choose a rule in the dialog, then let the worker re-check and delete."""
+        seam = self.services.shelf
+        if seam is None:
+            return
+        try:
+            shelf = seam.read()
+        except Exception as exc:  # noqa: BLE001
+            self.maintenance_report.setPlainText(f"{CLEAN_UP_NO_FOLDER_ACCESS} ({exc})")
+            return
+        self._shelf = shelf
+        if shelf.delete_refused:
+            self.maintenance_report.setPlainText(shelf.delete_refused)
+            return
+        dialog = CleanUpDialog(shelf, keep_now=seam.keep(), parent=self)
+        try:
+            agreed = dialog.exec() == int(QDialog.DialogCode.Accepted)
+            plan = dialog.plan
+            changed, value = dialog.keep_wanted()
+        finally:
+            dialog.deleteLater()
+        if not agreed:
+            return
+        if changed:
+            try:
+                seam.set_keep(value)
+            except (backup_shelf.ShelfRefusal, OSError) as exc:
+                self.maintenance_report.setPlainText(f"The setting was not saved: {exc}")
+                return
+        if plan is None or not plan.names:
+            self.maintenance_report.setPlainText("Saved. Nothing was deleted.")
+            return
+        self._run_shelf_job("the clean-up", lambda: seam.carry_out(plan), "Cleaning up\u2026")
+
+    def _run_shelf_job(self, job: str, work: Callable[[], object], said: str) -> None:
+        self._shelf_job = job
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(said)
+        self._run(work, self._shelf_done, self._shelf_failed)
+
+    @Slot(object)
+    def _shelf_done(self, result: object) -> None:
+        self._shelf_job = ""
+        self.refresh_backups()
+        if not isinstance(result, backup_shelf.Removed):
+            return
+        n = len(result.names)
+        lines = [
+            f"Deleted {n} file{'' if n == 1 else 's'}, freeing {backup_shelf.size_text(result.freed)}:"
+        ]
+        lines += [f"  {name}" for name in result.names]
+        self.maintenance_report.setPlainText("\n".join(lines))
+
+    @Slot(object)
+    def _shelf_failed(self, exc: object) -> None:
+        self._shelf_job = ""
+        self.refresh_backups()  # some files may have gone before the one that would not
+        self._maintenance_failed(exc, MAINTENANCE_DELETE_FAILED)
+        self._settle_shelf_buttons()
+
+    def _retain_the_newest(self, seam: backup_shelf.Seam) -> None:
+        """After a Back up now, the automatic keep (off unless turned on); worker thread."""
+        if seam.keep() is None:
+            return
+        self._shelf_job = "the clean-up after the backup"
+        self._settle_shelf_buttons()
+        self._run(seam.retain, self._retained, self._retention_failed)
+
+    @Slot(object)
+    def _retained(self, result: object) -> None:
+        self._shelf_job = ""
+        before = self.maintenance_report.toPlainText()
+        self.refresh_backups()
+        text = before
+        if isinstance(result, backup_shelf.Removed) and result.names:
+            n = len(result.names)
+            text += (
+                f"\nKept only the newest copies, as you asked: removed {n} older "
+                f"file{'' if n == 1 else 's'} ({backup_shelf.size_text(result.freed)})."
+            )
+        self.maintenance_report.setPlainText(text)
+
+    @Slot(object)
+    def _retention_failed(self, exc: object) -> None:
+        self._shelf_job = ""
+        before = self.maintenance_report.toPlainText()
+        self.refresh_backups()
+        self.maintenance_report.setPlainText(f"{before}\nOlder backups were not cleaned up: {exc}")
+        self.action_failed.emit(f"Older backups were not cleaned up: {exc}")
 
     def _show_interrupted(self) -> None:
         """Surface a restore that never finished, and offer to put the record down."""
@@ -15542,18 +15760,25 @@ class ControllerView(QWidget):
         set_enabled_why(self.backup_button, wait_for("the backup"))
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
         self._backup_running = True  # T95: `forget_refusal()` reads it
+        self._retain_after_backup = True  # T604: the automatic keep follows THIS press only
+        self._settle_shelf_buttons()
         self._run(self._backup_with_the_database, self._backup_done, self._backup_failed)
 
     @Slot(object)
     def _backup_failed(self, exc: object) -> None:
         self._backup_running = False
+        self._retain_after_backup = False
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
+        self._settle_shelf_buttons()
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
         self._backup_running = False
+        retain = self._retain_after_backup
+        self._retain_after_backup = False
         self.backup_button.setEnabled(True)
         if not isinstance(result, wotlk_maintenance.BackupReport):
+            self._settle_shelf_buttons()
             return
         lines = [f"Backed up to {result.directory}:"]
         lines += [
@@ -15569,6 +15794,10 @@ class ControllerView(QWidget):
         # the one thing the user just asked for (caught by its own test).
         self.refresh_backups()
         self.maintenance_report.setPlainText("\n".join(lines))
+        if retain and self.services.shelf is not None:
+            self._retain_the_newest(self.services.shelf)
+        else:
+            self._settle_shelf_buttons()
 
     @Slot()
     def show_restore_plan(self) -> None:

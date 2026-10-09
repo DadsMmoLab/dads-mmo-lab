@@ -27,9 +27,10 @@ NOW = datetime(2026, 10, 9, 12, 0, 0)
 NONE_INSTALLED: dict[str, frozenset[str]] = {}
 
 
-def dump_of(database: str, *, game: str | None = GAME, whole: bool = True) -> bytes:
+def dump_of(database: str, *, game: str | None = GAME, whole: bool = True, pad: int = 0) -> bytes:
     preamble = f"-- yulon-backup: game={game}\n".encode() if game else b""
     body = preamble + BANNER + f"USE `{database}`;\nINSERT INTO `t` VALUES (1);\n".encode()
+    body += (b"-- " + b"x" * pad + b"\n") if pad else b""
     return body + (b"-- Dump completed on 2026-10-09 12:00:00\n" if whole else b"")
 
 
@@ -55,7 +56,7 @@ def put(
 ) -> Path:
     middle = f"{label}_" if label else ""
     path = folder_of(server) / f"{stamp}_{middle}{database}.sql"
-    path.write_bytes(dump_of(database, game=game, whole=whole) + b"x" * pad)
+    path.write_bytes(dump_of(database, game=game, whole=whole, pad=pad))
     return path
 
 
