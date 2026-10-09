@@ -6359,6 +6359,7 @@ class Applier:
             src = clone / step.src
             _look_again(clone, step.src)  # on the way; `_plan_onto()` never enters one under it
             target = self._client_target(step, src)
+            place: Callable[[Path, Path], object]
             if step.dest == "data":
                 place = self._placer(step.src, log, claimed)
             elif step.dest == "addons" and manifest.origin is not None:

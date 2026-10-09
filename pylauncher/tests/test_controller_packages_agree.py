@@ -500,7 +500,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 "module_version",
             }
             | (set() if settings else {"installed_modules"})
-        ) | (set() if counted or game == "wow-tortoise" else custom)
+        ) | (
+            set()
+            if counted or game == "wow-tortoise"
+            # T613 PR-2: `module_forget` arrives with the add-on route on every game
+            # whose client takes add-ons, so a Remove drops an outside add-on's record.
+            else custom - ({"module_forget"} if entry.client.addon_interface else set())
+        )
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an
         # AzerothCore Lua module hooking AzerothCore's command table, and the

@@ -1489,7 +1489,8 @@ def build_window() -> object:
         services.set_client_dir = _remember_client_live(game, server_dir)
         # T181: the ready-to-play client's record, over the same live state.
         services.set_play_client_dir = _remember_play_client_live(game, server_dir)
-        services.other_server_dirs = _other_server_dirs(game, server_dir)
+        # T181, T613 PR-2: on the tab and on every applier it holds, in one call.
+        services.bind_other_server_dirs(_other_server_dirs(game, server_dir))
         if services.uninstall is not None:
             # 8.9a. The record is the LAST thing an uninstall forgets, and in a
             # running window "the record" is this closure's live `AppState` -

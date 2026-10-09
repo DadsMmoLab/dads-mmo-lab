@@ -27,6 +27,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
+- On Tortoise, **Remove** of an add-on you added takes back its files, keeping any you changed and your saved settings.
 - On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
 - Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
 - A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.

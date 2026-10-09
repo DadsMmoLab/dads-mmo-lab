@@ -70,11 +70,21 @@ class ManifestStore:
     """
 
     def __init__(
-        self, root: Path, game: str, user_root: Path | None = None, *, user_game: str | None = None
+        self,
+        root: Path,
+        game: str,
+        user_root: Path | None = None,
+        *,
+        user_game: str | None = None,
+        shipped: bool = True,
     ) -> None:
         self.root = root
         self.game = game
         self.user_root = user_root
+        # T613 PR-2: False for a game that ships no manifests at all (Centurion) and
+        # for a reader of the user layer alone (`client_addons`): the bundled
+        # indexes then read as empty instead of "manifest file missing".
+        self.shipped = shipped
         # The user layer's game, `game` unless a caller names its own. A server
         # that offers another game's SHIPPED manifests keeps the modules the user
         # added to it under its own id (T554: WoW Unbound shows WotLK's catalog,
@@ -109,7 +119,12 @@ class ManifestStore:
         return self.user_root / self.user_game
 
     def load_index(self, kind: ManifestType) -> Index:
-        """Parse the family index; raises `ManifestError` if missing/invalid."""
+        """Parse the family index; raises `ManifestError` if missing/invalid.
+
+        A store made with `shipped=False` has no bundled tree: every index is empty.
+        """
+        if not self.shipped:
+            return Index(game=self.game, type=kind)
         return self._index_at(self.index_path(kind), kind)
 
     def _index_at(self, path: Path, kind: ManifestType, game: str | None = None) -> Index:
