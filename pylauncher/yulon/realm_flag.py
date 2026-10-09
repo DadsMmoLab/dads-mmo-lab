@@ -15,10 +15,15 @@ never a reason a server does not start or stop.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from yulon import docker
 from yulon.catalog.catalog import CatalogEntry
+from yulon.dbreads import SqlReader
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +33,15 @@ REALM_FLAG_OFFLINE = 2
 
 DB_HEALTHY_TIMEOUT = 120.0
 """How long the database may take to say healthy before the realm is left as it was."""
+
+
+def flags_statement(entry: CatalogEntry) -> str | None:
+    """The SELECT that reads this entry's realm flags (on the auth schema); None if it has none."""
+    realmlist = entry.realmlist
+    column = realmlist.offline_flag_column
+    if column is None:
+        return None
+    return f"SELECT {column} FROM {realmlist.table} WHERE id={realmlist.realm_id};"
 
 
 def online_statement(entry: CatalogEntry) -> str | None:
@@ -62,6 +76,7 @@ def mark_offline(
     wsl_distro: str | None = None,
     start_database: bool = True,
     unless_world_up: bool = False,
+    quiet: bool = False,
 ) -> bool:
     """Set the realm's offline bit; True when the statement ran, False when not run or failed.
 
@@ -75,6 +90,9 @@ def mark_offline(
     down, and `compose up` then starts nothing but the authserver. Not asked of a Stop or a
     replace, which mark a world that is up on purpose.
 
+    `quiet` logs at debug level only, for the dashboard tick (T581), which says once per
+    spell what it did rather than once per attempt.
+
     Never raises: a database that cannot be reached, a password
     that cannot be read or a statement that fails is logged and the caller carries on.
     """
@@ -87,6 +105,7 @@ def mark_offline(
         start_database=start_database,
         only_with_world_up=False,
         skip_if_world_up=unless_world_up,
+        quiet=quiet,
     )
 
 
@@ -96,6 +115,7 @@ def clear_offline_if_world_up(
     server_dir: Path,
     *,
     wsl_distro: str | None = None,
+    quiet: bool = False,
 ) -> bool:
     """Take the offline bit off again when a Stop or a replace gave up and the world still runs.
 
@@ -113,6 +133,7 @@ def clear_offline_if_world_up(
         start_database=False,
         only_with_world_up=True,
         skip_if_world_up=False,
+        quiet=quiet,
     )
 
 
@@ -126,18 +147,21 @@ def _run(
     start_database: bool,
     only_with_world_up: bool,
     skip_if_world_up: bool,
+    quiet: bool = False,
 ) -> bool:
     if statement is None:
         return False
+    say = logger.debug if quiet else logger.info
+    warn = logger.debug if quiet else logger.warning
     password = entry.install.db_password(server_dir)
     if password is None:
-        logger.warning(f"{entry.id}: the database password could not be read; realm row not set")
+        warn(f"{entry.id}: the database password could not be read; realm row not set")
         return False
     native = entry.install.native
     client = native.db.client if native is not None else "mysql"
     try:
         if skip_if_world_up and spec.world in set(docker.status(wsl_distro=wsl_distro)):
-            logger.info(f"{entry.id}: the world is already running; realm row left as it is")
+            say(f"{entry.id}: the world is already running; realm row left as it is")
             return False
         if start_database:
             docker.start_database(
@@ -153,7 +177,313 @@ def _run(
                 return False
         docker.sql_query(spec.db, client, password, None, statement, wsl_distro=wsl_distro)
     except docker.DockerCommandError as exc:
-        logger.warning(f"{entry.id}: the realm row was not set: {exc}")
+        warn(f"{entry.id}: the realm row was not set: {exc}")
         return False
-    logger.info(f"{entry.id}: realm row set in {entry.databases.auth}: {statement}")
+    say(f"{entry.id}: realm row set in {entry.databases.auth}: {statement}")
     return True
+
+
+# -- T581: the dashboard tick keeps the row honest while this app is open ------------------
+
+_HOLD_LOCK = threading.Lock()
+"""Guards the hold counts and epochs (T581); never held across a Docker call."""
+
+_holds: dict[str, int] = {}
+_epochs: dict[str, int] = {}
+
+
+@contextmanager
+def deliberately_offline(spec: docker.ContainerSpec) -> Iterator[None]:
+    """Hold this install's realm offline on purpose for the length of the block (T581).
+
+    Yu'lon's own Stop and a rebuild's replace mark the realm offline over a world that is
+    still up, on purpose, and the world can take a long time to save on the way down. The
+    dashboard tick clears a bit it finds set over a world that has been ready for a while
+    (`Keeper`); inside this block it does not. Keyed by the database container, which is
+    the row's home. In-process only: a Stop run by another process is not seen.
+    """
+    key = spec.db
+    with _HOLD_LOCK:
+        _holds[key] = _holds.get(key, 0) + 1
+        _epochs[key] = _epochs.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _holds[key] -= 1
+            if not _holds[key]:
+                del _holds[key]
+            _epochs[key] = _epochs.get(key, 0) + 1
+
+
+def held(spec: docker.ContainerSpec) -> bool:
+    """Whether a deliberate hold is in force on this install's realm right now."""
+    with _HOLD_LOCK:
+        return bool(_holds.get(spec.db))
+
+
+def _epoch(spec: docker.ContainerSpec) -> int:
+    with _HOLD_LOCK:
+        return _epochs.get(spec.db, 0)
+
+
+def _held_or_moved(spec: docker.ContainerSpec, begun: int) -> bool:
+    """A hold in force now, or one that began or ended since epoch `begun` was read."""
+    with _HOLD_LOCK:
+        return bool(_holds.get(spec.db)) or _epochs.get(spec.db, 0) != begun
+
+
+def _gone(since: datetime, now: datetime) -> timedelta:
+    """How long since `since`; a clock that went back counts as the whole wait gone by.
+
+    Otherwise a clock set back an hour would put off a retry or a read for that hour
+    (cold review; `dashboard.Dashboard._with_wrong_client` guards its own the same way).
+    """
+    gone = now - since
+    return gone if gone >= timedelta(0) else timedelta.max
+
+
+MARK_RETRY = timedelta(seconds=30)
+"""How long the tick waits before it tries a failed mark on the same run again."""
+
+STOPPED_RETRY = timedelta(minutes=5)
+"""How long the tick waits before it tries a failed mark of a stopped world again.
+
+After Yu'lon's own Stop the database is down, so each try is one `docker ps` that finds it so."""
+
+FLAGS_READ_EVERY = timedelta(seconds=60)
+"""How often the tick reads the realm's flags over a world that is up."""
+
+UNCONFIRMED_RETRY = timedelta(minutes=10)
+"""How long a run whose log did not show the ready marker waits before it is searched again."""
+
+CLEAR_AFTER = timedelta(seconds=60)
+"""How long a run must have been seen ready before a bit still set on it is called stuck.
+
+The core clears the bit a few statements after it prints its ready marker (`World.cpp:2399`
+inside `SetInitialWorldSettings`, called at `Master.cpp:194`; the clear at `:228`), so a bit
+still set a minute later is not the core's to clear any more. The install's own watch after
+the ready marker is the same length (`native.READY_GRACE_SECONDS`)."""
+
+
+class Keeper:
+    """Keeps the realm row's offline bit in step with the world while the app is open (T581).
+
+    Fed by the dashboard tick (`dashboard.Dashboard.tick`, every five seconds on a worker
+    thread, never two at once) with what it already read: the world container's status,
+    its run, and whether that run said ready.
+
+    - The world `restarting`, or `running` on a run that has not said ready: mark the realm
+      offline, once per run, only with the database already up. That is Docker's restart
+      policy reviving a crashed world without this app, which the core never marks.
+    - The world `running` on a run seen ready at least `CLEAR_AFTER` ago, its log showing the
+      ready marker (`said_ready`; uptime alone is no proof), and the bit still set (read once
+      a minute): take it off, unless a deliberate hold
+      (`deliberately_offline`) is in force or began or ended since the tick started. That is
+      a cancelled Stop whose own put-back failed. A mark of a running world is followed by
+      the same check, so a mark that landed just after the core cleared the bit comes off.
+    - The world stopped (exited, created, paused, dead): mark it, database already up, a
+      failure retried only every `STOPPED_RETRY`; a world stopped outside Yu'lon's own Stop
+      with realmd still up is listed Offline. Gone or unread: nothing.
+    - Each status of a run is its own spell (`_marked`): a run marked while loading that
+      came up and was stopped or crashed before a tick saw it up is marked again.
+
+    Says once per spell what it did, never per tick, and never raises.
+    """
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        sql: SqlReader,
+        *,
+        wsl_distro: str | None = None,
+        now: Callable[[], datetime] | None = None,
+        mark: Callable[..., bool] | None = None,
+        clear: Callable[..., bool] | None = None,
+    ) -> None:
+        self.entry = entry
+        self.spec = spec
+        self.server_dir = server_dir
+        self.sql = sql
+        self.wsl_distro = wsl_distro
+        self._now = now or (lambda: datetime.now(UTC))
+        self._mark = mark or mark_offline
+        self._clear = clear or clear_offline_if_world_up
+        self._marked: str | None = None
+        """The status and run last marked: a new status of the same run is a new spell."""
+        self._tried: tuple[str, datetime] | None = None
+        self._spell_said: set[str] = set()
+        self._ready_run: str | None = None
+        self._ready_at: datetime | None = None
+        self._read_at: datetime | None = None
+        self._unconfirmed: tuple[str, datetime] | None = None
+        self._unconfirmed_said: str | None = None
+        self.said_ready: Callable[[str], bool] | None = None
+        """Whether the world is still running run `run` and its log shows the ready marker.
+
+        Set by the dashboard that feeds this keeper. The only evidence a clear is written on:
+        the tab's own "ready" also counts ten minutes of uptime, which is no proof that a
+        world listens (Codex adversarial review). None clears nothing."""
+
+    def begin(self) -> int:
+        """Called before the tick reads the container: the hold epoch the clear must match."""
+        return _epoch(self.spec)
+
+    def after_tick(self, status: str, run: str, ready: bool, begun: int) -> None:
+        """Act on one tick's reading; never raises."""
+        try:
+            self._after_tick(status, run, ready, begun)
+        except Exception as exc:  # noqa: BLE001 - the realm row is never a reason the tick fails
+            logger.debug(f"{self.entry.id}: the realm row was not kept: {exc}")
+
+    def _after_tick(self, status: str, run: str, ready: bool, begun: int) -> None:
+        if status == "running" and ready:
+            # Up: the core cleared the bit. A crash of this same run is a new spell by its
+            # status (`_marked`): Docker's `restarting` still carries this run's StartedAt.
+            self._spell_said.clear()
+            self._unstick(run, begun)
+        elif status:
+            # Restarting, loading, or stopped (exited, created, paused, dead). A stopped world
+            # is marked for one stopped outside Yu'lon's own Stop with realmd still listing it
+            # (Codex adversarial review), retried only every `STOPPED_RETRY` and never said
+            # when it fails, since after Yu'lon's own Stop the database is down too.
+            self._ready_run = None
+            self._make_offline(status, run, begun)
+
+    def _make_offline(self, status: str, run: str, begun: int) -> None:
+        key = f"{status} {run}"
+        if self._marked == key:
+            return
+        now = self._now()
+        stopped = status not in ("running", "restarting")
+        tried = self._tried
+        wait = STOPPED_RETRY if stopped else MARK_RETRY
+        if tried is not None and tried[0] == key and _gone(tried[1], now) < wait:
+            return
+        self._tried = (key, now)
+        ok = self._mark(
+            self.entry,
+            self.spec,
+            self.server_dir,
+            wsl_distro=self.wsl_distro,
+            start_database=False,
+            quiet=True,
+        )
+        what = "stopped" if stopped else "restarting" if status == "restarting" else "loading"
+        if ok and status == "running" and self.said_ready is not None and self.said_ready(run):
+            # The world printed its ready marker and cleared the bit between this tick's read
+            # and the mark (the marker comes first, `World.cpp:2399` before `Master.cpp:228`),
+            # so the mark is the stale one: take it off again now (Codex review).
+            self._clear_unless_held(begun)
+            self._marked = key
+            return
+        if ok:
+            self._marked = key
+            if "marked" not in self._spell_said:
+                self._spell_said.add("marked")
+                logger.info(
+                    f"{self.entry.id}: the world is {what}; its realm is listed Offline "
+                    "until the world server says it is up"
+                )
+        elif not stopped and "failed" not in self._spell_said:
+            self._spell_said.add("failed")
+            logger.info(
+                f"{self.entry.id}: the world is {what}, and its realm could not be listed "
+                "Offline (its database is down or did not answer); trying again"
+            )
+
+    def _unstick(self, run: str, begun: int) -> None:
+        now = self._now()
+        if self._ready_run != run or self._ready_at is None or now < self._ready_at:
+            # A new run, or a clock that went back: the grace starts again from now, the
+            # safe way for it to go wrong (cold review).
+            self._ready_run, self._ready_at, self._read_at = run, now, None
+            return
+        if now - self._ready_at < CLEAR_AFTER:
+            return
+        if self._read_at is not None and _gone(self._read_at, now) < FLAGS_READ_EVERY:
+            return
+        statement = flags_statement(self.entry)
+        if statement is None:
+            return
+        self._read_at = now
+        try:
+            raw = self.sql.query("auth", statement)
+            flags = int(raw.split()[0])
+        except Exception as exc:  # noqa: BLE001 - an unread row is left as it is
+            logger.debug(f"{self.entry.id}: the realm flags could not be read: {exc}")
+            return
+        if not flags & REALM_FLAG_OFFLINE:
+            return
+        if not self._confirmed(run):
+            return
+        if self._clear_unless_held(begun):
+            logger.info(
+                f"{self.entry.id}: the realm was still listed Offline over a world that has "
+                "been up for a while; listed Online again"
+            )
+
+    def _confirmed(self, run: str) -> bool:
+        """Whether run `run` said ready; a no is asked again only `UNCONFIRMED_RETRY` later.
+
+        Each ask reads the run's log, so not every minute; but a load longer than the tab's
+        ten-minute fallback says ready late, and is not written off for its whole run (Codex).
+        """
+        if self.said_ready is None:
+            return False
+        now = self._now()
+        last = self._unconfirmed
+        if last is not None and last[0] == run and _gone(last[1], now) < UNCONFIRMED_RETRY:
+            return False
+        if self.said_ready(run):
+            self._unconfirmed = None
+            return True
+        self._unconfirmed = (run, now)
+        if self._unconfirmed_said != run:
+            self._unconfirmed_said = run
+            logger.info(
+                f"{self.entry.id}: the realm is listed Offline over a running world whose log "
+                "does not show it ready yet; left as it is"
+            )
+        return False
+
+    def _clear_unless_held(self, begun: int) -> bool:
+        """Take the bit off, unless a deliberate hold is in force or moved since `begun`.
+
+        The lock is never held across the Docker calls (cold review: a wedged Docker would
+        then block every Stop). So a Stop may begin while the clear is in Docker, and its
+        mark may land before the clear's UPDATE: the hold is looked at again afterwards, and
+        if one began, the bit is set again (database already up, never started).
+        """
+        if _held_or_moved(self.spec, begun):
+            return False
+        ok = self._clear(
+            self.entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, quiet=True
+        )
+        if _held_or_moved(self.spec, begun):
+            self._mark(
+                self.entry,
+                self.spec,
+                self.server_dir,
+                wsl_distro=self.wsl_distro,
+                start_database=False,
+                quiet=True,
+            )
+            return False
+        return ok
+
+
+def keeper_for(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: SqlReader,
+    *,
+    wsl_distro: str | None = None,
+) -> Keeper | None:
+    """A `Keeper` for an entry whose catalog names the offline flag column; None otherwise."""
+    if entry.realmlist.offline_flag_column is None:
+        return None
+    return Keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro)

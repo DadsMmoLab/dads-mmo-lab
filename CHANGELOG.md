@@ -35,8 +35,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
+- Stopping a Tortoise server just after it starts now waits for its save, instead of warning that characters may be missing.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
+- While Yu'lon is open, a Tortoise realm shows offline while it reloads after a crash, and not over a running server.
 - A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
 - **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
 - The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
@@ -72,6 +74,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Install now checks every port the server needs before the build, and says if Windows has reserved the database port.
 - A port the server cannot use is said in plain words, and a failed start shows Docker's error first.
 - A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
+- The **A module this app does not ship** box says when a game cannot take your own modules, instead of two dead buttons.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.

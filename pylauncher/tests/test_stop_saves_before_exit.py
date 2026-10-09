@@ -510,6 +510,10 @@ class _Console:
         """Commands that alone fail as a console this host cannot reach does."""
         self.prompted = True
         self.after_look: object = None
+        self.markers: dict[str, object] = {}
+        """The text each command was told to end its wait on (None: the whole window)."""
+        self.windows: dict[str, float] = {}
+        """The listening window each command was typed with."""
 
     def __call__(self, command: str, **kw: object) -> object:
         from yulon.controller_wow_wotlk.console import ConsoleError, ConsoleReply
@@ -519,6 +523,8 @@ class _Console:
         if self.refuse or command in self.refused:
             raise ConsoleError(self.refuse or "no attach")
         self.fake.events.append(f"console: {command}")
+        self.windows[command] = float(kw["window"])  # type: ignore[arg-type]
+        self.markers[command] = kw.get("answer_marker")
         if command != "server debug":
             return ConsoleReply(command, ("All players saved.",), prompted=self.prompted)
         self.looks += 1
@@ -745,6 +751,28 @@ def test_tortoise_saves_everyone_before_the_signal_and_does_not_wait_on_a_queue(
         "compose stop (world down)",
     ]
     assert said == [docker.SAVE_FIRST_ASKING, docker.WORLD_SAVING, docker.WORLD_SAVED]
+
+
+@pytest.mark.parametrize(
+    ("game", "window"),
+    [
+        # A console that prompts after its answer ends the wait at the answer, so its ceiling
+        # can cover the first minutes' world stalls (13-18 s measured) at no cost (T561).
+        ("wow-tortoise", 30.0),
+        # A readline console sleeps its whole window: it keeps the 10 s.
+        ("wow-centurion", 10.0),
+    ],
+)
+def test_saveall_is_given_the_window_its_console_can_afford(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, game: str, window: float
+) -> None:
+    fake = _install(monkeypatch, game, _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    console = _with_console(monkeypatch, fake, [0])
+    _stop(fake, tmp_path)
+    assert console.windows["saveall"] == window
+    # Only a console that prompts after its answer is told what `saveall`'s answer looks like.
+    assert console.markers["saveall"] == ("All players saved." if window > 10 else None)
 
 
 def test_a_tortoise_console_with_no_prompt_is_said_as_not_asked(

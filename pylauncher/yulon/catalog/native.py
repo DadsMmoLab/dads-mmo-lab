@@ -8074,49 +8074,52 @@ class StagedInstaller:
         # Offline for the whole load. On the update route the old world is already down here,
         # and the bit is set within seconds of that. Best effort, never raising; a replace
         # given up or refused with the old world still running takes the bit off again below.
-        self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
+        # T581: held offline on purpose from that mark to the replace's end, so the dashboard
+        # tick does not put the realm back online over the old world while it saves.
+        with realm_flag.deliberately_offline(spec):
+            self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
 
-        def replace_them(say: docker.OutputSink) -> bool:
-            return self._seams.recreate(
-                spec,
-                ctx.server_dir,
-                control=replace(control, say=say),
-                before_signal=before_replace,
-            )
-
-        try:
-            try:
-                yield from _with_hint(
-                    _speaking(replace_them, control.abandon),
-                    ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
+            def replace_them(say: docker.OutputSink) -> bool:
+                return self._seams.recreate(
+                    spec,
+                    ctx.server_dir,
+                    control=replace(control, say=say),
+                    before_signal=before_replace,
                 )
-            except Exception:
-                # T577: a replace given up or refused may leave the old world running behind
-                # the bit set above, and only a start clears it.
-                self._seams.clear_realm_offline(self.entry, spec, ctx.server_dir)
-                raise
-        except docker.SaveAbandoned as exc:
-            raise InstallStopped(
-                "The rebuild was stopped while the world server was saving its characters on "
-                "the way down, before the new build replaced it."
-            ) from exc
-        except docker.SaveFirstAbandoned as exc:
-            raise InstallStopped(
-                "The rebuild was cancelled while the world server was saving its characters, "
-                "before it was told to stop, so its containers were not replaced -- the server "
-                "you have is still the one that was running before this rebuild."
-            ) from exc
-        except docker.StopAbandoned as exc:
-            raise InstallStopped(
-                "The rebuild was cancelled while the world was still loading, so its "
-                "containers were not replaced -- the server you have is still the one that was "
-                "running before this rebuild."
-            ) from exc
-        except docker.DockerCommandError as exc:
-            raise InstallerError(
-                f"The server was rebuilt, but its containers could not be replaced, so the "
-                f"old build is still what is running: {exc}"
-            ) from exc
+
+            try:
+                try:
+                    yield from _with_hint(
+                        _speaking(replace_them, control.abandon),
+                        ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
+                    )
+                except Exception:
+                    # T577: a replace given up or refused may leave the old world running behind
+                    # the bit set above, and only a start clears it.
+                    self._seams.clear_realm_offline(self.entry, spec, ctx.server_dir)
+                    raise
+            except docker.SaveAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was stopped while the world server was saving its characters on "
+                    "the way down, before the new build replaced it."
+                ) from exc
+            except docker.SaveFirstAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was cancelled while the world server was saving its characters, "
+                    "before it was told to stop, so its containers were not replaced -- the server "
+                    "you have is still the one that was running before this rebuild."
+                ) from exc
+            except docker.StopAbandoned as exc:
+                raise InstallStopped(
+                    "The rebuild was cancelled while the world was still loading, so its "
+                    "containers were not replaced -- the server you have is still the one that was "
+                    "running before this rebuild."
+                ) from exc
+            except docker.DockerCommandError as exc:
+                raise InstallerError(
+                    f"The server was rebuilt, but its containers could not be replaced, so the "
+                    f"old build is still what is running: {exc}"
+                ) from exc
         yield "The containers were replaced."
 
     def rebuild(
