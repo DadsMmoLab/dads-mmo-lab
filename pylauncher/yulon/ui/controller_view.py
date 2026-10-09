@@ -8647,7 +8647,9 @@ class ControllerView(QWidget):
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
-        self._world_failed = bool(result.failure)
+        # A stopped verdict only keeps the sentence on the tab (T608); it is not a world that
+        # sits at the update, and the next run, started outside Yu'lon, must not inherit it.
+        self._world_failed = bool(result.failure) and result.state != "stopped"
         self._world_ready = result.state == "up" and result.ready
         if self._last_polled is not None:
             # T391: a loop seen after the poll takes REALM ONLINE down now, and

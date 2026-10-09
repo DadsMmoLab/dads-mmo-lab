@@ -23,7 +23,7 @@ from tests.test_dashboard import (
 )
 from yulon import dashboard, docker, runner
 from yulon.ui.controller_view import ControllerView
-from yulon.ui.tray import status_words
+from yulon.ui.tray import status_words, tray_state, tray_tooltip
 from yulon.ui.tray_flyout import dot_tone
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge, realm_tone
 from yulon.ui.widgets.job import run_inline
@@ -190,3 +190,44 @@ def test_the_failed_word_is_down_and_the_tray_and_flyout_say_so(qapp: object) ->
 def test_the_badge_renders_the_failed_word_by_itself(qapp: object) -> None:
     badge = DadcraftRealmBadge("failed")
     assert "UPDATE FAILED" in badge._label.text()
+
+
+def test_a_world_brought_back_by_something_else_does_not_read_failed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The stopped verdict keeps the sentence; it must not arm the badge for the next run.
+
+    Mutation: drop `and result.state != "stopped"` from `_verdict_ready()` and the healthy
+    new run (docker compose up, Docker Desktop) reads UPDATE FAILED.
+    """
+    ps.names = ""
+    verdicts = _Verdicts(AFTER_STOP)
+    view = _view(ps, tmp_path, verdicts)
+    view.refresh_status()
+    view.refresh_verdict()
+    assert "20260903063722_world.sql" in view.verdict_label.text()
+
+    ps.names = ALL_UP  # started outside Yu'lon; no verdict has landed yet
+    view.refresh_status()
+
+    assert view.realm_badge.status != "failed"
+    assert "UPDATE FAILED" not in view.realm_badge._label.text()
+
+
+def test_the_tray_icon_needs_a_look_for_a_failed_update_like_for_a_loop() -> None:
+    """Mutation: drop "failed" from `tray_state()` and the icon draws plain."""
+    assert tray_state(["failed"]) == "attention"
+    assert tray_state(["running", "failed"]) == "attention"
+
+
+def test_the_tray_tooltip_names_a_failed_update() -> None:
+    """Mutation: leave "failed" out of the tooltip's others and it says "no servers online"."""
+    text = tray_tooltip([("WoW Tortoise", "failed"), ("WoW TBC", "stopped")])
+    assert "WoW Tortoise — Update failed" in text
+    assert "WoW TBC" not in text
+
+
+def test_the_launcher_banner_does_not_say_a_hung_world_stopped() -> None:
+    from yulon.ui import launcher_window
+
+    assert "stuck at a failed update" in launcher_window.FAILED_BANNER

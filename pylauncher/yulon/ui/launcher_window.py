@@ -120,7 +120,7 @@ STARTING_BANNER = "The server is starting…"
 STOPPING_BANNER = "The server is stopping…"
 PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
 LOOP_BANNER = "The world server keeps crashing"
-FAILED_BANNER = "The world server stopped at a failed update"
+FAILED_BANNER = "The world server is stuck at a failed update"
 STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
 STOPPING_REASON = (
     "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
@@ -133,7 +133,7 @@ LOOP_REASON = (
     "says what it printed."
 )
 FAILED_REASON = (
-    "The world server stopped at a database update it could not apply, so nobody can log in. "
+    "The world server is stuck at a database update it could not apply, so nobody can log in. "
     "The Server tab says which update."
 )
 PARTIAL_REASON = (

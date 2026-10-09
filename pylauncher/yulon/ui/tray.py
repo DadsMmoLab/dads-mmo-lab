@@ -121,7 +121,7 @@ def tray_state(statuses: Sequence[str]) -> str:
     """
     words = [status.lower() for status in statuses]
     tones = [realm_tone(word) for word in words]
-    if "loop" in words or "partial" in words:
+    if "loop" in words or "partial" in words or "failed" in words:
         return "attention"
     # "restarting" is the hold of a Restart of ours (T188), in between like a Start.
     if "between" in tones or "restarting" in tones:
@@ -142,7 +142,8 @@ def tray_tooltip(servers: Sequence[tuple[str, str]]) -> str:
     others = [
         f"{name} — {status_words(status)}"
         for name, status in servers
-        if not is_online(status) and realm_tone(status) not in ("down", "unknown")
+        if not is_online(status)
+        and (realm_tone(status) not in ("down", "unknown") or status.lower() == "failed")
     ]
     noun = "server" if len(online) == 1 else "servers"
     head = f"Yu'lon: {len(online)} {noun} online" if online else "Yu'lon: no servers online"
