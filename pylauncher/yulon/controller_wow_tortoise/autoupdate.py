@@ -565,6 +565,7 @@ class GuardedApplier(Applier):
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: Completer | None = None,
     ) -> ApplyReport:
         """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
 
@@ -588,7 +589,7 @@ class GuardedApplier(Applier):
                 values,
                 last=last,
                 automatic=automatic,
-                complete=self._recompleter_for(manifest),
+                complete=complete or self._recompleter_for(manifest),
             ),
             note,
         )
