@@ -30110,3 +30110,156 @@ def test_play_with_a_12340_client_starts_the_game(
     view.play()
 
     assert len(launched) == 1
+
+
+# --------------------------------------------------------------------------
+# T612 -- a Tortoise server puts its two client addons into the game client by itself
+# --------------------------------------------------------------------------
+
+ADDON_IDS = ("tortoise-bots-manager", "tortoise-gm-manager")
+
+
+def _built_for_tortoise(original: Path, server_dir: Path) -> Path:
+    """`_built()`, marked as the Tortoise server's, which is the one that has addons."""
+    target = play_client.default_target(original, TORTOISE.name, server_dir)
+    play_client.create(
+        original,
+        target,
+        game=TORTOISE.id,
+        server_dir=server_dir,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    return target
+
+
+def _addon_view(
+    ps: _Ps, tmp_path: Path, *, play: Path | None = None, original: Path | None = None
+) -> tuple[ControllerView, _FakeApplier, Path]:
+    """A Tortoise-shaped tab (no client data in its catalog entry) with the addons wired in."""
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=TORTOISE)
+    applier = _FakeApplier(tmp_path)
+    applier.client_dir = play or original
+    view.services.applier = applier
+    object.__setattr__(view.services, "store", tortoise_modules.store())
+    object.__setattr__(view.services, "default_addons", ADDON_IDS)
+    return view, applier, tmp_path
+
+
+def test_only_tortoise_names_default_addons(tmp_path: Path) -> None:
+    assert _tortoise_services(tmp_path / "t", None).default_addons == ADDON_IDS
+    assert ControllerServices.for_entry(WOTLK, tmp_path / "w").default_addons == ()
+    assert ControllerServices.for_entry(TBC, tmp_path / "b").default_addons == ()
+
+
+def test_play_puts_both_addons_in_before_the_game_starts(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    launched: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon import play_launch
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, _ = _addon_view(ps, tmp_path, play=play, original=original)
+    ps.names = WORLD_UP
+    seen_at_launch: list[list[str]] = []
+    record = play_launch.launch
+    monkeypatch.setattr(
+        play_launch,
+        "launch",
+        lambda spec, **k: (seen_at_launch.append(list(applier.installed)), record(spec, **k))[1],
+    )
+    view.play()
+    assert seen_at_launch == [list(ADDON_IDS)], "the addons must be in before the game starts"
+    assert len(launched) == 1
+
+
+def test_play_does_not_put_back_an_addon_the_player_removed(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    from yulon import default_addons
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    default_addons.decline(server, "tortoise-gm-manager")
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.installed == ["tortoise-bots-manager"]
+    assert len(launched) == 1
+
+
+def test_a_game_with_no_default_addons_gets_no_step_at_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, _ = _addon_view(ps, tmp_path, play=play, original=original)
+    object.__setattr__(view.services, "default_addons", ())
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.installed == [] and len(launched) == 1
+
+
+def test_an_addon_that_cannot_be_put_in_does_not_stop_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, _ = _addon_view(ps, tmp_path, play=play, original=original)
+
+    def broken(manifest: object, *a: object, **k: object) -> ApplyReport:
+        raise OSError("github is down")
+
+    applier.install = broken  # type: ignore[method-assign]
+    ps.names = WORLD_UP
+    view.play()
+    assert len(launched) == 1
+
+
+def test_a_remove_of_a_default_addon_is_remembered_and_an_install_lifts_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    _deliver_report(view, ApplyReport("remove", "tortoise-gm-manager", family="mod"))
+    assert default_addons.declined(server) == {"tortoise-gm-manager"}
+    _deliver_report(view, ApplyReport("remove", "some-other-mod", family="mod"))
+    assert default_addons.declined(server) == {"tortoise-gm-manager"}
+    _deliver_report(view, ApplyReport("install", "tortoise-gm-manager", family="mod"))
+    assert default_addons.declined(server) == frozenset()
+
+
+def test_a_game_with_no_default_addons_remembers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    object.__setattr__(view.services, "default_addons", ())
+    _deliver_report(view, ApplyReport("remove", "tortoise-gm-manager", family="mod"))
+    assert not (server / default_addons.DECLINED_FILE).exists()
+
+
+def test_a_fresh_install_puts_both_addons_in_and_a_second_ask_adds_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, applier, _ = _addon_view(ps, tmp_path, original=original)
+    view.put_default_addons_in()
+    assert applier.installed == list(ADDON_IDS)
+
+
+def test_a_fresh_install_with_no_client_folder_puts_nothing_in(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, applier, _ = _addon_view(ps, tmp_path)
+    applier.client_dir = None
+    view.put_default_addons_in()
+    assert applier.installed == []

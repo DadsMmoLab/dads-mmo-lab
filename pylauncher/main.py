@@ -1617,6 +1617,7 @@ def build_window() -> object:
         view = controllers.get((game, Path(str(server_dir))))
         if view is not None:
             view.settle_channel_after_install()
+            view.put_default_addons_in()
 
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
         """A server adopted from a WSL distro, which is remembered with it.

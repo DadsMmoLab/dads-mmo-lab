@@ -192,3 +192,54 @@ def test_the_memory_is_written_whole_and_names_only_ids(tmp_path: Path) -> None:
 
 def test_tortoise_names_exactly_these_two_as_its_defaults() -> None:
     assert tortoise_modules.DEFAULT_ADDONS == IDS
+
+
+# ------------------------------------------------------ keep_in_step: the Play-time entry
+
+
+def _row(key: str, behind: object, family: str = "mod") -> object:
+    from yulon.apply import ModuleUpdate
+
+    return ModuleUpdate(key=key, path=Path(key), is_checkout=True, behind=behind, family=family)  # type: ignore[arg-type]
+
+
+def test_keep_in_step_updates_what_the_cached_count_says_is_behind(tmp_path: Path) -> None:
+    box = _Box(tmp_path)
+    box.put_in()
+    box.applier.calls.clear()
+    rows = [_row("tortoise-bots-manager", 0), _row("tortoise-gm-manager", 3)]
+    out = default_addons.keep_in_step(
+        box.server, box.applier, _manifests(), IDS, updates=lambda: rows
+    )
+    assert box.applier.calls == [("update", "tortoise-gm-manager")]
+    assert out.updated == ("tortoise-gm-manager",)
+
+
+def test_keep_in_step_ignores_a_module_of_the_same_name_in_another_family(tmp_path: Path) -> None:
+    box = _Box(tmp_path)
+    box.put_in()
+    box.applier.calls.clear()
+    default_addons.keep_in_step(
+        box.server,
+        box.applier,
+        _manifests(),
+        IDS,
+        updates=lambda: [_row("tortoise-gm-manager", 3, family="module")],
+    )
+    assert box.applier.calls == []
+
+
+def test_keep_in_step_survives_a_count_that_could_not_be_asked(tmp_path: Path) -> None:
+    box = _Box(tmp_path)
+
+    def broken() -> list[object]:
+        raise OSError("no network")
+
+    out = default_addons.keep_in_step(box.server, box.applier, _manifests(), IDS, updates=broken)
+    assert out.installed == IDS
+
+
+def test_a_failure_note_does_not_claim_an_install_when_it_was_an_update(tmp_path: Path) -> None:
+    out = default_addons.Outcome(failed={"tortoise-gm-manager": "no network"})
+    (line,) = out.notes()
+    assert "Tortoise GM Manager" in line and "no network" in line

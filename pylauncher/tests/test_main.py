@@ -6094,3 +6094,25 @@ def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: 
     finally:
         window.yulon_open_settings = real
     assert opened == [1]
+
+
+def test_a_finished_install_also_puts_the_default_addons_in(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fresh_install` -> the tab -> `put_default_addons_in()` (T612); "Use existing…" does not."""
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(ControllerView, "settle_channel_after_install", lambda self: None)
+    monkeypatch.setattr(
+        ControllerView,
+        "put_default_addons_in",
+        lambda self: asked.append(self.services.controller.server_dir),
+        raising=False,
+    )
+    server_dir = tmp_path / "addons-please"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    assert asked == []
+    catalog.fresh_install.emit("wow-wotlk", server_dir, None)
+    assert asked == [server_dir], asked

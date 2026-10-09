@@ -27,7 +27,8 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon.apply import Applier, ApplyReport, installed_clones
+from yulon.apply import Applier, ApplyReport, ModuleUpdate, installed_clones
+from yulon.git import is_behind
 from yulon.log import get_logger
 from yulon.manifest import Manifest
 
@@ -85,6 +86,12 @@ def remember(server_dir: Path, report: ApplyReport, ids: Collection[str]) -> Non
         logger.warning(f"could not note {report.item_id}'s {report.action} for Play: {exc}")
 
 
+_NAMES = {
+    "tortoise-bots-manager": "TortoiseBots Manager",
+    "tortoise-gm-manager": "Tortoise GM Manager",
+}
+
+
 @dataclass
 class Outcome:
     """What one `put_in()` did."""
@@ -100,7 +107,8 @@ class Outcome:
         out = [f"Put {item} into your game client." for item in self.installed]
         out += [f"Updated {item} in your game client." for item in self.updated]
         out += [
-            f"Could not put {item} into your game client ({why}). Play goes on without it."
+            f"Could not set up {_NAMES.get(item, item)} in your game client ({why}). "
+            "Play goes on without it."
             for item, why in self.failed.items()
         ]
         return tuple(out)
@@ -157,3 +165,31 @@ def put_in(
                     kept.remove(item)
     out.installed, out.updated = tuple(installed), tuple(updated)
     return out
+
+
+def keep_in_step(
+    server_dir: Path,
+    applier: Applier,
+    manifests: Iterable[Manifest],
+    ids: Sequence[str],
+    *,
+    updates: Callable[[], Iterable[ModuleUpdate]] | None = None,
+    say: Callable[[str], None] = lambda _line: None,
+) -> Outcome:
+    """`put_in()` with `behind` read from the Modules tab's own cached count (`updates`).
+
+    The count is kept a day per clone (`apply.cached_module_updates`), so Play costs GitHub
+    nothing while an add-on has not moved. A count that cannot be asked leaves nothing behind:
+    the add-on is put in if it is missing and otherwise left as it is.
+    """
+    behind: set[str] = set()
+    if updates is not None:
+        try:
+            behind = {
+                row.key
+                for row in updates()
+                if row.family == "mod" and row.key in ids and is_behind(row.behind)
+            }
+        except Exception as exc:  # boundary: no network must not stop Play
+            logger.info(f"default add-ons: could not count what is behind ({exc})")
+    return put_in(server_dir, applier, manifests, ids, behind=behind, say=say)
