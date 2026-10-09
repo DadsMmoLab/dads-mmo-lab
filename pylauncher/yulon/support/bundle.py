@@ -124,6 +124,8 @@ class BundleReport:
     size: int
     cut: tuple[str, ...] = ()
     """Members cut shorter than their 2 MiB to fit the cap."""
+    unvouched: tuple[str, ...] = ()
+    """Members left out because their cut text could not be vouched for (T606), not for size."""
     short_passwords: tuple[str, ...] = ()
     """Where a password too short to take out of free text is set (`sources.Known.short`)."""
 
@@ -350,6 +352,7 @@ def build(
         dropped=tuple(member.name for member in fit.dropped),
         size=len(data),
         cut=tuple(fit.cuts),
+        unvouched=tuple(member.name for member in fit.unvouched),
         short_passwords=tuple(redactor.redact(where) for where in short),
     )
 
@@ -406,6 +409,9 @@ def _manifest_text(
     if fit.dropped:
         lines += ["", f"Left out to keep the file under {megabytes} MB, oldest first:"]
         lines += [f"  {m.name}" for m in fit.dropped]
+    if fit.unvouched:
+        lines += ["", "Left out because the cleaner could not vouch for the shorter text:"]
+        lines += [f"  {m.name}" for m in fit.unvouched]
     if fit.cuts:
         lines += [
             "",
@@ -455,6 +461,8 @@ class _Fit:
     dropped: list[_Member]
     cuts: dict[str, int]
     """Member name -> the bytes of its text still kept, in the order first cut."""
+    unvouched: list[_Member]
+    """Left out because the redactor refused the text of their cut (T606), not for size."""
 
 
 def _cut_tier(member: _Member, newest_runs: frozenset[str] = frozenset()) -> int | None:
@@ -561,7 +569,7 @@ def _fit(
     newest_runs = _newest_runs(runs)
     queue += [m for m in runs if m.name not in newest_runs]
     weight = {m.name: _estimate(m) for m in members}
-    fit = _Fit(kept=list(members), dropped=[], cuts={})
+    fit = _Fit(kept=list(members), dropped=[], cuts={}, unvouched=[])
 
     def give() -> bool:
         """Drop or cut one member. False when nothing is left to give."""
@@ -576,8 +584,11 @@ def _fit(
         try:
             shorter = _shorter(fit.kept[index], redact)
         except Unredactable:
-            # The cut text cannot be vouched for: it goes, whole, rather than raw (T595).
-            fit.dropped.append(fit.kept.pop(index))
+            # The cut text cannot be vouched for: it goes, whole, rather than raw (T595),
+            # under its own reason and not as a cut file (T606).
+            victim = fit.kept.pop(index)
+            fit.cuts.pop(victim.name, None)
+            fit.unvouched.append(victim)
             return True
         fit.kept[index] = shorter
         weight[shorter.name] = _estimate(shorter)
