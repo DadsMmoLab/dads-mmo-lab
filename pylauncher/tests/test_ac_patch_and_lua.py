@@ -2108,3 +2108,74 @@ def test_an_update_whose_lay_fails_part_way_is_put_back_whole_and_may_start(
     assert made.start_refusal(server_dir) is None
     assert not (server_dir / native.START_REFUSED_FILE).exists()
     assert rec.calls.count("recreate") == 1, "the rollback started the old build"
+
+
+def refuse_the_start_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full disk: the file that blocks a hand Start cannot be written either (T602 review)."""
+    real = Path.write_text
+
+    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name.startswith(native.START_REFUSED_FILE):
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+
+
+def test_a_part_way_lay_still_leaves_the_old_build_stopped_when_the_marker_cannot_be_saved(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk that filled under script 2 refuses the marker too: the fact is kept in memory."""
+    from yulon import server_build_presses
+
+    refuse_the_start_marker(monkeypatch)
+    rec, server_dir, made, said, error = rebuild_whose_second_script_cannot_be_laid(
+        tmp_path, installers, monkeypatch
+    )
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert "recreate" not in rec.calls, f"the old build was started on the mixed set: {rec.calls}"
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+    assert "STOPPED" in error and rebuild in error, error
+    # Said plainly: nothing will block a hand Start, so the player is told not to press it.
+    assert "could not be saved" in error and "Start is NOT blocked" in error, error
+    assert any(START_NOT_SAVED in line for line in said), said
+
+
+START_NOT_SAVED = "nothing stops this server being started"
+
+
+def test_a_rebuild_with_no_rollback_whose_lay_fails_part_way_says_start_is_refused(
+    tmp_path: Path, installers: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import server_build_presses
+
+    rec, server_dir, made, _said = installed(tmp_path, installers)
+    rec.images = False  # no build to keep as a rollback
+    rec.on_clone = None
+    lua = server_dir / MODULE / "lua_scripts"
+    (lua / FIRST_NAME).write_text(FIRST_BODY, encoding="utf-8")
+    (lua / LUA_NAME).write_text(NEW_LUA, encoding="utf-8")
+    real = scriptdeploy._publish
+    scripts: list[str] = []
+
+    def second_script_fails(target: Path, data: bytes) -> None:
+        if target.name != scriptdeploy.RECORD_FILE:
+            scripts.append(target.name)
+            if len(scripts) >= 2:
+                raise OSError(28, "no space left on device")
+        real(target, data)
+
+    monkeypatch.setattr(scriptdeploy, "_publish", second_script_fails)
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError) as raised:
+        list(made.rebuild(InstallOptions(server_dir=server_dir), missing_images_ok=True))
+
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    error = str(raised.value)
+    assert scripts == [FIRST_NAME, LUA_NAME], scripts
+    assert "recreate" not in rec.calls, rec.calls
+    assert "run the new build" not in error, error  # the containers were never replaced
+    assert "Start is refused" in error and rebuild in error, error
+    assert made.start_refusal(server_dir) == native.SCRIPTS_NOT_BACK_REFUSAL

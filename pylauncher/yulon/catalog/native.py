@@ -2683,6 +2683,38 @@ it (it lays the scripts from the sources the folder is on), and the Rebuild pres
 refused by it."""
 
 
+NO_ROLLBACK_SCRIPTS_MIXED = (
+    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "The servers were stopped to lay the Lua scripts and no container was replaced, so nothing "
+    "runs now and the scripts are a mix of the old and the new. Start is refused until this "
+    "server is rebuilt: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""T602: a rebuild with no rollback whose Lua lay failed part-way, with the servers down."""
+
+
+class _MixedScripts:
+    """A plain Rebuild's Lua lay changed some scripts and failed (T602), as this press saw it.
+
+    `unsaved` is `owe_start()`'s warning when the file that blocks a Start could not be
+    written (a full disk is the likeliest cause of the lay failing), else "".
+    """
+
+    def __init__(self) -> None:
+        self.scripts = False
+        self.unsaved = ""
+
+    def not_saved_note(self) -> str:
+        """The sentence for a marker that is not on disk: a hand Start would not be blocked."""
+        if not self.unsaved:
+            return ""
+        return (
+            " But the note that blocks Start could not be saved (the disk would not take the "
+            "file), so Start is NOT blocked: do not press Start. Press "
+            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} first."
+        )
+
+
 def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
     """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
 
@@ -8100,20 +8132,8 @@ class StagedInstaller:
                     f"new build: {exc}"
                 ) from exc
             # T562: the scripts the world reads at its start, laid now that nothing runs.
-            try:
-                yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
-            except ScriptsPartlyLaid:
-                # T602: a lay that changed some scripts and then failed leaves a mix of the
-                # old and the new set. The update route's rollback lays the old set from the
-                # old checkout; a plain Rebuild has no old checkout, so the rollback must not
-                # start the old build on the mix. Written before the exception travels on:
-                # `_restore_rollback()` asks `start_refusal()` and leaves the servers
-                # stopped, and every later Start is refused until a Rebuild succeeds.
-                if servers_down is None:
-                    warned = owe_start(ctx.server_dir, why=SCRIPTS_NOT_BACK)
-                    if warned:
-                        yield warned
-                raise
+            # A `ScriptsPartlyLaid` from here is `rebuild()`'s to answer (T602).
+            yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 
@@ -8359,6 +8379,7 @@ class StagedInstaller:
         built = False
         touched = False
         parking = _Parking()
+        mixed = _MixedScripts()
         self._build_exit = None
 
         def may_have_tagged() -> bool:
@@ -8400,9 +8421,24 @@ class StagedInstaller:
             # before the compose command is issued -- not at the stage's first yield
             # (round 2), which left a window between the readiness probe and the
             # command where a failure read as a partial replacement.
-            yield from self.stage_recreate(
-                stage_ctx, before_replace=mark_touched, servers_down=servers_down
-            )
+            try:
+                yield from self.stage_recreate(
+                    stage_ctx, before_replace=mark_touched, servers_down=servers_down
+                )
+            except ScriptsPartlyLaid:
+                # T602: the lay changed some scripts and then failed, so the folder holds a
+                # mix of the old and the new set. The update route's rollback lays the old
+                # set from the old checkout; a plain Rebuild has no old checkout, so its
+                # rollback must not start the old build on the mix. Remembered HERE, in
+                # memory, and also in the file that blocks every later Start: the disk that
+                # filled under the script may refuse the file too, and `owe_start()` only
+                # says so, so the rollback cannot rely on the file alone.
+                if servers_down is None:
+                    mixed.scripts = True
+                    mixed.unsaved = owe_start(stage_ctx.server_dir, why=SCRIPTS_NOT_BACK)
+                    if mixed.unsaved:
+                        yield mixed.unsaved
+                raise
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
@@ -8525,7 +8561,11 @@ class StagedInstaller:
                 # back to. `touched` says whether the containers run it yet.
                 # No start refusal here (owner, 2026-09-28; lead, T223): a first
                 # build has no old one to go back to, so one would leave nothing runnable.
-                message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
+                if mixed.scripts:
+                    # T602: the servers were stopped for the lay and nothing was replaced.
+                    message = f"{failure} {NO_ROLLBACK_SCRIPTS_MIXED}{mixed.not_saved_note()}"
+                else:
+                    message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 if touched:
                     raise carry_detail(exc, RebuildChangedTheServer(message, up=False)) from exc
@@ -8543,6 +8583,7 @@ class StagedInstaller:
                 # describes the server (scoped re-review, the lead's (a)): it goes below,
                 # and the restore treats the names as it always did.
                 hold_rollback=hold and not touched,
+                mixed_scripts=mixed,
             )
             also = self._forget_the_stopped_build(server_dir) if touched and hold else ""
             message_said = f"{message}{also}"
@@ -10070,6 +10111,7 @@ class StagedInstaller:
         press: str = server_build_presses.REBUILD,
         parking: _Parking | None = None,
         hold_rollback: bool = False,
+        mixed_scripts: _MixedScripts | None = None,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
 
@@ -10273,6 +10315,9 @@ class StagedInstaller:
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
         # tags as its rollback, and a repair that failed must not start them again.
         refused = self.start_refusal(ctx.server_dir)
+        if mixed_scripts is not None and mixed_scripts.scripts:
+            # T602: held in memory too, for a marker the disk would not take.
+            refused = f"{refused or SCRIPTS_NOT_BACK_REFUSAL}{mixed_scripts.not_saved_note()}"
         if stay is not None:
             yield from self._release(named)
             yield from self._release(letting_go)
