@@ -30134,3 +30134,272 @@ def test_play_with_a_12340_client_starts_the_game(
     view.play()
 
     assert len(launched) == 1
+
+
+# --------------------------------------------------------------------------
+# T612 -- a Tortoise server puts its two client addons into the game client by itself
+# --------------------------------------------------------------------------
+
+ADDON_IDS = ("tortoise-bots-manager", "tortoise-gm-manager")
+
+
+def _built_for_tortoise(original: Path, server_dir: Path) -> Path:
+    """`_built()`, marked as the Tortoise server's, which is the one that has addons."""
+    target = play_client.default_target(original, TORTOISE.name, server_dir)
+    play_client.create(
+        original,
+        target,
+        game=TORTOISE.id,
+        server_dir=server_dir,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    return target
+
+
+class _AddonApplier(_FakeApplier):
+    """`_FakeApplier` that also answers the two local questions Play asks of a clone (T612)."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.lacking: set[str] = set()
+        self.put_back: list[str] = []
+
+    def client_files_missing(self, manifest: object) -> tuple[Path, ...]:  # type: ignore[override]
+        return (Path("x"),) if manifest.id in self.lacking else ()  # type: ignore[attr-defined]
+
+    def put_back_client_files(self, manifest: object) -> tuple[Path, ...]:  # type: ignore[override]
+        self.put_back.append(manifest.id)  # type: ignore[attr-defined]
+        return ()
+
+
+def _cloned(server: Path, *ids: str) -> None:
+    for item in ids:
+        (server / "sql_scripts" / "clones" / item).mkdir(parents=True, exist_ok=True)
+
+
+def _addon_view(
+    ps: _Ps, tmp_path: Path, *, play: Path | None = None, original: Path | None = None
+) -> tuple[ControllerView, _AddonApplier, Path]:
+    """A Tortoise-shaped tab (no client data in its catalog entry) with the addons wired in."""
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=TORTOISE)
+    applier = _AddonApplier(tmp_path)
+    applier.client_dir = play or original
+    view.services.applier = applier
+    object.__setattr__(view.services, "store", tortoise_modules.store())
+    object.__setattr__(view.services, "default_addons", ADDON_IDS)
+    return view, applier, tmp_path
+
+
+def test_only_tortoise_names_default_addons(tmp_path: Path) -> None:
+    assert _tortoise_services(tmp_path / "t", None).default_addons == ADDON_IDS
+    assert ControllerServices.for_entry(WOTLK, tmp_path / "w").default_addons == ()
+    assert ControllerServices.for_entry(TBC, tmp_path / "b").default_addons == ()
+
+
+def test_play_puts_missing_addon_files_back_before_the_game_starts_and_installs_nothing(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    launched: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon import play_launch
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    _cloned(server, *ADDON_IDS)
+    applier.lacking = {"tortoise-gm-manager"}
+    ps.names = WORLD_UP
+    seen_at_launch: list[list[str]] = []
+    record = play_launch.launch
+    monkeypatch.setattr(
+        play_launch,
+        "launch",
+        lambda spec, **k: (seen_at_launch.append(list(applier.put_back)), record(spec, **k))[1],
+    )
+    view.play()
+    assert seen_at_launch == [["tortoise-gm-manager"]], "files must be back before the game starts"
+    assert applier.installed == [] and applier.removed == []
+    assert len(launched) == 1
+
+
+def test_play_does_not_clone_an_addon_that_has_no_clone(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, _ = _addon_view(ps, tmp_path, play=play, original=original)
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.installed == [] and applier.put_back == []
+    assert len(launched) == 1
+
+
+def test_play_does_not_put_back_an_addon_the_player_removed(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    from yulon import default_addons
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    _cloned(server, *ADDON_IDS)
+    applier.lacking = set(ADDON_IDS)
+    default_addons.decline(server, "tortoise-gm-manager")
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == ["tortoise-bots-manager"]
+    assert len(launched) == 1
+
+
+def test_a_game_with_no_default_addons_gets_no_step_at_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    _cloned(server, *ADDON_IDS)
+    applier.lacking = set(ADDON_IDS)
+    object.__setattr__(view.services, "default_addons", ())
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == [] and len(launched) == 1
+
+
+def test_an_addon_that_cannot_be_put_in_does_not_stop_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    _cloned(server, *ADDON_IDS)
+    applier.lacking = set(ADDON_IDS)
+
+    def broken(manifest: object, *a: object, **k: object) -> tuple[Path, ...]:
+        raise OSError("disk full")
+
+    applier.put_back_client_files = broken  # type: ignore[method-assign]
+    ps.names = WORLD_UP
+    view.play()
+    assert len(launched) == 1
+
+
+def test_a_remove_of_a_default_addon_is_remembered_and_an_install_lifts_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    _deliver_report(view, ApplyReport("remove", "tortoise-gm-manager", family="mod"))
+    assert default_addons.declined(server) == {"tortoise-gm-manager"}
+    _deliver_report(view, ApplyReport("remove", "some-other-mod", family="mod"))
+    assert default_addons.declined(server) == {"tortoise-gm-manager"}
+    _deliver_report(view, ApplyReport("install", "tortoise-gm-manager", family="mod"))
+    assert default_addons.declined(server) == frozenset()
+
+
+def test_a_remove_that_stopped_half_way_is_still_the_players_remove_of_the_addon(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    gm = view.services.store.load("mod", "tortoise-gm-manager")
+    view._acting_on, view._module_pending = gm, "remove tortoise-gm-manager"
+    view._module_failed(OSError("the clone's folder could not be removed"))
+    assert default_addons.declined(server) == {"tortoise-gm-manager"}
+
+
+def test_an_addon_remove_that_was_refused_up_front_is_not_noted(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    gm = view.services.store.load("mod", "tortoise-gm-manager")
+    view._acting_on, view._module_pending = gm, "remove tortoise-gm-manager"
+    view._module_failed(apply_module.ApplyRefusal("not yours to remove"))
+    assert default_addons.declined(server) == frozenset()
+    view._acting_on, view._module_pending = gm, "install tortoise-gm-manager"
+    view._module_failed(OSError("no network"))
+    assert default_addons.declined(server) == frozenset()
+
+
+def test_a_game_with_no_default_addons_remembers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import default_addons
+
+    view, _applier, server = _addon_view(ps, tmp_path)
+    object.__setattr__(view.services, "default_addons", ())
+    _deliver_report(view, ApplyReport("remove", "tortoise-gm-manager", family="mod"))
+    assert not (server / default_addons.DECLINED_FILE).exists()
+
+
+def test_a_fresh_install_puts_both_addons_in_and_a_second_ask_adds_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, applier, _ = _addon_view(ps, tmp_path, original=original)
+    view.put_default_addons_in()
+    assert applier.installed == list(ADDON_IDS)
+
+
+def test_a_fresh_install_with_no_client_folder_puts_nothing_in(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, applier, _ = _addon_view(ps, tmp_path)
+    applier.client_dir = None
+    view.put_default_addons_in()
+    assert applier.installed == []
+
+
+def test_a_fresh_install_waits_for_a_busy_tab_and_leaves_the_addons_to_the_next_play(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, applier, _ = _addon_view(ps, tmp_path, original=original)
+    view._busy = True
+    view.put_default_addons_in()
+    assert applier.installed == []
+    view._busy = False
+    view._module_pending = "install something-else"
+    view.put_default_addons_in()
+    assert applier.installed == []
+
+
+def test_a_fresh_install_writes_nothing_into_a_ready_to_play_folder_that_is_not_this_servers(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    stranger = tmp_path / "clients" / "not-a-play-client"
+    stranger.mkdir()
+    view, applier, _ = _addon_view(ps, tmp_path, play=stranger, original=original)
+    view.put_default_addons_in()
+    assert applier.installed == []
+
+
+def test_a_tab_opened_at_start_up_asks_for_the_addons_a_moment_later(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, applier, _ = _addon_view(ps, tmp_path, original=original)
+    view.put_default_addons_later(0)
+    assert applier.installed == [], "never on the spot: the tab is still being built"
+    for _ in range(200):
+        QApplication.processEvents()
+        if applier.installed:
+            break
+    assert applier.installed == list(ADDON_IDS)
+    quiet, quiet_applier, _ = _addon_view(ps, tmp_path / "other", original=original)
+    object.__setattr__(quiet.services, "default_addons", ())
+    quiet.put_default_addons_later(0)
+    for _ in range(50):
+        QApplication.processEvents()
+    assert quiet_applier.installed == []

@@ -43,9 +43,12 @@
     "files made every SECOND install of this addon die with Errno 13 before it had landed a",
     "file, and this app's own `.yulon-clone.json`. Both are bookkeeping, the history stays in",
     "the clone, and the client never reads either.",
-    "WRITTEN AT INSTALL, not at Play. `_ApplyEngine._client()` (apply.py:2173-2192) is the one",
-    "writer into a client folder in this app, and it runs from the Modules tab's Install press;",
-    "Play launches the client it finds. The tab has to have been given a client dir for the",
-    "step to run at all -- on a record with none it is skipped with a sentence."
+    "PUT IN BY THE APP (T612). A new install, and a tab opened at start-up that has no clone of",
+    "it yet, install this addon through the Modules tab's own Install, so this row reads installed",
+    "and its Remove works as ever. Play (the ready-to-play client only) never touches git or the",
+    "network: it copies back, from the clone already on disk, any file of the addon the client",
+    "lacks, and never overwrites one that is there. Updates stay the Modules tab's Check for",
+    "updates and Update. A Remove is remembered per server and nothing puts the addon back;",
+    "installing it by hand lifts that. Nothing is written to the server and nothing is restarted."
   ]
 }

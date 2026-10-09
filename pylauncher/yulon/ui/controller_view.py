@@ -82,6 +82,7 @@ from yulon import (
     conf_dist,
     database_presence,
     dbreads,
+    default_addons,
     docker,
     docker_advice,
     install_wiring,
@@ -2041,6 +2042,14 @@ class ControllerServices:
     `Applier.replacement_question()` is the whole of it; this seam exists so the
     view can ask without holding an applier (style-guide §3).
     """
+    default_addons: tuple[str, ...] = ()
+    """The Modules-tab client addons this game puts into the game client by itself (T612).
+
+    A fresh install (`put_default_addons_in()`) and every Play (`_prepare_client()`) put
+    each one in through `default_addons.put_in()`, unless the player removed it:
+    the Modules tab's own Remove is remembered per server (`_module_done()`). Empty for
+    every game but Tortoise, which names its two Sagiroth addons.
+    """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
 
@@ -2762,6 +2771,7 @@ def _assemble(
     module_install_custom: CustomModuleInstall | None = None,
     module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
+    default_addons: tuple[str, ...] = (),
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -2847,6 +2857,7 @@ def _assemble(
         # to the games that have such clones and to no other.
         module_replacement_question=module_replacement_question,
         module_forget=module_forget,
+        default_addons=default_addons,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
         # `catalog.json` by `installer_for()`, and every family's stage tuple
@@ -4207,6 +4218,8 @@ def _for_tortoise(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
         module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        # T612: the two Sagiroth client addons go in by themselves (new install, every Play).
+        default_addons=tortoise_modules.DEFAULT_ADDONS if entry.has_manifests else (),
         applier=(
             tortoise_modules.applier(
                 server_dir,
@@ -11736,9 +11749,13 @@ class ControllerView(QWidget):
         # packs or a patched exe: step 1 takes them out. And for the launcher's picks
         # alone (T187): on an entry with no client data -- every shipped game today --
         # its display and account choices are Config.wtf keys only the pipeline writes.
-        if has_client_data(self.entry.client) or (
-            recorded is not None
-            and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
+        if (
+            has_client_data(self.entry.client)
+            or bool(self.services.default_addons)
+            or (
+                recorded is not None
+                and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
+            )
         ):
             self._skipped = frozenset()
             self._play_prepare()
@@ -11827,6 +11844,11 @@ class ControllerView(QWidget):
             if cancelled():
                 raise client_packs.Cancelled("Cancelled. Nothing was started.")
 
+        # 0. The game's default client addons (T612), before anything else is written: put in
+        # when missing, updated when behind, never put back once the player removed them. A
+        # failure is a line in the Play log and never a stop: Play must start the game.
+        check_cancel()
+        notes += self._default_addons_work(say, clone=False)
         wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
         # "Play without" a pack whose update was cut half way: its files are a mix of old
         # and new, so they go (and the entry) before the game starts.
@@ -12035,6 +12057,85 @@ class ControllerView(QWidget):
             seeded = True
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
+
+    def _default_addons_work(self, say: Callable[[str], None], *, clone: bool) -> tuple[str, ...]:
+        """Off the GUI thread: this game's default client addons, put in (T612).
+
+        Through the Modules tab's own applier and manifests, so what lands in the game client
+        is what the tab shows installed and what its Remove takes back. `clone=False` is Play:
+        no git and no network, only the files a clone on disk has and the client lacks.
+        `clone=True` (a fresh install, a tab opening) also installs an add-on with no clone.
+        Never raises: the lines come back as Play notes.
+        """
+        services = self.services
+        ids = services.default_addons
+        if not ids or services.applier is None or services.store is None:
+            return ()
+        try:
+            outcome = default_addons.put_in(
+                services.controller.server_dir,
+                services.applier,
+                services.store.load_all("mod"),
+                ids,
+                clone=clone,
+                say=say,
+            )
+        except Exception as exc:  # boundary: the addons are a courtesy, Play is the job
+            logger.warning(f"default client addons: {exc}")
+            return (f"Could not check your client addons ({exc}). Play goes on without them.",)
+        return outcome.notes()
+
+    def put_default_addons_later(self, milliseconds: int = 5000) -> None:
+        """A tab opened at start-up: ask `put_default_addons_in()` a few seconds on (T612).
+
+        How an existing server that has no clone of its addons yet gets them, off the Play
+        path: Play itself never clones. Nothing happens when they are all there, removed, or
+        failed within the day.
+        """
+        if self.services.default_addons:
+            QTimer.singleShot(milliseconds, self, self.put_default_addons_in)
+
+    def put_default_addons_in(self) -> None:
+        """A fresh install ended: put this game's default client addons in (T612).
+
+        Hung off `fresh_install` like `settle_channel_after_install()` and for the same reason:
+        an install is a press that is allowed to write, "Use existing…" is not. Nothing is
+        started while a server job, a module job or a Play is on, or when the folder the
+        files would go into is not this server's; the next Play puts them in then.
+        """
+        if not self.services.default_addons or getattr(self, "_closed", False):
+            return
+        if self._busy or self._module_job_running() or self._play_pending:
+            return
+        if (
+            self.services.play_client_dir is not None
+            and self._usable_play_client(offer_remake=False) is None
+        ):
+            return
+        self._module_pending = "put in the client addons"
+        self.module_report.setPlainText("Putting the client addons in…")
+        self._run_module_job(
+            lambda: self._default_addons_work(lambda _line: None, clone=True),
+            self._default_addons_done,
+            self._default_addons_failed,
+        )
+
+    @Slot(object)
+    def _default_addons_done(self, result: object) -> None:
+        self._module_job_ended()
+        self._module_pending = None
+        lines = result if isinstance(result, tuple) else ()
+        self.module_report.setPlainText(
+            "\n".join(lines) if lines else "The client addons are already in place."
+        )
+        self.reload_modules()
+
+    @Slot(object)
+    def _default_addons_failed(self, exc: object) -> None:
+        self._module_job_ended()
+        self._module_pending = None
+        logger.warning(f"default client addons: {exc}")
+        self.module_report.setPlainText(f"Could not put the client addons in: {exc}")
 
     def _download_progress(self, pack: ClientPack) -> Callable[[int, int], None]:
         """A progress callback for `pack`'s download: at most five lines a second."""
@@ -17069,6 +17170,12 @@ class ControllerView(QWidget):
             )
         )
         self._note_session_facts(result, acted_on)
+        # T612: a Remove (or a hand Install) of a default client addon is kept per server,
+        # so the next Play does not put back what the player took out.
+        if self.services.default_addons:
+            default_addons.remember(
+                self.services.controller.server_dir, result, self.services.default_addons
+            )
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
         # a remove that then failed, leaving a folder on disk with no row in the
@@ -17171,6 +17278,19 @@ class ControllerView(QWidget):
         self._module_pending = None
         self._acting_on = None
         if acted_on is not None:
+            # T612: a Remove that stopped half way (the clone may be gone, or half of it) is
+            # still the player's Remove: noted, so Play does not put the addon back over it.
+            # A refusal changed nothing, so it is not.
+            if (
+                what.startswith("remove ")
+                and acted_on.id in self.services.default_addons
+                and acted_on.type == "mod"
+                and not isinstance(exc, apply_module.ApplyRefusal)
+            ):
+                try:
+                    default_addons.decline(self.services.controller.server_dir, acted_on.id)
+                except OSError as note_exc:
+                    logger.warning(f"could not note the removal of {acted_on.id}: {note_exc}")
             # A failure is not "nothing happened" (round 2). `install()` fetches
             # and RESETS the checkout first and then runs deploy, patches, SQL,
             # conf and the client copy; any of those can raise with the folder

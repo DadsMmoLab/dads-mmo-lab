@@ -1557,6 +1557,9 @@ def build_window() -> object:
                 install.wsl_distro,
                 install.play_client_dir,
             )
+            opened = controllers.get((install.game, install.server_dir))
+            if opened is not None:
+                opened.put_default_addons_later()  # T612: off the Play path, a few seconds on
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
     # The Catalog was made current before `currentChanged` was connected, so
@@ -1617,6 +1620,7 @@ def build_window() -> object:
         view = controllers.get((game, Path(str(server_dir))))
         if view is not None:
             view.settle_channel_after_install()
+            view.put_default_addons_in()
 
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
         """A server adopted from a WSL distro, which is remembered with it.

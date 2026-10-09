@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
+- A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.

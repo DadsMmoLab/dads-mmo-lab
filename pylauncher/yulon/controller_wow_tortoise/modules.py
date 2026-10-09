@@ -188,6 +188,13 @@ def apply_module(
 ADDON_ID = "tortoise-bots-manager"
 """The client addon whose release is paired with the server's bot module (T126)."""
 
+DEFAULT_ADDONS = ("tortoise-bots-manager", "tortoise-gm-manager")
+"""The two client addons a Tortoise server puts into the game client by itself (T612).
+
+A new install and every Play ask `yulon.default_addons.put_in()` for them; a player's Remove
+of either is remembered per server and Play never puts it back.
+"""
+
 BOTS_REPO = "Sagiroth/TortoiseBots"
 """The catalog source the addon's release is compared against (T126).
 
