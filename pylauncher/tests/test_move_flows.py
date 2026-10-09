@@ -834,3 +834,36 @@ def test_the_lease_refuses_an_import_beside_a_backup(tmp_path: Path) -> None:
                 box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
             )
     assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_a_dump_without_a_record_is_refused_at_the_load_even_if_the_plan_let_it_through(
+    tmp_path: Path,
+) -> None:
+    """Defence in depth: the engine's own plan is asked again of the extracted file, and an
+    unlabelled one is never accepted (Restore may ask the player; a move may not)."""
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": None})
+    box = target(tmp_path)
+    manifest = move.read_package(package).manifest
+    forged = move_flows.ImportPlan(
+        path=package,
+        manifest=manifest,
+        refusals=(),
+        schemas=("acore_auth", "acore_characters"),
+        counts=(0, 0),
+    )
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.run_import(
+            box.world, forged, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert move.unlabeled_dump("db/acore_characters.sql") in str(raised.value)
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_the_target_moving_to_another_version_since_the_plan_refuses(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    box.db.updates = ("2024_01_a", "2024_01_b", "2024_03_newer")  # updated after the plan
+    with pytest.raises(MaintenanceError, match="not at the same version as this server's"):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert not [e for e in box.events if e.startswith(("load:", "dump:"))]

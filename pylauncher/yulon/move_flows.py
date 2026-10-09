@@ -899,13 +899,12 @@ def _checked_plans(
         except MaintenanceError as exc:
             raise MoveError(f"{exc} {_NOT_IN}") from exc
         if recorded is None:
+            # Refused here and never acknowledged: Restore may ask the player about an old
+            # backup; a move may not. (`restore()` refuses an unacknowledged one as well.)
             raise MoveError(f"{move.unlabeled_dump(f'db/{schema}.sql')} {_NOT_IN}")
         restore_plan = world.plan_restore(path)
         if not restore_plan.allowed:
             raise MoveError(f"{' '.join(restore_plan.refusals)} {_NOT_IN}")
-        if restore_plan.game_unproven:
-            # Never accepted: Restore may ask the player about an old backup; a move may not.
-            raise MoveError(f"{move.unlabeled_dump(f'db/{schema}.sql')} {_NOT_IN}")
         plans.append((schema, restore_plan))
     return plans
 
