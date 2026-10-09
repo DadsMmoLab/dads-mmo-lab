@@ -1258,7 +1258,7 @@ def test_a_release_with_no_pr_titles_still_sends_the_section_alone(world):
     assert "Only line" in sent and "Pull requests merged" not in sent
 
 
-# --- T620: the release post is one "## New:" and one "## Fixes:" list -----------
+# --- T620: the release post is a "## New:", a "## Fixes:" and a "## Changed:" list -----------
 
 SAMPLE = (
     "## v1.1 - d\n"
@@ -1275,9 +1275,10 @@ SAMPLE_SHAPE = (
     "## New:\n"
     "- **Alpha** is out for players.\n"
     "- Beta works now\n"
-    "- Delta behaves differently\n"
     "## Fixes:\n"
-    "- Gamma no longer crashes"
+    "- Gamma no longer crashes\n"
+    "## Changed:\n"
+    "- Delta behaves differently"
 )
 
 
@@ -1298,7 +1299,7 @@ def release_lists(world, changelog=SAMPLE, claude=None):
     return body
 
 
-def test_the_post_is_the_changelog_built_into_new_and_fixes_with_changed_under_new(world):
+def test_the_post_is_the_changelog_built_into_new_fixes_and_changed_lists(world):
     assert release_lists(world) == SAMPLE_SHAPE
 
 
@@ -1612,3 +1613,104 @@ def test_a_cut_inside_a_bold_phrase_leaves_no_open_marker(world):
     line = desc.splitlines()[1]
     assert line.endswith("…") and len(line) - 2 <= 90
     assert line.count("**") % 2 == 0
+
+
+# --- T620 owner change: Changed is its own list, after Fixes ---------------------
+
+
+def test_changed_items_have_their_own_list_after_fixes_not_under_new(world):
+    desc = release_lists(
+        world, "## v1.1 - d\n### Changed\n- Delta\n### Fixed\n- Gamma\n### New\n- Alpha\n"
+    )
+    assert desc == "## New:\n- Alpha\n## Fixes:\n- Gamma\n## Changed:\n- Delta"
+
+
+def test_a_changed_only_release_is_just_the_changed_list(world):
+    assert release_lists(world, "## v1.1 - d\n### Changed\n- Delta\n") == "## Changed:\n- Delta"
+
+
+def test_an_empty_changed_section_is_left_out(world):
+    desc = release_lists(world, "## v1.1 - d\n### New\n- Alpha\n### Changed\n")
+    assert desc == "## New:\n- Alpha"
+
+
+def test_the_changed_list_is_cut_to_six_bullets_of_ninety_characters(world):
+    items = "".join(f"- {'c' * 120}{n}\n" for n in range(9))
+    desc = release_lists(world, f"## v1.1 - d\n### Changed\n{items}")
+    lines = desc.splitlines()
+    assert lines[0] == "## Changed:" and len(lines) == 7
+    assert all(len(line) - 2 <= 90 for line in lines[1:])
+
+
+def test_claudes_reply_with_the_three_lists_in_order_is_posted_as_it_is(world):
+    reply = "## New:\n- Alpha\n## Fixes:\n- Gamma\n## Changed:\n- Delta"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "## New:\n- Alpha\n## Changed:\n- Delta",
+        "## Fixes:\n- Gamma\n## Changed:\n- Delta",
+        "## Changed:\n- Delta",
+    ],
+)
+def test_any_of_the_three_lists_may_be_absent(world, reply):
+    assert release_lists(world, claude=FakeClaude(text=reply)) == reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "## Changed:\n- Delta\n## Fixes:\n- Gamma",
+        "## Changed:\n- Delta\n## New:\n- Alpha",
+        "## New:\n- Alpha\n## Changed:\n- Delta\n## Fixes:\n- Gamma",
+        "## New:\n- Alpha\n## Changed:\n- Delta\n## Changed:\n- Delta",
+        "## Changes:\n- Delta",
+        "## Changed\n- Delta",
+    ],
+    ids=[
+        "changed first",
+        "changed before new",
+        "fixes after changed",
+        "twice",
+        "plural",
+        "no colon",
+    ],
+)
+def test_the_three_lists_out_of_order_or_misspelt_fall_back_to_the_built_shape(world, reply):
+    assert release_lists(world, claude=FakeClaude(text=reply)) == SAMPLE_SHAPE
+
+
+def test_a_changed_heading_claude_left_empty_is_dropped(world):
+    reply = "## New:\n- Alpha\n## Changed:"
+    assert release_lists(world, claude=FakeClaude(text=reply)) == "## New:\n- Alpha"
+
+
+def test_the_prompt_names_all_three_headings_and_no_longer_files_changed_under_new(world):
+    release_desc(world, claude=FakeClaude())
+    system = world.claude.requests[0]["system"]
+    assert "## Changed:" in system
+    assert "go under '## New:'" not in system
+
+
+def test_the_link_stays_last_after_the_changed_list(world):
+    assert release_desc(world).endswith(
+        "## Changed:\n- Delta behaves differently\n" + CHANGELOG_LINK
+    )
+
+
+def test_when_the_limit_bites_the_changed_list_goes_first_and_the_link_stays(world, monkeypatch):
+    monkeypatch.setattr(dn, "EMBED_DESC_MAX", 200)
+    body = (
+        "## v1.1 - d\n### New\n- "
+        + "n" * 40
+        + "\n### Changed\n- "
+        + "c" * 80
+        + "\n- "
+        + "d" * 80
+        + "\n"
+    )
+    desc = release_desc(world, body)
+    assert len(desc) <= 200 and desc.endswith(CHANGELOG_LINK)
+    assert desc.startswith("## New:\n- nnnn")

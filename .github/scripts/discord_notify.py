@@ -49,6 +49,8 @@ RELEASE_BULLET_MAX = 90
 CHANGELOG_LINK_TEXT = "Full changelog on GitHub"
 NEW_HEADING = "## New:"
 FIXES_HEADING = "## Fixes:"
+CHANGED_HEADING = "## Changed:"
+RELEASE_HEADINGS = (NEW_HEADING, FIXES_HEADING, CHANGED_HEADING)
 
 COLOR_MERGED = 0x5865F2
 COLOR_RELEASE = 0xF1C40F
@@ -80,7 +82,8 @@ _KIND_RULES = {
         "of a release. Write exactly this and nothing else, with no intro and "
         "no closing sentence: a line '## New:', then one line per item, each "
         "starting with '- '; then a line '## Fixes:', then one line per item, "
-        "each starting with '- '. Items that are changed go under '## New:'. "
+        "each starting with '- '; then a line '## Changed:', then one line per "
+        "item, each starting with '- '. "
         f"At most {RELEASE_MAX_BULLETS} items under each heading, each at most "
         f"{RELEASE_BULLET_MAX} characters, in plain words for players and "
         "hosts, the most visible items first. Leave out a heading whose list "
@@ -780,36 +783,44 @@ def shorten(text: str, limit: int = RELEASE_BULLET_MAX) -> str:
     return out if out.count("**") % 2 == 0 else out.replace("**", "")
 
 
-def release_items(section: str) -> tuple[list[str], list[str]]:
-    """(new, fixes) bullet texts of a CHANGELOG section, in its order.
+def release_items(section: str) -> tuple[list[str], list[str], list[str]]:
+    """(new, fixes, changed) bullet texts of a CHANGELOG section, in its order.
 
-    ``### Fixed`` (or Fixes / Fix) is the fixes list; ``### New``, ``### Changed`` and any
-    other heading go in the new list, and so do bullets under no heading at all.
-    Only column-0 bullets count: an indented line belongs to the item above it.
+    ``### Fixed`` (or Fixes / Fix) is the fixes list and ``### Changed`` (or Change /
+    Changes) the changed list; a trailing colon on a heading is fine. ``### New``, any other
+    heading, and bullets under no heading at all go in the new list. Only column-0 bullets
+    count: an indented line belongs to the item above it.
     """
     new: list[str] = []
     fixes: list[str] = []
+    changed: list[str] = []
     target = new
     for line in section.splitlines():
         line = line.rstrip()
         if line.startswith("### "):
             name = line[4:].strip().rstrip(":").strip().lower()
-            target = fixes if name in ("fixed", "fixes", "fix") else new
+            if name in ("fixed", "fixes", "fix"):
+                target = fixes
+            elif name in ("changed", "change", "changes"):
+                target = changed
+            else:
+                target = new
             continue
         found = _BULLET_RE.fullmatch(line)
         if found:
             target.append(found.group(1).strip())
-    return new, fixes
+    return new, fixes, changed
 
 
-def render_release(new: list[str], fixes: list[str]) -> str:
-    """The post: ``## New:`` and ``## Fixes:`` lists, a list left out when it is empty.
+def render_release(new: list[str], fixes: list[str], changed: list[str] | None = None) -> str:
+    """The post: ``## New:``, ``## Fixes:`` and ``## Changed:`` lists, an empty one left out.
 
     At most RELEASE_MAX_BULLETS bullets under each, each cut to RELEASE_BULLET_MAX
-    characters (an ellipsis ends a cut one), no blank lines, no other text.
+    characters (`shorten`), no blank lines, no other text.
     """
     lines: list[str] = []
-    for heading, items in ((NEW_HEADING, new), (FIXES_HEADING, fixes)):
+    lists = ((NEW_HEADING, new), (FIXES_HEADING, fixes), (CHANGED_HEADING, changed or []))
+    for heading, items in lists:
         kept = [shorten(i) for i in items if i.strip()]
         if kept:
             lines.append(heading)
@@ -820,23 +831,24 @@ def render_release(new: list[str], fixes: list[str]) -> str:
 def shape_release_reply(reply: str) -> str | None:
     """Claude's reply as the post, or None when it is not in the shape.
 
-    The shape: ``## New:`` and/or ``## Fixes:`` (that order, each once), each followed by
-    ``- `` bullets, and nothing else. Blank lines are dropped, a heading with no bullets
-    is dropped and too many or too long bullets are cut, as for a built post. Prose, an
-    intro or closing line, numbered items, other headings and a wrong order are not
-    accepted.
+    The shape: ``## New:``, ``## Fixes:`` and ``## Changed:`` (that order, each at most
+    once, any of them absent), each followed by ``- `` bullets, and nothing else. Blank
+    lines are dropped, a heading with no bullets is dropped and too many or too long
+    bullets are cut, as for a built post. Prose, an intro or closing line, numbered
+    items, other headings, a wrong order, code, a link and a mention are not accepted.
     """
-    lists = {NEW_HEADING: [], FIXES_HEADING: []}
-    seen: list[str] = []
+    lists: dict[str, list[str]] = {heading: [] for heading in RELEASE_HEADINGS}
+    last = -1
     target = None
     for line in reply.splitlines():
         line = line.rstrip()
         if not line.strip():
             continue
         if line in lists:
-            if line in seen or (line == NEW_HEADING and FIXES_HEADING in seen):
+            at = RELEASE_HEADINGS.index(line)
+            if at <= last:
                 return None
-            seen.append(line)
+            last = at
             target = lists[line]
         elif _CONTENT_RE.search(line):
             return None
@@ -844,7 +856,7 @@ def shape_release_reply(reply: str) -> str | None:
             target.append(line[2:].strip())
         else:
             return None
-    return render_release(lists[NEW_HEADING], lists[FIXES_HEADING]) or None
+    return render_release(*lists.values()) or None
 
 
 def release_post_text(
@@ -862,13 +874,13 @@ def release_post_text(
     lists = (
         shaped
         or render_release(*release_items(section))
-        or render_release(titles, [])
+        or render_release(titles, [], [])
         or render_release(*release_items(body))
         or "A new release is out."
     ).splitlines()
     while lists and len("\n".join([*lists, link])) > EMBED_DESC_MAX:
         lists.pop()
-        while lists and lists[-1] in (NEW_HEADING, FIXES_HEADING):
+        while lists and lists[-1] in RELEASE_HEADINGS:
             lists.pop()  # no heading is left over a list that lost every bullet
     return "\n".join([*lists, link])
 
