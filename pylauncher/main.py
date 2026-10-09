@@ -588,6 +588,7 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
+    from yulon.ui.move_in import move_in_for_app
     from yulon.ui.sidebar import SidebarPins, server_tab_icon
     from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
@@ -756,6 +757,8 @@ def build_window() -> object:
         # thing that knows: the view cannot look at a folder it was never told
         # about. Same list `add_controller()` just built the tabs from.
         installed_games=state.installed_dirs(),
+        # T601 level 2: "Bring from another computer…" on each tile.
+        move_in=move_in_for_app(catalog),
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents

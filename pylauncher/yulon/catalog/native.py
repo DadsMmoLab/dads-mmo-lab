@@ -153,11 +153,15 @@ ERROR_RUN_REBUILD = "rebuild"
 """`InstallState.error_run` for a failure of any press on a remembered server (T207)."""
 STATE_VERSION = 1
 
+MOVE_IN_FILE = ".yulon-move-in.json"
+"""A server being built from another computer's package records its steps here (T601 level 2)."""
+
 OUR_OWN_FILES = (
     STATE_FILE,
     networking.INTENT_FILE,
     module_answers.ANSWERS_FILE,
     docker.FOLDER_ID_FILE,
+    MOVE_IN_FILE,
 )
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
@@ -174,7 +178,8 @@ created by this app (.yulon-network.json)` from
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
 in one place rather than in the five call sites that ask the question. The third
-is T104's record of the answers a player gave a module's questions.
+is T104's record of the answers a player gave a module's questions. The fourth is T601's
+move-in record, written before the install of a server brought from another computer.
 """
 
 OPENING_NOTE = (
@@ -10392,6 +10397,28 @@ class StagedInstaller:
                 refused_updates=refused,
             ),
         )
+
+    def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
+        """Write `rows` into the install record, keeping every other source's row (T601).
+
+        For a server built from a move package at commits that are not this catalog's pins:
+        the rows say where each source stands, so the Server tab offers Update or Return the
+        way it does after a press (`_against_the_catalog`). Re-read here for
+        `_record_source_revs`' reason. False when the record would not be read or written.
+        """
+        if not rows:
+            return True
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            logger.warning(
+                f"{server_dir} would not say what it is; the moved-in rows were not written"
+            )
+            return False
+        keep = {row.repo for row in rows}
+        merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(rows)
+        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
+        written = read_state(server_dir, valid=self.stage_names())
+        return written is not None and set(rows) <= set(written.source_revs)
 
     def _remember_refused(self, server_dir: Path, refused: UpdateRefused) -> None:
         """Record the upstream commit an update refused, so the tab stops offering it (T179).

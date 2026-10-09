@@ -192,6 +192,29 @@ def compare_or_refused(
     return Comparison(ahead=ahead, behind=behind, status=str(payload.get("status", "")))
 
 
+def commit_exists(slug: str, sha: str, *, get: HttpGet) -> bool | None:
+    """Does GitHub still have commit `sha` of `slug`? None = it could not say (T601).
+
+    A 404 or 422 is GitHub's own "no such commit" (a force-push that dropped it, a repository
+    rewritten); any other failure, a refusal (rate limit) included, is "could not say", which a
+    caller must never read as "gone".
+    """
+    url = f"https://api.github.com/repos/{slug}/commits/{quote(sha, safe='')}"
+    try:
+        payload = json.loads(get(url, "application/vnd.github+json").decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 422):
+            return False
+        logger.debug(f"could not ask GitHub for {slug} {sha}: {exc}")
+        return None
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not ask GitHub for {slug} {sha}: {exc}")
+        return None
+    if isinstance(payload, dict) and payload.get("sha") == sha:
+        return True
+    return None
+
+
 def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | None:
     """`compare/{base}...{ref}` on GitHub, whole. None = could not ask, never a guess.
 

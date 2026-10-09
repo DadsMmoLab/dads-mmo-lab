@@ -343,3 +343,62 @@ def test_every_default_sentence_is_the_one_the_owner_decided_on() -> None:
 def test_the_question_shows_when_it_was_packed(when: datetime) -> None:
     text = move_panel.bring_in_question(allowed_plan(Path("p.zip")))
     assert "2026-10-09 15:30" in text
+
+
+# ------------------------------------------------------------------ pack the whole server (level 2)
+
+
+def whole_services(engine: Engine) -> MoveServices:
+    from dataclasses import replace
+
+    def export_server(folder: Path, stop_allowed: bool) -> ExportResult:
+        engine.calls.append(("export_server", (folder, stop_allowed)))
+        out = folder / "w.zip"
+        out.write_bytes(b"x")
+        return ExportResult(path=out, manifest=manifest(), restarted=None)
+
+    return replace(engine.services(), export_server=export_server)
+
+
+def test_the_whole_server_press_is_drawn_only_when_wired(tmp_path: Path, qapp: object) -> None:
+    engine = Engine(tmp_path)
+    screen = Screen(engine)
+    assert panel(engine, screen, qapp).pack_server_button is None
+    wired = MovePanel(whole_services(engine), **screen.panel_args)  # type: ignore[arg-type]
+    assert wired.pack_server_button is not None
+    assert wired.pack_server_button.text() == move_panel.PACK_SERVER_BUTTON
+
+
+def test_the_whole_server_press_asks_its_own_question_and_packs_the_server(
+    tmp_path: Path, qapp: object
+) -> None:
+    engine = Engine(tmp_path)
+    engine.export_plan = ExportPlan(server_running=True, refusals=())
+    screen = Screen(engine)
+    MovePanel(whole_services(engine), **screen.panel_args).pack_server()  # type: ignore[arg-type]
+    assert [a[0] for a in screen.asked] == ["Pack the whole server?"]
+    text = screen.asked[0][1]
+    assert "the world too" in text and "keep it private" in text
+    assert "stopped while Yu'lon packs it" in text
+    assert engine.calls == [("export_server", (tmp_path, True))]
+
+
+def test_the_accounts_press_still_packs_accounts_beside_it(tmp_path: Path, qapp: object) -> None:
+    engine = Engine(tmp_path)
+    screen = Screen(engine)
+    wired = MovePanel(whole_services(engine), **screen.panel_args)  # type: ignore[arg-type]
+    wired.pack_server()
+    wired.pack()
+    assert [c[0] for c in engine.calls] == ["export_server", "export"]
+    assert [a[0] for a in screen.asked] == [
+        "Pack the whole server?",
+        "Pack accounts and characters?",
+    ]
+
+
+def test_a_no_to_the_whole_server_packs_nothing(tmp_path: Path, qapp: object) -> None:
+    engine = Engine(tmp_path)
+    screen = Screen(engine, yes=False)
+    MovePanel(whole_services(engine), **screen.panel_args).pack_server()  # type: ignore[arg-type]
+    assert engine.calls == []
+    assert screen.reports[-1] == "Nothing was packed."

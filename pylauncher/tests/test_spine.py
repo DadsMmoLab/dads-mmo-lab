@@ -3083,6 +3083,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "it does not own, so it is not `native._listing()`. A folder that cannot be listed "
         "answers no files, so the tab shows the cards' own files and the server's, as before"
     ),
+    ("move_server.py", "_lua_members"): (
+        "T601 level 2. Walks the Lua engine's own script folder (`env/dist/etc/modules/"
+        "lua_scripts`, refused when it or a folder on the way is a link; links and dot-files "
+        "inside are skipped) to READ the player's scripts into a move package. It decides no "
+        "write: the files are read, never changed, and the package is written elsewhere"
+    ),
     ("move_flows.py", "_backup_for_the_package"): (
         "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
         "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
