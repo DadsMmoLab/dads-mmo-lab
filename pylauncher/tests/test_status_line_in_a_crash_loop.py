@@ -29,10 +29,16 @@ from yulon.ui.widgets.job import run_inline
 
 GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion", "wow-unbound")
 
+DB_ASSERT_LINE = (
+    "/src/src/shared/Database/DatabaseMysql.cpp:190: Error: Assertion in HandleMySQLError "
+    "failed: false\n"
+)
+
+
 HONOR_LOG = (
     "Initiating honor maintenance...\nMaking copy of character_inventory table.\n"
     "[1146] Table 'tw_char.character_inventory_copy' doesn't exist\n"
-    "Your database structure is not up to date.\n"
+    "Your database structure is not up to date.\n" + DB_ASSERT_LINE + "./mangosd(main+0x326)\n"
 )
 
 
@@ -274,12 +280,96 @@ def test_the_flag_goes_back_when_a_later_dead_run_lacks_the_signature(tmp_path: 
     assert not tick().honor_copy_missing
 
 
+def test_the_real_tortoise_crash_is_flagged_whatever_its_backtrace_length(tmp_path: Path) -> None:
+    """The 2026-09-28 live capture (fedora), verbatim: 13 lines follow the 1146 line.
+
+    Mutation: look at the last ten lines only, and the signature is missed.
+    """
+    log = (Path(__file__).parent / "fixtures" / "t629_honor_maintenance_crash.log").read_text(
+        encoding="utf-8"
+    )
+    tick = _loop_watch(tmp_path, {"r1": log}, _loop_states(("restarting", "r1")))
+    assert tick().honor_copy_missing
+
+
+def test_an_earlier_honor_1146_then_another_database_death_is_not_flagged(
+    tmp_path: Path,
+) -> None:
+    """Mutation: take the first [NNNN] line before the assert instead of the last."""
+    log = HONOR_LOG + "[1062] Duplicate entry '1' for key 'PRIMARY'\n" + DB_ASSERT_LINE
+    tick = _loop_watch(tmp_path, {"r1": log}, _loop_states(("restarting", "r1")))
+    assert not tick().honor_copy_missing
+
+
+def test_the_honor_flag_goes_with_a_loop_that_ended(tmp_path: Path) -> None:
+    """Loop with the signature, a stop, then a new loop whose first run is running: no flag.
+
+    Mutation: leave out the reset on the non-loop path in `Dashboard.tick()`.
+    """
+    tick = _loop_watch(
+        tmp_path,
+        {"r1": HONOR_LOG, "r2": "Loading...\n"},
+        _loop_states(
+            ("restarting", "r1"),
+            ("restarting", "r1"),
+            ("exited", "r1"),
+            ("running", "r2"),
+        ),
+    )
+    first, _, stopped, again = tick(), tick(), tick(), tick()
+    assert first.honor_copy_missing and stopped.state == "stopped"
+    assert again.state == "restart_loop" and not again.honor_copy_missing
+
+
+def test_an_unreadable_log_after_a_loop_ended_carries_no_old_flag(tmp_path: Path) -> None:
+    """The next loop's dead run cannot be read: the earlier loop's flag is not inherited."""
+
+    class Unreadable(dict[str, str]):
+        def get(self, key: str, default: str | None = None) -> str:
+            if key == "r2":
+                raise OSError("docker logs failed")
+            return super().get(key, default or "")
+
+    tick = _loop_watch(
+        tmp_path,
+        Unreadable({"r1": HONOR_LOG}),
+        _loop_states(
+            ("restarting", "r1"), ("restarting", "r1"), ("exited", "r1"), ("restarting", "r2")
+        ),
+    )
+    tick(), tick(), tick()
+    again = tick()
+    assert again.state == "restart_loop" and not again.honor_copy_missing
+
+
+def test_a_verdict_that_cannot_reach_docker_leaves_the_loop_line_for_the_poll(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The verdict read fails on Docker before the poll does (banner still hidden): the line
+    keeps the loop sentence until the poll says what Docker said.
+
+    Mutation: refresh Start's line in the Docker-unreachable branch of `_verdict_failed()`.
+    """
+    from yulon import docker
+
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(LOOP))
+    view.refresh_status()
+    view.refresh_verdict()
+    assert view.docker_banner.isHidden()
+    view._verdict_failed(docker.DockerCommandError("cannot connect to the Docker daemon"))
+    assert _said(view) == SERVER_LOOPING.format(restarts=28)
+
+
 def test_an_early_non_fatal_1146_does_not_point_at_the_corrections(tmp_path: Path) -> None:
     """The table error is not the last thing the run said: it died for another reason.
 
-    Mutation: search the whole log instead of its tail.
+    Mutation: search the whole log for the signature without the death anchor.
     """
-    log = HONOR_LOG + "".join(f"Loading thing {n}...\n" for n in range(40)) + "ASSERT failed\n"
+    log = (
+        HONOR_LOG.split("Your database")[0]
+        + "".join(f"Loading {n}...\n" for n in range(40))
+        + "ASSERT failed\n"
+    )
     tick = _loop_watch(tmp_path, {"r1": log}, _loop_states(("restarting", "r1")))
     assert not tick().honor_copy_missing
 

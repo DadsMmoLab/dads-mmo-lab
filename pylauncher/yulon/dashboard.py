@@ -282,11 +282,28 @@ class Verdict:
         )
 
 
-HONOR_TAIL = 10
-"""How many of a dead run's last lines may carry T159's error: it is the cause of death, so
-it sits just above the assert, and an earlier non-fatal one must not be taken for it (T629)."""
+DB_ASSERT = re.compile(r"Assertion in HandleMySQLError failed")
+"""The core's death on a MySQL error (`DatabaseMysql.cpp:190`); the error line is just above it."""
+MYSQL_ERROR = re.compile(r"^\[\d{3,5}\] ")
 HONOR_COPY_MISSING = re.compile(r"\[1146\] Table '[^']*character_inventory_copy' doesn't exist")
 """T159's crash: honor maintenance truncates a table no SQL made (`ObjectMgr.cpp:10126`)."""
+
+
+def died_on_the_honor_copy(log: str) -> bool:
+    """Whether the run in `log` died on T159's missing table, and not merely printed it (T629).
+
+    Anchored on the death: the last MySQL assert, and the last `[NNNN]` error line before it.
+    A log can carry the same 1146 earlier, from a statement that did not kill the run, and
+    the backtrace after the assert is of any length, so no count of last lines serves.
+    """
+    lines = [text.strip() for text in log.splitlines() if text.strip()]
+    died = [at for at, text in enumerate(lines) if DB_ASSERT.search(text)]
+    if not died:
+        return False
+    for text in reversed(lines[: died[-1]]):
+        if MYSQL_ERROR.match(text):
+            return HONOR_COPY_MISSING.search(text) is not None
+    return False
 
 
 def line(verdict: Verdict) -> str:
@@ -638,8 +655,7 @@ class Dashboard:
                 logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
                 return self._honor
             self._honor_run = run
-            tail = "\n".join([text for text in log.splitlines() if text.strip()][-HONOR_TAIL:])
-            self._honor = HONOR_COPY_MISSING.search(tail) is not None
+            self._honor = died_on_the_honor_copy(log)
         return self._honor
 
     def _foreign_data_hint(self, run: str, status: str) -> str:

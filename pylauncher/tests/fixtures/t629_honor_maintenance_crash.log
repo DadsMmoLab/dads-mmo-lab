@@ -1,0 +1,29 @@
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 150112 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30171 (reference id) not exist but used as loot id in DB.
+Initiating zone scripts...
+Loading transport on continents...
+[0 ms] SQL: SELECT guid, entry FROM transports
+WaypointMovementGenerator::LoadPath: GUID 60006 Entry 15184 doesn't have waypoint path
+Deleting expired bans...
+[1 ms] SQL: DELETE FROM ip_banned WHERE unbandate<=UNIX_TIMESTAMP() AND unbandate<>bandate
+Initiating honor maintenance...
+[0 ms] SQL: SELECT `lastHonorMaintenanceDay`, `nextHonorMaintenanceDay`, `honorMaintenanceMarker` FROM `saved_variables`
+Making copy of character_inventory table.
+SQL: TRUNCATE `character_inventory_copy`
+[1146] Table 'tw_char.character_inventory_copy' doesn't exist
+Your database structure is not up to date. Please make sure you have executed all the queries in the sql/updates folders.
+/src/src/shared/Database/DatabaseMysql.cpp:190: Error: Assertion in HandleMySQLError failed: false
+./mangosd(_ZN8Database14DirectPExecuteEPKcz+0x149) [0x55f1c5efa109]
+./mangosd(_ZN9ObjectMgr24BackupCharacterInventoryEv+0x33) [0x55f1c55ca1a3]
+./mangosd(_ZN17HonorMaintenancer13DoMaintenanceEv+0x344) [0x55f1c5b2ec94]
+./mangosd(_ZN5World23SetInitialWorldSettingsEv+0x1d22) [0x55f1c567e7a2]
+./mangosd(_ZN6Master3RunEv+0x99) [0x55f1c5558c99]
+./mangosd(main+0x326) [0x55f1c5452356]
+/lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca) [0x7f3ab1d881ca]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x8b) [0x7f3ab1d8828b]
+./mangosd(_start+0x25) [0x55f1c554f755]
+
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  false

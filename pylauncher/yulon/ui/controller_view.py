@@ -9402,7 +9402,7 @@ class ControllerView(QWidget):
             return "starting"
         return word
 
-    def _clear_the_verdict(self) -> None:
+    def _clear_the_verdict(self, *, refresh_start: bool = True) -> None:
         """No verdict line: the distro is not known to run, so no world to describe (T133).
 
         Its loop goes with it (T391): a held badge, a stopped distro or Docker's
@@ -9414,7 +9414,8 @@ class ControllerView(QWidget):
         self._world_loops = False
         self._world_failed = False
         self._world_ready = False
-        self._refresh_start_reason()
+        if refresh_start:
+            self._refresh_start_reason()
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -9691,7 +9692,8 @@ class ControllerView(QWidget):
             # T194 C7: Docker not answering is the banner's to say -- and the
             # status poll's to log -- even when this lands first, or under a
             # hold that keeps the banner down.
-            self._clear_the_verdict()
+            # Nor is Start's line: the poll has not failed yet, and what it set stands (T629).
+            self._clear_the_verdict(refresh_start=False)
             return
         said = str(exc)
         if said != self._verdict_said:
