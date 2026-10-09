@@ -5,12 +5,14 @@ name: discord
 # but it registered this path, so the three jobs sit here (job `merged`, `issue`
 # and `release`), each started by its own event.
 #
-# merged   (push to Yulon) One post per commit (a squash merge is one commit, so
-#          one PR is one post): title, link, author and a short Claude Haiku
-#          summary. A commit with no PR (a direct push) is posted as its first
-#          line and a link. More than 10 commits, or a force push, is one compact
-#          message instead. Not on pull_request: closed as well, or every merge
-#          would post twice.
+# merged   (push to Yulon) One post per MERGED PR behind the push (a squash merge is
+#          one commit, so one PR is one post): title, link, the PR number as a link
+#          and a short Claude Haiku summary. A PR that adds 4 or more CHANGELOG
+#          lines, or has more than 10 commits, gets the release shape instead: a
+#          New / Fixes / Changed list of its own CHANGELOG lines and a link to the
+#          PR. A push with no merged PR (a direct push, a force push) posts
+#          nothing. Not on pull_request: closed as well, or every merge would
+#          post twice.
 # issue    (issues opened / closed / reopened) One post per issue. Every run reads
 #          the issue as it is NOW and renders that, so whichever run executes last
 #          shows the true state. No trusted message id yet: post it (one short
