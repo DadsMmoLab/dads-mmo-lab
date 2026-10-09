@@ -660,3 +660,32 @@ def test_a_zip_link_whose_zip_is_unsafe_leaves_nothing(_cache: Path) -> None:
 
     assert "would land outside" in said
     assert _left(_cache) == []
+
+
+def test_a_member_locked_with_a_password_is_refused(tmp_path: Path, _cache: Path) -> None:
+    """`zipfile` cannot write an encrypted member, so the central flag is set by hand."""
+    path = _zip(tmp_path / "a.zip", {**GOOD, "pfUI-master/locked.lua": "x"})
+    data = bytearray(path.read_bytes())
+    entry = data.rindex(b"PK\x01\x02")  # the last central entry is the last member written
+    assert (
+        data[entry + 46 : entry + 46 + len(b"pfUI-master/locked.lua")] == b"pfUI-master/locked.lua"
+    )
+    data[entry + 8] |= 0x1
+    path.write_bytes(bytes(data))
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith("'pfUI-master/locked.lua' in the zip is locked with a password")
+    assert _left(_cache) == []
+
+
+@pytest.mark.parametrize("bad", ["pfUI-master/a?.lua", "pfUI-master/CON.lua", "pfUI-master/a|b"])
+def test_a_member_name_windows_cannot_hold_is_refused(
+    tmp_path: Path, _cache: Path, bad: str
+) -> None:
+    path = _zip(tmp_path / "a.zip", {**GOOD, bad: "x"})
+
+    said = _refusal(lambda: stage_zip(path))
+
+    assert said.startswith(f"{bad!r} in the zip has a name a game client's folder on Windows")
+    assert _left(_cache) == []

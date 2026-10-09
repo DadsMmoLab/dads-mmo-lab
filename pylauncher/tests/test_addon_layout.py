@@ -449,3 +449,14 @@ def test_every_game_names_an_addon_interface_the_reader_can_word() -> None:
         number = entry.client.addon_interface
         assert number is not None, entry.id
         assert number in addon_layout.CLIENT_NAMES, (entry.id, number)
+
+
+@pytest.mark.parametrize("stem", ["CON", "a?b", "aux.x"])
+def test_a_toc_whose_name_windows_cannot_hold_as_a_folder_is_refused(
+    tmp_path: Path, stem: str
+) -> None:
+    _toc(tmp_path / "src" / "Probe", stem)
+
+    said = _refused(find_addons(tmp_path / "src", interface=11200, shipped={}))
+
+    assert said.startswith(f"{stem}.toc names a folder the game client cannot hold on Windows")
