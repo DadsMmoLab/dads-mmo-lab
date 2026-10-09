@@ -3591,6 +3591,23 @@ The command saves every player on the world thread before it answers; the answer
 itself is not needed, only that it was typed. A window too short for it reads as
 an unprompted reply and changes nothing: the queue looks that follow see the saves."""
 
+_SAVE_COMMAND_STALLED_WINDOW_SECONDS = 30.0
+"""The ceiling for `saveall` on a console that says when it has answered (T561).
+
+Measured on Tortoise with 500 bots (2026-10-08): `saveall` answers in 0.07-0.33 s, but in the first
+minutes after a start the world thread stalls: answers took up to 18.3 s through Yu'lon's console
+(p95 10.95 s, max 14.14 s in the first probe) and a world-thread stall of 21.8 s was measured
+elsewhere, so 10 s missed the answer and the stop warned that characters might be missing. 30 s
+leaves room above the longest of those. Only for a console whose prompt follows its answer
+(`SaveFirst.prompt_precedes_answer` False): the wait then ends at the answer line and prompt, so
+this costs a normal stop nothing. A readline console (Centurion) sleeps its whole window, so it
+keeps the 10 s."""
+
+_SAVE_ANSWER = "All players saved."
+"""What `saveall` prints when it is done (`ObjectAccessor::SaveAllPlayers()`, read from a Tortoise
+world's log, 2026-10-08). A console that prompts after its answer ends the wait for `saveall` at
+this line followed by its prompt (T561); without the line the whole window is listened to."""
+
 _QUEUE_LOOK_WINDOW_SECONDS = 4.0
 """How long the console is listened to for one `server debug` answer (T410).
 
@@ -3857,7 +3874,11 @@ def _ask_the_channel(
 
 
 def _type_at_the_world(
-    spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
+    spec: ContainerSpec,
+    command: str,
+    window: float,
+    wsl_distro: str | None,
+    answer_marker: str | None = None,
 ) -> Any | None:
     """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
 
@@ -3876,6 +3897,7 @@ def _type_at_the_world(
             window=window,
             prompt=save.prompt,
             prompt_precedes_answer=save.prompt_precedes_answer,
+            answer_marker=answer_marker,
         )
     except Exception as exc:  # noqa: BLE001 - every console failure means "not typed" here
         logger.warning(f"could not type {command!r} at {spec.world}'s console: {exc}")
@@ -3947,7 +3969,18 @@ def _save_everyone_first(
     for line in save.first:
         if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
             logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
-    reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
+    window = (
+        _SAVE_COMMAND_WINDOW_SECONDS
+        if save.prompt_precedes_answer
+        else _SAVE_COMMAND_STALLED_WINDOW_SECONDS
+    )
+    reply = _type_at_the_world(
+        spec,
+        save.command,
+        window,
+        wsl_distro,
+        answer_marker=None if save.prompt_precedes_answer else _SAVE_ANSWER,
+    )
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:
