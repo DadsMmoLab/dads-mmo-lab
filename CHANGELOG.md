@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
 - Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
 - On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.

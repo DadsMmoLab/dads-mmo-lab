@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -68,9 +69,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import apply as apply_module
-from yulon import bot_population as botpop
 from yulon import (
+    addon_archive,
     botlist,
     channel_setup,
     client_addons,
@@ -104,6 +104,8 @@ from yulon import (
     useraccounts,
     wsl,
 )
+from yulon import apply as apply_module
+from yulon import bot_population as botpop
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
@@ -179,6 +181,7 @@ from yulon.ui.theme import (
     PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
+from yulon.ui.widgets.client_addons_box import AddonRow, ClientAddonsBox
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.details import Details
 from yulon.ui.widgets.docker_banner import DockerBanner
@@ -836,6 +839,20 @@ def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     packaged build is wherever the user launched it from.
     """
     return pick_folder(parent, title)
+
+
+def ask_addon_link(parent: QWidget, title: str) -> str | None:
+    """The real add-on link dialog: one line of text, or `None` on cancel (T613)."""
+    text, accepted = QInputDialog.getText(
+        parent, title, ADDON_LINK_DIALOG_PROMPT, QLineEdit.EchoMode.Normal, ""
+    )
+    return text if accepted else None
+
+
+def ask_addon_zip(parent: QWidget, title: str) -> Path | None:
+    """The real add-on zip dialog: a `.zip` file, or `None` on cancel (T613)."""
+    chosen, _filter = QFileDialog.getOpenFileName(parent, title, "", "Zip files (*.zip)")
+    return Path(chosen) if chosen else None
 
 
 SET_CLIENT_DIR_LABEL = "Set client folder…"
@@ -7280,6 +7297,35 @@ TORTOISE_FOLDER_TIP = (
 )
 """As `TORTOISE_LINK_TIP`, for a folder: read before it is copied, never written into."""
 
+ADDON_LINK_DIALOG_TITLE = "Add a game add-on from a link"
+
+ADDON_LINK_DIALOG_PROMPT = (
+    "Link to the add-on (a GitHub, GitLab or Codeberg repository, or a .zip):"
+)
+
+ADDON_FOLDER_DIALOG_TITLE = "Choose the folder holding the add-on"
+
+ADDON_ZIP_DIALOG_TITLE = "Choose the add-on's .zip file"
+
+ADDON_POINTER = (
+    "Game add-ons from a link, a folder or a zip: Modules tab, \u201cGame add-ons you bring\u201d."
+)
+"""The Server tab's one line under the client folder, pointing at the add-on box (T613)."""
+
+ADDON_REPLACE_TITLE = "Replace {id}?"
+
+ADDON_REMOVE_TITLE = "Remove {name}?"
+
+ADDON_REMOVE_QUESTION = (
+    "Yu'lon takes back the files it put in your game client for {name}. A file you changed "
+    "stays, and your settings (the WTF folder) are never touched. Remove it?"
+)
+
+ADDON_BUSY = (
+    "\u201c{what}\u201d is running on this server's Modules tab. Wait for it to finish, then "
+    "press this again. Nothing on this machine was changed."
+)
+
 MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
 
 MODULE_LINK_DIALOG_PROMPT = "Link to the module's repository:"
@@ -7576,6 +7622,9 @@ class ControllerView(QWidget):
         prompt_asker: PromptAsker | None = None,
         link_asker: LinkAsker | None = None,
         folder_asker: FolderAsker | None = None,
+        addon_link_asker: LinkAsker | None = None,
+        addon_folder_asker: FolderAsker | None = None,
+        addon_zip_asker: FolderAsker | None = None,
         pick_client_dir: DirPicker = _qt_dir_picker,
         play_client_asker: PlayClientAsker | None = None,
         client_options_asker: ClientOptionsAsker | None = None,
@@ -7627,6 +7676,10 @@ class ControllerView(QWidget):
         # The same shape for the two custom-module dialogs, for the same reason.
         self._link_asker: LinkAsker = link_asker or ask_module_link
         self._folder_asker: FolderAsker = folder_asker or ask_module_folder
+        # T613: the add-on box's three dialogs, the same way.
+        self._addon_link_asker: LinkAsker = addon_link_asker or ask_addon_link
+        self._addon_folder_asker: FolderAsker = addon_folder_asker or ask_module_folder
+        self._addon_zip_asker: FolderAsker = addon_zip_asker or ask_addon_zip
         # T36's client-folder press. The same `DirPicker` shape the Catalog's
         # own folder pickers use (`catalog_view._qt_dir_picker`), reused rather
         # than a second modal dialog function that would open the same window.
@@ -8377,6 +8430,11 @@ class ControllerView(QWidget):
 
         client, client_column = section("Client", tab)
         client_column.addWidget(self.client_dir_label)
+        self.addon_pointer = QLabel(ADDON_POINTER, tab)
+        self.addon_pointer.setWordWrap(True)
+        self.addon_pointer.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.addon_pointer.setVisible(self.services.client_addons is not None)
+        client_column.addWidget(self.addon_pointer)
         client_presses = [
             b for b in (self.set_client_dir_button, self.forget_client_dir_button) if b is not None
         ]
@@ -9860,6 +9918,8 @@ class ControllerView(QWidget):
             # a module into the image that no report claims is in it.
             self.module_link_button.setEnabled(False)
             self.module_folder_button.setEnabled(False)
+            # T613: and the add-on box, which writes the game client and `modules/`.
+            self.addon_box.set_busy(True)
             # And every row's own Install/Remove, which is where the two greyed
             # toolbar buttons went (T42). Same rule as the two above it: a clone
             # landing half-way through a build puts a module into the image no
@@ -9903,6 +9963,7 @@ class ControllerView(QWidget):
             # with no custom-module route must not be handed a live button by
             # any job of its own finishing.
             self._set_custom_module_buttons()
+            self.addon_box.set_busy(False)
             # Back to what this install can do, not unconditionally: a game
             # with no import service has no route, and re-enabling it here
             # would hand the three CMaNGOS games a live button the moment any
@@ -16234,6 +16295,17 @@ class ControllerView(QWidget):
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
         box.addWidget(self.custom_module_line)
+        # T613: the add-on box, on every game's Modules tab (the route is wired by
+        # `for_entry()`; a hand-built services object without it has no box).
+        self.addon_box = ClientAddonsBox(tab)
+        self.addon_box.link_pressed.connect(self.add_addon_from_link)
+        self.addon_box.folder_pressed.connect(self.add_addon_from_folder)
+        self.addon_box.zip_pressed.connect(self.add_addon_from_zip)
+        self.addon_box.update_pressed.connect(self.update_addon)
+        self.addon_box.remove_pressed.connect(self.remove_addon)
+        self.addon_box.setVisible(self.services.client_addons is not None)
+        box.addWidget(self.addon_box)
+        self.refresh_addon_box()
         box.addWidget(self.module_report_strip)
         box.addWidget(self.module_report)
         # T214: what broke behind a report that says so in words; the next report takes it down.
@@ -17131,6 +17203,172 @@ class ControllerView(QWidget):
             self._module_done,
             self._module_failed,
         )
+
+    # ------------------------------------------------ client add-ons (T613 PR-3)
+
+    def refresh_addon_box(self) -> None:
+        """List the outside add-ons Yu'lon put in the client; an unreadable record is skipped."""
+        route = self.services.client_addons
+        rows: list[AddonRow] = []
+        if route is not None:
+            try:
+                for manifest in route.installed():
+                    origin = manifest.origin
+                    where = {"link": "link", "folder": "folder", "archive": "zip"}.get(
+                        origin.kind if origin is not None else "", "outside"
+                    )
+                    rows.append(AddonRow(manifest.id, f"{manifest.name} ({where})"))
+            except Exception as exc:  # boundary: the records are files the player may have edited
+                logger.warning(f"could not list the add-ons Yu'lon put in the client: {exc}")
+        self.addon_box.set_rows(rows)
+
+    def _addon_busy(self) -> bool:
+        """True (said in the module report, nothing started) while another Modules job runs."""
+        if self._module_job_running():
+            self.module_report.setPlainText(
+                ADDON_BUSY.format(what=self._module_pending or "A Modules tab action")
+            )
+            return True
+        return self._build_is_running("add a game add-on")
+
+    @Slot()
+    def add_addon_from_link(self) -> None:
+        route = self.services.client_addons
+        if route is None or self._addon_busy():
+            return
+        text = self._addon_link_asker(self, ADDON_LINK_DIALOG_TITLE)
+        if text is None:
+            self._addon_cancelled("add-on from link")
+            return
+        self._read_addon("add-on from link", lambda: route.from_link(text))
+
+    @Slot()
+    def add_addon_from_folder(self) -> None:
+        route = self.services.client_addons
+        if route is None or self._addon_busy():
+            return
+        folder = self._addon_folder_asker(self, ADDON_FOLDER_DIALOG_TITLE)
+        if folder is None:
+            self._addon_cancelled("add-on from folder")
+            return
+        self._read_addon("add-on from folder", lambda: route.from_folder(folder))
+
+    @Slot()
+    def add_addon_from_zip(self) -> None:
+        route = self.services.client_addons
+        if route is None or self._addon_busy():
+            return
+        archive = self._addon_zip_asker(self, ADDON_ZIP_DIALOG_TITLE)
+        if archive is None:
+            self._addon_cancelled("add-on from zip")
+            return
+        self._read_addon("add-on from zip", lambda: route.from_zip(archive))
+
+    def _addon_cancelled(self, what: str) -> None:
+        self._module_pending = None
+        self.module_report.setPlainText(
+            f"{what}: cancelled \u2014 nothing on this machine was changed."
+        )
+
+    def _read_addon(self, what: str, read: Callable[[], client_addons.Prepared]) -> None:
+        """Read the source on a worker (a link goes to the network, a zip is unpacked)."""
+        self._module_pending = what
+        self.module_report.setPlainText(f"{what}\u2026")
+        self._run_module_job(read, self._addon_read, self._addon_refused)
+
+    @Slot(object)
+    def _addon_read(self, result: object) -> None:
+        self._module_job_ended()
+        what = self._module_pending or "add-on"
+        self._module_pending = None
+        route = self.services.client_addons
+        if route is None or not isinstance(result, client_addons.Prepared):
+            return
+        manifest = result.manifest
+        if self._stopped_for_the_client(what, manifest):
+            result.discard()
+            return
+        try:
+            question = route.replacement_question(result)
+        except Exception as exc:  # boundary: the disk; the applier refuses what it cannot ask
+            logger.warning(f"could not tell what adding {manifest.id} would replace: {exc}")
+            question = None
+        if question is not None and not self._confirm(
+            ADDON_REPLACE_TITLE.format(id=manifest.id), question
+        ):
+            result.discard()
+            self._addon_cancelled(f"{what} {manifest.id}")
+            return
+        replacing = any(m.id == manifest.id for m in route.installed())
+        self._acting_on = manifest
+        self._module_pending = f"{what} {manifest.id}"
+        self.module_report.setPlainText(f"{self._module_pending}\u2026")
+        self._run_module_job(
+            lambda: route.install(
+                result, replacing=replacing, replace_existing=question is not None
+            ),
+            self._addon_done,
+            self._addon_failed,
+        )
+
+    @Slot(object)
+    def _addon_refused(self, exc: object) -> None:
+        """The source could not be read: the refusal's sentence alone, nothing was written."""
+        if not isinstance(exc, addon_archive.AddonRefusal):
+            self._addon_failed(exc)
+            return
+        self._module_job_ended()
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(str(exc))
+        self.action_failed.emit(str(exc))
+        self.refresh_addon_box()
+
+    @Slot(object)
+    def _addon_done(self, result: object) -> None:
+        self._module_done(result)
+        self.refresh_addon_box()
+
+    @Slot(object)
+    def _addon_failed(self, exc: object) -> None:
+        self._module_failed(exc)
+        self.refresh_addon_box()
+
+    def _chosen_addon(self, item_id: str) -> Manifest | None:
+        route = self.services.client_addons
+        if route is None:
+            return None
+        return next((m for m in route.installed() if m.id == item_id), None)
+
+    @Slot(str)
+    def update_addon(self, item_id: str) -> None:
+        route = self.services.client_addons
+        manifest = self._chosen_addon(item_id)
+        if route is None or manifest is None or self._addon_busy():
+            return
+        if self._stopped_for_the_client(f"update {manifest.id}", manifest):
+            return
+        self._acting_on = manifest
+        self._module_pending = f"update {manifest.id}"
+        self.module_report.setPlainText(f"{self._module_pending}\u2026")
+        self._run_module_job(lambda: route.update(manifest), self._addon_done, self._addon_failed)
+
+    @Slot(str)
+    def remove_addon(self, item_id: str) -> None:
+        route = self.services.client_addons
+        manifest = self._chosen_addon(item_id)
+        if route is None or manifest is None or self._addon_busy():
+            return
+        if not self._confirm(
+            ADDON_REMOVE_TITLE.format(name=manifest.name),
+            ADDON_REMOVE_QUESTION.format(name=manifest.name),
+        ):
+            self._addon_cancelled(f"remove {manifest.id}")
+            return
+        self._acting_on = manifest
+        self._module_pending = f"remove {manifest.id}"
+        self.module_report.setPlainText(f"{self._module_pending}\u2026")
+        self._run_module_job(lambda: route.remove(manifest), self._addon_done, self._addon_failed)
 
     def _replacement_question(self, manifest: Manifest) -> str | None:
         """The seam's question about the clone already at this manifest's path, if any.
