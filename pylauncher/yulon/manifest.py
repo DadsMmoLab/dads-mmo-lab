@@ -603,11 +603,45 @@ class Origin(_Strict):
     ownership is decided by the clone claim, as it is for a shipped module.
     """
 
-    kind: Literal["link", "folder"]
+    kind: Literal["link", "folder", "archive"]
     path: str | None = Field(
-        default=None, description="The folder it was copied from (kind='folder'); null for a link."
+        default=None,
+        description=(
+            "The folder it was copied from (kind='folder'), or the zip it was unpacked from "
+            "(kind='archive', a zip on this computer); null for a link."
+        ),
+    )
+    url: str | None = Field(
+        default=None,
+        description=(
+            "kind='archive' only: the https link the zip was downloaded from (T613), for "
+            "Update to fetch again. Null for a zip on this computer."
+        ),
+    )
+    sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "kind='archive' only, and required there: the SHA-256 of the zip that was "
+            "installed (T613), so an Update can tell a changed download from the same one."
+        ),
     )
     added: str = Field(min_length=1, description="ISO date the derivation happened.")
+
+    @model_validator(mode="after")
+    def _an_archive_says_which_zip(self) -> Origin:
+        """An archive names its zip by a path or a url (one), and its bytes; nothing else does."""
+        if self.kind != "archive":
+            if self.url is not None or self.sha256 is not None:
+                raise ValueError("url and sha256 are only an archive origin's")
+            return self
+        if self.sha256 is None:
+            raise ValueError("an archive origin needs the zip's sha256")
+        if (self.path is None) == (self.url is None):
+            raise ValueError("an archive origin names its zip by a path or a url, one of them")
+        if self.url is not None and urlsplit(self.url).scheme != "https":
+            raise ValueError(f"an archive origin's url must be https, got {self.url!r}")
+        return self
 
 
 class Manifest(_Strict):

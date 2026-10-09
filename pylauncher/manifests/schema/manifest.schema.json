@@ -341,7 +341,8 @@
         "kind": {
           "enum": [
             "link",
-            "folder"
+            "folder",
+            "archive"
           ],
           "title": "Kind",
           "type": "string"
@@ -356,8 +357,35 @@
             }
           ],
           "default": null,
-          "description": "The folder it was copied from (kind='folder'); null for a link.",
+          "description": "The folder it was copied from (kind='folder'), or the zip it was unpacked from (kind='archive', a zip on this computer); null for a link.",
           "title": "Path"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "kind='archive' only, and required there: the SHA-256 of the zip that was installed (T613), so an Update can tell a changed download from the same one.",
+          "title": "Sha256"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "kind='archive' only: the https link the zip was downloaded from (T613), for Update to fetch again. Null for a zip on this computer.",
+          "title": "Url"
         }
       },
       "required": [
