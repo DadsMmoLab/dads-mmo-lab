@@ -3089,6 +3089,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "inside are skipped) to READ the player's scripts into a move package. It decides no "
         "write: the files are read, never changed, and the package is written elsewhere"
     ),
+    ("move_server.py", "_folder_module_members"): (
+        "T624. Walks a folder module's own clone folder under `modules/` (links refused, `.git` "
+        "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
+        "write: the files are read, never changed, and the package is written elsewhere"
+    ),
     ("move_flows.py", "_backup_for_the_package"): (
         "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
         "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
