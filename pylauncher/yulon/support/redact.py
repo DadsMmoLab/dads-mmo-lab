@@ -280,7 +280,7 @@ def _home_patterns(
 
 _STRONG_KEY = (
     r"session[ _-]?key|session[_-]?id|jsessionid|phpsessid|sha[_-]?pass(?:[_-]?hash)?|verifier"
-    r"|api[_-]?key|private[_-]?key|passwd|[_-]pwd|pwd[_-]"
+    r"|api[_-]?key|private[_-]?key|passwd|pwd"
 )
 _WEAK_KEY = r"token|secret|credentials?"
 _KEYED = re.compile(
@@ -374,8 +374,8 @@ The console commands the app itself sends (`commands.py`), an XML element a SOAP
 or request carries, and the command lines that put a password on an argv."""
 
 _COOKIE = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?P<set>set-)?cookie[\"']?[ \t]*[=:][ \t]*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
+    r"(?i)(?<![\w-])(?P<head>(?P<set>set-)?cookie(?:\\{0,4}[\"'])?[ \t]*[=:][ \t]*)"
+    r"(?P<value>\\{1,4}[\"'][^\"'\\\r\n]*\\{1,4}[\"']|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
 )
 _COOKIE_PAIR = re.compile(r"(?P<head>(?:^|[;,][ \t]*)[^=;,\s]+=)(?P<value>[^;,\r\n]*)")
 _COOKIE_ATTRIBUTES = frozenset(
@@ -419,10 +419,14 @@ def _mask_head_value(match: re.Match[str]) -> str:
     return match.group("head") + MASK
 
 
+_QUOTED = re.compile(r"(\\*[\"'])(.*?)(\\*[\"'])", re.DOTALL)
+"""A value in quotes, escaped or not: the opening quote, what is inside, the closing quote."""
+
+
 def _mask_cookie(match: re.Match[str]) -> str:
     value = match.group("value")
-    quoted = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
-    inner = value[1:-1] if quoted else value
+    wrapped = _QUOTED.fullmatch(value)
+    opener, inner, closer = wrapped.groups() if wrapped else ("", value, "")
     set_cookie = match.group("set") is not None
     seen = itertools.count()
 
@@ -436,7 +440,7 @@ def _mask_cookie(match: re.Match[str]) -> str:
         return found.group("head") + MASK
 
     masked = _COOKIE_PAIR.sub(pair, inner)
-    return match.group("head") + (f"{value[0]}{masked}{value[0]}" if quoted else masked)
+    return match.group("head") + opener + masked + closer
 
 
 def _mask_keyed(match: re.Match[str]) -> str:

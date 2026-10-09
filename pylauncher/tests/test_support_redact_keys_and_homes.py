@@ -644,3 +644,19 @@ def test_an_account_password_command_followed_by_log_text_settles_in_one_pass() 
     ):
         once = redactor.checked(text)  # raises if a second pass would change it
         assert "secret" not in once and "old" not in once and "new" not in once, once
+
+
+def test_a_cookie_in_an_escaped_json_record_and_a_bare_pwd_key_are_masked() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    redactor = Redactor.build([])
+    for line in (
+        f'{{\\"Cookie\\": \\"sid={secret}\\", \\"url\\": \\"/x\\"}}',
+        f'{{\\"Set-Cookie\\": \\"sid={secret}; Path=/x\\"}}',
+        f"pwd={secret}",
+        f'{{"pwd": "{secret}"}}',
+        f'{{\\"pwd\\": \\"{secret}\\"}}',
+        f"PWD: {secret}",
+    ):
+        assert secret not in redactor.checked(line), line
+    kept = redactor.checked(f'{{\\"Set-Cookie\\": \\"sid={secret}; Path=/x\\", \\"u\\": 1}}')
+    assert "Path=/x" in kept and '\\"u\\": 1' in kept, kept
