@@ -29,6 +29,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
 - **Start** on a server whose build is gone from Docker says so and names **Rebuild the server…**, before it starts anything.
 - **Rebuild the server…** on a server made from the retired playerbots fork says so at once instead of failing after half an hour.
+- **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
+- A failed, stopped or rolled-back update keeps every earlier database copy; only a successful one clears them.
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
