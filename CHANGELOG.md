@@ -49,6 +49,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
 
 ### Changed
+- NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
 
 ## v0.9.15-Public — 2026-10-09
 
