@@ -245,3 +245,13 @@ def test_a_failure_note_does_not_claim_an_install_when_it_was_an_update(tmp_path
     out = default_addons.Outcome(failed={"tortoise-gm-manager": "no network"})
     (line,) = out.notes()
     assert "Tortoise GM Manager" in line and "no network" in line
+
+
+def test_the_play_log_names_the_addons_in_words(tmp_path: Path) -> None:
+    out = default_addons.Outcome(
+        installed=("tortoise-bots-manager",), updated=("tortoise-gm-manager",)
+    )
+    assert out.notes() == (
+        "Put TortoiseBots Manager into your game client.",
+        "Updated Tortoise GM Manager in your game client.",
+    )

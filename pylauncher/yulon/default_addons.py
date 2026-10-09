@@ -104,8 +104,8 @@ class Outcome:
 
     def notes(self) -> tuple[str, ...]:
         """Plain sentences for the Play log; empty when nothing happened."""
-        out = [f"Put {item} into your game client." for item in self.installed]
-        out += [f"Updated {item} in your game client." for item in self.updated]
+        out = [f"Put {_NAMES.get(item, item)} into your game client." for item in self.installed]
+        out += [f"Updated {_NAMES.get(item, item)} in your game client." for item in self.updated]
         out += [
             f"Could not set up {_NAMES.get(item, item)} in your game client ({why}). "
             "Play goes on without it."
