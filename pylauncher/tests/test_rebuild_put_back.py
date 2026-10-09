@@ -17,6 +17,7 @@ import pytest
 from tests.support_native import ENTRY
 from tests.test_apply_put_back import URL, _git, _LocalOrigin, _manifest, _publish
 from yulon import install_wiring, module_moves
+from yulon.after_stop import StopTookEffect
 from yulon.apply import Applier, failed_build_put_back
 from yulon.catalog.installer import InstallerError, InstallStopped, WorldStoppedAfterReadyError
 from yulon.catalog.native import RebuildChangedTheServer
@@ -220,19 +221,26 @@ def test_a_kept_build_settles_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert two.ledger().moves == {}
 
 
-@pytest.mark.parametrize("how", ["stop-said", "cancel-set"])
+class _ChildEndedByStop(InstallerError, StopTookEffect):
+    """A failure that IS the Stop taking effect, though not the engine's own `InstallStopped`."""
+
+
+@pytest.mark.parametrize("how", ["stop-said", "stop-marked-child", "stop-marked-cause"])
 def test_stopped_rebuild_neither_settles_nor_puts_back(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
 ) -> None:
-    """Test 12."""
+    """Test 12: a Stop is told by what the failure IS (T592), not by the event's timing."""
     two = _Two(tmp_path)
     tips = two.update("mod-x")
     cancel = threading.Event()
-    if how == "cancel-set":
-        cancel.set()
-        error: InstallerError = InstallerError(FAILED)
+    cancel.set()
+    if how == "stop-said":
+        error: InstallerError = InstallStopped("Stopped.")
+    elif how == "stop-marked-child":
+        error = _ChildEndedByStop(FAILED)
     else:
-        error = InstallStopped("Stopped.")
+        error = InstallerError(FAILED)
+        error.__cause__ = _ChildEndedByStop("the child was ended")
     before = (two.server / module_moves.MOVES_FILE).read_text(encoding="utf-8")
 
     with pytest.raises(InstallerError) as failed:
@@ -241,6 +249,48 @@ def test_stopped_rebuild_neither_settles_nor_puts_back(
     assert failed.value is error and "put" not in str(error)
     assert two.head("mod-x") == tips["mod-x"]
     assert (two.server / module_moves.MOVES_FILE).read_text(encoding="utf-8") == before
+
+
+def test_a_compile_failure_that_lands_after_a_late_stop_still_puts_the_module_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T592: Stop clicked as the compiler failed on its own. The failure carries no Stop mark."""
+    two = _Two(tmp_path)
+    tips = two.update("mod-x")
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(InstallerError) as failed:
+        _press(monkeypatch, two, ["Rebuilding", ERROR_X], InstallerError(FAILED), cancel=cancel)
+
+    assert two.head("mod-x") == two.a["mod-x"], "the broken update stayed on the clone"
+    assert "Yu'lon put mod-x back on the version it had before that update" in str(failed.value)
+    ledger = two.ledger()
+    assert "module/mod-x" not in ledger.moves
+    assert ledger.skipped["module/mod-x"].tip == tips["mod-x"]
+
+
+def test_a_late_stop_does_not_hide_the_module_order_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T592: the T586 note rides the same failures the put-back does, a set cancel included."""
+    two = _Two(tmp_path)
+    two.update("mod-x")
+    asked: list[tuple[str, ...]] = []
+
+    def note(named: tuple[str, ...]) -> str:
+        asked.append(named)
+        return "Order note."
+
+    monkeypatch.setattr(install_wiring, "_core_note", lambda *_args: note)
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(InstallerError) as failed:
+        _press(monkeypatch, two, [ERROR_X], InstallerError(FAILED), cancel=cancel)
+
+    assert asked == [("mod-x",)]
+    assert str(failed.value).endswith(" Order note.")
 
 
 def test_a_failure_the_old_build_is_not_back_from_changes_nothing(

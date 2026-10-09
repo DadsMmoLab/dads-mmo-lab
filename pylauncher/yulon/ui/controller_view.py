@@ -18367,7 +18367,10 @@ class ControllerView(QWidget):
             # nothing about the running server changed.
             self._rebuild_owed.clear()
             self.reload_modules()
-        if not ok and not self.rebuild_log.cancelled:
+        if not ok:
+            # `ok` alone, not the panel's `cancelled` (T592): a Stop that took effect
+            # arrives as ok=True, so a failure here is a real one -- even one that
+            # landed as Stop was pressed, which still put its module back.
             self._reload_after_a_failed_build()
         if not ok:
             self.action_failed.emit(message)
@@ -18400,7 +18403,7 @@ class ControllerView(QWidget):
         recorded as put back has a clone on another commit than the one its count
         and its version were read at. Those are dropped before the redraw, as an
         Update drops them, and every version is read again (a local `rev-parse` per
-        clone, off the GUI thread). Not on a Stop: nothing is put back on one.
+        clone, off the GUI thread). A Stop that took effect never gets here: it ends ok=True.
         """
         if self._waits_for_the_distro(
             "modules after a failed build", self._reload_after_a_failed_build
