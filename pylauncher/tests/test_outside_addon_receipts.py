@@ -868,8 +868,10 @@ def test_an_update_that_moves_the_add_on_in_its_source_still_puts_the_folder_bac
             "client": [{"src": "sub/pfUI", "dest": "addons", "name": "pfUI"}],
         }
     )
-    applier.install(newer, folder=FolderSource(moved, copy_folder), replacing=True)
+    updated = applier.install(newer, folder=FolderSource(moved, copy_folder), replacing=True)
 
+    assert aside.is_dir(), "still written by the item, so still aside"
+    assert not any("yulon-addon-old" in line for line in updated.skipped), updated.skipped
     report = applier.remove(newer)
 
     assert (own / "pfUI.lua").read_text() == MINE, report.left_behind
@@ -894,6 +896,9 @@ def test_an_update_that_drops_the_add_on_still_puts_the_folder_back_at_remove(
         }
     )
     applier.install(renamed, folder=FolderSource(other, copy_folder), replacing=True)
+
+    assert (own / "pfUI.lua").read_text() == MINE, "no longer written: back at the Update"
+    assert not aside.exists() and _noted(applier.server_dir) == []
     report = applier.remove(renamed)
 
     assert (own / "pfUI.lua").read_text() == MINE or any(
@@ -964,3 +969,44 @@ def test_the_refusal_without_a_yes_says_what_to_do_instead(tmp_path: Path) -> No
         "so it did not replace it. Move or rename your own pfUI folder in Interface/AddOns "
         "first, then install again. Nothing was changed."
     )
+
+
+def test_an_update_that_drops_one_of_two_add_ons_puts_back_only_that_ones_folder(
+    tmp_path: Path,
+) -> None:
+    """The add-on still written keeps its aside, said nowhere; the dropped one's comes back."""
+    client = _client(tmp_path)
+    addons = client / "Interface" / "AddOns"
+    for name in ("pfUI", "pfUI_Config"):
+        (addons / name).mkdir()
+        (addons / name / "mine.lua").write_text(f"-- my {name}\n")
+    src = tmp_path / "two"
+    for name in ("pfUI", "pfUI_Config"):
+        (src / name).mkdir(parents=True)
+        (src / name / f"{name}.toc").write_text("## Interface: 11200\n")
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+
+    def item(*names: str) -> Manifest:
+        return parse_manifest(
+            {
+                "id": ITEM,
+                "name": "pfUI",
+                "type": "mod",
+                "game": "wow-vanilla",
+                "origin": {"kind": "folder", "path": "/x", "added": "2026-10-09"},
+                "client": [{"src": n, "dest": "addons", "name": n} for n in names],
+            }
+        )
+
+    applier.install(
+        item("pfUI", "pfUI_Config"), folder=FolderSource(src, copy_folder), replace_addons=True
+    )
+
+    updated = applier.install(item("pfUI"), folder=FolderSource(src, copy_folder), replacing=True)
+
+    assert (addons / "pfUI_Config" / "mine.lua").read_text() == "-- my pfUI_Config\n"
+    assert (addons / "pfUI.yulon-addon-old" / "mine.lua").read_text() == "-- my pfUI\n"
+    assert not any("pfUI.yulon-addon-old" in line for line in updated.skipped), updated.skipped
+    assert [n["addon"] for n in _noted(server)] == ["pfUI"]
