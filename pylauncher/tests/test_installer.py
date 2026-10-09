@@ -249,6 +249,8 @@ MODULE_SURFACE_AFTER_7_2 = {
     "UpstreamNews",
     # T126. `InstallEngine.update_to_latest(rewritten_ok=...)` is typed with it.
     "Collection",
+    # T568. `InstallEngine.reserved()` returns a context manager.
+    "AbstractContextManager",
     "get_logger",
 }
 
