@@ -751,13 +751,17 @@ class AzerothCoreInstaller(StagedInstaller):
                     "git could not read the update files it removes and adds",
                 )
             )
-        filed = {(_database_part(path), _sql_of(after.get(path, ()))) for path in beside}
-        return {
-            path
-            for path in removed
-            if _sql_of(before.get(path, ()))
-            and (_database_part(path), _sql_of(before.get(path, ()))) in filed
-        }
+        # Each added file re-files ONE removed file (re-review of 2db10bd9): two removed
+        # updates with the same SQL and one added file leave one of them lacked.
+        filed = [(_database_part(path), _sql_of(after.get(path, ()))) for path in beside]
+        refiled: set[str] = set()
+        for path in removed:
+            key = (_database_part(path), _sql_of(before.get(path, ())))
+            if not key[1] or key not in filed:
+                continue
+            filed.remove(key)
+            refiled.add(path)
+        return refiled
 
     def _applied_of(self, server_dir: Path, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
         """Per database, which of `names` its `updates` table holds; only those holding any.
