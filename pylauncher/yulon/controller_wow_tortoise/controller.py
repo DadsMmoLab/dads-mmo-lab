@@ -88,14 +88,18 @@ class TortoiseController(Controller):
         """
         if self.wsl_distro is not None and wsl.known_stopped(self.wsl_distro):
             return super().stop()
-        self._mark_the_realm_offline(start_database=False)
-        try:
-            return super().stop()
-        except Exception:
-            # A Stop given up (a Cancel while the world loads or saves) or refused leaves the
-            # world running, and only a start clears the bit: take it off again.
-            self._put_the_realm_back()
-            raise
+        # T581: held offline on purpose for the whole Stop, so the dashboard tick does not
+        # put a realm back online while its world saves on the way down.
+        with realm_flag.deliberately_offline(self.spec):
+            self._mark_the_realm_offline(start_database=False)
+            try:
+                return super().stop()
+            except Exception:
+                # A Stop given up (a Cancel while the world loads or saves) or refused leaves
+                # the world running, and only a start clears the bit: take it off again. If
+                # that fails, the dashboard tick takes it off once the hold is over (T581).
+                self._put_the_realm_back()
+                raise
 
     def _before_the_servers_start(self) -> None:
         """Mark the realm offline (T577), then bring the bot dashboard up when it is on (T127).
