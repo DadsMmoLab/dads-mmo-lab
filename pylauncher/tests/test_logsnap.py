@@ -475,3 +475,35 @@ def test_a_log_whose_lines_pass_but_not_together_is_removed_whole(
     assert snap.path is not None
     written = snap.path.read_text(encoding="utf-8")
     assert "PART-" not in written and "log was removed" in written
+
+
+def test_the_marker_for_a_log_the_cleaner_could_not_vouch_for_says_secrets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T609: the cleaner takes out tokens and home paths too, so "passwords" understates it.
+
+    Mutation: put "passwords" back in `_REMOVED_LINE` or `_REMOVED_ALL`.
+    """
+    from yulon.support.redact import Redactor
+
+    _unsafe_redactor(monkeypatch, "HALFMASKED", "raises")
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="a\nHALFMASKED x\nb\n"))
+    (tmp_path / "server").mkdir()
+    one = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    real = Redactor.redact
+
+    def redact(self, text: str) -> str:  # noqa: ANN001
+        return text + "x" if "PART-A" in text and "PART-B" in text else real(self, text)
+
+    monkeypatch.setattr(Redactor, "redact", redact)
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="PART-A\nPART-B\n"))
+    whole = logsnap.capture(
+        SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs2"
+    )
+
+    assert one.path is not None and whole.path is not None
+    for path in (one.path, whole.path):
+        written = path.read_text(encoding="utf-8")
+        assert "free of secrets" in written, written
+        assert "passwords" not in written, written
