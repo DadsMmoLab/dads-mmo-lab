@@ -2746,9 +2746,13 @@ def _server_hold_for(
     A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it. A
     caller may pass its own per call (`hold(press, budget=...)`): the channel's roll-back does.
     """
-    return lambda press, budget=budget: docker.server_hold(
-        server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
-    )
+
+    def hold(press: str, budget: float | None = budget) -> contextlib.AbstractContextManager[None]:
+        return docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
+        )
+
+    return hold
 
 
 def _under_the_hold(

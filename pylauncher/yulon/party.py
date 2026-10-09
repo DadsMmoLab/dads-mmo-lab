@@ -3056,7 +3056,7 @@ class InstallParty:
         level_setter: LevelSetter | None = None,
         link_writer: SqlWriter | None = None,
         altbots: AltbotMemory | None = None,
-        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
