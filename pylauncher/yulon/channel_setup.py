@@ -55,16 +55,19 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypeVar, cast
 
 from yulon import bot_population, commands, platform, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -278,8 +281,22 @@ Defined in `composegen`, which every writer of the override can import (T101).
 """
 
 
+_C = TypeVar("_C", bound=Callable[..., Any])
+
+
 class EnableRefused(RuntimeError):
     """The press declined. The message is written for a person to act on."""
+
+
+class ServerHeldElsewhere(RuntimeError):
+    """Another Yu'lon holds this server (T607); the message is its sentence, nothing was written."""
+
+
+CHANNEL_SETUP_PRESS = "Set up the command channel"
+"""The press name on the reservation the channel's account create and reset take (T607)."""
+
+CHANNEL_ENABLE_PRESS = "Turn on the command channel"
+"""The press name on the reservation `enable` takes (T607)."""
 
 
 @dataclass(frozen=True)
@@ -1312,13 +1329,17 @@ class InstallChannel:
         exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
         self.templates_root = templates_root
         self.install_id = install_id
-        self._create = create
-        self._reset = reset
+        # T607: the server's cross-process hold (`docker.server_hold`) around what this writes:
+        # the account it creates or re-salts, and the files `enable` writes. None holds nothing.
+        self._hold_server = hold_server
+        self._create = self._held_call(create)
+        self._reset = self._held_call(reset) if reset is not None else None
         # A read of the auth database: is this app's own account there (T386)?
         # Asked by `check()` with nothing saved, so a tab or a Refresh can offer
         # Repair for a lost password without writing a row.
@@ -1336,6 +1357,33 @@ class InstallChannel:
         self._settles = 0
         self.channel_is_off = False
         """Set by `check()`, `settle()` and `repair()`: waiting, and the files say off (T423)."""
+
+    @contextmanager
+    def _held(self, press: str) -> Iterator[None]:
+        """The server's cross-process hold for the block; `ServerHeldElsewhere` if it is taken.
+
+        Raised before the block runs, so nothing is written. The block's own exceptions pass.
+        """
+        if self._hold_server is None:
+            yield
+            return
+        with ExitStack() as held:
+            try:
+                held.enter_context(self._hold_server(press))
+            except SaidByYulon as refused:
+                raise ServerHeldElsewhere(str(refused)) from refused
+            yield
+
+    def _held_call(self, call: _C) -> _C:
+        """`call` run under the hold, as the account create and reset are (T607)."""
+        if self._hold_server is None:
+            return call
+
+        def held(*args: Any) -> Any:
+            with self._held(CHANNEL_SETUP_PRESS):
+                return call(*args)
+
+        return cast(_C, held)
 
     def _password(self) -> str | None:
         """The install's database password, read now if it was handed over as a reader."""
@@ -1744,13 +1792,17 @@ class InstallChannel:
         channel "is checked the next time you start the server", and a state
         left at `GaveUp` was never checked again in the same app run.
         """
-        done = enable(
-            self.entry,
-            self.server_dir,
-            templates_root=self.templates_root,
-            world_running=world_running,
-            db_password=self._password(),
-        )
+        try:
+            with self._held(CHANNEL_ENABLE_PRESS):
+                done = enable(
+                    self.entry,
+                    self.server_dir,
+                    templates_root=self.templates_root,
+                    world_running=world_running,
+                    db_password=self._password(),
+                )
+        except ServerHeldElsewhere as held:
+            raise EnableRefused(str(held)) from held
         self._rearm("Turn on")
         return done
 
@@ -1799,6 +1851,11 @@ class InstallChannel:
                 state=asked_from,
                 gm_level=operations.gm_level or 3,
             )
+        except ServerHeldElsewhere as held:
+            # Another Yu'lon is working on this server: no account was made. The setup stays
+            # where it was and the next Start settles it (T607).
+            logger.info(f"the command channel for {self.entry.id} waits: {held}")
+            return self._state
         finally:
             self._settles -= 1
         # Kept only over the state it was asked from, or when it is a proof

@@ -550,6 +550,7 @@ def _reserved_for(
     press: str,
     spec: ContainerSpec | None,
     wsl_distro: str | None,
+    label: str | None = None,
 ) -> Iterator[None]:
     """The cross-process reservation for a Backup or Restore block (T568), when it has a spec.
 
@@ -563,13 +564,36 @@ def _reserved_for(
     with contextlib.ExitStack() as reserved:
         try:
             reserved.enter_context(
-                server_claim(server_dir, press=press, spec=spec, wsl_distro=wsl_distro)
+                server_claim(
+                    server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=label
+                )
             )
         except ServerReservationUnavailable as exc:
             if not exc.moot:
                 raise
             logger.warning(f"{press} on {server_dir} without a reservation: {exc}")
         yield
+
+
+def server_hold(
+    server_dir: Path | str,
+    press: str,
+    *,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None = None,
+    label: str | None = None,
+) -> contextlib.AbstractContextManager[None]:
+    """Reserve the server across processes for a block that writes to it (T607).
+
+    For the feature paths that are not an engine press or an Applier action -- Party's account
+    link, the command channel's account and `enable`, the bot pool rebuild. Another Yu'lon's
+    Start, Update or Rebuild then refuses with this block's `press`, and this block is refused
+    with theirs: `ServerReserved`, whose message is the sentence to show, raised before the
+    block runs. Nested in a reservation this process already holds it shares it. A `spec` of
+    None (a harness with no container names) holds nothing; a reservation that is `moot`
+    (Docker not there or not answering, an unwritable folder) is skipped, as everywhere.
+    """
+    return _reserved_for(server_dir, press, spec, wsl_distro, label)
 
 
 @contextmanager

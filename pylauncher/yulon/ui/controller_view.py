@@ -3159,6 +3159,11 @@ def _for_wotlk(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
         install_id=composegen.install_id(server_dir),
         # The scheme is the entry's or nothing: `or "azerothcore"` stood here
         # until 2026-09-09, which handed an entry whose scheme is unmeasured the
@@ -3294,6 +3299,10 @@ def _for_wotlk(
             # cannot be called through it. Without this line the control could
             # only ever say it has no route.
             link_writer=sql,
+            # T607: the link is written under this server's cross-process reservation.
+            hold_server=lambda press: docker.server_hold(
+                server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
             # T26 round 2, and the second line of this factory the ticket needs.
             # `members()` unions the bot marker's rows with the characters this
             # app added through `add_named`, and that record has to outlive the
@@ -3555,6 +3564,11 @@ def _for_tbc(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tbc_accounts.create_account(sql, name, pw, gm_level=level),
@@ -3708,6 +3722,11 @@ def _for_vanilla(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: vanilla_accounts.create_account(
@@ -3886,6 +3905,11 @@ def _for_centurion(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: centurion_accounts.create_account(
@@ -4121,6 +4145,11 @@ def _for_tortoise(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
+        # T607: the account it creates and the files `enable` writes are written under
+        # this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tortoise_accounts.create_account(
@@ -4309,6 +4338,10 @@ def _for_tortoise(
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
         image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
+        # T607: the whole rebuild is held under this server's cross-process reservation.
+        hold_server=lambda press: docker.server_hold(
+            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+        ),
     )
     return replace(
         services,
