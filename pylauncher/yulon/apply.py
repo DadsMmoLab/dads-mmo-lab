@@ -3538,7 +3538,8 @@ class Applier:
                     self._take_back(copy, log)
             log.skipped.extend(log.client_left_behind)  # an install's report has no left_behind
             log.client_left_behind.clear()
-        self._check_hold()
+        # No check here: every file is written by now, and stopping would only leave a complete
+        # install marked unfinished.
         self._finish_claim(
             manifest,
             clone,

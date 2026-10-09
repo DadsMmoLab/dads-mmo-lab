@@ -197,8 +197,8 @@ SQL_HOLD_LOST = (
 
 ACTION_HOLD_LOST = (
     "Another Yu'lon stopped this server while this was being done, so the rest was not done. "
-    "What ran before that stays as it is: press the module's button again once the server is "
-    "stopped."
+    "What ran before that stays as it is: press the module's button again once the other "
+    "Yu'lon is done."
 )
 """A Modules action ended between two of its steps by another Yu'lon's "Stop anyway" (T607)."""
 
