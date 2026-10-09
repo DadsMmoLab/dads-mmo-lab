@@ -526,8 +526,7 @@ class Controller:
         in a WSL distro (`wsl_distro`) -- a Linux path in that distro, read through its
         `\\\\wsl.localhost` share (T607; the other server's Docker is this one's, so its path is
         in this distro). A working dir this host cannot see, or one Docker has no label for, is
-        skipped (and logged), since there is no id file to put in it. So is a folder with no
-        Yu'lon record and no id file already in it (T610): it is not Yu'lon's to write to.
+        skipped (and logged), since there is no id file to put in it.
         """
         found: dict[Path, str] = {}
         for name in containers:
@@ -540,16 +539,6 @@ class Controller:
                 logger.info(f"no server folder this host can see for {name} ({working!r})")
                 continue
             if folder.resolve() == self.server_dir.resolve():
-                continue
-            if (
-                not (folder / native.STATE_FILE).is_file()
-                and docker.existing_folder_id(folder) is None
-            ):
-                # T610: a compose project Yu'lon did not install has no Yu'lon on the other side
-                # to race with, and reserving it would write `.yulon-folder-id` into somebody
-                # else's folder. A folder with Yu'lon's record gets its id as every press makes
-                # it; one that already carries an id is reserved by reading it.
-                logger.info(f"{folder} is no server Yu'lon installed: stopping {name} unreserved")
                 continue
             found.setdefault(folder, name)
         return found
