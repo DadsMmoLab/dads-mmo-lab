@@ -570,9 +570,7 @@ class CmangosInstaller(StagedInstaller):
                 what = (
                     "is new"
                     if status.startswith("A")
-                    else "was removed"
-                    if status.startswith("D")
-                    else "changed"
+                    else "was removed" if status.startswith("D") else "changed"
                 )
                 yield (
                     f"{prefix}{path} ({phase.name}) {what} in {source.repo} since this server "
