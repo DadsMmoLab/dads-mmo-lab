@@ -18,14 +18,21 @@ claims nothing more.
 
 **Which release.** The newest release that carries the binary, whose tag is at
 or before the module's own commit (GitHub's compare of `tag...commit` says the
-module is not behind it), and whose binary was not re-uploaded long after the tag
-was made. A daemon newer than the module may speak a datagram protocol the module
-does not (T162). Upstream's workflow re-uploads the day's assets on every push to
-main (`--clobber`) while the tag moves only when the changelog job succeeds, so a
-binary uploaded more than `SKEW` after its tag's commit may be from a later build
-than the tag: that release is skipped. A module older than the first release with
-a binary has none, and builds from source -- for the installs that sit on an older
-TortoiseBots (T597) that is the normal path.
+module is not behind it), and whose binary was not re-uploaded long after the
+tag's commit. A daemon newer than the module may speak a datagram protocol the
+module does not (T162). Upstream's workflow re-uploads the day's assets on every
+push to main (`--clobber`) while the tag moves only when the changelog job
+succeeds, so a binary uploaded more than `SKEW` after its tag's commit may be
+from a later build than the tag: that release is skipped, and the player is told
+how many hours late it was, not that anything was tampered with.
+
+**Finding it by date, not by page.** TortoiseBots releases daily, so a module can
+sit weeks behind the newest release. One listing of the newest 100 releases is
+read, the module's own commit date is read, and only releases CREATED at or before
+that date are candidates (a release created after the commit cannot be tagged at or
+before it). Of those, the newest few are compared with the commit. That is about
+five requests however far behind the module is (unauthenticated GitHub allows 60
+an hour). When none fits the sentence says how many releases were looked through.
 
 **Fail closed.** The binary is downloaded only after the release's sha256 file
 has been read and names it; the download is held to the size the release
@@ -50,6 +57,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -70,14 +78,20 @@ INSTALLED_NAME = "tortoise-observability"
 STAGING_DIR = ".yulon-dashboard-binary"
 """Under the server folder: the build context while it exists. Removed after every build."""
 
-RELEASES_PER_PAGE = 10
-"""The newest releases asked for. A binary is on a few of the daily releases at most."""
+RELEASES_PER_PAGE = 100
+"""One listing, GitHub's largest page: releases are daily, and a module may be weeks behind."""
+
+CREATED_SLACK = timedelta(hours=1)
+"""How far past the module commit's date a release may have been created and still be tried."""
 
 MAX_BINARY_BYTES = 200 * 1024 * 1024
 """The daemon is ~29 MB. A release declaring more than this is not asked for."""
 
-MAX_COMPARES = 5
-"""How many releases are compared with the module's commit before giving up (one request each)."""
+MAX_COMPARES = 3
+"""How many date-eligible releases are compared with the module's commit (one request each).
+
+The newest eligible release can be the module's own day's, tagged after the commit; the one
+before it is then at or before it. A third is for a release skipped by the skew guard."""
 
 SKEW = timedelta(hours=2)
 """How long after its tag's commit a release's binary may have been uploaded."""
@@ -180,55 +194,111 @@ def _candidates(releases: object) -> list[_Candidate]:
     return found
 
 
-def _tag_moment(repo: str, tag: str, get: upstream.HttpGet) -> datetime | None:
-    """When the commit `tag` names was made, or None if GitHub would not say."""
-    url = f"https://api.github.com/repos/{repo}/commits/{tag}"
-    try:
-        payload = json.loads(get(url, "application/vnd.github+json"))
-        return _moment(payload["commit"]["committer"]["date"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+class _Missing(Exception):
+    """GitHub answered 404/422: it has no such commit."""
 
 
-def pick(rev: str | None, repo: str, *, get: upstream.HttpGet = upstream.https_get) -> Pick:
+class _Asker:
+    """GitHub API reads for one `pick()`: Stop is checked before each, failures are told apart."""
+
+    def __init__(self, get: upstream.HttpGet, cancelled: Callable[[], bool]) -> None:
+        self._get = get
+        self._cancelled = cancelled
+
+    def json(self, url: str) -> object:
+        """The parsed answer; raises `Stopped`, `_Missing` or `Unavailable` (worded)."""
+        if self._cancelled():
+            raise Stopped("stopped")
+        try:
+            return json.loads(self._get(url, "application/vnd.github+json"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (403, 429):
+                raise Unavailable("GitHub is limiting requests from this PC just now") from None
+            if exc.code in (404, 422):
+                raise _Missing from None
+            logger.info(f"GitHub answered {exc.code} for {url}")
+        except (OSError, ValueError) as exc:
+            logger.info(f"could not read {url}: {exc}")
+        raise Unavailable("GitHub did not answer, so Yu'lon could not look for one") from None
+
+    def moment(self, url: str) -> datetime | None:
+        """The committer date of the commit at `url` (a `commits/...` address), or None."""
+        payload = self.json(url)
+        try:
+            return _moment(payload["commit"]["committer"]["date"])  # type: ignore[index]
+        except (KeyError, TypeError):
+            return None
+
+    def behind(self, url: str) -> int | None:
+        """`behind_by` of a compare, or None when the answer carries no count."""
+        payload = self.json(url)
+        count = payload.get("behind_by") if isinstance(payload, dict) else None
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        return count
+
+
+NOT_ON_GITHUB = "this server's bots version is not on GitHub, so no release can be matched to it"
+
+
+def pick(
+    rev: str | None,
+    repo: str,
+    *,
+    get: upstream.HttpGet = upstream.https_get,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> Pick:
     """The newest release with the binary at or before `rev`, or `Unavailable` saying why."""
     if rev is None or not re.fullmatch(r"[0-9a-f]{7,40}", rev):
         raise Unavailable("Yu'lon could not read which bots version this server has")
-    url = f"https://api.github.com/repos/{repo}/releases?per_page={RELEASES_PER_PAGE}"
+    api = f"https://api.github.com/repos/{repo}"
+    ask = _Asker(get, cancelled)
     try:
-        releases = json.loads(get(url, "application/vnd.github+json"))
-    except (OSError, ValueError) as exc:
-        logger.info(f"could not list the {repo} releases: {exc}")
-        raise Unavailable("GitHub did not answer, so Yu'lon could not look for one") from None
-    candidates = _candidates(releases)
-    if not candidates:
-        raise Unavailable("no release of the bots module carries one yet")
-    outran: str | None = None
-    unknown: str | None = None
-    for candidate in candidates[:MAX_COMPARES]:
-        said = upstream.compare_or_refused(repo, candidate.tag, rev, get=get)
-        if isinstance(said, upstream.Refused):
-            raise Unavailable("GitHub is limiting requests from this PC just now")
-        if said is None:
-            raise Unavailable("GitHub did not answer, so Yu'lon could not look for one")
-        if said.behind != 0:
-            continue
-        made, uploaded = _tag_moment(repo, candidate.tag, get), _moment(candidate.uploaded)
-        if made is None or uploaded is None:
-            unknown = unknown or (
-                f"Yu'lon could not tell whether release {candidate.tag}'s dashboard is from "
-                "the same build as its tag"
-            )
-            continue
-        if uploaded > made + SKEW:
-            outran = outran or (
-                f"release {candidate.tag}'s dashboard was uploaded after that release's tag "
-                "was made, so it may be from a later build than this server's bots module"
-            )
-            continue
-        return Pick(candidate.tag, candidate.size)
+        releases = ask.json(f"{api}/releases?per_page={RELEASES_PER_PAGE}")
+        candidates = _candidates(releases)
+        if not candidates:
+            raise Unavailable("no release of the bots module carries one yet")
+        looked = len(releases) if isinstance(releases, list) else 0
+        made_rev = ask.moment(f"{api}/commits/{rev}")
+        if made_rev is None:
+            raise Unavailable("Yu'lon could not tell when this server's bots version was made")
+        eligible = [
+            c
+            for c in candidates
+            if (c_made := _moment(c.created)) is not None and c_made <= made_rev + CREATED_SLACK
+        ]
+        outran: str | None = None
+        unknown: str | None = None
+        for candidate in eligible[:MAX_COMPARES]:
+            behind = ask.behind(f"{api}/compare/{candidate.tag}...{rev}?per_page=1&page=2")
+            if behind is None:
+                raise Unavailable("GitHub did not answer, so Yu'lon could not look for one")
+            if behind != 0:
+                continue
+            made = ask.moment(f"{api}/commits/{candidate.tag}")
+            uploaded = _moment(candidate.uploaded)
+            if made is None or uploaded is None:
+                unknown = unknown or (
+                    f"Yu'lon could not tell whether release {candidate.tag}'s dashboard is from "
+                    "the same build as its tag"
+                )
+                continue
+            if uploaded > made + SKEW:
+                late = (uploaded - made).total_seconds() / 3600
+                outran = outran or (
+                    f"release {candidate.tag}'s dashboard was uploaded {late:.1f} h after the "
+                    "commit that release is tagged at, so it may be from a later build than "
+                    "this server's bots module"
+                )
+                continue
+            return Pick(candidate.tag, candidate.size)
+    except _Missing:
+        raise Unavailable(NOT_ON_GITHUB) from None
     raise Unavailable(
-        outran or unknown or "this server's bots module is older than the releases that carry one"
+        outran
+        or unknown
+        or f"none of the {looked} newest releases of the bots module has a dashboard built "
+        "from this server's bots version"
     )
 
 
@@ -254,6 +324,7 @@ def stage(
     rev: str | None,
     repo: str | None,
     *,
+    daemon_arch: Callable[[], str | None] = lambda: "amd64",
     get: upstream.HttpGet = upstream.https_get,
     open_url: fetch.Opener = fetch._open,
     cancelled: Callable[[], bool] = lambda: False,
@@ -266,7 +337,16 @@ def stage(
     """
     if repo is None:
         raise Unavailable("this server's bots module does not come from GitHub")
-    chosen = pick(rev, repo, get=get)
+    if rev is None:
+        raise Unavailable("Yu'lon could not read which bots version this server has")
+    arch = daemon_arch()
+    if arch is None:
+        raise Unavailable("Docker would not say what architecture it runs on")
+    if arch != "amd64":
+        raise Unavailable(
+            f"this PC's Docker runs {arch} and TortoiseBots publishes the dashboard for amd64 only"
+        )
+    chosen = pick(rev, repo, get=get, cancelled=cancelled)
     context = server_dir / STAGING_DIR
     try:
         shutil.rmtree(context, ignore_errors=True)
@@ -274,7 +354,11 @@ def stage(
         sums_url = asset_url(repo, chosen.tag, SUMS_NAME)
         binary_url = asset_url(repo, chosen.tag, BINARY_NAME)
         try:
+            if cancelled():
+                raise Stopped("stopped")
             sums = fetch.parse_checksums(fetch.fetch_text(sums_url, open_url=open_url))
+            if cancelled():
+                raise Stopped("stopped")
             digest = sums.get(BINARY_NAME)
             if digest is None:
                 raise Unavailable(

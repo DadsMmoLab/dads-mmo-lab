@@ -8180,6 +8180,25 @@ def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) 
     return int(text)
 
 
+def daemon_arch(*, timeout: float | None = None, wsl_distro: str | None = None) -> str | None:
+    """The Docker DAEMON's CPU architecture, as `"amd64"` or `"arm64"` (anything else as the
+    daemon spells it); None if it would not say (T542).
+
+    The daemon's, for `daemon_cpus()`'s reason: Docker Desktop's VM may differ from the host.
+    `docker info` says `x86_64` or `aarch64`; those are folded to the names release assets use.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.Architecture}}"], timeout=timeout, wsl_distro=wsl_distro
+    )
+    text = proc.stdout.strip().lower()
+    if proc.returncode != 0 or not text:
+        logger.warning(f"could not read the daemon's architecture: {proc.stderr.strip()}")
+        return None
+    return {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(
+        text, text
+    )
+
+
 def remove_container(
     container: str, *, timeout: float | None = None, wsl_distro: str | None = None
 ) -> None:

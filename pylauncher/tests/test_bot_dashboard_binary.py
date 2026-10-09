@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import urllib.error
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -103,6 +104,11 @@ class _GitHub:
         self.api_error: OSError | None = None
         self.commit_dates: dict[str, str] = {}
         """The date of the commit a tag names; `_tag_date()` when a tag is not here."""
+        self.rev_date = "2026-12-31T00:00:00Z"
+        """When the module's own commit was made: after every release, unless a test says."""
+        self.fail: dict[str, Exception] = {}
+        """An error raised for any API address containing the key."""
+        self.on_api: Callable[[str], None] | None = None
         self.files: dict[str, bytes] = {}
         self.urls: list[str] = []
         self.api: list[str] = []
@@ -119,12 +125,19 @@ class _GitHub:
     def get(self, url: str, accept: str) -> bytes:
         self.api.append(url)
         assert f"/repos/{self.repo}/" in url, f"asked about another repository: {url}"
+        if self.on_api is not None:
+            self.on_api(url)
         if self.api_error is not None:
             raise self.api_error
+        for part, error in self.fail.items():
+            if part in url:
+                raise error
         if "/releases?" in url:
             return json.dumps(self.releases).encode()
         if "/commits/" in url:
             tag = url.split("/commits/")[1]
+            if not tag.startswith("v"):
+                return json.dumps({"commit": {"committer": {"date": self.rev_date}}}).encode()
             date = self.commit_dates.get(tag, _tag_date(tag))
             return json.dumps({"commit": {"committer": {"date": date}}}).encode()
         if "/compare/" in url:
@@ -162,6 +175,8 @@ class _RecordingDocker(_Docker):
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         super().__init__(monkeypatch)
         self.contexts: list[dict[str, bytes]] = []
+        self.arch: str | None = "amd64"
+        monkeypatch.setattr(docker, "daemon_arch", lambda **_kw: self.arch)
 
     def build_image(
         self, context: Path, tag: str, *, sink: Callable[[str], None] | None = None, **kw: object
@@ -508,14 +523,16 @@ def test_a_binary_uploaded_long_after_its_tag_was_made_is_not_used(
 ) -> None:
     """The tag moves only when the changelog job succeeds; the binary may be a later push's."""
     server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
-    github.releases = [_release("v2026-10-09", updated_at="2026-10-09T10:44:09Z")]  # +2 h 1 s
+    github.releases = [_release("v2026-10-09", updated_at="2026-10-09T13:44:08Z")]  # +5 h
 
     said = _on(switch)
 
     assert github.urls == [], "nothing is downloaded from a release whose binary outran its tag"
     assert fake.calls[0].startswith("build observability ")
     why = [line for line in said if "prebuilt" in line]
-    assert len(why) == 1 and "after" in why[0] and "v2026-10-09" in why[0], said
+    assert len(why) == 1 and "v2026-10-09" in why[0], said
+    assert "5.0 h after the commit that release is tagged at" in why[0], why[0]
+    assert "tamper" not in why[0] and "fake" not in why[0]
 
 
 def test_a_binary_uploaded_within_two_hours_of_its_tag_is_used(
@@ -587,14 +604,15 @@ def test_an_asset_that_is_not_uploaded_yet_is_not_picked(
     assert any("/v2026-10-09/" in u for u in github.urls)
 
 
-def test_only_the_newest_ten_releases_are_asked_for(
+def test_one_listing_of_the_newest_hundred_releases_is_asked_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
 
     _on(switch)
 
-    assert "per_page=10" in github.api[0]
+    assert github.api[0].endswith("/releases?per_page=100")
+    assert sum("/releases?" in u for u in github.api) == 1
 
 
 # -- a disk that refuses the staging folder -----------------------------------------
@@ -721,3 +739,207 @@ def test_a_stop_during_the_binary_download_of_an_update_rebuild_stops_the_old_da
     assert "Stopped before anything was changed" not in text
     assert "rm tortoise-observability" in fake.calls, "the old dashboard is stopped (T162)"
     assert files.rebuild_owed(server_dir) is not None
+
+
+# -- a module weeks behind the newest release (the window, not the newest page) ------
+
+
+def _daily(first: str, days: int) -> list[dict[str, object]]:
+    """Releases newest first, one per day from `first` (YYYY-MM-DD), each carrying the binary."""
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(first)
+    return [_release("v" + (start + timedelta(days=i)).isoformat()) for i in reversed(range(days))]
+
+
+def test_a_module_weeks_behind_the_newest_release_still_finds_its_release_in_few_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = _daily("2026-10-09", 40)  # v2026-10-09 .. v2026-11-17
+    github.rev_date = "2026-10-10T12:00:00Z"
+    for release in github.releases:
+        github.serve(str(release["tag_name"]))
+    # The module sits mid-day on the 10th: the 10th's tag (made after it) is ahead of it.
+    github.behind = {"v2026-10-10": 3}
+
+    said = _on(switch)
+
+    assert github.urls[-1].endswith("/v2026-10-09/" + LINUX), github.urls
+    assert any("v2026-10-09" in line for line in said)
+    compared = [u.split("/compare/")[1].split("...")[0] for u in github.api if "/compare/" in u]
+    assert compared == [
+        "v2026-10-10",
+        "v2026-10-09",
+    ], "only releases made before the module's commit"
+    assert len(github.api) <= 6, github.api
+
+
+def test_a_release_made_after_the_modules_commit_is_never_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = _daily("2026-10-09", 10)
+    github.rev_date = "2026-10-09T09:00:00Z"
+    github.serve("v2026-10-09")
+
+    _on(switch)
+
+    compared = [u.split("/compare/")[1].split("...")[0] for u in github.api if "/compare/" in u]
+    assert compared == ["v2026-10-09"]
+
+
+def test_when_no_release_fits_the_sentence_counts_the_releases_it_looked_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = _daily("2026-10-09", 7)
+    github.rev_date = "2026-10-01T00:00:00Z"  # before every release
+
+    said = _on(switch)
+
+    why = [line for line in said if "prebuilt" in line]
+    assert len(why) == 1
+    assert "none of the 7 newest releases" in why[0], why[0]
+    assert "older than" not in why[0]
+    assert github.urls == []
+
+
+def test_a_module_commit_that_is_not_on_github_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.fail["/commits/" + REV] = urllib.error.HTTPError("u", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    said = _on(switch)
+
+    why = [line for line in said if "prebuilt" in line]
+    assert "not on GitHub" in why[0] and "did not answer" not in why[0], why
+    assert fake.calls[0].startswith("build observability ")
+
+
+def test_a_compare_that_finds_no_such_commit_says_so_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.fail["/compare/"] = urllib.error.HTTPError("u", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    said = _on(switch)
+
+    why = [line for line in said if "prebuilt" in line]
+    assert "not on GitHub" in why[0] and "did not answer" not in why[0], why
+
+
+@pytest.mark.parametrize(
+    "where", ["/commits/" + REV, "/commits/v2026-10-09", "/compare/", "/releases?"]
+)
+@pytest.mark.parametrize("code", [403, 429])
+def test_a_rate_limit_on_any_request_says_github_is_limiting_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str, code: int
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.fail[where] = urllib.error.HTTPError("u", code, "rate limit", {}, None)  # type: ignore[arg-type]
+
+    said = _on(switch)
+
+    why = [line for line in said if "prebuilt" in line]
+    assert "limiting requests" in why[0], why
+    assert github.urls == []
+
+
+def test_any_other_failure_says_github_did_not_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.fail["/compare/"] = urllib.error.HTTPError("u", 500, "boom", {}, None)  # type: ignore[arg-type]
+
+    said = _on(switch)
+
+    assert any("did not answer" in line for line in said if "prebuilt" in line)
+
+
+# -- Stop between requests -----------------------------------------------------------
+
+
+def test_a_stop_between_the_github_requests_asks_nothing_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    cancel = threading.Event()
+    github.on_api = lambda _url: cancel.set()  # the player presses Stop during the first request
+
+    with pytest.raises(botdash.SwitchStopped):
+        list(switch.switch_on(lan=False, cancel=cancel))
+
+    assert len(github.api) == 1 and github.urls == []
+    assert fake.calls == []
+    assert not files.state(server_dir).on
+
+
+def test_a_stop_during_the_checksum_file_downloads_no_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    cancel = threading.Event()
+    real = github.open_url
+
+    def stop_while_reading_sums(url: str, watcher: object) -> object:
+        body = real(url, watcher)
+        if url.endswith(SUMS_NAME):
+            cancel.set()
+        return body
+
+    switch.open_url = stop_while_reading_sums  # type: ignore[assignment]
+
+    with pytest.raises(botdash.SwitchStopped):
+        list(switch.switch_on(lan=False, cancel=cancel))
+
+    assert [u for u in github.urls if u.endswith(LINUX)] == []
+    assert not _staging(server_dir).exists()
+
+
+# -- the Docker daemon's architecture ----------------------------------------------------
+
+
+@pytest.mark.parametrize("arch", ["arm64", "riscv64"])
+def test_a_daemon_that_is_not_amd64_skips_the_binary_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arch: str
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    fake.arch = arch
+
+    said = _on(switch)
+
+    assert github.api == [] and github.urls == []
+    assert fake.calls[0].startswith("build observability ")
+    why = [line for line in said if "prebuilt" in line]
+    assert len(why) == 1 and arch in why[0] and "amd64" in why[0], why
+
+
+def test_a_daemon_that_will_not_say_its_architecture_skips_the_binary_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    fake.arch = None
+
+    said = _on(switch)
+
+    assert github.api == [] and github.urls == []
+    assert any("prebuilt" in line and "architecture" in line for line in said)
+
+
+def test_daemon_arch_folds_docker_infos_names_to_the_release_assets_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    def answer(text: str, code: int = 0) -> Callable[..., subprocess.CompletedProcess[str]]:
+        return lambda *_a, **_kw: subprocess.CompletedProcess([], code, text + "\n", "")
+
+    seen: dict[str, str | None] = {}
+    for said, want in [("x86_64", "amd64"), ("aarch64", "arm64"), ("riscv64", "riscv64")]:
+        monkeypatch.setattr(docker, "_docker", answer(said))
+        seen[said] = docker.daemon_arch()
+        assert seen[said] == want
+    monkeypatch.setattr(docker, "_docker", answer("", 1))
+    assert docker.daemon_arch() is None

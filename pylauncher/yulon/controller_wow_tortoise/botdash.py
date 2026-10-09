@@ -538,6 +538,7 @@ class Dashboard:
                 self.server_dir,
                 self._module_head(),
                 self._binary_repo(),
+                daemon_arch=lambda: docker.daemon_arch(wsl_distro=self.wsl_distro),
                 get=self.http_get,
                 open_url=self.open_url,
                 cancelled=lambda: cancel is not None and cancel.is_set(),
