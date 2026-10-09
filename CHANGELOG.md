@@ -30,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
 - On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
 - Restore refuses a backup made on another game, such as WotLK onto Unbound, and asks about an old one.
+- Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
 
 ### Changed
 

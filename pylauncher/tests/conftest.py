@@ -1529,3 +1529,23 @@ def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker, "_console_send", unreachable)
     # T496: the command channels the wiring registers for a stop are this test's alone.
     monkeypatch.setattr(docker, "_save_channels", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_server_reservation_runs_at_a_real_docker() -> Iterator[None]:
+    """A lifecycle command or a press makes no real server reservation (T568).
+
+    `docker.server_claim()` is a `docker run` that the daemon arbitrates, and an engine or
+    controller test that fakes `docker.compose` fakes nothing it would answer. Off here; the
+    tests of the reservation itself (`test_server_claim.py`, `test_server_reservation.py`)
+    switch `RESERVATIONS_ON` on against `support_fake_docker`, and a guard test pins that the
+    default the app ships with is on.
+    """
+    from yulon import docker
+
+    # Not through `monkeypatch`: a test that calls `monkeypatch.undo()` part-way (several do)
+    # would switch the reservations back on under the rest of it.
+    was = docker.RESERVATIONS_ON
+    docker.RESERVATIONS_ON = False
+    yield
+    docker.RESERVATIONS_ON = was

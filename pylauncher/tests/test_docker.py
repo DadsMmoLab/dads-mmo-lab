@@ -4543,6 +4543,14 @@ def test_run_attached_also_names_a_missing_server_folder(
 # completeness test below.
 _DAEMON_AGNOSTIC: dict[str, str] = {
     "_docker": "the seam itself - it takes the distro and builds the argv",
+    "_a_lifecycle_command": (
+        "T568: the decorator reads `wsl_distro` off the wrapped command's own arguments at call "
+        "time and hands it to `_in_flight()` and so to the reservation's daemon"
+    ),
+    "run": (
+        "T568: the inner function of `_a_lifecycle_command()`: it forwards the wrapped "
+        "command's own `wsl_distro` (see there)"
+    ),
     "run_container": (
         "a host bind mount is a local-daemon concept: `Mount.host` is a path on THIS "
         "machine and `to_argv()` translates nothing, so forwarding a distro would send "

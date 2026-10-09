@@ -17,11 +17,12 @@ Phase 2.3's `modules.py`, layered on later, never stubbed in this class.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import database_presence, docker, wsl
+from yulon import database_presence, docker, forgetting, wsl
 from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
@@ -331,27 +332,37 @@ class Controller:
                 (T377). Nothing is started, and a database started to ask is
                 stopped again.
         """
-        self.refuse_start()
-        conflicts = self.port_conflicts()
-        if conflicts:
-            logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
-            raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
-        self.refuse_a_missing_database()
-        if not asked_before_the_servers:
-            self._ask_before_the_servers()
-        self._before_the_servers_start()
-        self.zone_problem = self._put_back_the_zone_file()
-        # The map-data fingerprint was written by `refuse_start()` above (T219).
-        # No `wait_healthy` closure: `start_staged()` deleted the argument on
-        # entry, so the lambda that used to be built here was dead code reading
-        # like a health wait that no longer happens. Compose does the waiting
-        # now, through the project's own `service_healthy` conditions.
-        docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
-        if self.wsl_distro is not None:
-            # AFTER the start, so a start that failed pins nothing. The distro
-            # would otherwise stop 15-25 s after this app's last call into it,
-            # killing the server it just started (T132, `wsl.hold()`).
-            self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+        # T568: reserved BEFORE the first thing it changes (the database `refuse_a_missing_database`
+        # starts, the realm-port UPDATE, Tortoise's realm flag, dashboard and zone file), not
+        # only around `start_staged()` at its end: another Yu'lon's job on this server then
+        # leaves all of it untouched.
+        with docker.lifecycle(
+            self.server_dir,
+            press=forgetting.PRESS_START,
+            spec=self.spec,
+            wsl_distro=self.wsl_distro,
+        ):
+            self.refuse_start()
+            conflicts = self.port_conflicts()
+            if conflicts:
+                logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
+                raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+            self.refuse_a_missing_database()
+            if not asked_before_the_servers:
+                self._ask_before_the_servers()
+            self._before_the_servers_start()
+            self.zone_problem = self._put_back_the_zone_file()
+            # The map-data fingerprint was written by `refuse_start()` above (T219).
+            # No `wait_healthy` closure: `start_staged()` deleted the argument on
+            # entry, so the lambda that used to be built here was dead code reading
+            # like a health wait that no longer happens. Compose does the waiting
+            # now, through the project's own `service_healthy` conditions.
+            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            if self.wsl_distro is not None:
+                # AFTER the start, so a start that failed pins nothing. The distro
+                # would otherwise stop 15-25 s after this app's last call into it,
+                # killing the server it just started (T132, `wsl.hold()`).
+                self._hold = wsl.hold(self.wsl_distro, self.spec.world)
 
     def refuse_a_missing_database(self) -> None:
         """Raise `DatabaseMissing` when Docker says this server's database is gone or empty (T377).
@@ -468,12 +479,36 @@ class Controller:
                     to_stop.append(candidate)
         logger.info(f"stopping the server(s) holding {self.spec.ports}: {to_stop}")
         self._fresh_stop()
-        # The catalogue's specs, so a blocker that is another game's world is
-        # waited for if it is still loading (T158): a server started a minute
-        # ago is the likeliest one to be holding the ports.
-        docker.stop_containers(
-            to_stop, wsl_distro=self.wsl_distro, known=_catalog_specs(), control=self.stop_control
-        )
+        # T568: the OTHER server is another Yu'lon's to be working on too. Its folder is
+        # reserved for the stop, so a rebuild running there is refused with its holder's
+        # sentence, and nothing is stopped.
+        with contextlib.ExitStack() as reserved:
+            for folder, container in self._servers_in_the_way(to_stop).items():
+                try:
+                    reserved.enter_context(
+                        docker.server_claim(
+                            folder,
+                            press=forgetting.PRESS_STOP,
+                            spec=docker.ContainerSpec(
+                                db=container, auth=container, world=container, ports=()
+                            ),
+                            wsl_distro=self.wsl_distro,
+                            label=folder.name,
+                        )
+                    )
+                except docker.ServerReservationUnavailable as unavailable:
+                    if not unavailable.moot:
+                        raise
+                    logger.warning(f"stopping {folder} unreserved: {unavailable}")
+            # The catalogue's specs, so a blocker that is another game's world is
+            # waited for if it is still loading (T158): a server started a minute
+            # ago is the likeliest one to be holding the ports.
+            docker.stop_containers(
+                to_stop,
+                wsl_distro=self.wsl_distro,
+                known=_catalog_specs(),
+                control=self.stop_control,
+            )
         if self.wsl_distro is not None:
             # That server's hold is keyed by ITS world container, which is one
             # of these and cannot be told from the others by name alone; a key
@@ -483,6 +518,34 @@ class Controller:
                     f"the hold that kept {self.wsl_distro} open for {to_stop} may still be in place"
                 )
         return to_stop
+
+    def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
+        """The server folders (by compose working dir) of `containers`, each with one container.
+
+        Only a folder this host can see and Yu'lon built (it has `native.STATE_FILE`): a working
+        dir inside a WSL distro, one Docker has no label for, or the user's own compose project
+        is skipped (and logged), since Yu'lon writes no id file into a folder that is not its own.
+        """
+        found: dict[Path, str] = {}
+        for name in containers:
+            try:
+                working = docker.container_working_dir(name, wsl_distro=self.wsl_distro)
+            except docker.DockerCommandError:
+                working = None
+            folder = Path(working) if working else None
+            if folder is None or not folder.is_dir():
+                logger.info(f"no server folder this host can see for {name} ({working!r})")
+                continue
+            if folder.resolve() == self.server_dir.resolve():
+                continue
+            if not (folder / native.STATE_FILE).is_file():
+                # Not a server Yu'lon built: the user's own compose project in the way.
+                # Stopped as before, unreserved -- no id file written into their folder, and
+                # no reservation container run from their image (T568, Opus review).
+                logger.info(f"{folder} is not a Yu'lon server; stopping {name} unreserved")
+                continue
+            found.setdefault(folder, name)
+        return found
 
     def refuse_start(self) -> None:
         """Raise `StartRefused` when the folder or `start_guard` gives a reason; before any stop.
@@ -545,16 +608,23 @@ class Controller:
         the stop (T552, Codex review). With nothing in the way it is asked first,
         like every press that stops something: a refusal leaves everything as it was.
         """
-        self.refuse_start()
-        self.refuse_a_missing_database()
-        asked = not self.port_conflicts()
-        if asked:
-            self._ask_before_the_servers()
-        stopped = self.stop_conflicting()
-        # A conflict that appeared between the two looks was stopped just now, and the step
-        # asked before it ran with that server still holding our ports: ask it again.
-        self.start(asked_before_the_servers=asked and not stopped)
-        return stopped
+        # T568: this server is reserved before anything is asked or stopped (see `start()`).
+        with docker.lifecycle(
+            self.server_dir,
+            press=forgetting.PRESS_START,
+            spec=self.spec,
+            wsl_distro=self.wsl_distro,
+        ):
+            self.refuse_start()
+            self.refuse_a_missing_database()
+            asked = not self.port_conflicts()
+            if asked:
+                self._ask_before_the_servers()
+            stopped = self.stop_conflicting()
+            # A conflict that appeared between the two looks was stopped just now, and the step
+            # asked before it ran with that server still holding our ports: ask it again.
+            self.start(asked_before_the_servers=asked and not stopped)
+            return stopped
 
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.

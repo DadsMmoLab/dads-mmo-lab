@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -378,6 +379,7 @@ def applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
     sql_backup: SqlBackup | None = None,
@@ -418,6 +420,7 @@ def applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
         git=git,
         client_dir=client_dir,
         sql_backup=sql_backup,

@@ -31,8 +31,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -44,6 +45,7 @@ from yulon import (
     client_names,
     docker,
     folder_swap,
+    forgetting,
     links,
     module_answers,
     module_moves,
@@ -3043,6 +3045,7 @@ class Applier:
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
@@ -3125,6 +3128,16 @@ class Applier:
         # is `PendingSql`'s closed bug wearing a different hat. Absent means the
         # behaviour every caller had before this landed, byte for byte.
         self._start_database = start_database
+        # T568: "reserve this server across processes while I send SQL" -- a seam for the
+        # same reason as the two above: the primitive is a Docker container
+        # (`docker.server_claim()`) and this module never touches Docker. Called with the
+        # press's name; the context it returns is held from the first running-world reading
+        # to the last statement and its check, so two Yu'lons on one server cannot both send
+        # one package's file (T599: the read-then-send of a ledger entry is inside it too).
+        # Absent means the behaviour every caller had before: no cross-process hold.
+        self._hold_server = hold_server
+        # The `lost` event of the hold this press holds, while it holds one (T568).
+        self._hold_lost: threading.Event | None = None
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -5457,6 +5470,46 @@ class Applier:
         log: _Log,
         undo: Mapping[str, str] | None = None,
     ) -> None:
+        """Run this action's SQL under the server's cross-process hold, when it sends any (T568).
+
+        The hold is taken only for an action with a direct SQL step (not `db-import`, which
+        the server's own importer applies), and covers `_sql_held()` whole: the world
+        readings, the database start, any ledger read, and every statement.
+        """
+        direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
+        hold = (
+            self._hold_server(f"{when.capitalize()} {manifest.name}")
+            if direct and self._hold_server is not None
+            else nullcontext()
+        )
+        with ExitStack() as held:
+            held_by: object = None
+            try:
+                held_by = held.enter_context(hold)
+            except docker.ServerReservationUnavailable as unavailable:
+                # Docker not answering, or a folder that takes no id file: met by the SQL in
+                # its own words, as every other press does (cold review of T568).
+                if not unavailable.moot:
+                    raise ApplyRefusal(str(unavailable)) from unavailable
+            except SaidByYulon as refused:
+                # The holder's own sentence ("Another Yu'lon is working on ..."), shown as
+                # written; nothing was sent.
+                raise ApplyRefusal(str(refused)) from refused
+            self._hold_lost = getattr(held_by, "lost", None)
+            try:
+                self._sql_held(manifest, clone, vals, when, log, undo)
+            finally:
+                self._hold_lost = None
+
+    def _sql_held(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        when: When,
+        log: _Log,
+        undo: Mapping[str, str] | None = None,
+    ) -> None:
         """Run this action's SQL steps; a relative manifest's as one recorded text (T115).
 
         A `reapplies_on_top()` manifest's install or remove goes through
@@ -6068,6 +6121,11 @@ class Applier:
             return None, f"{type(exc).__name__}: {exc}"
         return bool(rows.strip()), ""
 
+    def _refuse_if_the_hold_was_lost(self) -> None:
+        """No statement is sent once another Yu'lon's Stop anyway ended this press's hold (T568)."""
+        if self._hold_lost is not None and self._hold_lost.is_set():
+            raise ApplyRefusal(forgetting.SQL_HOLD_LOST)
+
     def _precondition_met(self, step: SqlStep, log: _Log) -> bool:
         """Whether this step's turn has come — and if not, why, in the report.
 
@@ -6095,6 +6153,7 @@ class Applier:
           precondition is about ONE step's own tables; a manifest's other steps
           are not implicated and are not held back by it.
         """
+        self._refuse_if_the_hold_was_lost()
         if step.precondition is None:
             return True
         found, why = self._ask_db(step.precondition)
@@ -7072,6 +7131,9 @@ class Applier:
         if self.sql is None:
             log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
             return
+        # T568 (Codex review): the relative text is a sent statement too, and a record is
+        # marked pending before it; a hold another Yu'lon's Stop anyway ended sends neither.
+        self._refuse_if_the_hold_was_lost()
         db, text = self._relative_text(manifest, when, vals, undo)
         after = (
             {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}

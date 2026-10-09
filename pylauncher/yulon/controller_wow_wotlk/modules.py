@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -299,6 +300,7 @@ def applier(
     *,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
@@ -341,6 +343,7 @@ def applier(
         dbc=dbc,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
     )
 
 

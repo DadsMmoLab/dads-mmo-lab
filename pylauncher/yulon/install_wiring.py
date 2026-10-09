@@ -50,10 +50,12 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
     ComposeRepairRoute,
     ConfCheck,
+    ConfRepaired,
     ConfRepairRoute,
     CorrectionRoute,
     KeptBuildRoute,
@@ -987,10 +989,14 @@ def repair_confs_for_app(
             return ConfCheck()
         return azerothcore.conf_check(entry, server_dir)
 
-    return ConfRepairRoute(
-        check=check,
-        repair=lambda: azerothcore.repair_confs(entry, server_dir),
-    )
+    def repair() -> ConfRepaired:
+        # T568: the conf half of "Repair server files…" writes into the server folder like
+        # the compose half does (a press of the engine), so it reserves the server too.
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        with engine.reserved(server_dir, REPAIR_FILES_LABEL):
+            return azerothcore.repair_confs(entry, server_dir)
+
+    return ConfRepairRoute(check=check, repair=repair)
 
 
 def corrections_for_app(
