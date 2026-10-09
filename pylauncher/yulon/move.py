@@ -1,0 +1,478 @@
+"""The move package: a server's accounts and characters, packed to go to another computer (T601).
+
+Level 1 only. The package holds the auth, characters (and, where the game has them, the
+playerbots and Lua-engine) databases of ONE game as verified mysqldumps, and a manifest
+that says what they are. Nothing else: no world database, no conf, no module, no build.
+Importing is for a server of the SAME game that already exists on the other computer.
+
+This module is the file format and the checks that need no Docker: the manifest model,
+the writer, the reader, the refusal sentences, and the comparison of two servers'
+database versions. `move_flows` is the part that talks to a server.
+
+**What is trusted, and when.** Nothing in a package is believed until it has been read
+back: the reader opens every member and compares its length and SHA-256 with the manifest
+before it answers, the member names are checked for the shapes a zip can use to write
+outside a folder, and the format number is read before the rest of the manifest, so a
+file from a newer Yu'lon says so instead of failing a strict parse. Every string the
+manifest carries that later reaches a SQL statement (the channel account, the realm name,
+the bot prefix) has a grammar here, and a manifest that breaks it is not a package.
+
+**Secrets.** The auth dump holds every account's login verifier and salt. The manifest says
+so in `SECRETS`, the dialog says so, and the file name ends `-keep-private` (owner decision
+2026-10-09: no password on the package in v1, a plain warning instead). The database
+password and the command-channel credential are not in it: neither is a table in these
+databases, and no conf file is packed.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+import zipfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import IO, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+import yulon
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
+
+FORMAT = 1
+"""The package format this build writes and the newest it can read."""
+
+MANIFEST_NAME = "yulon-move.json"
+KEEP_PRIVATE = "keep-private"
+"""The last word of the file name: the warning the owner asked for, kept with the file."""
+
+SECRETS = (
+    "This file holds every account's login verifier and salt, so anyone who has it can try to "
+    "work out the passwords. Keep it private and delete it once the move is done. The database "
+    "password and the command-channel credential are not in it."
+)
+
+NOT_A_PACKAGE = (
+    "This file is not a Yu'lon move package, or it is damaged. Pack the accounts and "
+    "characters again on the old computer."
+)
+
+_CHUNK = 1 << 20
+_SCHEMA = re.compile(r"[A-Za-z0-9_]{1,64}")
+_CHANNEL_ACCOUNT = re.compile(r"YULON_[A-Z0-9]{1,64}")
+_BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+_DRIVE = re.compile(r"^[A-Za-z]:")
+
+
+class MovePackageError(RuntimeError):
+    """A package that cannot be used, in a sentence the player can read as it is."""
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class MadeBy(_Strict):
+    yulon: str
+    platform: str
+    made: str
+    """ISO time from the clock of the computer that packed it; shown, never decided on."""
+
+
+class GameRef(_Strict):
+    id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    name: str = Field(min_length=1, max_length=100)
+
+
+Role = Literal["auth", "characters", "playerbots", "ale"]
+
+
+class Member(_Strict):
+    """One database dump inside the package."""
+
+    schema_name: str = Field(alias="schema")
+    role: Role
+    file: str
+    bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    @field_validator("schema_name")
+    @classmethod
+    def _schema_grammar(cls, value: str) -> str:
+        if not _SCHEMA.fullmatch(value):
+            raise ValueError("a schema name is letters, digits and underscores")
+        return value
+
+    @field_validator("file")
+    @classmethod
+    def _file_is_the_schema_file(cls, value: str) -> str:
+        if not re.fullmatch(r"db/[A-Za-z0-9_]{1,64}\.sql", value):
+            raise ValueError("a database file is db/<schema>.sql")
+        return value
+
+
+class Evidence(_Strict):
+    """What a database says about its own version, reduced to a count and a digest.
+
+    `kind` names where it was read from (`updates`, `migrations`, `db_version`), so two
+    servers are only ever compared on the same evidence.
+    """
+
+    kind: str = Field(min_length=1, max_length=40)
+    count: int = Field(ge=0)
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class Counts(_Strict):
+    accounts: int = Field(ge=0)
+    characters: int = Field(ge=0)
+    bot_accounts: int = Field(ge=0)
+
+
+class Manifest(_Strict):
+    format: int
+    kind: Literal["characters"] = "characters"
+    made_by: MadeBy
+    game: GameRef
+    databases: tuple[Member, ...] = Field(min_length=1)
+    schema_evidence: dict[str, Evidence] = Field(default_factory=dict)
+    realm_name: str | None = None
+    channel_account: str | None = None
+    bot_prefix: str | None = None
+    counts: Counts
+    excluded: tuple[str, ...] = ()
+    secrets: str
+
+    @field_validator("realm_name")
+    @classmethod
+    def _realm_name_is_printable(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or len(value) > 100 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("a realm name is printable text of up to 100 characters")
+        return value
+
+    @field_validator("channel_account")
+    @classmethod
+    def _channel_account_grammar(cls, value: str | None) -> str | None:
+        if value is not None and not _CHANNEL_ACCOUNT.fullmatch(value):
+            raise ValueError("the channel account is YULON_ and an install id")
+        return value
+
+    @field_validator("bot_prefix")
+    @classmethod
+    def _bot_prefix_grammar(cls, value: str | None) -> str | None:
+        if value is not None and not _BOT_PREFIX.fullmatch(value):
+            raise ValueError("a bot prefix is letters, digits and _.-")
+        return value
+
+
+@dataclass(frozen=True)
+class Header:
+    """What the writer needs to know that the dump files do not say."""
+
+    game_id: str
+    game_name: str
+    realm_name: str | None
+    channel_account: str | None
+    bot_prefix: str | None
+    counts: Counts
+    schema_evidence: Mapping[str, Evidence]
+    excluded: Sequence[str]
+    made: datetime
+
+
+@dataclass(frozen=True)
+class DumpFile:
+    """One verified dump on disk, with the role its schema plays in this game."""
+
+    schema_name: str
+    role: Role
+    path: Path
+
+
+def package_filename(game_id: str, made: datetime) -> str:
+    """`yulon-move-<game>-<YYYYMMDD-HHMM>-keep-private.zip`."""
+    return f"yulon-move-{game_id}-{made:%Y%m%d-%H%M}-{KEEP_PRIVATE}.zip"
+
+
+# ------------------------------------------------------------------- writing
+
+
+def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Manifest:
+    """Write the package to `dest`, read it back, and only then give it its name.
+
+    Streamed: each dump is hashed in a first pass and copied into the zip in a second, so
+    memory stays at one chunk whatever the characters weigh. The file is written under
+    `<name>.partial`, read back through the same reader an import uses, and renamed; a
+    package that does not read back is deleted and never keeps the name of a good one.
+    """
+    if dest.exists():
+        raise MovePackageError(f"{dest.name} already exists, so Yu'lon did not overwrite it.")
+    members: list[Member] = []
+    for dump in dumps:
+        digest, size = _hash_file(dump.path)
+        members.append(
+            Member(
+                schema=dump.schema_name,
+                role=dump.role,
+                file=f"db/{dump.schema_name}.sql",
+                bytes=size,
+                sha256=digest,
+            )
+        )
+    manifest = Manifest(
+        format=FORMAT,
+        made_by=MadeBy(
+            yulon=yulon.__version__, platform=sys.platform, made=header.made.isoformat()
+        ),
+        game=GameRef(id=header.game_id, name=header.game_name),
+        databases=tuple(members),
+        schema_evidence=dict(header.schema_evidence),
+        realm_name=header.realm_name,
+        channel_account=header.channel_account,
+        bot_prefix=header.bot_prefix,
+        counts=header.counts,
+        excluded=tuple(header.excluded),
+        secrets=SECRETS,
+    )
+    partial = dest.with_name(dest.name + ".partial")
+    try:
+        with zipfile.ZipFile(
+            partial, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
+        ) as archive:
+            archive.writestr(MANIFEST_NAME, manifest.model_dump_json(by_alias=True, indent=2))
+            for dump, member in zip(dumps, members, strict=True):
+                with (
+                    dump.path.open("rb") as source,
+                    archive.open(member.file, "w", force_zip64=True) as sink,
+                ):
+                    while chunk := source.read(_CHUNK):
+                        sink.write(chunk)
+        read_package(partial)
+        partial.replace(dest)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return manifest
+
+
+def _hash_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as fh:
+        while chunk := fh.read(_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+# ------------------------------------------------------------------- reading
+
+
+@dataclass(frozen=True)
+class Package:
+    """A package that has been read and whose every member matched the manifest."""
+
+    path: Path
+    manifest: Manifest
+
+    def member(self, schema: str) -> Member:
+        for member in self.manifest.databases:
+            if member.schema_name == schema:
+                return member
+        raise MovePackageError(f"{self.path.name} holds no {schema} database.")
+
+    def head(self, schema: str, size: int = 1 << 16) -> bytes:
+        """The first bytes of one dump, for reading its game record without extracting it."""
+        member = self.member(schema)
+        with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as fh:
+            return fh.read(size)
+
+    def extract(self, schema: str, folder: Path) -> Path:
+        """Write one dump into `folder` as `<schema>.sql`, checking it again as it is written.
+
+        The reader checked the member once, and a file can change between that and this, so
+        the bytes that reach the disk are hashed on the way and a mismatch deletes them.
+        """
+        member = self.member(schema)
+        target = folder / f"{member.schema_name}.sql"
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as source:
+                with target.open("xb") as sink:
+                    while chunk := source.read(_CHUNK):
+                        digest.update(chunk)
+                        size += len(chunk)
+                        sink.write(chunk)
+        except (OSError, zipfile.BadZipFile) as exc:
+            target.unlink(missing_ok=True)
+            raise MovePackageError(NOT_A_PACKAGE) from exc
+        if digest.hexdigest() != member.sha256 or size != member.bytes:
+            target.unlink(missing_ok=True)
+            raise MovePackageError(_changed(self.path.name))
+        return target
+
+
+def _changed(name: str) -> str:
+    return (
+        f"{name} does not match the list inside it (it is damaged, or it changed while it was "
+        "being read), so nothing was brought in. Copy it over again, or pack it again."
+    )
+
+
+def _unsafe_name(name: str) -> bool:
+    """A member name a zip can use to write somewhere it was not asked to."""
+    if not name or name.startswith(("/", "\\")) or "\\" in name or _DRIVE.match(name):
+        return True
+    if "\x00" in name:
+        return True
+    return any(part in ("..", ".", "") for part in name.split("/"))
+
+
+def read_package(path: Path) -> Package:
+    """Open a package, check it end to end, and return it, or raise `MovePackageError`.
+
+    Order matters. The names are checked before anything is read, the format before the
+    rest of the manifest, and every member's length and SHA-256 before the caller is given
+    anything: an import never touches a server on the word of a file it has not verified.
+    """
+    try:
+        archive = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise MovePackageError(NOT_A_PACKAGE) from exc
+    with archive:
+        names = archive.namelist()
+        if any(_unsafe_name(n) for n in names):
+            raise MovePackageError(
+                f"{path.name} holds a file whose name could write outside the folder it is "
+                "unpacked into, so Yu'lon will not open it."
+            )
+        if len(set(names)) != len(names):
+            raise MovePackageError(
+                f"{path.name} holds two files of the same name, so it cannot be trusted."
+            )
+        if MANIFEST_NAME not in names:
+            raise MovePackageError(NOT_A_PACKAGE)
+        try:
+            raw = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
+        except (ValueError, OSError, zipfile.BadZipFile) as exc:
+            raise MovePackageError(NOT_A_PACKAGE) from exc
+        if not isinstance(raw, dict) or not isinstance(raw.get("format"), int):
+            raise MovePackageError(NOT_A_PACKAGE)
+        if raw["format"] > FORMAT:
+            made_by = raw.get("made_by")
+            version = made_by.get("yulon") if isinstance(made_by, dict) else None
+            said = f" ({version})" if isinstance(version, str) else ""
+            raise MovePackageError(
+                f"This file was made by a newer Yu'lon{said}. Update Yu'lon on this computer, "
+                "then try again."
+            )
+        try:
+            manifest = Manifest.model_validate(raw)
+        except ValidationError as exc:
+            logger.info(f"{path.name}: manifest rejected: {exc}")
+            raise MovePackageError(NOT_A_PACKAGE) from exc
+        listed = {m.file for m in manifest.databases}
+        if len({m.schema_name for m in manifest.databases}) != len(manifest.databases):
+            raise MovePackageError(NOT_A_PACKAGE)
+        stray = sorted(set(names) - listed - {MANIFEST_NAME})
+        if stray:
+            raise MovePackageError(
+                f"{path.name} holds a file its list does not name ({stray[0]}), so Yu'lon "
+                "will not open it."
+            )
+        for member in manifest.databases:
+            if member.file not in names:
+                raise MovePackageError(
+                    f"{path.name} is missing {member.file}, which its list names, so nothing "
+                    "was brought in."
+                )
+            try:
+                with archive.open(member.file) as fh:
+                    digest, size = _hash_stream(fh)
+            except (OSError, zipfile.BadZipFile) as exc:
+                raise MovePackageError(_changed(path.name)) from exc
+            if digest != member.sha256 or size != member.bytes:
+                raise MovePackageError(_changed(path.name))
+    return Package(path=path, manifest=manifest)
+
+
+def _hash_stream(fh: IO[bytes]) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := fh.read(_CHUNK):
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
+
+
+# ------------------------------------------------------------------- the checks
+
+
+def refuse_another_game(manifest: Manifest, target_id: str, target_name: str) -> None:
+    """Characters go into a server of the same game and no other (T603's rule, for a package)."""
+    if manifest.game.id != target_id:
+        raise MovePackageError(
+            f"This file holds {manifest.game.name} characters; this server is {target_name}. "
+            "Characters can only go into a server of the same game."
+        )
+
+
+def unlabeled_dump(name: str) -> str:
+    return (
+        f"{name} inside this package does not say which game it is from, so Yu'lon cannot "
+        "tell that it belongs in this server and will not bring it in. Pack the accounts and "
+        "characters again with Yu'lon on the old computer."
+    )
+
+
+def dump_from_another_game(name: str, found: str, target_name: str) -> str:
+    return (
+        f"{name} inside this package is from {found}, not from {target_name}, though the "
+        "package says otherwise. Yu'lon will not bring it in."
+    )
+
+
+def version_difference(
+    package: Mapping[str, Evidence], here: Mapping[str, Evidence | None]
+) -> str | None:
+    """A sentence if the package's databases are not at this server's version, else None.
+
+    Equal evidence is the only thing that lets an import go ahead: Yu'lon cannot convert
+    characters between database versions, and a start of this app never runs the core's own
+    import (`docker.start_staged` leaves it out on purpose), so data one step behind would
+    be run on a newer core as it is. `here` holds `None` for a schema that could not be
+    asked, which refuses too: an unreadable version is not a matching one.
+    """
+    differences: list[str] = []
+    for schema, theirs in sorted(package.items()):
+        ours = here.get(schema)
+        if ours is None:
+            differences.append(f"{schema}: this server's version could not be read")
+        elif ours.kind != theirs.kind or ours.digest != theirs.digest:
+            differences.append(
+                f"{schema}: {theirs.count} {_unit(theirs.kind)} in the file, {ours.count} here"
+            )
+    if not differences:
+        return None
+    return (
+        "The databases in this file are not at the same version as this server's "
+        f"({'; '.join(differences)}), and Yu'lon cannot convert characters between versions. "
+        "Put both servers on the same version (press Update the server to latest… on the one "
+        "that is behind, and pack again if it was the old one), then try again."
+    )
+
+
+def _unit(kind: str) -> str:
+    return {"updates": "updates", "migrations": "migrations", "db_version": "version marks"}.get(
+        kind, "version marks"
+    )
