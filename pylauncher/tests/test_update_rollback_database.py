@@ -652,8 +652,9 @@ def test_the_stop_wait_of_a_world_stuck_at_a_failed_update_kills_it_and_says_why
 ) -> None:
     """T600: the failed build's world sits in a read after a failed update and ignores the stop.
 
-    Every stop path (the rollback's included) used to say "still loading" until "Stop now anyway"; now it says which
-    update failed and what MariaDB said, kills the stuck world and goes on.
+    Every stop path (the rollback's included) used to say "still loading" until "Stop now
+    anyway"; now it says which update failed and what MariaDB said, kills the stuck world and
+    goes on.
 
     Mutation: drop the `_stuck_at_a_failed_update()` check in `world_load_steps()`, and the
     steps are the loading hint, again and again.
