@@ -7631,12 +7631,6 @@ class Applier:
             if noting
             else ""
         )
-        if not _one_folder_name(addon):
-            log.client_left_behind.append(
-                f"{aside_raw} (Yu'lon's record names the add-on folder {addon!r} for it, which "
-                "is not one folder in Interface/AddOns, so Yu'lon left it alone)"
-            )
-            return True
         if self.client_dir is None:
             log.client_left_behind.append(
                 f"your own {addon} add-on, which Yu'lon set aside as {aside_raw} when it "
