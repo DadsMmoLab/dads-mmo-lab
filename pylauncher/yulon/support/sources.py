@@ -22,7 +22,7 @@ from yulon.catalog import composegen
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.state import KnownInstall
 from yulon.support import runlog
-from yulon.support.redact import TOKEN_FLOOR, database_info_passwords
+from yulon.support.redact import TOKEN_FLOOR, database_info_passwords, home_of
 
 FILE_CAP = 2 * 1024 * 1024
 """Each file keeps its last 2 MiB, a worldserver snapshot's budget (`logsnap.MAX_BYTES`)."""
@@ -181,6 +181,24 @@ def _failed_installs(
                     failed=True,
                 )
             )
+    return found
+
+
+def other_homes(installs: Iterable[InstallFacts]) -> list[str]:
+    """Home folders besides this process's own that a log may show (T595).
+
+    The home a WSL install's folder sits under (`/home/<name>` inside the distro), the
+    Windows profile an install reached through `/mnt/c/Users/<name>` belongs to, and
+    the home folders the environment names (`USERPROFILE`, `HOME`). Found by reading
+    paths, never the disk, so a stopped distro is not started.
+    """
+    found: list[str] = []
+    for text in [str(install.server_dir) for install in installs] + [
+        os.environ.get(name, "") for name in ("USERPROFILE", "HOME", "HOMEPATH")
+    ]:
+        home = home_of(text) if text else None
+        if home is not None and home not in found:
+            found.append(home)
     return found
 
 

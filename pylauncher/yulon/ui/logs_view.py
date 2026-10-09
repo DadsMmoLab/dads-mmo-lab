@@ -163,7 +163,11 @@ def _read_logs(
     try:
         sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
         known = support_sources.gather_known(sources)
-        redactor = Redactor.build(known.values, home=Path.home())
+        redactor = Redactor.build(
+            known.values,
+            home=Path.home(),
+            also_home=support_sources.other_homes(sources.installs),
+        )
         short = tuple(redactor.redact(where) for where in known.short)
         # A label is a file name and is shown too, so it is redacted like a line.
         items = tuple(
@@ -189,7 +193,7 @@ def _intro(*, short: bool) -> str:
     """The tab's first line. It promises the passwords are gone only when they can be."""
     text = (
         "Something not working? Press <b>Save logs for support…</b> and send us the file "
-        "it makes. Passwords and your home folder are taken out first"
+        "it makes. Passwords, login keys and your home folder are taken out first"
     )
     if short:
         return text + ", except a very short password in ordinary log lines (see below)."
