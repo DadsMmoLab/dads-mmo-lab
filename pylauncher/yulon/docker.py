@@ -551,6 +551,7 @@ def _reserved_for(
     spec: ContainerSpec | None,
     wsl_distro: str | None,
     label: str | None = None,
+    budget: float | None = None,
 ) -> Iterator[None]:
     """The cross-process reservation for a Backup or Restore block (T568), when it has a spec.
 
@@ -564,7 +565,14 @@ def _reserved_for(
     with contextlib.ExitStack() as reserved:
         try:
             reserved.enter_context(
-                server_claim(server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=label)
+                server_claim(
+                    server_dir,
+                    press=press,
+                    spec=spec,
+                    wsl_distro=wsl_distro,
+                    label=label,
+                    up_timeout=budget,
+                )
             )
         except ServerReservationUnavailable as exc:
             if not exc.moot:
@@ -580,6 +588,7 @@ def server_hold(
     spec: ContainerSpec | None,
     wsl_distro: str | None = None,
     label: str | None = None,
+    budget: float | None = None,
 ) -> contextlib.AbstractContextManager[None]:
     """Reserve the server across processes for a block that writes to it (T607).
 
@@ -590,8 +599,12 @@ def server_hold(
     block runs. Nested in a reservation this process already holds it shares it. A `spec` of
     None (a harness with no container names) holds nothing; a reservation that is `moot`
     (Docker not there or not answering, an unwritable folder) is skipped, as everywhere.
+
+    `budget` (seconds) bounds the take and, as a Stop's does, the release: for a block run on
+    the GUI thread (T610), which must not wait out a press's full 60 s take. Without one the
+    take waits as long as it needs.
     """
-    return _reserved_for(server_dir, press, spec, wsl_distro, label)
+    return _reserved_for(server_dir, press, spec, wsl_distro, label, budget)
 
 
 @contextmanager

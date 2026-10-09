@@ -295,6 +295,9 @@ class ServerHeldElsewhere(RuntimeError):
 CHANNEL_SETUP_PRESS = "Set up the command channel"
 """The press name on the reservation the channel's account create and reset take (T607)."""
 
+CHANNEL_ROLLBACK_PRESS = "Turn the command channel back off"
+"""The press name on the reservation `roll_back` takes (T610)."""
+
 CHANNEL_ENABLE_PRESS = "Turn on the command channel"
 """The press name on the reservation `enable` takes (T607)."""
 
@@ -1671,6 +1674,15 @@ class InstallChannel:
         return self._channel_for(saved)
 
     def roll_back(self) -> bool:
+        """`_roll_back()` under the server's cross-process hold (T610).
+
+        Raises `ServerHeldElsewhere`, with nothing written, when another Yu'lon holds the server;
+        the Start that failed on the port reports the sentence beside the port's.
+        """
+        with self._held(CHANNEL_ROLLBACK_PRESS):
+            return self._roll_back()
+
+    def _roll_back(self) -> bool:
         """Undo this install's own press, and give its host port back.
 
         Hands `roll_back()` the text the press would write NOW, so a file that

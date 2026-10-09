@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import commands
-from yulon.actions import Outcome, send
+from yulon.actions import Outcome, ServerHold, holding, send
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import SqlReader
 from yulon.log import get_logger
@@ -372,7 +372,10 @@ class InstallPlay:
         sql: SqlReader,
         channel_for_saved: Callable[[], object | None],
         withheld: Mapping[str, str] | None = None,
+        hold_server: ServerHold | None = None,
     ) -> None:
+        self._hold_server = hold_server
+        """Reserves the server across processes for a write (T610); None holds nothing."""
         self.entry = entry
         self.server_dir = server_dir
         self._sql = sql
@@ -444,12 +447,14 @@ class InstallPlay:
 
     # -- writes --------------------------------------------------------------
 
+    @holding("Teleport a character")
     def teleport(self, character: str, location: str) -> Outcome:
         if refused := self._refused("teleport"):
             return refused
         verb = self.entry.play.teleport_command if self.entry.play is not None else ""
         return self._one(character, lambda name: commands.teleport_to(name, location, verb=verb))
 
+    @holding("Set a character's level")
     def set_level(self, character: str, level: int) -> Outcome:
         """Refused outright on a tree whose console has no route to a level.
 
@@ -471,6 +476,7 @@ class InstallPlay:
             character, lambda name: commands.set_character_level(name, level, verb=verb)
         )
 
+    @holding("Set a character's level")
     def set_level_and_save(
         self,
         character: str,
@@ -566,6 +572,7 @@ class InstallPlay:
             return None
         return int(found.split("\t")[0]) if found.split("\t")[0].isdigit() else None
 
+    @holding("Mark a character for rename")
     def rename(self, character: str) -> Outcome:
         """Not sent at all where this tree measured the offline arm destroying
         the name.
@@ -590,11 +597,13 @@ class InstallPlay:
             refuse_offline=block.rename_offline_refusal if block is not None else None,
         )
 
+    @holding("Revive a character")
     def revive(self, character: str) -> Outcome:
         if refused := self._refused("revive"):
             return refused
         return self._one(character, commands.revive)
 
+    @holding("Mail gold")
     def mail_gold(self, character: str, *, gold: int, subject: str, body: str) -> Outcome:
         """Gold in, copper out, multiplied once and in one place."""
         if refused := self._refused("mail_gold"):
@@ -606,6 +615,7 @@ class InstallPlay:
             ),
         )
 
+    @holding("Mail items")
     def mail_items(
         self, character: str, *, items: tuple[tuple[int, int], ...], subject: str, body: str
     ) -> Outcome:
@@ -618,6 +628,7 @@ class InstallPlay:
             ),
         )
 
+    @holding("Send a gear set")
     def send_gear_set(self, character: str, *, to: str, subject: str, body: str) -> Outcome:
         """Everything a character is wearing, in as many mails as it takes.
 

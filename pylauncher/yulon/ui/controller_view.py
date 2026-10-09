@@ -1794,6 +1794,13 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    hold_server: Callable[[str], contextlib.AbstractContextManager[None]] | None = None
+    """Reserves this server across processes for a write the view makes itself (T610).
+
+    The Tuning tab saves and reverts its conf files on the GUI thread and takes this around the
+    write; the account and character writes take it inside their own seams. `None` (a harness)
+    holds nothing.
+    """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
 
@@ -2726,6 +2733,41 @@ def _steam_seam(
     )
 
 
+GUI_HOLD_BUDGET_SECONDS = 15.0
+"""How long a write made on the GUI thread waits to take the server's hold (T610)."""
+
+
+def _server_hold_for(
+    entry: CatalogEntry,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    *,
+    wsl_distro: str | None,
+    budget: float | None = None,
+) -> Callable[[str], contextlib.AbstractContextManager[None]]:
+    """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
+
+    A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it.
+    """
+    return lambda press: docker.server_hold(
+        server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
+    )
+
+
+def _under_the_hold(
+    hold: Callable[[str], contextlib.AbstractContextManager[None]],
+    press: str,
+    call: Callable[[str, str, int], wotlk_accounts.AccountResult],
+) -> Callable[[str, str, int], wotlk_accounts.AccountResult]:
+    """`call` run inside the server's hold; a held server raises its sentence, nothing written."""
+
+    def held(name: str, password: str, level: int) -> wotlk_accounts.AccountResult:
+        with hold(press):
+            return call(name, password, level)
+
+    return held
+
+
 def _assemble(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2789,7 +2831,17 @@ def _assemble(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
         network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
-        create_account=create_account,
+        # T610: the account row is written under the server's cross-process hold, in the shared
+        # half so that every game's factory gets it (five of them pass their own writer).
+        create_account=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Create an account",
+            create_account,
+        ),
+        # The Tuning tab's saves run on the GUI thread, so this one's wait is bounded.
+        hold_server=_server_hold_for(
+            entry, server_dir, spec, wsl_distro=wsl_distro, budget=GUI_HOLD_BUDGET_SECONDS
+        ),
         backup=backup,
         # HERE, in the shared half, for the rebuild's reason one line further
         # down: bringing a database up for a backup takes no per-game decision
@@ -3209,6 +3261,7 @@ def _for_wotlk(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4a. The Characters tab, over the same channel the account writes use
@@ -3219,6 +3272,7 @@ def _for_wotlk(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     # One applier for the Modules tab, named here so the custom-module seam
     # below is built over the SAME object the shipped route installs with.
@@ -3591,6 +3645,7 @@ def _for_tbc(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4b. The same seam as 8.4a over this tree's own measured facts: its
@@ -3602,6 +3657,7 @@ def _for_tbc(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return _assemble(
         entry,
@@ -3749,6 +3805,7 @@ def _for_vanilla(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     # 8.4c. The same seam as 8.4a and 8.4b over facts read from THIS install's
@@ -3766,6 +3823,7 @@ def _for_vanilla(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return _assemble(
         entry,
@@ -3929,6 +3987,7 @@ def _for_centurion(
             server_dir,
             sql=sql,
             channel_for_saved=channel.live_channel,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             app_account=channel_setup.account_name(composegen.install_id(server_dir)),
         )
         if entry.accounts.level is not None
@@ -3941,6 +4000,7 @@ def _for_centurion(
             server_dir,
             sql=sql,
             channel_for_saved=channel.live_channel,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             withheld=withheld,
         )
         if entry.play is not None
@@ -4168,6 +4228,7 @@ def _for_tortoise(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     characters_admin = play_module.InstallPlay(
@@ -4175,6 +4236,7 @@ def _for_tortoise(
         server_dir,
         sql=sql,
         channel_for_saved=channel.live_channel,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     lifecycle = tortoise_controller.controller_for(
         server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -14120,7 +14182,12 @@ class ControllerView(QWidget):
     @Slot(object)
     def _account_failed(self, exc: object) -> None:
         self.create_account_button.setEnabled(True)
-        self.account_report.setText(f"Could not create the account: {exc}")
+        # Another Yu'lon holds the server (T610): its sentence says what was not done.
+        self.account_report.setText(
+            str(exc)
+            if isinstance(exc, docker.ServerHeldError)
+            else f"Could not create the account: {exc}"
+        )
         self.action_failed.emit(str(exc))
 
     # --------------------------------------------------------------- bots tab
@@ -19891,6 +19958,26 @@ class ControllerView(QWidget):
                         keys.setdefault(key.key, key)
         return keys
 
+    @contextlib.contextmanager
+    def _writing_to_the_server(self, press: str) -> Iterator[bool]:
+        """Hold the server across processes for a conf write; True inside, False if refused (T610).
+
+        When another Yu'lon holds the server the tab says that Yu'lon's sentence and the caller
+        returns before it has written, or taken a backup of, anything. A view with no hold wired
+        (a harness) holds nothing.
+        """
+        hold = self.services.hold_server
+        with contextlib.ExitStack() as held:
+            if hold is not None:
+                try:
+                    held.enter_context(hold(press))
+                except docker.ServerHeldError as refused:
+                    self.tuning_report.setPlainText(str(refused))
+                    self.action_failed.emit(str(refused))
+                    yield False
+                    return
+            yield True
+
     @Slot(str, str)
     def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
@@ -19944,45 +20031,50 @@ class ControllerView(QWidget):
                 self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
                 self.action_failed.emit(str(exc))
                 return
-        for file, values in per_file.items():
-            try:
-                if (family, module_id) == unbound_settings.CARD:
-                    # Only `0` and `1` reach the file: a switch flipped from a hand-edited
-                    # `true`/`false` is written back as the module's own 1/0
-                    # (`unbound_settings.write`). Its file's path was checked above, with
-                    # every other card's (T573).
-                    made = unbound_settings.write(server_dir, values)
-                else:
-                    made = tuning.write(
-                        server_dir / file, values, spec=specs[file], root=server_dir
-                    )
-            except tuning.TuningError as exc:
-                # Unreachable through the loop above, which has already checked
-                # every value on the card. Kept because `tuning.write()` is a
-                # public seam with its own refusals and a caller that assumed
-                # otherwise would be the next half-applied save.
-                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
-                self.action_failed.emit(str(exc))
+        with self._writing_to_the_server("Save settings") as held:
+            if not held:
                 return
-            except OSError as exc:
-                self.tuning_report.setPlainText(
-                    TUNING_REFUSED.format(
-                        module=module_id, why=f"{file} could not be written: {exc}"
+            for file, values in per_file.items():
+                try:
+                    if (family, module_id) == unbound_settings.CARD:
+                        # Only `0` and `1` reach the file: a switch flipped from a hand-edited
+                        # `true`/`false` is written back as the module's own 1/0
+                        # (`unbound_settings.write`). Its file's path was checked above, with
+                        # every other card's (T573).
+                        made = unbound_settings.write(server_dir, values)
+                    else:
+                        made = tuning.write(
+                            server_dir / file, values, spec=specs[file], root=server_dir
+                        )
+                except tuning.TuningError as exc:
+                    # Unreachable through the loop above, which has already checked
+                    # every value on the card. Kept because `tuning.write()` is a
+                    # public seam with its own refusals and a caller that assumed
+                    # otherwise would be the next half-applied save.
+                    self.tuning_report.setPlainText(
+                        TUNING_REFUSED.format(module=module_id, why=exc)
+                    )
+                    self.action_failed.emit(str(exc))
+                    return
+                except OSError as exc:
+                    self.tuning_report.setPlainText(
+                        TUNING_REFUSED.format(
+                            module=module_id, why=f"{file} could not be written: {exc}"
+                        )
+                    )
+                    self.action_failed.emit(str(exc))
+                    return
+                self._note_tuning_owed(file)
+                said.append(
+                    TUNING_SAVED.format(
+                        module=module_id,
+                        keys=", ".join(values),
+                        file=file,
+                        backup=made.name,
+                        rule=tuning.apply_sentence(tuning.file_rule(file)),
                     )
                 )
-                self.action_failed.emit(str(exc))
-                return
-            self._note_tuning_owed(file)
-            said.append(
-                TUNING_SAVED.format(
-                    module=module_id,
-                    keys=", ".join(values),
-                    file=file,
-                    backup=made.name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
-                )
-            )
-        self.tuning_report.setPlainText("\n".join(said))
+            self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
 
     @Slot(str, str)
@@ -19996,29 +20088,32 @@ class ControllerView(QWidget):
             return
         server_dir = self.services.controller.server_dir
         said: list[str] = []
-        for file in card.card.files:
-            path = server_dir / file
-            backups = tuning.backups_of(path)
-            if not backups:
-                said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
-                continue
-            try:
-                note = self._put_back(backups[-1], path)
-            except (OSError, tuning.TuningError) as exc:
-                said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
-                continue
-            self._note_tuning_owed(file)
-            said.append(
-                TUNING_REVERTED.format(
-                    module=module_id,
-                    file=file,
-                    backup=backups[-1].name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+        with self._writing_to_the_server("Put settings back") as held:
+            if not held:
+                return
+            for file in card.card.files:
+                path = server_dir / file
+                backups = tuning.backups_of(path)
+                if not backups:
+                    said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
+                    continue
+                try:
+                    note = self._put_back(backups[-1], path)
+                except (OSError, tuning.TuningError) as exc:
+                    said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
+                    continue
+                self._note_tuning_owed(file)
+                said.append(
+                    TUNING_REVERTED.format(
+                        module=module_id,
+                        file=file,
+                        backup=backups[-1].name,
+                        rule=tuning.apply_sentence(tuning.file_rule(file)),
+                    )
                 )
-            )
-            if note:
-                said.append(note)
-        self.tuning_report.setPlainText("\n".join(said))
+                if note:
+                    said.append(note)
+            self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
 
     def _put_back_refused(self, press: str) -> bool:
@@ -20161,21 +20256,24 @@ class ControllerView(QWidget):
             gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
             self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
-        try:
-            note = self._put_back(backups[-1], path)
-        except tuning.TuningError as exc:
-            self.tuning_report.setPlainText(str(exc))
-            self.action_failed.emit(str(exc))
-            return
-        except OSError as exc:
-            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-            self.action_failed.emit(str(exc))
-            return
-        said = TUNING_REVERTED_FILE.format(
-            file=file,
-            backup=backups[-1].name,
-            rule=tuning.apply_sentence(tuning.file_rule(file)),
-        )
+        with self._writing_to_the_server("Put a setting file back") as held:
+            if not held:
+                return
+            try:
+                note = self._put_back(backups[-1], path)
+            except tuning.TuningError as exc:
+                self.tuning_report.setPlainText(str(exc))
+                self.action_failed.emit(str(exc))
+                return
+            except OSError as exc:
+                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+                self.action_failed.emit(str(exc))
+                return
+            said = TUNING_REVERTED_FILE.format(
+                file=file,
+                backup=backups[-1].name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
         self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
         self._note_tuning_owed(file)
         self.open_tuning_file(file)
@@ -20213,19 +20311,22 @@ class ControllerView(QWidget):
                 return
         server_dir = self.services.controller.server_dir
         path = server_dir / file
-        try:
-            # Refuses a link out of the server folder, before any byte moves (T573).
-            made = tuning.backup(path, root=server_dir)
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(tuning.save_text(self._tuning_raw, text))
-        except tuning.TuningError as exc:
-            self.tuning_report.setPlainText(str(exc))
-            self.action_failed.emit(str(exc))
-            return
-        except OSError as exc:
-            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
-            self.action_failed.emit(str(exc))
-            return
+        with self._writing_to_the_server("Save a setting file") as held:
+            if not held:
+                return
+            try:
+                # Refuses a link out of the server folder, before any byte moves (T573).
+                made = tuning.backup(path, root=server_dir)
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(tuning.save_text(self._tuning_raw, text))
+            except tuning.TuningError as exc:
+                self.tuning_report.setPlainText(str(exc))
+                self.action_failed.emit(str(exc))
+                return
+            except OSError as exc:
+                self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+                self.action_failed.emit(str(exc))
+                return
         self.tuning_report.setPlainText(
             TUNING_FILE_SAVED.format(
                 file=file,

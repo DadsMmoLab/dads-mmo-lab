@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from yulon import commands, passwordcheck
-from yulon.actions import Outcome, outcome_of
+from yulon.actions import Outcome, ServerHold, holding, outcome_of
 from yulon.actions import send as _send
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
@@ -612,7 +612,10 @@ class InstallAccounts:
         channel_for_saved: Callable[[], object | None],
         app_account: str,
         sleep: Callable[[float], None] = time.sleep,
+        hold_server: ServerHold | None = None,
     ) -> None:
+        self._hold_server = hold_server
+        """Reserves the server across processes for a write (T610); None holds nothing."""
         self.entry = entry
         self.server_dir = server_dir
         self._sql = sql
@@ -632,6 +635,7 @@ class InstallAccounts:
             return Listing(problem=answer.problem or "this install's bot marker could not be read")
         return accounts(self._sql, self.entry, answer.marker, app_account=self.app_account)
 
+    @holding("Change an account's password")
     def set_password(self, account: str, password: str) -> Outcome:
         channel = self._channel()
         if channel is None:
@@ -685,6 +689,7 @@ class InstallAccounts:
             logger.info(f"{account}'s credential is not in a shape this app can read")
         return answered
 
+    @holding("Set an account's GM level")
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()
         if channel is None:
@@ -754,6 +759,7 @@ class InstallAccounts:
             self._sql, self.entry, answer.marker, account=account, app_account=self.app_account
         )
 
+    @holding("Delete an account")
     def delete_account(self, confirmed: DeletePlan) -> Outcome:
         """Delete the account the person confirmed, if it is still that account.
 
