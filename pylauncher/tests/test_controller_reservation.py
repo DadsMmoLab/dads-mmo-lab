@@ -18,6 +18,7 @@ from tests.conftest import HANG_BOUND
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from yulon import docker, platform
+from yulon.catalog import native
 from yulon.controller import Controller
 
 IMAGE = "yulon.local/wotlk-server:native"
@@ -123,6 +124,7 @@ def test_stopping_the_other_server_reserves_its_folder_and_is_refused_while_it_i
     ours, other = tmp_path / "ours", tmp_path / "other"
     ours.mkdir()
     other.mkdir()
+    (other / native.STATE_FILE).write_text("{}", encoding="utf-8")
     stopped: list[tuple[list[str], bool]] = []
 
     def stop_containers(names: list[str], **_kw: Any) -> None:
@@ -171,6 +173,7 @@ def _wsl_other(
     ours, other = tmp_path / "ours", tmp_path / "unc" / "other"
     ours.mkdir()
     other.mkdir(parents=True)
+    (other / native.STATE_FILE).write_text("{}", encoding="utf-8")
     stopped: list[tuple[list[str], bool]] = []
 
     def stop_containers(names: list[str], **_kw: Any) -> None:
@@ -237,3 +240,67 @@ def test_a_wsl_share_that_is_not_there_is_left_unreserved_and_the_stop_goes_ahea
     controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
     assert controller.stop_conflicting() == ["o-db", "o-world"]
     assert stopped == [(["o-db", "o-world"], False)]
+
+
+# ------------------------------------------------------------------ T610 item 2
+
+
+def _foreign_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Controller, Path, list[tuple[list[str], bool]]]:
+    """Our server beside a compose project Yu'lon did not install: no record, no id file."""
+    ours, other = tmp_path / "ours", tmp_path / "somebodys-compose-project"
+    ours.mkdir()
+    other.mkdir()
+    (other / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    stopped: list[tuple[list[str], bool]] = []
+
+    def stop_containers(names: list[str], **_kw: Any) -> None:
+        stopped.append((names, docker.reservation_held_here(other)))
+
+    monkeypatch.setattr(docker, "stop_containers", stop_containers)
+    monkeypatch.setattr(docker, "container_project", lambda *_a, **_kw: "other")
+    monkeypatch.setattr(docker, "project_containers", lambda *_a, **_kw: ["o-db", "o-world"])
+    monkeypatch.setattr(docker, "container_working_dir", lambda *_a, **_kw: str(other))
+    controller = _Recorded(ours)
+    controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
+    return controller, other, stopped
+
+
+def test_stopping_a_project_yulon_did_not_install_writes_nothing_into_its_folder(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: reserve every blocker's folder as before and `.yulon-folder-id` appears in it."""
+    controller, other, stopped = _foreign_other(tmp_path, monkeypatch)
+    before = sorted(p.name for p in other.iterdir())
+    assert controller.stop_conflicting() == ["o-db", "o-world"]
+    assert sorted(p.name for p in other.iterdir()) == before
+    assert stopped == [(["o-db", "o-world"], False)]
+
+
+def test_a_project_with_an_id_file_but_no_record_is_reserved_by_reading_it(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another Yu'lon that reserved the folder left an id; reading it reserves, writing nothing."""
+    controller, other, stopped = _foreign_other(tmp_path, monkeypatch)
+    (other / docker.FOLDER_ID_FILE).write_text("a" * 32 + "\n", encoding="ascii")
+    theirs = _holds(fake_docker, other, press="Update the server to latest…")
+    try:
+        with pytest.raises(docker.ServerReserved):
+            controller.stop_conflicting()
+        assert stopped == []
+    finally:
+        theirs.kill()
+    assert sorted(p.name for p in other.iterdir()) == sorted(
+        ["docker-compose.yml", docker.FOLDER_ID_FILE]
+    )
+
+
+def test_a_server_yulon_installed_but_never_reserved_is_given_its_id_and_reserved(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, other, stopped = _foreign_other(tmp_path, monkeypatch)
+    (other / native.STATE_FILE).write_text("{}", encoding="utf-8")
+    assert controller.stop_conflicting() == ["o-db", "o-world"]
+    assert stopped == [(["o-db", "o-world"], True)]
+    assert (other / docker.FOLDER_ID_FILE).is_file()

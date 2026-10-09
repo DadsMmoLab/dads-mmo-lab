@@ -7740,6 +7740,11 @@ def _read_folder_id(target: Path) -> str | None:
     return text if _FOLDER_ID.fullmatch(text) else None
 
 
+def existing_folder_id(folder: Path) -> str | None:
+    """The id already in `folder`'s id file; None when there is none. Writes nothing (T610)."""
+    return _read_folder_id(folder / FOLDER_ID_FILE)
+
+
 OWNER_LABEL = "yulon.owner"
 """The label `docker create` puts on every extraction tool container: whose Yu'lon made it."""
 
