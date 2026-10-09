@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import replace as dataclasses_replace
 from datetime import datetime
 from pathlib import Path
 
@@ -694,6 +695,123 @@ def test_files_removed_before_a_failure_are_reported(
     assert a.name in str(caught.value)
     assert not a.exists()
     assert b.exists()
+
+
+def test_a_directory_with_a_backups_name_is_not_a_backup(server: Path) -> None:
+    (folder_of(server) / "20261001_100000_acore_world.sql").mkdir()
+    assert shelf(server).rows == ()
+
+
+def test_a_file_the_platform_calls_a_link_is_not_listed(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows reports a junction or WSL link as a plain entry; `links.stat_is_link` is the judge."""
+    put(server, "20261001_100000")
+    monkeypatch.setattr(backup_shelf.links, "stat_is_link", lambda _st: True)
+    assert shelf(server).rows == ()
+
+
+def test_a_new_backup_after_the_plan_refuses_the_whole_clean_up(
+    server: Path, calls: Calls
+) -> None:
+    """Every file named is still fine alone; the SET the rule selects is what moved."""
+    a = put(server, "20261001_100000", "acore_world")
+    b = put(server, "20261002_100000", "acore_world")
+    plan = backup_shelf.plan_clean_up(shelf(server), Rule(keep_newest=1), now=NOW)
+    assert plan.names == (a.name,)
+    put(server, "20261003_100000", "acore_world")  # now `b` is surplus too
+    with pytest.raises(ShelfRefusal, match="changed"):
+        carry(server, plan)
+    assert a.exists()
+    assert b.exists()
+
+
+def test_a_folder_replaced_by_an_identical_one_after_the_plan_refuses(
+    server: Path, calls: Calls
+) -> None:
+    """Same names, inodes, sizes and times, a different directory: still not the plan's folder."""
+    old = put(server, "20261001_100000")
+    put(server, "20261003_100000")
+    plan = backup_shelf.plan_delete(shelf(server), old.name)
+    folder = folder_of(server)
+    twin = server / "twin"
+    twin.mkdir()
+    for f in folder.iterdir():
+        os.link(f, twin / f.name)
+    moved = server / "moved"
+    folder.rename(moved)
+    for f in moved.iterdir():
+        f.unlink()
+    twin.rename(folder)
+    with pytest.raises(ShelfRefusal, match="changed"):
+        carry(server, plan)
+    assert (folder / old.name).exists()
+
+
+def test_remove_one_looks_at_the_file_again(server: Path) -> None:
+    """The last look before the unlink, apart from the plan's checks, each refusing alone."""
+    old = put(server, "20261001_100000")
+    put(server, "20261003_100000")
+    found = shelf(server)
+    r = row(found, old.name)
+
+    swapped = server / "swapped"
+    swapped.write_bytes(old.read_bytes() + b"more")
+    os.replace(swapped, old)
+    with pytest.raises(ShelfRefusal, match="changed"):
+        backup_shelf._remove_one(found, server, r)
+    assert old.exists()
+
+    fresh = shelf(server)
+    os.link(old, server / "late.sql")
+    with pytest.raises(ShelfRefusal, match="another name"):
+        backup_shelf._remove_one(fresh, server, row(fresh, old.name))
+    assert old.exists()
+
+    with pytest.raises(ShelfRefusal, match="not a file name"):
+        backup_shelf._remove_one(
+            found, server, dataclasses_replace(r, name="../backups/" + old.name)
+        )
+    assert old.exists()
+
+
+def test_remove_one_refuses_a_folder_that_is_not_the_one_listed(server: Path) -> None:
+    old = put(server, "20261001_100000")
+    put(server, "20261003_100000")
+    found = shelf(server)
+    folder = folder_of(server)
+    twin = server / "twin"
+    twin.mkdir()
+    for f in folder.iterdir():
+        os.link(f, twin / f.name)
+    folder.rename(server / "moved")
+    for f in (server / "moved").iterdir():
+        f.unlink()
+    twin.rename(folder)
+    with pytest.raises(ShelfRefusal, match="changed"):
+        backup_shelf._remove_one(found, server, row(found, old.name))
+    assert (folder / old.name).exists()
+
+
+def test_the_read_only_flag_is_cleared_before_the_unlink(
+    server: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows refuses to unlink a read-only file; the order is what makes Delete work there."""
+    old = put(server, "20261001_100000")
+    put(server, "20261003_100000")
+    old.chmod(0o444)
+    plan = backup_shelf.plan_delete(shelf(server), old.name)
+    seen: list[int] = []
+    real = os.unlink
+
+    def watching(path: object, *a: object, **k: object) -> None:
+        seen.append(stat.S_IMODE(os.stat(path).st_mode))  # type: ignore[arg-type]
+        real(path, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", watching)
+    carry(server, plan)
+    assert seen
+    assert seen[0] & stat.S_IWUSR
 
 
 # ---------------------------------------------------------- the keep setting
