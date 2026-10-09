@@ -16,8 +16,10 @@ game-agnostic (style-guide §4).
 
 The core DOES compile modules from `modules/<name>/src/` (`modules/README.md`,
 `ConfigureModules.cmake`; this docstring said it did not until T596). None is
-shipped, and a module from outside is a later Yu'lon: what a player can bring
-today is an add-on or a database package (`custom.py`, T596).
+shipped, but a player can bring one from a link or a folder (`custom.py`, T596):
+it is cloned to `<server>/modules/<name>`, which the image recipe lays over the
+core's own `modules/`, and it is compiled in at the next Rebuild. An add-on and a
+database package come the same way.
 
 **What is NOT inherited from TBC, and this is the whole reason 8.7d is its own
 box.** Three facts were measured against this fork's own source on m910q,
@@ -62,6 +64,7 @@ from yulon.apply import (
     CLONE_DIRS,
     Applier,
     ApplyReport,
+    CompletionRefused,
     CountingGit,
     FolderSource,
     ModuleUpdate,
@@ -149,17 +152,22 @@ def layout() -> custom.TortoiseLayout:
     return custom.TortoiseLayout(shipped_addons=shipped_addons())
 
 
+def _taken_ids() -> tuple[str, ...]:
+    """The ids this game ships in either family a custom item can land in."""
+    return (*shipped_ids("mod"), *shipped_ids("module"))
+
+
 def derive_link(text: str) -> Manifest:
-    """A Tortoise add-on or database package for the link `text`, or `DeriveError` (T596)."""
+    """A Tortoise server module, add-on or database package for the link `text` (T596)."""
     return module_source.derive_link(
-        text, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+        text, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
 
 
 def derive_folder(path: Path) -> Manifest:
     """As `derive_link()`, for a folder on this computer; read before anything is copied."""
     return module_source.derive_folder(
-        path, GAME, today=date.today(), shipped_ids=shipped_ids(), layout=layout()
+        path, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
 
 
@@ -171,7 +179,7 @@ def complete(manifest: Manifest, clone: Path) -> Manifest:
     the applier takes a first install's folder back.
     """
     completed = custom.complete(manifest, clone, shipped_addons=shipped_addons())
-    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids())
+    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids(completed.type))
     return completed
 
 
@@ -192,8 +200,11 @@ def install_custom(applier: Applier) -> CustomInstall:
         source = FolderSource(folder, copy_folder) if folder is not None else None
         finished: list[Manifest] = []
 
+        kept: list[str] = []
+        completer = _completer(applier, kept)
+
         def finish(derived: Manifest, clone: Path) -> Manifest:
-            finished.append(complete(derived, clone))
+            finished.append(completer(derived, clone))
             return finished[-1]
 
         first = not os.path.lexists(applier.clone_dir(manifest))
@@ -209,10 +220,85 @@ def install_custom(applier: Applier) -> CustomInstall:
                 if not os.path.lexists(applier.clone_dir(manifest)):
                     forget(manifest)
             raise
-        left = custom.unused(finished[-1]) if finished else ()
+        left = (
+            *(custom.unused(finished[-1]) if finished else ()),
+            *kept,
+        )
         return replace(report, skipped=(*report.skipped, *left)) if left else report
 
     return install
+
+
+def _completer(
+    applier: Applier, kept: list[str] | None = None
+) -> Callable[[Manifest, Path], Manifest]:
+    """`complete()` behind the checks an outside item gets whenever its clone is read (T596).
+
+    Read first and persist after: a settings file another installed item already owns is
+    refused before anything is recorded, on an Install and on an Update alike (an update can
+    add or rename a `conf/*.conf.dist`). `kept`, when given, collects the lines for settings
+    files that were already there.
+    """
+
+    def finish(derived: Manifest, clone: Path) -> Manifest:
+        found = custom.complete(derived, clone, shipped_addons=shipped_addons())
+        _refuse_a_shared_conf(applier, found)
+        if kept is not None:
+            kept.extend(_kept_conf_lines(applier.server_dir, found, clone))
+        return complete(derived, clone)
+
+    return finish
+
+
+def _kept_conf_lines(server_dir: Path, found: Manifest, clone: Path) -> list[str]:
+    """One skipped line per settings file that was already there and so is not written (T596).
+
+    A file an earlier Remove kept, or one made by hand, is read by the module as it is
+    (an install never replaces a settings file). When it differs from the module's own
+    template the line says so, because that is the case where it may be another
+    module's (Codex review): the player is told, not refused.
+    """
+    lines: list[str] = []
+    for conf in found.conf:
+        target = server_dir / conf.file
+        if not target.exists():
+            continue
+        template = clone / conf.template if conf.template else None
+        try:
+            same = template is not None and target.read_bytes() == template.read_bytes()
+        except OSError:
+            same = False
+        differs = "" if same else f" and differs from this module's own {conf.template}"
+        lines.append(
+            f"{conf.file} was already there{differs}, so it was kept as it is (a settings file "
+            "is never replaced): the module reads what is in it"
+            + ("" if same else ", so check it is this module's")
+        )
+    return lines
+
+
+def _refuse_a_shared_conf(applier: Applier, found: Manifest) -> None:
+    """Refuse a module whose settings file another installed item already puts at that path.
+
+    Two modules that ship the same `conf/<n>.conf.dist` would share one
+    `etc/modules/<n>.conf`, and an install never replaces a file that is there, so the
+    second would read the first's settings (Codex review). A file nobody here owns (a
+    hand-made one, or one an earlier Remove kept) is not refused: it is kept and said.
+    """
+    wanted = {conf.file for conf in found.conf}
+    if not wanted:
+        return
+    for kind in ("module", "mod"):
+        for other in store().load_all(kind):
+            if (other.type, other.id) == (found.type, found.id):
+                continue
+            clash = sorted(wanted & {conf.file for conf in other.conf})
+            if clash and os.path.lexists(applier.clone_dir(other)):
+                raise CompletionRefused(
+                    f"{found.name}'s settings file {clash[0]} is also the settings file of "
+                    f"{other.name}, which is installed: two modules cannot share one. Remove "
+                    f"{other.name} first, or ask the author of one of them to rename theirs."
+                )
 
 
 BACKUP_LABEL = "before-{id}"
@@ -326,7 +412,7 @@ def applier(
     `sql_backup` is T596's `OutsideSqlBackup`: the backup before an outside
     item's database changes. Absent, none is taken.
     """
-    return autoupdate.guarded_applier(
+    guarded = autoupdate.guarded_applier(
         server_dir,
         sql=sql,
         arming=arming,
@@ -336,6 +422,9 @@ def applier(
         client_dir=client_dir,
         sql_backup=sql_backup,
     )
+    # An item brought from a link is read again whenever its clone is put on new code.
+    guarded.recomplete = _completer(guarded)
+    return guarded
 
 
 def apply_module(

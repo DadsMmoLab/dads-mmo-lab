@@ -7169,17 +7169,20 @@ card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 
 TORTOISE_LINK_TIP = (
     "Paste an https link to a repository on github.com, gitlab.com or codeberg.org holding a "
-    "client add-on (a .toc file) or database changes (.sql files in data/sql/auth, character "
-    "or world). Database changes need the world server stopped, and Yu'lon backs up the "
-    "databases they change first. Server modules (named mod-… or tw-mod-…) come in a later "
-    "Yu'lon."
+    "server module (its repository is named mod-<name> or tw-mod-<name>, in lower case: it is "
+    "built into the server the next time it is rebuilt), a client add-on (a .toc file) or "
+    "database changes (.sql files in data/sql/auth, character or world). Database changes "
+    "need the world server stopped, and Yu'lon backs up the databases they change first."
 )
-"""Tortoise's link tooltip (T596): the two kinds it takes, the stop-the-world rule, the backup."""
+"""Tortoise's link tooltip (T596): the three kinds it takes, the name rule and the rebuild
+a server module waits for, the stop-the-world rule and the backup."""
 
 TORTOISE_FOLDER_TIP = (
-    "Choose a folder on this computer holding a client add-on or database changes, laid out "
-    "as for a link. It is copied; the original is not touched. Database changes need the world "
-    "server stopped, and Yu'lon backs up the databases they change first."
+    "Choose a folder on this computer holding a server module (named mod-<name> or "
+    "tw-mod-<name>, in lower case; built in when the server is next rebuilt), a client add-on or "
+    "database changes, laid out as for a link. It is copied; the original is not touched. "
+    "Database changes need the world server stopped, and Yu'lon backs up the databases they "
+    "change first."
 )
 """As `TORTOISE_LINK_TIP`, for a folder: read before it is copied, never written into."""
 

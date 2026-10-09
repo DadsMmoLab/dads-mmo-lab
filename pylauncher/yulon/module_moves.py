@@ -363,7 +363,8 @@ def drop(server_dir: Path, item: str) -> str:
 
 # -- which module a failed build names --------------------------------------
 
-_MODULE = r"/azerothcore/modules/(?P<id>[^/\s:'\"]+)/[^\s:'\"]*"
+_MODULE_FOLDER = r"modules/(?P<id>[^/\s:'\"]+)/[^\s:'\"]*"
+_MODULE = r"(?:/azerothcore|(?<![\w./-])/src)/" + _MODULE_FOLDER
 _ERRORS = (
     # The compiler: `<path>:<line>[:<col>]: [fatal ]error:`.
     re.compile(_MODULE + r":\d+(?::\d+)?: (?:fatal )?error:"),
@@ -371,9 +372,13 @@ _ERRORS = (
     re.compile(_MODULE + r":\d+: undefined reference to"),
     # CMake, configuring the module. It writes a file inside its own source tree
     # relative to it (`modules/<id>/CMakeLists.txt`), and one outside it in full.
-    re.compile(r"CMake Error at (?:/azerothcore/)?" + _MODULE.removeprefix("/azerothcore/")),
+    re.compile(r"CMake Error at (?:/azerothcore/|/src/)?" + _MODULE_FOLDER),
 )
 """The three error shapes that name a module folder, and only those.
+
+The folder is `/azerothcore/modules/<id>/` in AzerothCore's image and `/src/modules/<id>/`
+in Tortoise's (T596: the recipe lays `<server>/modules/` over the core's own there). The
+second is read only where a path begins, so `/home/me/src/modules/...` is not one.
 
 Anchored on `:<line>:` and the word `error` (or the linker's and CMake's own
 words) on purpose: worldserver's `Applying of file '/azerothcore/modules/<id>/

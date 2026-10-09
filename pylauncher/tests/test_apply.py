@@ -6619,6 +6619,7 @@ def test_the_tortoise_applier_puts_a_put_back_through_its_guard(
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: object = None,
     ) -> ApplyReport:
         ran.append(m.id)
         return ApplyReport("install", m.id, family=m.type, done=("restore",))
@@ -6665,6 +6666,7 @@ def test_the_tortoise_guard_is_for_the_put_back_press_and_not_the_one_a_failed_b
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: object = None,
     ) -> ApplyReport:
         ran.append(automatic)
         return ApplyReport("install", m.id, family=m.type, done=("restore",))

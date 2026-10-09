@@ -63,16 +63,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker
+from yulon import docker, server_build_presses
 from yulon.apply import (
     Applier,
     ApplyError,
     ApplyReport,
     Completer,
+    CompletionRefused,
     FolderSource,
     LastUpdate,
     SqlBackup,
     SqlRunner,
+    UncheckedApproval,
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
@@ -483,6 +485,20 @@ class GuardedApplier(Applier):
         self.arming = arming
         self.world_running = world_running
         self.settings_for = settings_for
+        self.recomplete: Completer | None = None
+        """Reads an outside item's clone again when an Install or Update puts it on new code.
+
+        Set by `modules.applier()` (T596). An upstream update can add or rename a
+        `conf/*.conf.dist`, add SQL or an add-on, and the manifest persisted at the first
+        install knows none of them: a server module whose new settings file is not put in
+        place stops the world from starting after the next Rebuild (Codex review).
+        """
+
+    def _recompleter_for(self, manifest: Manifest) -> Completer | None:
+        """`recomplete`, for an item brought from a link (T596); None for any other."""
+        if manifest.origin is not None and manifest.source is not None:
+            return self.recomplete
+        return None
 
     def _guard(self, manifest: Manifest, action: When) -> str:
         check_manifest(manifest)
@@ -526,6 +542,7 @@ class GuardedApplier(Applier):
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
         note = self._guard(manifest, "install")
+        complete = complete or self._recompleter_for(manifest)
         return _with_note(
             super().install(
                 manifest,
@@ -548,6 +565,7 @@ class GuardedApplier(Applier):
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: Completer | None = None,
     ) -> ApplyReport:
         """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
 
@@ -565,7 +583,56 @@ class GuardedApplier(Applier):
             note = "auto-update guard: not asked, this put-back follows a failed build"
         else:
             note = self._guard(manifest, "install")
-        return _with_note(super().put_back(manifest, values, last=last, automatic=automatic), note)
+        return _with_note(
+            super().put_back(
+                manifest,
+                values,
+                last=last,
+                automatic=automatic,
+                complete=complete or self._recompleter_for(manifest),
+            ),
+            note,
+        )
+
+    def update(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        approved: UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        """`Applier.update()`, and a server module the new code makes unacceptable goes back (T596).
+
+        An outside item is read again once its clone is on the new commit
+        (`recomplete`). When that refuses -- a settings file with no `[Section]`,
+        one another module owns -- the checkout is already on the rejected commit,
+        and a Rebuild would compile it without the settings file it needs. So the
+        clone is put back on the commit it was on, through the update's own record,
+        and the refusal says so.
+        """
+        try:
+            return super().update(manifest, values, approved=approved)
+        except CompletionRefused as refused:
+            refused.args = (f"{refused} {self._put_back_a_refused_update(manifest)}".rstrip(),)
+            raise
+
+    def _put_back_a_refused_update(self, manifest: Manifest) -> str:
+        if manifest.type != "module" or manifest.origin is None:
+            return ""
+        last = self.last_update(manifest)
+        if last is None:
+            return ""
+        try:
+            self.put_back(manifest, last=last, automatic=True)
+        except (ApplyError, OSError) as exc:
+            return (
+                f"Yu'lon could not put it back on the version it was on ({exc}), so the next "
+                "rebuild would build the version that was just fetched."
+            )
+        return (
+            "Yu'lon put it back on the version it was on, so the next rebuild builds that one, "
+            "and the version it refused is not offered again."
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")
@@ -573,7 +640,31 @@ class GuardedApplier(Applier):
 
     def remove(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "remove")
-        return _with_note(super().remove(manifest, values), note)
+        report = _naming_the_conf_kept(super().remove(manifest, values), manifest)
+        return _with_note(report, note)
+
+
+def _naming_the_conf_kept(report: ApplyReport, manifest: Manifest) -> ApplyReport:
+    """Say what Remove does with an outside server module's settings files (T596, PR-B).
+
+    It never removes them: the image that compiled the module still reads
+    `etc/modules/<n>.conf` at every start until a Rebuild has taken the module out,
+    and a world that cannot find one does not start (`Config.cpp:207-231`). After
+    the Rebuild the file is unread and harmless, so it stays for the player to
+    delete or to find again if the module is installed again.
+    """
+    if manifest.type != "module" or manifest.origin is None:
+        return report
+    files = [step.file for step in manifest.conf if step.template is not None]
+    if not files:
+        return report
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    line = (
+        f"its settings file {', '.join(files)} is kept: the server running now was built with "
+        f"this module and still reads it, so press {rebuild} to take the module out of the "
+        "server; after that the file is unread"
+    )
+    return replace(report, left_behind=(line, *report.left_behind))
 
 
 def _with_note(report: ApplyReport, note: str) -> ApplyReport:

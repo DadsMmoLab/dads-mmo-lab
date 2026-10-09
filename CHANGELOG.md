@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
 - Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
+- On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.

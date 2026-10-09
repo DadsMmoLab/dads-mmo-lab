@@ -247,6 +247,41 @@ def test_cmake_names_the_module_by_the_path_relative_to_the_source_dir_too() -> 
     assert _scan("CMake Error at src/server/CMakeLists.txt:7 (message):") == ()
 
 
+def test_a_tortoise_build_names_the_module_by_its_source_path() -> None:
+    """Tortoise compiles in `/src/modules/<id>/`, where WotLK's is `/azerothcore/modules/<id>/`."""
+    assert _scan(
+        lines.TOOL + "#14 301.2 /src/modules/tw-mod-x/src/Hearth.cpp:12:5: error: 'y' undeclared"
+    ) == ("tw-mod-x",)
+    assert _scan("/src/modules/mod-y/src/a.cpp:3:1: fatal error: nope.h: No such file") == (
+        "mod-y",
+    )
+    assert _scan("/src/modules/mod-z/src/a.cpp:31: undefined reference to `Baz::Qux()'") == (
+        "mod-z",
+    )
+    assert _scan("CMake Error at /src/modules/mod-cm/CMakeLists.txt:4 (add_library):") == (
+        "mod-cm",
+    )
+    assert _scan("CMake Error at modules/mod-rel/CMakeLists.txt:4 (add_library):") == ("mod-rel",)
+
+
+def test_a_tortoise_path_is_read_only_at_the_start_of_a_path() -> None:
+    """A `/src/modules/` inside a longer path (a host checkout) is not the build's."""
+    assert _scan("/home/me/src/modules/mod-a/src/a.cpp:3:1: error: x") == ()
+    assert _scan("/opt/x/src/modules/mod-a/src/a.cpp:3:1: error: x") == ()
+    assert _scan("/src/src/game/Foo.cpp:3:1: error: x") == ()
+
+
+def test_a_tortoise_world_start_line_does_not_name_a_module() -> None:
+    assert (
+        _scan(
+            ">> Attempting to execute update 20260915090000_char.sql from "
+            "/src/modules/mod-x/data/sql/char",
+            "[ERROR] DB AutoUpdater FAILED, cancelling server.",
+        )
+        == ()
+    )
+
+
 def test_sql_lines_at_world_start_do_not_name_a_module() -> None:
     """Test 9: worldserver's own SQL apply lines name a module folder and are not compile errors."""
     assert (

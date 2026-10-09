@@ -157,8 +157,8 @@ class Layout(Protocol):
         """Why the folder at `path` cannot be installed, read before any copy; None if it can."""
         ...
 
-    def build(self) -> Build:
-        """What the derived item asks of the server after it is installed."""
+    def build(self, kind: ManifestType) -> Build:
+        """What the derived item of this kind asks of the server after it is installed."""
         ...
 
 
@@ -231,7 +231,7 @@ def derive_link(
             today=today,
             kind=kind,
             name=name,
-            build=layout.build(),
+            build=layout.build(kind),
         )
     item_id = _id_from(text.rstrip("/").rsplit("/", 1)[-1])
     if item_id is None:
@@ -286,7 +286,7 @@ def derive_folder(
             today=today,
             kind=kind,
             name=name,
-            build=layout.build(),
+            build=layout.build(kind),
         )
     item_id = _id_from(path.name)
     if item_id is None:

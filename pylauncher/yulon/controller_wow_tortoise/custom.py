@@ -1,7 +1,7 @@
-"""What Tortoise takes from a link or a folder (T596 step 2, first half).
+"""What Tortoise takes from a link or a folder (T596 step 2).
 
 The per-game layout `module_source` is handed for this core, kept beside the
-binding because every fact in it is this core's:
+binding because every fact in it is this core's. Three kinds:
 
 * **A client add-on.** A folder whose `.toc` has the folder's name, the way the
   1.12 client loads one: at the top of the repository (`MobStats.toc`, the
@@ -16,14 +16,21 @@ binding because every fact in it is this core's:
   Yu'lon runs itself and records in that database's `migrations` table under
   this package's id (`SqlStep.migration_module`), so the server's updater and
   Yu'lon never run the same file twice.
+* **A server module (C++).** The core compiles every `modules/<name>/src/` it
+  finds into the server (`-DMODULES=static`, `ConfigureModules.cmake`), and
+  Yu'lon's image recipe lays `<server>/modules/` over the core's, so a module
+  cloned or copied there is built in at the next Rebuild. The loader's name is
+  the FOLDER's (`Add<folder>Scripts`), so the folder keeps the author's name and
+  the name has to be exactly `mod-<x>` or `tw-mod-<x>` (lower case: the shared
+  Tortoise modules' names). Its `conf/*.conf.dist` goes to `etc/modules/<n>.conf`
+  at once, because a world built with a module whose settings file is missing,
+  or has no `[Section]`, does not start (`Config.cpp:207-231`).
 
-**A server module (C++) is not one of them yet.** The core compiles modules
-from `modules/<name>/src/`, and building one in needs the image change, the
-settings-file rule and the build-error scanner that a later Yu'lon brings. So a
-name the shared Tortoise modules carry (`mod-…`, `tw-mod-…`) is refused before
-anything is cloned, and C++ in `src/` is refused once the content is read. The
-name decides the kind because a link's content is unknown until it is cloned,
-and the kind decides the folder it is cloned to (`apply.CLONE_DIRS`).
+The name decides the kind because a link's content is unknown until it is
+cloned, and the kind decides the folder it is cloned to (`apply.CLONE_DIRS`).
+A repository named like a server module that holds no C++ in `src/` is read as a
+database package or add-on in `modules/`, which the core ignores (no `src/`, no
+module), and one that holds C++ but is not named like one is refused.
 """
 
 from __future__ import annotations
@@ -36,20 +43,40 @@ from pathlib import Path, PurePosixPath
 from pydantic import TypeAdapter, ValidationError
 
 from yulon.apply import CompletionRefused
-from yulon.manifest import Build, ClientFile, Db, Manifest, ManifestType, Slug, parse_manifest
+from yulon.manifest import (
+    Build,
+    ClientFile,
+    ConfFile,
+    Db,
+    Manifest,
+    ManifestType,
+    Slug,
+    parse_manifest,
+)
 from yulon.module_source import NOTHING_CHANGED, DeriveError
 
 _SLUG: TypeAdapter[str] = TypeAdapter(Slug)
 
-_SERVER_MODULE_NAME = re.compile(r"^(tw-)?mod-", re.IGNORECASE)
+_SERVER_MODULE_NAME = re.compile(r"(tw-)?mod-[a-z0-9-]{1,64}")
 """The names the shared Tortoise server modules carry (`tw-mod-*`, `mod-*-twow`, `mod-twow-*`).
 
-Read case-blind on purpose: `TW-Mod-A` is a server module's name typed in
-another case, and taking it as an add-on would clone a C++ module beside the
-add-ons. The later Yu'lon that builds modules decides what case it accepts."""
+Matched whole and in lower case, NOT lower-cased first (WotLK's rule lower-cases the
+id; here the id is the loader's name, which comes from the folder: `Add<folder,
+non-alphanumerics to _>Scripts`, `modules/README.md:73-74`, so a renamed folder no
+longer links)."""
+
+_LOOKS_LIKE_A_SERVER_MODULE = re.compile(r"(tw-)?mod-", re.IGNORECASE)
+"""A name that starts like one: refused when it is not exactly one, never taken as an add-on.
+
+`TW-Mod-A` is a server module's name typed in another case, and taking it as an
+add-on would put a C++ module beside the add-ons."""
 
 _MAX_ID = 64
 """As WotLK's `mod-[a-z0-9-]{1,64}`: an id is a folder name and a list key."""
+
+CONF_SUFFIX = ".conf.dist"
+MODULE_CONF_DIR = "etc/modules"
+"""Where the core reads a module's settings file, under the server dir."""
 
 CPP_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
 """What the core's module CMake globs as source (`ConfigureModules.cmake:54-68`)."""
@@ -84,10 +111,29 @@ LINK_DESCRIPTION = "Custom mod (cloned from a link you provided)."
 FOLDER_DESCRIPTION = "Custom mod (copied from a folder you provided)."
 
 WHAT_IS_READ = (
-    "Yu'lon installs two things on Tortoise: an add-on (a folder whose .toc file has the "
-    "folder's name, at the top or under addons/ or Interface/AddOns/) and database changes "
-    "(.sql files directly inside data/sql/auth, data/sql/character or data/sql/world)."
+    "Yu'lon installs three things on Tortoise: a server module (a repository named mod-<name> "
+    "or tw-mod-<name>, with C++ in src/ and its settings file in conf/), an add-on (a folder "
+    "whose .toc file has the folder's name, at the top or under addons/ or Interface/AddOns/) "
+    "and database changes (.sql files directly inside data/sql/auth, data/sql/character or "
+    "data/sql/world)."
 )
+
+SERVER_MODULE_NAME_RULE = (
+    "a server module's repository must be named exactly mod-<name> or tw-mod-<name>, in lower "
+    "case letters, digits and hyphens (up to 64 after the prefix)"
+)
+"""The rule in one clause, for the refusals: the server finds a module by its folder's name."""
+
+_SECTION = re.compile(r"^[ \t]*\[[^\]\r\n]+\]", re.MULTILINE)
+
+
+def is_server_module_name(name: str) -> bool:
+    """Is `name` exactly a server module's repository name (`mod-<x>` / `tw-mod-<x>`)?"""
+    return _SERVER_MODULE_NAME.fullmatch(name) is not None
+
+
+def _kind_of(name: str) -> ManifestType:
+    return "module" if is_server_module_name(name) else "mod"
 
 
 @dataclass(frozen=True)
@@ -100,12 +146,14 @@ class TortoiseLayout:
     """Add-on folder names the shipped items use (lower case) → the shipped item's name."""
 
     def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
-        if _SERVER_MODULE_NAME.match(basename):
+        if is_server_module_name(basename):
+            return "module", basename, basename
+        if _LOOKS_LIKE_A_SERVER_MODULE.match(basename):
             raise DeriveError(
-                f"{basename} is named like a Tortoise server module (mod-… or tw-mod-…), "
-                "which is compiled into the server. Yu'lon cannot build server modules into "
-                "Tortoise yet; a later Yu'lon will. Add-ons and database packages can be "
-                f"installed now. {NOTHING_CHANGED}"
+                f"{basename} is named like a Tortoise server module, but "
+                f"{SERVER_MODULE_NAME_RULE}: "
+                "the server finds a module by the name of its folder, so Yu'lon cannot rename "
+                f"it to fit. {NOTHING_CHANGED}"
             )
         item_id = re.sub(r"[^a-z0-9]+", "-", basename.lower()).strip("-")
         try:
@@ -121,13 +169,15 @@ class TortoiseLayout:
         return "mod", item_id, basename
 
     def refuse_folder(self, path: Path, name: str) -> str | None:
-        found = read_package(path, name, self.shipped_addons)
+        found = read_package(path, name, self.shipped_addons, _kind_of(name))
         return found if isinstance(found, str) else None
 
-    def build(self) -> Build:
-        # Nothing to compile, and the restart a database change wants is said
-        # by the report from the SQL itself (`ApplyReport.restart_recommended`).
-        return Build(rebuild=False, restart=False)
+    def build(self, kind: ManifestType) -> Build:
+        # A server module asks for a Rebuild (`complete()` takes it back when the
+        # folder holds no C++ for the core to build). Nothing else compiles, and
+        # the restart a database change wants is said by the report from the SQL
+        # itself (`ApplyReport.restart_recommended`).
+        return Build(rebuild=kind == "module", restart=False)
 
 
 LAYOUT = TortoiseLayout()
@@ -140,23 +190,38 @@ class Package:
     sql: tuple[tuple[Db, str], ...]
     client: tuple[ClientFile, ...]
     unused: tuple[str, ...]
+    conf: tuple[ConfFile, ...] = ()
+    cpp: bool = False
+    """C/C++ source under `src/`: the core will compile this folder into the server."""
 
 
-def read_package(root: Path, name: str, shipped_addons: Mapping[str, str]) -> Package | str:
-    """Read `root` as a Tortoise add-on and/or database package, or say why it is neither.
+def read_package(
+    root: Path, name: str, shipped_addons: Mapping[str, str], kind: ManifestType = "mod"
+) -> Package | str:
+    """Read `root` as a Tortoise server module, add-on and/or database package, or say why not.
 
     A pure read; the same answer for a folder before it is copied and for a
     clone once it landed, so the folder route refuses early and both routes
     agree. A refusal is a sentence without a closing clause: whether anything
-    was changed is the caller's to say.
+    was changed is the caller's to say. `kind` is what the NAME made of it
+    (`TortoiseLayout.identify`).
     """
-    cpp = _first_cpp(root)
-    if cpp is not None:
-        return (
-            f"{name} holds C++ source ({cpp.relative_to(root).as_posix()}), so it is a server "
-            "module, which is compiled into the server. Yu'lon cannot build server modules "
-            "into Tortoise yet; a later Yu'lon will."
-        )
+    cpp_in_src = _has_cpp_in_src(root)
+    if kind != "module":
+        cpp = _first_cpp(root)
+        if cpp is not None:
+            return (
+                f"{name} holds C++ source ({cpp.relative_to(root).as_posix()}), so it is a "
+                f"server module, and {SERVER_MODULE_NAME_RULE}; this one is named {name}."
+            )
+    elif not cpp_in_src:
+        elsewhere = _first_cpp(root)
+        if elsewhere is not None:
+            return (
+                f"{name} holds C++ source in {elsewhere.relative_to(root).as_posix()}, but the "
+                "server builds a module only from the src/ folder of its own folder, so it "
+                "would be left out of the server without a word."
+            )
     sql = _sql_files(root)
     client = _addons(root, name)
     if isinstance(client, str):
@@ -169,25 +234,30 @@ def read_package(root: Path, name: str, shipped_addons: Mapping[str, str]) -> Pa
                 f"{name} carries the add-on {step.name}, which Yu'lon already ships as "
                 f"{shipped}: install that one from its row in the list."
             )
-    unused = _unused(root, {path for _db, path in sql}, client)
-    if not sql and not client:
+    conf = _conf_steps(root, name) if cpp_in_src else ()
+    if isinstance(conf, str):
+        return conf
+    unused = _unused(root, {path for _db, path in sql}, client, compiled=cpp_in_src)
+    if not sql and not client and not cpp_in_src:
         also = f" It holds: {'; '.join(unused)}." if unused else ""
         return f"Yu'lon found nothing in {name} it can install on Tortoise. {WHAT_IS_READ}{also}"
-    return Package(sql=sql, client=client, unused=unused)
+    return Package(sql=sql, client=client, unused=unused, conf=conf, cpp=cpp_in_src)
 
 
 def complete(manifest: Manifest, clone: Path, *, shipped_addons: Mapping[str, str]) -> Manifest:
-    """`manifest` with the add-ons and SQL the clone turned out to hold, re-validated.
+    """`manifest` with the settings files, add-ons and SQL the clone turned out to hold.
 
-    Raises `CompletionRefused` with the sentence of what it is not; the applier
-    takes a first install's folder back and closes the sentence.
+    Re-validated. Raises `CompletionRefused` with the sentence of what it is not;
+    the applier takes a first install's folder back and closes the sentence.
     """
-    found = read_package(clone, manifest.name, shipped_addons)
+    found = read_package(clone, manifest.name, shipped_addons, manifest.type)
     if isinstance(found, str):
         raise CompletionRefused(found)
     return parse_manifest(
         {
             **manifest.model_dump(),
+            "build": Build(rebuild=found.cpp, restart=False).model_dump(),
+            "conf": [step.model_dump() for step in found.conf],
             "client": [step.model_dump() for step in found.client],
             "sql": [
                 {"db": db, "path": path, "migration_module": manifest.id} for db, path in found.sql
@@ -205,6 +275,19 @@ def unused(manifest: Manifest) -> tuple[str, ...]:
 
 
 # ------------------------------------------------------------------ reading
+
+
+def _has_cpp_in_src(root: Path) -> bool:
+    """C/C++ source under a folder named exactly `src` (the core's glob is case-sensitive)."""
+    if not root.is_dir():
+        return False
+    return any(
+        child.name == "src"
+        and not child.is_symlink()
+        and child.is_dir()
+        and _first_cpp(child) is not None
+        for child in root.iterdir()
+    )
 
 
 def _first_cpp(root: Path) -> Path | None:
@@ -324,7 +407,42 @@ def _interface_refusal(name: str, toc: Path) -> str:
     return ""
 
 
-def _unused(root: Path, run: set[str], client: tuple[ClientFile, ...]) -> tuple[str, ...]:
+def _conf_steps(root: Path, name: str) -> tuple[ConfFile, ...] | str:
+    """One step per top-level `conf/*.conf.dist`, put at `etc/modules/<n>.conf` (where it is read).
+
+    The core's build lists every enabled module's `conf/*.conf.dist` by name
+    (`ConfigureModules.cmake:277-305`) and the world refuses to start when
+    `<etc>/modules/<n>.conf` is missing or cannot be read as sections
+    (`Config.cpp:207-231`, `mangosd/Main.cpp:157-162`). So the file is laid at
+    install, long before the Rebuild that makes the world need it, and a dist with no
+    `[Section]` line is refused here rather than found out as a world that will not
+    start.
+    """
+    found: list[ConfFile] = []
+    conf = root / "conf"
+    if not conf.is_dir():
+        return ()
+    for dist in sorted(p for p in conf.iterdir() if p.is_file() and p.name.endswith(CONF_SUFFIX)):
+        stem = dist.name[: -len(CONF_SUFFIX)]
+        if not stem:
+            continue
+        text = dist.read_text(encoding="utf-8-sig", errors="replace")
+        if _SECTION.search(text) is None:
+            return (
+                f"{name}'s settings file conf/{dist.name} has no [Section] line. The server "
+                "reads a module's settings file by its sections, and one it cannot read "
+                "stops the whole server from starting, so Yu'lon will not install this "
+                "module until the file has one."
+            )
+        found.append(
+            ConfFile(file=f"{MODULE_CONF_DIR}/{stem}.conf", template=f"conf/{dist.name}", keys=())
+        )
+    return tuple(found)
+
+
+def _unused(
+    root: Path, run: set[str], client: tuple[ClientFile, ...], *, compiled: bool = False
+) -> tuple[str, ...]:
     """What the package holds that is neither run nor copied, one line per kind."""
     lines: list[str] = []
     inside = [step.src for step in client]
@@ -344,6 +462,9 @@ def _unused(root: Path, run: set[str], client: tuple[ClientFile, ...]) -> tuple[
             f"{shown} (not run: Yu'lon runs only the .sql files directly inside data/sql/auth, "
             "data/sql/character or data/sql/world, as the server's own updater reads them)"
         )
-    if (root / "conf").is_dir():
-        lines.append("conf/ (only a server module reads a settings file, and this is not one)")
+    if (root / "conf").is_dir() and not compiled:
+        lines.append(
+            "conf/ (a settings file is read only for a module the server compiles, and there "
+            "is no C++ in src/ here)"
+        )
     return tuple(lines)
