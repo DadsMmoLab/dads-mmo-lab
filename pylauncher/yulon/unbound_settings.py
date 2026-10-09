@@ -195,9 +195,9 @@ def is_on(row: tuning.TuningRow) -> bool:
     `GetOption<bool>`, which is `StringTo<bool>` non-strict: 1/y/on/yes/true in any case
     (`tuning.core_bool`). `Unbound.AutoBuff` is read only by `dml_autobuff.lua` through
     ALE's `GetConfigValue`, which turns `true`/`false` in any case into a boolean and a
-    whole number into a number and leaves anything else as text (`GlobalMethods.h:64-97`
-    at 1cb86c96); the script then turns on for the text `1` or `true`, so `01` is on
-    there and `yes` is not.
+    whole number into a number and leaves anything else as text (`GlobalMethods.h:64-97`,
+    the same bytes at 1cb86c96 and at cead0cb, Unbound's pin since T580); the script then
+    turns on for the text `1` or `true`, so `01` is on there and `yes` is not.
     """
     if row.current is None:
         return False
