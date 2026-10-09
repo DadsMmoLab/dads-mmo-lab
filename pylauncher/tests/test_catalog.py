@@ -1193,7 +1193,7 @@ and its `ExtractSingleModel` already normalises (read the same day at
 CARRIED = {
     "wow-tbc": "src/mangos-tbc",
     "wow-vanilla": "src/mangos-classic",
-    "wow-tortoise": None,
+    "wow-tortoise": None,  # carries a different patch: test_tortoise_updater_patch.py
 }
 
 
@@ -1206,7 +1206,8 @@ def test_the_doodad_patch_is_carried_by_the_two_entries_whose_extractor_drops_pl
     patches = entry.install.native.cmangos.patches
     source = CARRIED[game_id]
     if source is None:
-        assert patches == ()
+        # Tortoise's extractor never needed it; what it does carry is its own patch.
+        assert DOODAD_PATCH not in [p.file for p in patches]
         return
     assert [(p.file, p.source) for p in patches] == [(DOODAD_PATCH, source)]
     assert patches[0].reason
@@ -1255,7 +1256,7 @@ def test_every_shipped_patch_names_a_source_the_entry_clones_and_a_file_that_shi
             path = resources.installers_dir() / spec.file
             assert path.is_file(), (entry.id, spec.file)
             assert patch.parse(path.read_text(encoding="utf-8"))
-    assert seen == 2
+    assert seen == 3
 
 
 def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:

@@ -1364,7 +1364,14 @@
                 }
               ],
               "marker_db": "tw_world"
-            }
+            },
+            "patches": [
+              {
+                "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
+                "source": "src/tortoise-wow",
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+              }
+            ]
           }
         }
       },
