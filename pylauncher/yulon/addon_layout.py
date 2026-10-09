@@ -20,8 +20,9 @@ add-ons in one source are all found (Bagnon with Bagnon_Config).
 **Which `.toc`.** A file such as `pfUI-tbc.toc` beside `pfUI.toc` is the same
 add-on's file for another game version, and is set aside. When the main toc does
 not fit this client and such a variant does, the variant is taken, under its own
-name, because the old client reads only `<Folder>.toc` (reasoned, not measured:
-T613's TBC live step checks it with pfUI). More than one main toc is refused,
+name, because the old client reads only `<Folder>.toc`. pfUI's own README says the
+same for TBC ("Rename the folder pfUI-master to pfUI-tbc", read 2026-10-09); not yet
+measured in a client: T613's TBC live step checks it. More than one main toc is refused,
 except that a folder holding its own name's toc is loaded by that one.
 
 **Which Interface numbers this client takes.** `band()`: from the major version's

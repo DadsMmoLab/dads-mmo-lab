@@ -247,6 +247,7 @@ def test_addons_under_an_addon_folder_are_found(tmp_path: Path, parent: str) -> 
 
 
 def _pfui(root: Path) -> None:
+    """shagu/pfUI master as read 2026-10-09: `pfUI.toc` at 11200, `pfUI-tbc.toc` at 20400."""
     folder = root / "pfUI-master"
     _toc(folder, "pfUI", "11200")
     (folder / "pfUI-tbc.toc").write_text("## Interface: 20400\n## Title: pfUI\n")
