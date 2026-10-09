@@ -404,7 +404,7 @@ def test_the_manifest_names_the_conf_key_the_module_actually_has() -> None:
     that does not exist is not written and not read, so the engine would have
     taken its COMPILED default. (That default compiles to true, not the spelled
     "false": a string literal passed as a bool. Read at mod-ale 1cb86c96 on
-    2026-10-08; nothing here relies on it.)
+    2026-10-08, the same line at cead0cb on 2026-10-09; nothing here relies on it.)
     """
     keys = [k["key"] for k in _ale_manifest()["conf"][0]["keys"]]
     assert "ALE.Enabled" in keys
@@ -1008,7 +1008,7 @@ def test_ale_enabled_counts_as_on_exactly_where_the_cores_bool_reader_would(
 
 
 def test_no_sentence_claims_the_engines_compiled_default_is_off() -> None:
-    """mod-ale 1cb86c96 `ALEConfig.cpp:20` passes the STRING "false" as the default of
+    """mod-ale `ALEConfig.cpp:20` (1cb86c96 and cead0cb) passes the STRING "false" as the default of
     `SetConfigValue<bool>`; a string literal converts to `true`, so the engine's
     compiled default for ALE.Enabled is ON (re-review note 2). The reading still
     errs on the safe side -- a missing or unreadable key is unknown, not on -- and

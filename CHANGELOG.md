@@ -51,6 +51,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
 
 ### Changed
+- WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
 
 ## v0.9.15-Public — 2026-10-09
 
