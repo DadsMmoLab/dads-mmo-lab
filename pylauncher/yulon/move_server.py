@@ -6,8 +6,9 @@ along), the conf files with the player's Tuning, the module answers, the modules
 the repository and commit each clone was on, never as built files), the derived manifests of
 modules added from a link, and the player's own Lua scripts. What a new install makes for
 itself never travels: built images, map data, logs, backups, the client, the database password,
-the channel credential and every `.yulon-*` record (the folder id among them: a copy must make its
-own, T568).
+the channel credential and every `.yulon-*` record but one (the folder id among them: a copy must
+make its own, T568). The one that travels is `.yulon-module-answers.json`, because it describes the
+databases, which travel too.
 
 Importing is a NEW install, never a load into an existing one: the catalog entry is copied with
 each source's `rev` set to the packed commit (`pinned_entry`), the normal install engine runs on
@@ -26,17 +27,16 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
-from yulon import apply, module_answers, move
+from yulon import apply, module_answers, move, reset_defaults
 from yulon.catalog.catalog import (
     LUA_SCRIPTS_DIR,
     CatalogEntry,
     ConfPatch,
-    ConfPatchTable,
 )
 from yulon.catalog.families import conf as conf_patch
 from yulon.catalog.git_head import read_head_file
@@ -44,6 +44,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec
 from yulon.move_flows import MoveError, MoveWorld
+from yulon.server_build_presses import REBUILD, under_server_build
 from yulon.support import redact
 from yulon.support.sources import conf_files
 
@@ -322,6 +323,7 @@ def moved_in_revs(
     *,
     head_version: Callable[[Path], str | None],
     commits_since: Callable[[Path, str], int | None],
+    distance: Callable[[str, str, str], int | None] | None = None,
 ) -> tuple[SourceRevRow, ...]:
     """The install record's rows for a server built at the packed commits (owner decision 3).
 
@@ -338,6 +340,9 @@ def moved_in_revs(
       Return, with its warning that nothing undoes what the newer server wrote. Cannot-count goes
       this way because it is the reading that warns.
 
+    `distance(repo, pin, commit)` is asked when the checkout cannot count (a shallow clone):
+    the commits `commit` has that `pin` lacks, from GitHub, or None.
+
     A checkout whose version cannot be read gets no row; the tab then reads its HEAD.
     """
     commits = {(s.repo.lower(), s.dest): s.commit for s in packed}
@@ -353,6 +358,9 @@ def moved_in_revs(
             logger.warning(f"could not read what {dest} was built from; no row for {source.repo}")
             continue
         ahead = commits_since(dest, pin)
+        if ahead is None and distance is not None:
+            # A shallow checkout cannot count (most shipped sources are depth 1): GitHub can.
+            ahead = distance(source.repo, pin, commit)
         if ahead == 0:
             rows.append(SourceRevRow(repo=source.repo, built=built, pin=commit, ahead=0))
         else:
@@ -381,7 +389,7 @@ def machine_keys(entry: CatalogEntry, target: str) -> frozenset[str]:
     the table sets to a literal (the bot count, SOAP's port) is not one: the player may have
     changed it on the Tuning tab, and that change travels.
     """
-    table = _conf_table(entry)
+    table = reset_defaults._conf_table(entry)  # the install's own table, per family
     if table is None:
         return frozenset()
     name = PurePosixPath(target)
@@ -390,17 +398,6 @@ def machine_keys(entry: CatalogEntry, target: str) -> frozenset[str]:
         if name.as_posix().endswith("/" + file) or name.as_posix() == file:
             keys.update(k for k, raw in patch.keys.items() if "{{" in raw)
     return frozenset(keys)
-
-
-def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
-    native_block = entry.install.native
-    if native_block is None:
-        return None
-    if native_block.cmangos is not None:
-        return native_block.cmangos.conf
-    if native_block.trinitycore is not None:
-        return native_block.trinitycore.conf
-    return None
 
 
 def _last_values(text: str) -> dict[str, str]:
@@ -458,7 +455,7 @@ def package_digest(manifest: move.Manifest) -> str:
 
 # --------------------------------------------------------------- the import: its plan
 
-MOVE_IN_FILE = ".yulon-move-in.json"
+MOVE_IN_FILE = ".yulon-move-in.json"  # == native.MOVE_IN_FILE (one of its OUR_OWN_FILES)
 """In the new server's folder: which package it is being built from, and which steps are done.
 
 What lets a press that stopped part-way (after a two-hour compile) be pressed again on the same
@@ -548,7 +545,7 @@ class ServerImportPlan:
             f"{m.counts.bot_accounts} bot accounts.",
             f"It is installed as a NEW server in {self.server_dir}, built at the version it was "
             "packed from, then its modules, settings and databases are put in. Building takes as "
-            "long as any install.",
+            "long as any install, and a module that is compiled in builds the server once more.",
             *self.notes,
             *(
                 [f"Modules installed again: {', '.join(t.manifest.name for t in self.modules)}."]
@@ -676,7 +673,7 @@ def folder_refusal(server_dir: Path, digest: str) -> tuple[str | None, bool]:
 
     if (server_dir / native.STATE_FILE).exists():
         return holds_a_server(server_dir), False
-    if any(server_dir.iterdir()):
+    if native._listing(server_dir, ignoring=native.OUR_OWN_FILES):
         return not_empty(server_dir), False
     return None, False
 
@@ -812,8 +809,70 @@ class MovedInServer:
     rebuild: Callable[[threading.Event | None], Iterator[str]] | None
     db_password: str | None
     persist_manifest: Callable[[Manifest], None]
-    installed: Callable[[], Mapping[str, frozenset[str]]]
-    """`apply.installed_modules` of the new server, for a press that carries on."""
+
+
+def _module_key(planned: ModuleToInstall) -> str:
+    return f"{planned.packed.type}/{planned.packed.id}"
+
+
+class _Record:
+    """`MOVE_IN_FILE` as the run keeps it: the steps done, and what a carried-on press needs."""
+
+    def __init__(self, server_dir: Path, digest: str, body: Mapping[str, object]) -> None:
+        self.server_dir = server_dir
+        self.digest = digest
+        self.done: list[str] = _strings(body.get("done"))
+        self.modules_done: list[str] = _strings(body.get("modules_done"))
+        self.rebuild_needed = bool(body.get("rebuild_needed"))
+        address = body.get("realm_address")
+        self.realm_address: tuple[str, str | None] | None = None
+        if isinstance(address, list) and len(address) == 2 and isinstance(address[0], str):
+            local = address[1] if isinstance(address[1], str) else None
+            self.realm_address = (address[0], local)
+
+    @classmethod
+    def read(cls, server_dir: Path, digest: str) -> _Record:
+        marker = read_marker(server_dir) if server_dir.is_dir() else None
+        if marker is None or marker.get("package") != digest:
+            return cls(server_dir, digest, {})
+        return cls(server_dir, digest, marker)
+
+    def save(self) -> None:
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        write_marker(
+            self.server_dir,
+            self.digest,
+            self.done,
+            modules_done=self.modules_done,
+            rebuild_needed=self.rebuild_needed,
+            realm_address=list(self.realm_address) if self.realm_address else None,
+        )
+
+    def keep(self) -> None:
+        """Put the record back if something cleared the folder (the core's clone does)."""
+        if self.server_dir.is_dir() and not (self.server_dir / MOVE_IN_FILE).exists():
+            self.save()
+
+    def finished(self, step: str) -> None:
+        self.done.append(step)
+        self.save()
+
+    def module_done(self, key: str) -> None:
+        self.modules_done.append(key)
+        self.save()
+
+    def need_rebuild(self) -> None:
+        if not self.rebuild_needed:
+            self.rebuild_needed = True
+            self.save()
+
+    def remember_address(self, address: tuple[str, str | None]) -> None:
+        self.realm_address = address
+        self.save()
+
+
+def _strings(value: object) -> list[str]:
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
 class MovedInInstall:
@@ -834,6 +893,7 @@ class MovedInInstall:
         record_rows: Callable[[Path, Sequence[SourceRevRow]], bool],
         head_version: Callable[[Path], str | None],
         commits_since: Callable[[Path, str], int | None],
+        distance: Callable[[str, str, str], int | None] | None = None,
     ) -> None:
         if not plan.allowed or plan.manifest is None or plan.pinned is None:
             raise MoveError(" ".join(plan.refusals) or "This file cannot be brought in.")
@@ -844,6 +904,7 @@ class MovedInInstall:
         self._record_rows = record_rows
         self._head_version = head_version
         self._commits_since = commits_since
+        self._distance = distance
 
     def preflight(
         self, options: Any, cancel: threading.Event | None = None, *, ask: Any = None
@@ -871,21 +932,20 @@ class MovedInInstall:
         refusal, _resuming = folder_refusal(server_dir, digest)
         if refusal:
             raise MoveError(f"{refusal} Nothing was started.")
+        record = _Record.read(server_dir, digest)
         yield f"Bringing a {manifest.game.name} server from another computer into {server_dir}"
-        yield from self._engine.run(options, cancel=cancel, ask=ask)
-        marker = read_marker(server_dir)
-        ours = marker is not None and marker.get("package") == digest
-        done: list[str] = list(marker["done"]) if ours and marker else []  # type: ignore[call-overload]
-        rebuild_needed = bool(marker.get("rebuild_needed")) if marker else False
-        write_marker(server_dir, digest, done, rebuild_needed=rebuild_needed)
+        # The record goes in BEFORE the install, so an install that fails or is stopped part-way
+        # (a compile error, the ready wait) leaves a folder this same file carries on in, never
+        # one "already holding a server". The core's clone into the server folder itself clears
+        # the folder, so the record is put back after every line the install says.
+        record.save()
+        for line in self._engine.run(options, cancel=cancel, ask=ask):
+            record.keep()
+            yield line
+        record.keep()
         server = self._server_for(server_dir, options.client_dir)
-
-        def finished(step: str) -> None:
-            done.append(step)
-            write_marker(server_dir, digest, done, rebuild_needed=rebuild_needed)
-
         for step in STEPS:
-            if step in done:
+            if step in record.done:
                 yield f"Already done: {_STEP_NAMES[step]}."
                 continue
             _check_cancel(cancel)
@@ -895,20 +955,30 @@ class MovedInInstall:
             elif step == "answers":
                 yield from _lay_answers(package, server_dir)
             elif step == "modules":
-                needed = yield from self._modules(server, server_dir)
-                rebuild_needed = rebuild_needed or needed
+                yield from self._modules(server, server_dir, record)
             elif step == "rebuild":
-                if rebuild_needed and server.rebuild is not None:
-                    yield from server.rebuild(cancel)
-                else:
+                if not record.rebuild_needed:
                     yield "No module needs the server built again."
+                elif server.rebuild is None:
+                    raise MoveError(
+                        "A module needs the server built again, and "
+                        f"{under_server_build(REBUILD)} is not wired for {self.entry.name} here. "
+                        "Nothing more was changed."
+                    )
+                else:
+                    yield from _rebuild_for_modules(server, cancel)
             elif step == "confs":
                 yield from _stop_if_running(server.world)
                 yield from _lay_files(package, server_dir, self.entry, server.db_password)
             elif step == "data":
                 yield from _stop_if_running(server.world)
-                yield from load_the_data(server.world, package)
-            finished(step)
+                yield from load_the_data(
+                    server.world,
+                    package,
+                    address=record.realm_address,
+                    remember_address=record.remember_address,
+                )
+            record.finished(step)
         yield from self._closing(server_dir)
 
     def _reopen(self) -> move.Package:
@@ -933,6 +1003,7 @@ class MovedInInstall:
             server_dir,
             head_version=self._head_version,
             commits_since=self._commits_since,
+            distance=self._distance,
         )
         if not rows:
             yield "Every source is on the version this Yu'lon is tested with."
@@ -946,30 +1017,36 @@ class MovedInInstall:
         for row in rows:
             yield f"{row.repo} is at {row.built}; the Server tab offers the tested version."
 
-    def _modules(self, server: MovedInServer, server_dir: Path) -> Generator[str, None, bool]:
-        needed = False
+    def _modules(self, server: MovedInServer, server_dir: Path, record: _Record) -> Iterator[str]:
+        """Every packed clone module through the Modules tab's applier, at its packed commit.
+
+        Which modules this move has finished is in the record, so a press that stopped half-way
+        carries on with the next one; a module whose install failed is asked of the applier
+        again, which decides about its half-made folder itself. Whether a rebuild is needed is
+        recorded BEFORE each install, from what the module declares, so it survives a press that
+        stops right after.
+        """
         if not self.plan.modules:
             yield "The old server had no module installed from a repository."
-            return False
+            return
         if server.applier is None:
             raise MoveError(
                 f"{self.entry.name} has no module installer here, so no module was put back."
             )
-        installed = server.installed()
-        if any(
-            p.manifest.id not in installed.get(str(p.manifest.type), frozenset())
-            for p in self.plan.modules
-        ):
+        pending = [p for p in self.plan.modules if _module_key(p) not in record.modules_done]
+        if pending:
             # The install ends with the world running, and the applier refuses a module's SQL
             # while a world holds those databases in memory (`Applier._refuse_while_running`).
             yield from _stop_if_running(server.world)
         for planned in self.plan.modules:
             manifest = planned.manifest
-            if planned.carried is not None:
-                server.persist_manifest(planned.carried)
-            if manifest.id in installed.get(str(manifest.type), frozenset()):
+            if planned not in pending:
                 yield f"{manifest.name} is already installed."
                 continue
+            if planned.carried is not None:
+                server.persist_manifest(planned.carried)
+            if manifest.build.rebuild:
+                record.need_rebuild()
             yield f"Installing {manifest.name} at {planned.packed.commit[:7]}"
             values = module_answers.read_answers(server_dir, manifest) or None
             try:
@@ -983,8 +1060,9 @@ class MovedInInstall:
                 yield f"  {line}"
             for line in report.skipped:
                 yield f"  skipped: {line}"
-            needed = needed or report.rebuild_required
-        return needed
+            if report.rebuild_required:
+                record.need_rebuild()
+            record.module_done(_module_key(planned))
 
     def _closing(self, server_dir: Path) -> Iterator[str]:
         manifest = self.plan.manifest
@@ -1009,6 +1087,12 @@ _STEP_NAMES = {
     "confs": "laying the settings files",
     "data": "putting the databases in",
 }
+
+
+def _rebuild_for_modules(server: MovedInServer, cancel: threading.Event | None) -> Iterator[str]:
+    """The Server tab's own Rebuild (`install_wiring.rebuild_for_app`), once, for the modules."""
+    assert server.rebuild is not None
+    yield from server.rebuild(cancel)
 
 
 def _check_cancel(cancel: threading.Event | None) -> None:
@@ -1080,7 +1164,13 @@ def _lay_files(
         yield f"Laid {member.target}"
 
 
-def load_the_data(world: MoveWorld, package: move.Package) -> Iterator[str]:
+def load_the_data(
+    world: MoveWorld,
+    package: move.Package,
+    *,
+    address: tuple[str, str | None] | None = None,
+    remember_address: Callable[[tuple[str, str | None]], None] | None = None,
+) -> Iterator[str]:
     """Replace every database of the new server with the packed one, then put its own facts back.
 
     Under the Maintenance tab's guards (`move_flows._database_session`: the lease, the hold, the
@@ -1112,7 +1202,13 @@ def load_the_data(world: MoveWorld, package: move.Package) -> Iterator[str]:
         said = core_version_difference(manifest.schema_evidence, here)
         if said:
             raise MoveError(said)
-        address = _realm_address(world)
+        if address is None:
+            # Read once, before the first load, and remembered: a press that carries on after a
+            # load that failed part-way would otherwise read the OLD computer's address, which
+            # the loaded auth database already holds.
+            address = _realm_address(world)
+            if address is not None and remember_address is not None:
+                remember_address(address)
         order = {
             world.entry.schema_map()[r]: i
             for i, r in enumerate(SERVER_ROLES)

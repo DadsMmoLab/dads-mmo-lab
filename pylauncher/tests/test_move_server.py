@@ -116,10 +116,10 @@ def test_no_yulon_record_travels_but_the_answers_file(tmp_path: Path) -> None:
 def test_a_generated_password_left_anywhere_refuses_the_pack(tmp_path: Path) -> None:
     server = wotlk_server(tmp_path)
     (server / "env" / "dist" / "etc" / "worldserver.conf").write_bytes(
-        b"Rate.XP.Kill = 3\nMyNote = tbc-0123456789abcdef\n"
+        b"Rate.XP.Kill = 3\nMyNote = tbc-planted-secret\n"
     )
     with pytest.raises(MoveError) as raised:
-        facts(server, secret_password="tbc-0123456789abcdef")
+        facts(server, secret_password="tbc-planted-secret")
     assert str(raised.value) == (
         "The database password is still in env/dist/etc/worldserver.conf after Yu'lon took it "
         "out of the database lines, so nothing was packed: it must never leave this computer. "
@@ -130,10 +130,10 @@ def test_a_generated_password_left_anywhere_refuses_the_pack(tmp_path: Path) -> 
 def test_a_generated_password_in_a_database_line_is_taken_out_and_packs(tmp_path: Path) -> None:
     server = wotlk_server(tmp_path)
     (server / "env" / "dist" / "etc" / "worldserver.conf").write_bytes(
-        b'LoginDatabaseInfo = "db;3306;root;tbc-0123456789abcdef;realmd"\n'
+        b'LoginDatabaseInfo = "db;3306;root;tbc-planted-secret;realmd"\n'
     )
-    got = facts(server, secret_password="tbc-0123456789abcdef")
-    assert b"tbc-0123456789abcdef" not in got.files[0].data
+    got = facts(server, secret_password="tbc-planted-secret")
+    assert b"tbc-planted-secret" not in got.files[0].data
 
 
 def test_a_module_added_from_a_folder_refuses_the_pack(tmp_path: Path) -> None:
@@ -357,9 +357,9 @@ def test_a_laid_conf_gets_this_machines_password_and_keeps_its_endings() -> None
         b'LoginDatabaseInfo = "db;3306;root;{{DB_PASSWORD}};realmd"\r\nRate = 3\r\n',
         None,
         (),
-        "tbc-feedfacefeedface",
+        "tbc-this-machine",
     )
-    assert got == b'LoginDatabaseInfo = "db;3306;root;tbc-feedfacefeedface;realmd"\r\nRate = 3\r\n'
+    assert got == b'LoginDatabaseInfo = "db;3306;root;tbc-this-machine;realmd"\r\nRate = 3\r\n'
 
 
 def test_the_machine_keys_take_the_value_this_install_wrote() -> None:
@@ -369,15 +369,15 @@ def test_the_machine_keys_take_the_value_this_install_wrote() -> None:
         b"AiPlayerbot.MinRandomBots = 200\n"
     )
     installed = (
-        b'LoginDatabaseInfo = "new-host;3306;root;tbc-1111111111111111;realmd"\n'
+        b'LoginDatabaseInfo = "new-host;3306;root;tbc-new-machine;realmd"\n'
         b"WorldServerPort = 8095\n"
         b"AiPlayerbot.MinRandomBots = 500\n"
     )
     keys = move_server.machine_keys(TBC, "etc/mangosd.conf")
     assert "WorldServerPort" in keys and "AiPlayerbot.MinRandomBots" not in keys
-    got = move_server.lay_conf(packed_conf, installed, keys, "tbc-1111111111111111")
+    got = move_server.lay_conf(packed_conf, installed, keys, "tbc-new-machine")
     assert got == (
-        b'LoginDatabaseInfo = "new-host;3306;root;tbc-1111111111111111;realmd"\n'
+        b'LoginDatabaseInfo = "new-host;3306;root;tbc-new-machine;realmd"\n'
         b"WorldServerPort = 8095\n"
         b"AiPlayerbot.MinRandomBots = 200\n"
     )
@@ -450,3 +450,22 @@ def test_no_clear_answer_is_never_gone(answer: object) -> None:
     from yulon.catalog import upstream
 
     assert upstream.commit_exists("a/b", CORE, get=_Get(answer)) is None
+
+
+def test_a_shallow_checkout_asks_github_how_far_the_packed_commit_is() -> None:
+    asked: list[tuple[str, str, str]] = []
+
+    def distance(repo: str, pin: str, commit: str) -> int | None:
+        asked.append((repo, pin, commit))
+        return 0
+
+    got = move_server.moved_in_revs(
+        WOTLK,
+        packed(WOTLK, **{".": CORE}),
+        Path("/srv"),
+        head_version=lambda dest: "aaaaaaa · 2026-10-01",
+        commits_since=lambda dest, rev: None,
+        distance=distance,
+    )
+    assert asked == [("mod-playerbots/azerothcore-wotlk", WOTLK.emulator.sources[0].rev, CORE)]
+    assert (got[0].pin, got[0].ahead) == (CORE, 0)  # behind the pin: the catch-up reading

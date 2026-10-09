@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import apply, module_source, move_server, platform
+from yulon import module_source, move_server, platform
 from yulon.catalog import native, upstream
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.log import get_logger
@@ -37,6 +37,15 @@ def _commit_known(repo: str, sha: str) -> bool | None:
     if slug is None:
         return None
     return upstream.commit_exists(slug, sha, get=upstream.https_get)
+
+
+def _distance(repo: str, pin: str, commit: str) -> int | None:
+    """Commits `commit` has that `pin` lacks, from GitHub; None when it cannot say."""
+    slug = upstream.github_slug(repo)
+    if slug is None:
+        return None
+    said = upstream.compare(slug, pin, commit, get=upstream.https_get)
+    return said.ahead if said is not None else None
 
 
 def _store_for(entry: CatalogEntry) -> ManifestStore | None:
@@ -89,14 +98,12 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
                 store.user_root, manifest, shipped_ids=store.load_index(manifest.type).items
             )
 
-        installed = services.installed_modules or (lambda: apply.installed_modules(server_dir))
         return move_server.MovedInServer(
             world=services.move.world,
             applier=services.applier,
             rebuild=services.rebuild,
             db_password=entry.install.db_password(server_dir),
             persist_manifest=persist,
-            installed=installed,
         )
 
     return build
@@ -136,6 +143,7 @@ def move_in_for_app(catalog: Catalog) -> MoveIn:
             record_rows=record,
             head_version=seams.head_version,
             commits_since=seams.commits_since,
+            distance=_distance,
         )
 
     return MoveIn(plan=plan, installer=installer)

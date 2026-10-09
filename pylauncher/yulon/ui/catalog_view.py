@@ -62,6 +62,8 @@ QWIDGETSIZE_MAX = 16777215
 """Qt's "no maximum" for a widget dimension (`QWIDGETSIZE_MAX` in C++)."""
 
 BRING_FROM_ANOTHER = "Bring from another computer…"
+MOVE_IN_FILE = ".yulon-move-in.json"
+"""`catalog.native.MOVE_IN_FILE`: a folder a whole-server move is building (T601 level 2)."""
 """The tile press that builds a whole server from a move package (T601 level 2)."""
 MOVE_PACKAGE_FILTER = "Move packages (*.zip)"
 
@@ -1047,6 +1049,17 @@ class CatalogView(QWidget):
         if folders is None:
             return False
         server_dir, client_dir = folders
+        if (server_dir / MOVE_IN_FILE).exists():
+            # T601 level 2: a plain install would finish the build and never put the modules,
+            # settings or data in, and then the tile could no longer bring the server in.
+            show_information(
+                self,
+                "A move that did not finish",
+                f"{server_dir} is a server being brought from another computer, and that did not "
+                f"finish. Press {BRING_FROM_ANOTHER} with the same file and this folder to carry "
+                "on.",
+            )
+            return False
         return self._run_install(entry, server_dir, client_dir, self._make_installer(entry))
 
     def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:

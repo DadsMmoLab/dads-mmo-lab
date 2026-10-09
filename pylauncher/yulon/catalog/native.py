@@ -149,7 +149,10 @@ ERROR_RUN_REBUILD = "rebuild"
 """`InstallState.error_run` for a failure of any press on a remembered server (T207)."""
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
+MOVE_IN_FILE = ".yulon-move-in.json"
+"""A server being built from another computer's package records its steps here (T601 level 2)."""
+
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE, MOVE_IN_FILE)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -165,7 +168,8 @@ created by this app (.yulon-network.json)` from
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
 in one place rather than in the five call sites that ask the question. The third
-is T104's record of the answers a player gave a module's questions.
+is T104's record of the answers a player gave a module's questions. The fourth is T601's
+move-in record, written before the install of a server brought from another computer.
 """
 
 OPENING_NOTE = (

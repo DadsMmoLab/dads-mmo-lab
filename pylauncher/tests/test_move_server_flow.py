@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
@@ -422,7 +423,6 @@ class Move:
             rebuild=rebuild,
             db_password="password",
             persist_manifest=lambda m: self.events.append(f"persist:{m.id}"),
-            installed=lambda: apply.installed_modules(server_dir),
         )
 
     def install(self) -> move_server.MovedInInstall:
@@ -692,22 +692,43 @@ def test_a_link_module_named_like_a_shipped_one_is_refused(tmp_path: Path) -> No
     assert plan.modules[0].manifest.source.rev == "d" * 40  # type: ignore[union-attr]
 
 
-def test_a_module_already_installed_is_not_installed_twice(tmp_path: Path) -> None:
+def test_a_module_this_move_finished_is_not_installed_twice(tmp_path: Path) -> None:
     mv = Move(tmp_path)
-    original = mv.server_for
-
-    def with_it_installed(server_dir: Path, client_dir: Path | None) -> move_server.MovedInServer:
-        from dataclasses import replace
-
-        return replace(
-            original(server_dir, client_dir),
-            installed=lambda: {"module": frozenset({"mod-transmog"})},
-        )
-
-    mv.server_for = with_it_installed  # type: ignore[method-assign]
+    digest = move_server.package_digest(mv.plan.manifest)  # type: ignore[arg-type]
+    mv.target.server_dir.mkdir()
+    (mv.target.server_dir / native.STATE_FILE).write_text("{}", encoding="utf-8")
+    move_server.write_marker(
+        mv.target.server_dir,
+        digest,
+        ["revs", "answers"],
+        modules_done=["module/mod-transmog"],
+        rebuild_needed=True,
+    )
     lines = mv.run()
     assert mv.applier.installed == []
     assert any("is already installed" in line for line in lines)
+    assert mv.rebuilds == 1
+
+
+def test_a_module_that_failed_is_asked_again_and_its_rebuild_is_not_lost(tmp_path: Path) -> None:
+    mv = Move(tmp_path)
+    real = mv.applier.install
+    calls = {"n": 0}
+
+    def fail_once(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise apply.ApplyRefusal("the clone was cut off")
+        return real(manifest, values)
+
+    mv.applier.install = fail_once  # type: ignore[method-assign]
+    with pytest.raises(MoveError, match="could not be installed again"):
+        mv.run()
+    marker = move_server.read_marker(mv.target.server_dir)
+    assert marker is not None and marker["rebuild_needed"] is True  # declared before the install
+    mv.run()
+    assert calls["n"] == 2
+    assert mv.rebuilds == 1
 
 
 def test_a_conf_folder_that_is_a_link_is_never_written_through(tmp_path: Path) -> None:
@@ -731,18 +752,29 @@ def test_a_conf_folder_that_is_a_link_is_never_written_through(tmp_path: Path) -
 
 
 def test_no_rebuild_when_no_module_needs_one(tmp_path: Path) -> None:
+    from dataclasses import replace
+
     mv = Move(tmp_path)
+    mv.plan = replace(mv.plan, modules=())
+    lines = mv.run()
+    assert mv.rebuilds == 0
+    assert "No module needs the server built again." in lines
+
+
+def test_a_module_that_declares_a_rebuild_gets_one_even_if_its_report_says_none(
+    tmp_path: Path,
+) -> None:
+    mv = Move(tmp_path)
+    assert mv.plan.modules[0].manifest.build.rebuild
 
     def install(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
-        mv.events.append(f"module:{manifest.id}")
         return apply.ApplyReport(
             action="install", item_id=manifest.id, family=manifest.type, rebuild_required=False
         )
 
     mv.applier.install = install  # type: ignore[method-assign]
-    lines = mv.run()
-    assert mv.rebuilds == 0
-    assert "No module needs the server built again." in lines
+    mv.run()
+    assert mv.rebuilds == 1
 
 
 def test_the_server_is_stopped_before_a_conf_is_laid(
@@ -760,3 +792,110 @@ def test_the_server_is_stopped_before_a_conf_is_laid(
     write = mv.events.index("write:worldserver.conf")
     rebuilt = mv.events.index("rebuild")
     assert rebuilt < write and "stop" in mv.events[rebuilt:write]
+
+
+def test_an_install_that_fails_leaves_a_folder_this_file_carries_on_in(tmp_path: Path) -> None:
+    mv = Move(tmp_path)
+    real_run = mv.engine.run
+
+    def fails(options: InstallOptions, **kw: object) -> Iterator[str]:
+        options.server_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+        # The core's clone into the server folder itself clears it, record and all.
+        for child in options.server_dir.iterdir():  # type: ignore[union-attr]
+            child.unlink()
+        (options.server_dir / native.STATE_FILE).write_text("{}", encoding="utf-8")  # type: ignore[operator]
+        yield "Cloning"
+        raise native.InstallerError("the compile failed")
+
+    mv.engine.run = fails  # type: ignore[method-assign]
+    with pytest.raises(native.InstallerError):
+        mv.run()
+    again = plan_for(mv.path, mv.target.server_dir)
+    assert again.allowed and again.resuming, again.refusals
+    mv.engine.run = real_run  # type: ignore[method-assign]
+    mv.run()
+    assert move_server.read_marker(mv.target.server_dir)["done"] == list(move_server.STEPS)  # type: ignore[index]
+
+
+def test_a_carried_on_load_uses_the_address_read_before_the_first_load(tmp_path: Path) -> None:
+    mv = Move(
+        tmp_path, fresh_db=Db([], realm="10.0.0.7\t127.0.0.1", fail_load_of="acore_characters")
+    )
+    with pytest.raises(MoveError):
+        mv.run()
+    # The auth load landed: the realm row now holds the OLD computer's address.
+    mv.target.db.realm = "192.168.9.9\t192.168.9.9"
+    mv.target.db.fail_load_of = None
+    time.sleep(1.1)  # the engine's safety copies are named by the second; a real press is later
+    mv.run()
+    last = [sql for sql in mv.target.db.executed if "localAddress" in sql][-1]
+    assert "address='10.0.0.7'" in last and "192.168.9.9" not in last
+
+
+def test_the_move_in_record_is_one_of_yulons_own_files(tmp_path: Path) -> None:
+    """The install's own guard reads a folder holding only the record as empty, so it installs."""
+    assert move_server.MOVE_IN_FILE == native.MOVE_IN_FILE
+    move_server.write_marker(tmp_path, "f" * 64, [])
+    assert not native._listing(tmp_path, ignoring=native.OUR_OWN_FILES)
+
+
+def test_an_install_that_stops_before_saying_anything_still_leaves_the_record(
+    tmp_path: Path,
+) -> None:
+    mv = Move(tmp_path)
+
+    def fails(options: InstallOptions, **kw: object) -> Iterator[str]:
+        (options.server_dir / native.STATE_FILE).write_text("{}", encoding="utf-8")  # type: ignore[operator]
+        raise native.InstallerError("preflight refused")
+        yield ""  # pragma: no cover - a generator that never yields
+
+    mv.engine.run = fails  # type: ignore[method-assign]
+    with pytest.raises(native.InstallerError):
+        mv.run()
+    again = plan_for(mv.path, mv.target.server_dir)
+    assert again.allowed and again.resuming, again.refusals
+
+
+def test_a_second_module_failing_does_not_redo_the_first(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    mv = Move(tmp_path)
+    loot = STORE.load("module", "mod-aoe-loot")
+    assert loot.source is not None
+    second = move_server.ModuleToInstall(
+        packed=PackedModule(
+            type="module",
+            id="mod-aoe-loot",
+            origin="catalog",
+            repo=loot.source.repo,
+            commit="e" * 40,
+        ),
+        manifest=loot.model_copy(
+            update={"source": loot.source.model_copy(update={"rev": "e" * 40})}
+        ),
+    )
+    mv.plan = replace(mv.plan, modules=(*mv.plan.modules, second))
+    real = mv.applier.install
+    failed = {"once": False}
+
+    def flaky(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+        if manifest.id == "mod-aoe-loot" and not failed["once"]:
+            failed["once"] = True
+            raise apply.ApplyRefusal("cut off")
+        return real(manifest, values)
+
+    mv.applier.install = flaky  # type: ignore[method-assign]
+    with pytest.raises(MoveError):
+        mv.run()
+    mv.run()
+    assert [i[0] for i in mv.applier.installed] == ["mod-transmog", "mod-aoe-loot"]
+
+
+def test_a_rebuild_needed_with_no_rebuild_here_is_refused_not_skipped(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    mv = Move(tmp_path)
+    original = mv.server_for
+    mv.server_for = lambda d, c: replace(original(d, c), rebuild=None)  # type: ignore[method-assign]
+    with pytest.raises(MoveError, match="is not wired for WoW WotLK here"):
+        mv.run()

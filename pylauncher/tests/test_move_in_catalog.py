@@ -161,3 +161,20 @@ def test_an_installed_game_offers_no_second_server(qapp: object, tmp_path: Path)
     )
     bring = built.findChild(QPushButton, f"move-in-{WOTLK.id}")
     assert bring is not None and not bring.isEnabled()
+
+
+def test_install_into_an_unfinished_move_sends_the_player_to_bring_in(
+    qapp: object, tmp_path: Path, monkeypatch: object
+) -> None:
+    import yulon.ui.catalog_view as cv
+    from yulon.catalog import native
+
+    assert cv.MOVE_IN_FILE == native.MOVE_IN_FILE
+    shown: list[str] = []
+    monkeypatch.setattr(cv, "show_information", lambda _p, _t, text: shown.append(text))  # type: ignore[attr-defined]
+    folder = tmp_path / WOTLK.install.default_server_dir
+    folder.mkdir()
+    (folder / native.MOVE_IN_FILE).write_text("{}", encoding="utf-8")
+    built, _ = view(tmp_path, Mover(tmp_path))
+    assert built.start_install(WOTLK) is False
+    assert shown and BRING_FROM_ANOTHER in shown[0]
