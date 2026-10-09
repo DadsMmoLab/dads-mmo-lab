@@ -1879,8 +1879,7 @@ def corrections_confirmation(
     )
     if not offered:
         return f"Run the unfinished world updates of {entry.name} again?\n\n" + (
-            f"Folder: {server_dir}\n\n{stuck_world_updates_text(stuck)}\n\n{held}"
-            f"{_STOPS_THE_WORLD}"
+            f"Folder: {server_dir}\n\n{stuck_world_updates_text(stuck)}\n\n{held}{_STOPS_THE_WORLD}"
         )
     extra = f"{stuck_world_updates_text(stuck)}\n\n" if stuck else ""
     return (
@@ -11248,6 +11247,14 @@ class StagedInstaller:
                 raise InstallerError(source_off_its_build(dest, head, expected))
         return tuple(unchecked)
 
+    def _modules_that_take_the_cores_names(self, server_dir: Path) -> str | None:
+        """The sentence for a server module whose name the core's own `modules/` holds (T611).
+
+        None here: only a family whose recipe lays the server's `modules/` over the core's
+        has anything to refuse (`CmangosInstaller`).
+        """
+        return None
+
     def rebuild_refusal_before_asking(self, server_dir: Path) -> str | None:
         """What `_refuse_sources_off_their_build()` would refuse, asked before the question.
 
@@ -11259,6 +11266,9 @@ class StagedInstaller:
         (`Seams.head_sha`). Where git cannot answer the press goes on, and so
         does this: None. No record or no recorded build is None too.
         """
+        clash = self._modules_that_take_the_cores_names(server_dir)
+        if clash is not None:
+            return clash
         state = read_state(server_dir, valid=self.stage_names())
         if state is None:
             return None
@@ -13324,8 +13334,7 @@ class StagedInstaller:
             )
         if forgot:
             yield (
-                "Cleared Yu'lon's record of the mods applied to the old databases: "
-                "these are new."
+                "Cleared Yu'lon's record of the mods applied to the old databases: these are new."
             )
 
     def stage_up(self, ctx: StageContext) -> Iterator[str]:

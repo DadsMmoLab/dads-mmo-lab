@@ -27,6 +27,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
 - A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
 - On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
+- On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
 
 ### Changed
 

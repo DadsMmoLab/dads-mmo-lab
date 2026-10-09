@@ -2473,6 +2473,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "name is written, never whether the client may be written: that is the step's own "
         "`dest`. A folder that cannot be listed raises, and the install stops"
     ),
+    ("core_modules.py", "names_in"): (
+        "T611. Lists a core's own `modules/` folder (`src/tortoise-wow/modules` under the server "
+        "folder) for the names of the modules in it, so a player's module of the same name is "
+        "refused before the build mixes the two. Read-only and it decides no write: it answers "
+        "a refusal sentence, and a folder that cannot be listed has no names"
+    ),
     ("catalog/world_data.py", "_folder_hash"): (
         "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
         "file's path, size and modification time into the fingerprint a Windows world "

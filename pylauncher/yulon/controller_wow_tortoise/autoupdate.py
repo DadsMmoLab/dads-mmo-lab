@@ -57,16 +57,18 @@ gets, and answering it with "nothing outstanding" would be the same defect
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker, server_build_presses
+from yulon import core_modules, docker, module_moves, server_build_presses
 from yulon.apply import (
     Applier,
     ApplyError,
+    ApplyRefusal,
     ApplyReport,
     Completer,
     CompletionRefused,
@@ -78,12 +80,15 @@ from yulon.apply import (
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
-from yulon.git import Git
+from yulon.git import Git, HeadReader, RevRestorer
 from yulon.log import get_logger
 from yulon.manifest import Db, Manifest, When
 from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
+
+CORE_MODULES_DIR = "src/tortoise-wow/modules"
+"""The core's own `modules/`, under the server dir: the checkout the install clones (T611)."""
 
 CONF_FILE = "etc/mangosd.conf"
 """Where this install's copy of the fork's conf lives, relative to the server dir.
@@ -423,7 +428,7 @@ def check_restart_is_survivable(
     the world reads at startup, so nothing about it brings the updater forward.
     """
     if not world_running:
-        return f"auto-update guard: not applied, the world is not running " f"({arming.summary()})"
+        return f"auto-update guard: not applied, the world is not running ({arming.summary()})"
     if not manifest.build.restart:
         return f"auto-update guard: this item asks for no restart ({arming.summary()})"
     armed = arming.armed
@@ -541,6 +546,7 @@ class GuardedApplier(Applier):
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
+        self._refuse_a_core_module_name(manifest)
         note = self._guard(manifest, "install")
         complete = complete or self._recompleter_for(manifest)
         return _with_note(
@@ -610,13 +616,42 @@ class GuardedApplier(Applier):
         clone is put back on the commit it was on, through the update's own record,
         and the refusal says so.
         """
+        was_on = self._head_of_an_outside_mod(manifest)
         try:
             return super().update(manifest, values, approved=approved)
         except CompletionRefused as refused:
-            refused.args = (f"{refused} {self._put_back_a_refused_update(manifest)}".rstrip(),)
+            said = self._put_back_a_refused_update(manifest, was_on)
+            refused.args = (f"{refused} {said}".rstrip(),)
             raise
 
-    def _put_back_a_refused_update(self, manifest: Manifest) -> str:
+    def _refuse_a_core_module_name(self, manifest: Manifest) -> None:
+        """Refuse a player's server module whose name the core's own `modules/` already uses (T611).
+
+        Read from the core's checkout on the disk every time, before anything is cloned or
+        copied: the core moves with "Update to latest", so an Update of a module that
+        installed cleanly meets the name later (an Update runs this `install()`). Remove is
+        not asked, so the way out stays.
+        """
+        if manifest.type != "module" or manifest.origin is None:
+            return
+        core = core_modules.same_name_in(
+            manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
+        )
+        if core is not None:
+            installed = os.path.lexists(self.clone_dir(manifest))
+            said = core_modules.sentence(manifest.id, core, CORE_MODULES_DIR, installed=installed)
+            raise ApplyRefusal(f"{said} Nothing was changed." if installed else said)
+
+    def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:
+        """Where an outside add-on or database package's clone is, before its Update (T611)."""
+        if manifest.type != "mod" or manifest.origin is None:
+            return None
+        head: str | None = self._reader("head_sha", HeadReader)(self.clone_dir(manifest))
+        return head
+
+    def _put_back_a_refused_update(self, manifest: Manifest, was_on: str | None = None) -> str:
+        if manifest.type == "mod":
+            return self._put_a_mod_back(manifest, was_on)
         if manifest.type != "module" or manifest.origin is None:
             return ""
         last = self.last_update(manifest)
@@ -632,6 +667,47 @@ class GuardedApplier(Applier):
         return (
             "Yu'lon put it back on the version it was on, so the next rebuild builds that one, "
             "and the version it refused is not offered again."
+        )
+
+    def _put_a_mod_back(self, manifest: Manifest, was_on: str | None) -> str:
+        """Put an add-on or database package's clone back on the commit it was on (T611).
+
+        Nothing compiles from it, so there is no build to fail and no move record
+        (`last_update()` is for a module): the commit read before the Update is the
+        place to go back to. Nothing of the rejected commit was applied -- the clone
+        is read before the first step -- so the checkout is all there is to restore,
+        and the version it refused is noted so Check for updates does not offer it again.
+        """
+        clone = self.clone_dir(manifest)
+        reader = self._reader("head_sha", HeadReader)
+        landed: str | None = reader(clone)
+        if was_on is None or landed is None or landed == was_on:
+            return ""
+        # `restore_rev` is `--force`, and "a caller must make its own check first"
+        # (`git.restore_rev`): the same one `put_back()` makes, here without a fetch.
+        if self._reset_cost(manifest, clone, history=False) is not None:
+            return (
+                f"Yu'lon did not put it back on the version it was on: files in "
+                f"{clone.relative_to(self.server_dir).as_posix()} were changed, and putting it "
+                "back would throw them away."
+            )
+        try:
+            self._reader("restore_rev", RevRestorer)(clone, was_on)
+        except (ApplyError, OSError) as exc:
+            return (
+                f"Yu'lon could not put it back on the version it was on ({exc}), so it is "
+                "still on the version that was just fetched."
+            )
+        problem = module_moves.skip(
+            self.server_dir, module_moves.key(manifest.type, manifest.id), tip=landed
+        )
+        if problem:
+            logger.warning(f"{manifest.id} was put back, but not recorded: {problem}")
+        if problem:
+            return "Yu'lon put it back on the version it was on."
+        return (
+            "Yu'lon put it back on the version it was on, and the version it refused is not "
+            "offered again."
         )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
