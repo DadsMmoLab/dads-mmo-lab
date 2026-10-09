@@ -1560,6 +1560,7 @@ def build_window() -> object:
             opened = controllers.get((install.game, install.server_dir))
             if opened is not None:
                 opened.put_default_addons_later()  # T612: off the Play path, a few seconds on
+                opened.refresh_updates_later()  # T621: add-on and module counts, once a day
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
     # The Catalog was made current before `currentChanged` was connected, so

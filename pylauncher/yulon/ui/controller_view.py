@@ -1914,6 +1914,14 @@ class ControllerServices:
     which refusals — belongs below this seam, in `docker.apply_module_sql()`,
     which is where 8.7a's "not while the world is running" guard lives.
     """
+    module_refresh: Callable[[threading.Event], tuple[apply_module.ModuleUpdate, ...]] | None = None
+    """The same counts as `module_updates`, kept up to date in the background (T621).
+
+    Takes the `Event` that ends it (a Quit, or a press that starts) and returns the rows of
+    the day's cache: a clone counted within the day is not asked again, one that could not be
+    asked keeps its count, and `()` means "nothing to say". Bounded: every fetch it runs
+    ends on a timeout. `refresh_updates()` runs it on a worker; Play never does.
+    """
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None
     """How far behind each installed module is, or None for a game with no modules.
 
@@ -2760,6 +2768,9 @@ def _assemble(
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
+    module_refresh: (
+        Callable[[threading.Event], tuple[apply_module.ModuleUpdate, ...]] | None
+    ) = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None,
@@ -2832,6 +2843,7 @@ def _assemble(
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
+        module_refresh=module_refresh,
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
@@ -3405,6 +3417,16 @@ def _for_wotlk(
         # a future core that compiles modules and imports differently.
         module_updates=(
             (lambda: wotlk_modules.module_updates(server_dir, user_game=user_game))
+            if entry.has_manifests
+            else None
+        ),
+        # T621: the same counts in the background, bounded, once a day per clone.
+        module_refresh=(
+            (
+                lambda cancel: wotlk_modules.refresh_module_updates(
+                    server_dir, cancel, user_game=user_game
+                )
+            )
             if entry.has_manifests
             else None
         ),
@@ -4199,6 +4221,12 @@ def _for_tortoise(
         # with the repository, dirty-tree and local-commit checks.
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
+        ),
+        # T621: the same counts in the background, bounded, once a day per clone.
+        module_refresh=(
+            (lambda cancel: tortoise_modules.refresh_module_updates(server_dir, cancel))
+            if entry.has_manifests
+            else None
         ),
         # T380: the folders AND the settings-only mods (Experience Rates, Message
         # of the Day, Performance Stats), which leave no folder.
@@ -7033,6 +7061,15 @@ MODULE_UPDATES_NO_MODULES = (
 )
 """Why the button is dead on the three CMaNGOS games — `MODULE_SQL_NO_IMPORTER`'s reason."""
 
+REFRESH_FIRST_MS = 20_000
+"""How long after a tab opens the background update refresh first looks (T621).
+
+After the window is up and after T612's add-on put-in (5 s), so neither waits for a fetch.
+"""
+
+REFRESH_AGAIN_MS = 60 * 60 * 1000
+"""How often a tab left open looks again. The cache makes the answer once a day per clone."""
+
 MODULE_UPDATES_RUNNING = "Asking each installed module's upstream how far behind it is…"
 
 MODULE_UPDATES_NONE = (
@@ -7530,6 +7567,11 @@ class ControllerView(QWidget):
         # the first to finish clears it while a second runs, so the guards that keep a
         # Rebuild off the record of module updates read this count instead.
         self._module_jobs = 0
+        # T621: the background update refresh. One at a time; `_refresh_cancel` is the
+        # running one's (a fresh Event per run), set by whatever should not wait for it.
+        self._refresh_running = False
+        self._refresh_cancel = threading.Event()
+        self._refresh_again_ms = REFRESH_AGAIN_MS
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -8444,6 +8486,8 @@ class ControllerView(QWidget):
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
         self._closed = True
+        # T621: the background refresh ends first, so the join below is not held by a fetch.
+        self._stop_update_refresh()
         # T158: a stop still waiting for a world to load gives up at its next
         # look and sends nothing, so the joins below are not held by a load
         # and the world is left running rather than signalled mid-load.
@@ -9641,6 +9685,7 @@ class ControllerView(QWidget):
         """
         waited = wait_for(self._busy_job) if self._busy else None
         if busy:
+            self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
         self._busy = busy
         self._busy_job = job if busy else ""
@@ -11620,6 +11665,7 @@ class ControllerView(QWidget):
         """
         if self.services.set_play_client_dir is None or self._play_pending:
             return
+        self._stop_update_refresh()  # T621: Play is network-free; a refresh does not run beside it
         if self.services.play_client_dir is None:
             self.make_play_client()
             return
@@ -17358,6 +17404,7 @@ class ControllerView(QWidget):
     ) -> None:
         """`_run()` for a Modules tab job: counted until its done or failed slot ends it."""
         self._module_jobs += 1
+        self._stop_update_refresh()  # T621: a press that writes into the clones goes first
         self._run(work, on_done, on_error)
 
     def _module_job_ended(self) -> None:
@@ -17455,6 +17502,69 @@ class ControllerView(QWidget):
         self._note_session_facts(result, acted_on)
         self.reload_modules()
 
+    def refresh_updates_later(self, milliseconds: int = REFRESH_FIRST_MS) -> None:
+        """A tab opened at start-up: count the add-ons and modules a little later (T621).
+
+        Not on the spot, so the window and the work T612 does at start (`put_default_addons_
+        later()`) come first; and again every `REFRESH_AGAIN_MS` for as long as the tab stays
+        open. What makes it once a day is the cache the route reads, not this timer: a look
+        that finds every clone counted within the day asks nobody anything.
+        """
+        if self.services.module_refresh is not None and not getattr(self, "_closed", False):
+            QTimer.singleShot(milliseconds, self, self._refresh_tick)
+
+    @Slot()
+    def _refresh_tick(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self.refresh_updates()
+        QTimer.singleShot(self._refresh_again_ms, self, self._refresh_tick)
+
+    def refresh_updates(self) -> None:
+        """Count how far behind the installed add-ons and modules are, quietly (T621).
+
+        Off the GUI thread, one at a time, and only when nothing else is going on: not
+        while a server job, a Modules tab job or a Play is under way (those may write into
+        the very clones it fetches into, and Play is the path T612 made network-free), and
+        never when the tab is closing. It shows nothing of its own: the module report is
+        not touched, no button changes. What it finds becomes the update chips, as if
+        Check for updates had been pressed; a run that failed, found nothing or was cancelled
+        changes nothing, and the old counts stay.
+
+        A job that starts while it runs ends it (`_stop_update_refresh()`), and so does a
+        Quit: its fetches take their `cancel` and end within a fifth of a second.
+        """
+        route = self.services.module_refresh
+        if route is None or getattr(self, "_closed", False) or self._refresh_running:
+            return
+        if self._busy or self._module_job_running() or self._play_pending:
+            return
+        if self._waits_for_the_distro("update-refresh", self.refresh_updates):
+            return
+        cancel = threading.Event()
+        self._refresh_cancel = cancel
+        self._refresh_running = True
+        self._run(lambda: route(cancel), self._refresh_done, self._refresh_failed)
+
+    def _stop_update_refresh(self) -> None:
+        """Tell a running background refresh to stop; its answer, when it comes, is dropped."""
+        self._refresh_cancel.set()
+
+    @Slot(object)
+    def _refresh_done(self, result: object) -> None:
+        self._refresh_running = False
+        if self._refresh_cancel.is_set() or getattr(self, "_closed", False):
+            return
+        if not isinstance(result, tuple) or not result:
+            return
+        self._note_counts(result)
+        self.reload_modules()
+
+    @Slot(object)
+    def _refresh_failed(self, exc: object) -> None:
+        self._refresh_running = False
+        logger.warning(f"background update refresh: {exc}")
+
     @Slot()
     def check_module_updates(self) -> None:
         """Ask each installed module how far behind its upstream it is (checklist 8.7a).
@@ -17502,8 +17612,15 @@ class ControllerView(QWidget):
         # client addons in `sql_scripts/clones/`).
         # `Behind.UNCOUNTED` is kept (T147): a shallow checkout that is behind
         # by a number it cannot prove still has an update to offer.
+        self._note_counts(result)
+        self.reload_modules()
+
+    def _note_counts(self, result: Sequence[apply_module.ModuleUpdate]) -> None:
+        """Keep what the rows counted, for the chips: the Check press's and the refresh's."""
         self._behind = {
-            (row.family, row.key): row.behind for row in result if is_behind(row.behind)
+            (row.family, row.key): row.behind
+            for row in result
+            if row.behind is not None and is_behind(row.behind)
         }
         self._put_back_tip = {
             (row.family, row.key): row.put_back_tip for row in result if row.put_back_tip
@@ -17514,7 +17631,6 @@ class ControllerView(QWidget):
             for row in result
             if row.release and row.release == row.installed_release
         }
-        self.reload_modules()
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
