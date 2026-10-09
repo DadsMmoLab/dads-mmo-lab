@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- An older Tortoise server is offered **Turn it off** for its SQL log spam on the Tuning tab, without a full reset.
 
 ### Changed
 
