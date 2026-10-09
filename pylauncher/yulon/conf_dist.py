@@ -250,7 +250,7 @@ def reads_unsigned(default: str, words: str | None) -> bool:
 _TOGGLE_IN_PROSE = re.compile(
     r"\b(?:enable[ds]?|disable[ds]?|on|off|true|false|yes|no|toggle|whether)\b", re.IGNORECASE
 )
-_TOGGLE_IN_NAME = re.compile(r"enable|disable|debug|trace|announce|allow", re.IGNORECASE)
+_TOGGLE_IN_NAME = re.compile(r"enable|disable|announce|allow", re.IGNORECASE)
 _A_QUANTITY = re.compile(
     r"\b(?:how many|interval|seconds?|minutes?|hours?|days?|delay|timeout|count|number of|"
     r"amount|maximum|minimum|limit|level)\b",
@@ -359,7 +359,7 @@ def _read_card(
     if text is None:
         return (), None
     sources = [server_dir / f"{file}{DIST_SUFFIX}"]
-    if template is not None and ".." not in PurePosixPath(template).parts:
+    if template is not None and _is_inside_the_clone(template):
         sources.append(clone_dir(manifest) / template)
     for source in sources:
         dist = _plain_text(source, server_dir)
@@ -367,6 +367,14 @@ def _read_card(
         if keys:
             return keys, text
     return (), None
+
+
+def _is_inside_the_clone(template: str) -> bool:
+    """A template path that stays in the clone: relative, no `..`, in either separator style."""
+    if "\\" in template:
+        return False
+    path = PurePosixPath(template)
+    return bool(template) and not path.is_absolute() and ".." not in path.parts
 
 
 def _plain_text(path: Path, server_dir: Path) -> str | None:

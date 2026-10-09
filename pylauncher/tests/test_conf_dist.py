@@ -382,12 +382,18 @@ def test_a_zero_or_one_default_with_nothing_saying_it_is_a_toggle_is_a_number() 
         ("Mod.Thing", "1 stays as a corpse. 0 restores stock behaviour."),
         ("Mod.EnableThing", ""),
         ("Mod.DisableThing", ""),
-        ("Mod.Debug", ""),
+        ("Mod.AllowThing", ""),
     ],
 )
 def test_what_makes_a_zero_or_one_default_a_switch(key: str, words: str) -> None:
     comment = f"# {words}\n" if words else ""
     assert _by_key(f"{comment}{key} = 1\n")[key].type == "bool"
+
+
+def test_a_debug_or_trace_name_alone_does_not_make_a_switch() -> None:
+    """Codex review: `DebugLevel = 1` may take 2, so the name `Debug` proves nothing."""
+    found = _by_key("Mod.DebugLevel = 1\nMod.TraceOutput = 0\n")
+    assert [item.type for item in found.values()] == ["int", "int"]
 
 
 def test_a_decimal_default_is_text() -> None:
@@ -544,6 +550,20 @@ def test_with_no_dist_beside_it_the_clones_template_is_read(tmp_path: Path) -> N
     _put(tmp_path, "modules/mod-x/conf/mod_x.conf.dist", "# From the clone\nClone.Key = 1\n")
     (row,) = _rows(tmp_path)
     assert (row.key, row.explain, row.current) == ("Clone.Key", "From the clone", "3")
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["../other/mod_x.conf.dist", "conf/../../other.conf.dist", "..\\other\\x.conf.dist", "{abs}"],
+)
+def test_a_template_that_leaves_the_clone_is_not_read(tmp_path: Path, template: str) -> None:
+    """Codex review: a template path is the clone's own, in either separator style."""
+    _put(tmp_path, CONF, "Other.Key = 1\n")
+    _put(tmp_path, "modules/other/mod_x.conf.dist", "Other.Key = 1\n")
+    _put(tmp_path, "modules/other.conf.dist", "Other.Key = 1\n")
+    template = template.replace("{abs}", str(tmp_path / "modules/other.conf.dist"))
+    manifest = _manifest(conf=[{"file": CONF, "template": template, "keys": []}])
+    assert _rows(tmp_path, [manifest]) == ()
 
 
 def test_no_dist_anywhere_is_no_card(tmp_path: Path) -> None:
