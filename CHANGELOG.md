@@ -14,8 +14,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 
 ### Fixed
+- A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 
 ### Changed
 
@@ -36,7 +38,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A new Tortoise server no longer fills its log with every database query; older ones get this with **Reset to defaults**.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
-- A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
 - The bot counts see an indented setting in a hand-edited conf.
 - A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
