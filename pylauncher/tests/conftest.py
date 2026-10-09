@@ -1532,7 +1532,7 @@ def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_server_reservation_runs_at_a_real_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_server_reservation_runs_at_a_real_docker() -> Iterator[None]:
     """A lifecycle command or a press makes no real server reservation (T568).
 
     `docker.server_claim()` is a `docker run` that the daemon arbitrates, and an engine or
@@ -1543,4 +1543,9 @@ def _no_server_reservation_runs_at_a_real_docker(monkeypatch: pytest.MonkeyPatch
     """
     from yulon import docker
 
-    monkeypatch.setattr(docker, "RESERVATIONS_ON", False)
+    # Not through `monkeypatch`: a test that calls `monkeypatch.undo()` part-way (several do)
+    # would switch the reservations back on under the rest of it.
+    was = docker.RESERVATIONS_ON
+    docker.RESERVATIONS_ON = False
+    yield
+    docker.RESERVATIONS_ON = was

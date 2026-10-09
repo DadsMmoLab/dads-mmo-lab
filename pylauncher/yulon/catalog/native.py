@@ -6494,6 +6494,36 @@ _PRESS_CANCEL_POLL = 0.05
 """How often `PressCancel.wait()` looks at the player's Stop. Not a deadline."""
 
 
+_LOSS_POLL_SECONDS = 0.2
+"""How often the watcher of a press's reservation looks at whether the press is still running."""
+
+
+def _end_on_loss(
+    held: docker.ClaimHeld, cancel: threading.Event | None, done: threading.Event
+) -> threading.Event:
+    """Make the loss of `held` the press's own Stop: set its `cancel` when `held.lost` is set.
+
+    Codex adversarial review: a press whose reservation another Yu'lon's "Stop anyway" removed
+    must end at its next check, as a Stop does. The press's OWN cancel is set, not wrapped:
+    the job runner, `withdraw_stop()` and "Stop now anyway" (`CancelWithForce`) all read that
+    object. Returns the cancel to hand the press (a new one when the caller gave none).
+    `done` ends the watcher when the press does.
+    """
+    ending = cancel if cancel is not None else threading.Event()
+    if held.lost.is_set():
+        ending.set()
+        return ending
+
+    def watch() -> None:
+        while not done.is_set():
+            if held.lost.wait(_LOSS_POLL_SECONDS):
+                ending.set()
+                return
+
+    threading.Thread(target=watch, name="yulon-reservation-loss", daemon=True).start()
+    return ending
+
+
 def _reserving(
     press: str | Callable[[Mapping[str, Any]], str],
 ) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
@@ -6515,11 +6545,10 @@ def _reserving(
             given = signature.bind(self, *args, **kwargs).arguments
             options = given.get("options") or InstallOptions()
             named = press if isinstance(press, str) else press(given)
+            done = threading.Event()
             with self._reservation(self.server_dir(options), named, given.get("cancel")) as held:
                 if held is not None:
-                    # Codex adversarial review: a press whose reservation another Yu'lon's
-                    # "Stop anyway" removed must end at its next check, as a Stop does.
-                    kwargs["cancel"] = PressCancel(given.get("cancel"), held.lost)
+                    kwargs["cancel"] = _end_on_loss(held, given.get("cancel"), done)
                 try:
                     yield from method(self, *args, **kwargs)
                 except GeneratorExit:
@@ -6528,6 +6557,8 @@ def _reserving(
                     if held is not None and held.lost.is_set():
                         yield forgetting.reservation_lost_line(named)
                     raise
+                finally:
+                    done.set()
 
         return reserved
 
@@ -6761,6 +6792,13 @@ class StagedInstaller:
             yield None
             return
         refs = self.image_refs_at(server_dir) if images is None else tuple(images)
+        try:
+            spec: docker.ContainerSpec | None = self.entry.container_spec()
+        except InstallerError as unreadable:
+            # The compose file could not be read: the press meets that itself, in its own
+            # words; the reservation falls back to the built refs for its image.
+            logger.info(f"no container spec for the reservation of {server_dir}: {unreadable}")
+            spec = None
         stack = ExitStack()
         held: docker.ClaimHeld | None = None
         try:
@@ -6769,7 +6807,7 @@ class StagedInstaller:
                     server_dir,
                     press=press,
                     images=refs,
-                    spec=self.entry.container_spec(),
+                    spec=spec,
                     cancel=cancel,
                     label=self.entry.name,
                 )
@@ -6783,7 +6821,9 @@ class StagedInstaller:
         except docker.ServerHeldError as refused:
             raise InstallerError(str(refused)) from refused
         with stack:
-            yield held if isinstance(held, docker.ClaimHeld) else None
+            # A "reservation" the module made while reservations are off has no name and
+            # nothing to lose: the press is not watched for it.
+            yield held if isinstance(held, docker.ClaimHeld) and held.name else None
 
     def server_dir(self, options: InstallOptions) -> Path:
         """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""
@@ -6961,7 +7001,9 @@ class StagedInstaller:
                         if held is not None:
                             # Codex review: a reservation another Yu'lon's "Stop anyway"
                             # removed ends the install at its next check, as a Stop does.
-                            ctx = replace(ctx, cancel=PressCancel(ctx.cancel, held.lost))
+                            over = threading.Event()
+                            reservation.callback(over.set)
+                            ctx = replace(ctx, cancel=_end_on_loss(held, ctx.cancel, over))
                     # WHERE THE USER IS, on its own line and never folded into
                     # the `--- <name>` marker. A format everything greps is not
                     # a place to add fields.

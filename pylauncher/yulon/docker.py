@@ -640,8 +640,8 @@ def hold_the_server(
 
 
 LOST_RESERVATION = (
-    "This server's reservation in Docker ended from elsewhere while this job was running (it "
-    "was stopped from another Yu'lon, or Docker restarted), so nothing was started."
+    "This server's reservation in Docker ended from elsewhere while this job was running "
+    "(another Yu'lon stopped it, or Docker restarted), so nothing was started."
 )
 """Why a start, recreate or remove inside a lost reservation is refused (T568 section 3)."""
 
@@ -8661,19 +8661,20 @@ def _new_reservation(
     return _Reservation(held, claim, letting_go, press)
 
 
-def end_reservation(holder: ServerHolder) -> bool:
+def end_reservation(holder: ServerHolder, *, wsl_distro: str | None = None) -> bool:
     """Remove the reservation `holder` read, by the container id it carried; True once gone.
 
     For "Stop anyway" (the owner's decision of 2026-10-09) and for "Clear it" on this user's
     own leftover. By id and never by name: a newer reservation of the same name is another
     press's and is not removed. A holder with no id (Docker would not say) removes nothing.
     """
+    distro = wsl_distro or holder.wsl_distro
     if not holder.container:
         return False
-    removed = _remove_claim(holder.container, wsl_distro=holder.wsl_distro)
+    removed = _remove_claim(holder.container, wsl_distro=distro)
     # "Removal already in progress" is not a failure, only not yet done: the Stop that follows
     # must not meet the container dying.
-    return _wait_gone(holder.name, holder.wsl_distro) if holder.name else removed
+    return _wait_gone(holder.name, distro) if holder.name else removed
 
 
 def reservation_holder(

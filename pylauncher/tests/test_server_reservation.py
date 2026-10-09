@@ -703,20 +703,47 @@ class _Toy:
         yield "done"
 
 
-def test_a_press_is_cancelled_when_its_reservation_is_lost(tmp_path: Path) -> None:
+def test_a_press_is_stopped_when_its_reservation_is_lost(tmp_path: Path) -> None:
+    """The press's OWN cancel is set, so the job runner, `withdraw_stop()` and "Stop now anyway"
+    (which read that very object) see it as they see a Stop.
+
+    Mutation this catches: the loss not reaching the cancel (the press goes on to its end).
+    """
     held = docker.ClaimHeld("yulon-busy-x", threading.Event())
     toy = _Toy(held)
     stop = threading.Event()
     lines = toy.press(InstallOptions(server_dir=tmp_path), cancel=stop)
     assert next(lines) == "working"
     (cancel,) = toy.seen
-    assert cancel is not stop and not cancel.is_set()
+    assert cancel is stop and not stop.is_set()
     held.lost.set()
-    assert cancel.is_set(), "the press does not see its reservation lost"
-    assert not stop.is_set(), "the player's own Stop was set for it"
-    stop.set()
-    assert cancel.is_set() and cancel.player_stopped()
+    deadline = time.monotonic() + HANG_BOUND
+    while not stop.is_set():
+        assert time.monotonic() < deadline, "the press does not see its reservation lost"
+        time.sleep(0.02)
     lines.close()
+
+
+def test_a_press_with_no_cancel_is_given_one_the_loss_sets(tmp_path: Path) -> None:
+    held = docker.ClaimHeld("yulon-busy-x", threading.Event())
+    toy = _Toy(held)
+    lines = toy.press(InstallOptions(server_dir=tmp_path))
+    next(lines)
+    (cancel,) = toy.seen
+    assert isinstance(cancel, threading.Event) and not cancel.is_set()
+    held.lost.set()
+    assert cancel.wait(HANG_BOUND)
+    lines.close()
+
+
+def test_the_loss_watcher_ends_with_its_press(tmp_path: Path) -> None:
+    before = {t for t in threading.enumerate() if t.name == "yulon-reservation-loss"}
+    toy = _Toy(docker.ClaimHeld("yulon-busy-x", threading.Event()))
+    list(toy.press(InstallOptions(server_dir=tmp_path)))
+    deadline = time.monotonic() + HANG_BOUND
+    while {t for t in threading.enumerate() if t.name == "yulon-reservation-loss"} - before:
+        assert time.monotonic() < deadline, "the watcher outlived its press"
+        time.sleep(0.05)
 
 
 def test_a_press_stopped_by_a_loss_says_what_happened_and_what_to_press(tmp_path: Path) -> None:
@@ -728,7 +755,7 @@ def test_a_press_stopped_by_a_loss_says_what_happened_and_what_to_press(tmp_path
     assert out[0] == "working"
     said = out[-1]
     assert "A toy press" in said and "ended from elsewhere" in said, said
-    assert "started nothing" in said and "Press Start or Rebuild" in said, said
+    assert "started nothing" in said and "Press Start, or \u201cRebuild" in said, said
 
 
 def test_a_press_that_failed_for_another_reason_adds_nothing(tmp_path: Path) -> None:
@@ -813,3 +840,25 @@ def test_an_install_whose_reservation_is_lost_stops_before_the_import(tmp_path: 
     with pytest.raises(InstallerError):
         install(rec, tmp_path / "wow", server_claim=claim)
     assert "one-shot:ac-db-import" not in rec.calls, rec.calls
+
+
+def test_a_reservation_already_lost_when_the_press_starts_stops_it_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not left to a watcher thread: the press's first check must already see the Stop.
+
+    The watcher is made unable to run, so only the entry check can answer.
+    Mutation this catches: the entry check dropped (the install test above then passes or
+    fails by how fast its stages run).
+    """
+
+    class NoThread:
+        def __init__(self, *_a: Any, **_kw: Any) -> None: ...
+
+        def start(self) -> None: ...
+
+    monkeypatch.setattr(native.threading, "Thread", NoThread)
+    lost = threading.Event()
+    lost.set()
+    cancel = native._end_on_loss(docker.ClaimHeld("yulon-busy-x", lost), None, threading.Event())
+    assert cancel.is_set()

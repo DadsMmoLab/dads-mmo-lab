@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from yulon import server_build_presses
+
 BUTTON_LABEL = "Remove from Yu'lon…"
 """The tab menu's entry and the Server tab's button (`controller_view.REMOVE_FROM_YULON`)."""
 
@@ -165,9 +167,9 @@ def reservation_lost_line(press: str) -> str:
     """What a press says last when its reservation ended from elsewhere while it ran (T568)."""
     return (
         f"This server's reservation in Docker ended from elsewhere while \u201c{press}\u201d was "
-        "running (it was stopped from another Yu'lon, or Docker restarted), so the job was "
-        "stopped and started nothing after that. Press Start or Rebuild to bring the server "
-        "up on what is on disk."
+        "running (another Yu'lon stopped it, or Docker restarted), so the job ended and "
+        f"started nothing after that. Press Start, or \u201c{server_build_presses.REBUILD}\u201d, "
+        "to bring the server up on what is on disk."
     )
 
 

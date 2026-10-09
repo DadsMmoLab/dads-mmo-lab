@@ -1292,6 +1292,8 @@ def test_a_stop_that_failed_on_a_run_that_has_not_planned_keeps_the_request(
 def test_restart_world_says_which_half_failed() -> None:
     class Stops:
         server_dir = Path("srv")
+        spec = None  # T568: a lifecycle command reserves by spec; none here
+        wsl_distro = None
 
         def refuse_start(self) -> None:
             return None
@@ -1306,6 +1308,8 @@ def test_restart_world_says_which_half_failed() -> None:
 
     class Starts:
         server_dir = Path("srv")
+        spec = None  # T568: a lifecycle command reserves by spec; none here
+        wsl_distro = None
 
         def refuse_start(self) -> None:
             return None
