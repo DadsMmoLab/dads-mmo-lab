@@ -928,3 +928,11 @@ def test_retention_is_a_keep_rule_run_through_the_same_checks(server: Path, call
     assert set(done.names) == {a.name, b.name}
     assert c.exists()
     assert calls.order[:2] == ["holder", "lease"]
+
+
+@pytest.mark.parametrize(
+    ("size", "said"),
+    [(0, "0 bytes"), (32, "32 bytes"), (2048, "2 KB"), (5 * 1024 * 1024, "5.0 MB")],
+)
+def test_sizes_are_said_in_the_unit_that_does_not_round_them_to_zero(size: int, said: str) -> None:
+    assert backup_shelf.size_text(size) == said

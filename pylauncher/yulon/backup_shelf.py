@@ -545,7 +545,7 @@ def carry_out(
     if spec is not None:
         holder = docker.reservation_holder(server_dir, wsl_distro=wsl_distro)
         if holder is not None and not holder.here:
-            raise ShelfRefusal(f"{_holder_refusal(holder, server_dir)} Nothing was deleted.")
+            raise ShelfRefusal(_holder_refusal(holder, server_dir))
     try:
         with docker.maintenance_lease(
             server_dir,
@@ -779,7 +779,11 @@ def describe(r: ShelfRow, game_id: str | None = None) -> str:
 
 
 def size_text(n: int) -> str:
-    return f"{n / (1024 * 1024):.1f} MB" if n >= 1024 * 1024 else f"{max(n, 0) / 1024:.0f} KB"
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{max(n, 0)} bytes"
 
 
 @dataclass(frozen=True)

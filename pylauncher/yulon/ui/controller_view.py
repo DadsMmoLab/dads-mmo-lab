@@ -15464,7 +15464,7 @@ class ControllerView(QWidget):
         self._shelf = shelf
         for r in shelf.rows:
             text = backup_shelf.describe(r, shelf.game_id)
-            item = QListWidgetItem(f"{text}  \u00b7 kept" if r.kept_because else text)
+            item = QListWidgetItem(f"{text} \u00b7 kept" if r.kept_because else text)
             item.setData(Qt.ItemDataRole.UserRole, str(shelf.folder / r.name))
             item.setData(Qt.ItemDataRole.UserRole + 1, r.name)
             item.setToolTip(

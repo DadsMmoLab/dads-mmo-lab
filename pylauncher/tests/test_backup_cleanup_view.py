@@ -295,7 +295,7 @@ def test_a_backup_running_in_another_yulon_refuses_the_delete_and_says_who(
     shown = view.maintenance_report.toPlainText()
     assert "Another Yu'lon" in shown
     assert "pk@THEIR-PC" in shown
-    assert "Nothing was deleted" in shown
+    assert "Nothing was changed" in shown
 
 
 def test_a_backup_running_in_this_yulon_refuses_the_delete(
