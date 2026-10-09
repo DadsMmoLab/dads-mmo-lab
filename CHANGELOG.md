@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
 - On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.
 - **Pack for another computer…** moves accounts and characters into a server of the same game on another computer.
+- **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
