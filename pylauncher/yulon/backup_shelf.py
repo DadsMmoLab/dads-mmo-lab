@@ -780,7 +780,8 @@ class Seam:
     def read(self) -> Shelf:
         return read_shelf(self.server_dir, game_id=self.game_id)
 
-    def carry_out(self, plan: Plan) -> Removed:
+    def delete(self, plan: Plan) -> Removed:
+        """Remove what `plan` names, if the folder is still as the plan saw it (worker)."""
         return carry_out(
             self.server_dir, plan, game_id=self.game_id, spec=self.spec, wsl_distro=self.wsl_distro
         )

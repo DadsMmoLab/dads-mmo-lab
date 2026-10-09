@@ -2813,7 +2813,7 @@ def _assemble(
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
-        shelf=backup_shelf.Seam(server_dir, entry.id, spec, wsl_distro),
+        shelf=backup_shelf.Seam(server_dir, entry.id, spec=spec, wsl_distro=wsl_distro),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         uninstall=uninstall,
@@ -15540,7 +15540,7 @@ class ControllerView(QWidget):
             lines.append(f"It cannot be restored: {row.problem}")
         if not ask_yes_no(self, "Delete this backup?", "\n\n".join(lines)):
             return
-        self._run_shelf_job("the delete", lambda: seam.carry_out(plan), "Deleting\u2026")
+        self._run_shelf_job("the delete", lambda: seam.delete(plan), "Deleting\u2026")
 
     @Slot()
     def clean_up_backups(self) -> None:
@@ -15575,7 +15575,7 @@ class ControllerView(QWidget):
         if plan is None or not plan.names:
             self.maintenance_report.setPlainText("Saved. Nothing was deleted.")
             return
-        self._run_shelf_job("the clean-up", lambda: seam.carry_out(plan), "Cleaning up\u2026")
+        self._run_shelf_job("the clean-up", lambda: seam.delete(plan), "Cleaning up\u2026")
 
     def _run_shelf_job(self, job: str, work: Callable[[], object], said: str) -> None:
         self._shelf_job = job
