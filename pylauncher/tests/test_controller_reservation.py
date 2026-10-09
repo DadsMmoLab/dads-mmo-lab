@@ -15,9 +15,11 @@ from typing import Any
 import pytest
 
 from tests.conftest import HANG_BOUND
+from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from yulon import docker, platform
+from yulon.catalog import native
 from yulon.controller import Controller
 
 IMAGE = "yulon.local/wotlk-server:native"
@@ -123,6 +125,7 @@ def test_stopping_the_other_server_reserves_its_folder_and_is_refused_while_it_i
     ours, other = tmp_path / "ours", tmp_path / "other"
     ours.mkdir()
     other.mkdir()
+    (other / native.STATE_FILE).write_text("{}", encoding="utf-8")  # a Yu'lon server
     stopped: list[tuple[list[str], bool]] = []
 
     def stop_containers(names: list[str], **_kw: Any) -> None:
@@ -171,6 +174,7 @@ def _wsl_other(
     ours, other = tmp_path / "ours", tmp_path / "unc" / "other"
     ours.mkdir()
     other.mkdir(parents=True)
+    (other / native.STATE_FILE).write_text("{}", encoding="utf-8")  # a Yu'lon server
     stopped: list[tuple[list[str], bool]] = []
 
     def stop_containers(names: list[str], **_kw: Any) -> None:
@@ -237,3 +241,65 @@ def test_a_wsl_share_that_is_not_there_is_left_unreserved_and_the_stop_goes_ahea
     controller.port_conflicts = lambda: ["o-world"]  # type: ignore[method-assign]
     assert controller.stop_conflicting() == ["o-db", "o-world"]
     assert stopped == [(["o-db", "o-world"], False)]
+
+
+def test_a_blocker_that_is_not_a_yulon_server_is_stopped_as_before_and_gets_no_id_file(
+    fake_docker: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's own `~/myproj` MySQL compose holding the port: no id file written into it, no
+    reservation container started from its image, and the stop is not refused when that image
+    cannot run one (a distroless image). Opus review of the rework.
+
+    Mutation this catches: every visible working folder reserved, not only Yu'lon's.
+    """
+    ours, myproj, yulon_other = tmp_path / "ours", tmp_path / "myproj", tmp_path / "yulon-other"
+    for folder in (ours, myproj, yulon_other):
+        folder.mkdir()
+    (yulon_other / native.STATE_FILE).write_text("{}", encoding="utf-8")
+    (fake_docker / "claim-refused").write_text("", encoding="utf-8")  # an image with no `sh`
+    dirs = {"my-mysql": str(myproj), "y-world": str(yulon_other)}
+    stopped: list[list[str]] = []
+    monkeypatch.setattr(docker, "stop_containers", lambda names, **_kw: stopped.append(names))
+    monkeypatch.setattr(docker, "container_project", lambda *_a, **_kw: None)
+    monkeypatch.setattr(docker, "container_working_dir", lambda name, **_kw: dirs[name])
+    controller = _Recorded(ours)
+    controller.port_conflicts = lambda: ["my-mysql"]  # type: ignore[method-assign]
+
+    assert controller.stop_conflicting() == ["my-mysql"]
+    assert stopped == [["my-mysql"]]
+    assert not (myproj / docker.FOLDER_ID_FILE).exists(), "an id file was written into ~/myproj"
+    assert [c for c in fake_calls(fake_docker) if c.startswith("run ")] == []
+
+    # A Yu'lon server in the way IS reserved, and a refused claim refuses the stop.
+    controller.port_conflicts = lambda: ["y-world"]  # type: ignore[method-assign]
+    with pytest.raises(docker.ServerReservationUnavailable):
+        controller.stop_conflicting()
+    assert stopped == [["my-mysql"]]
+
+
+def test_the_conf_half_of_repair_server_files_reserves_too(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """Opus review: "Repair server files" had its compose half reserved and its conf half not.
+
+    Mutation this catches: the conf repair writing straight through.
+    """
+    from yulon import install_wiring
+    from yulon.catalog.catalog import load_catalog
+    from yulon.catalog.installer import InstallerError
+
+    entry = load_catalog().get("wow-wotlk")
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / native.STATE_FILE).write_text("{}", encoding="utf-8")
+    route = install_wiring.repair_confs_for_app(entry, server)
+    assert route is not None
+    theirs = _holds(fake_docker, server, press="Update the server to latest…")
+    try:
+        with pytest.raises(InstallerError, match="Another Yu'lon is working on"):
+            route.repair()
+    finally:
+        theirs.kill()
+    assert sorted(p.name for p in server.iterdir() if p.name != docker.FOLDER_ID_FILE) == [
+        native.STATE_FILE
+    ], "a conf was written under another Yu'lon's job"

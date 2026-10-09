@@ -6813,6 +6813,17 @@ class StagedInstaller:
 
     # -- the contract ----------------------------------------------------
 
+    def reserved(
+        self, server_dir: Path, press: str
+    ) -> AbstractContextManager[docker.ClaimHeld | None]:
+        """This server's reservation for a press the caller runs itself (T568).
+
+        For the one press that is not a method here: the conf half of "Repair server files…"
+        (`install_wiring.repair_confs_for_app()`). Refuses with the holder's sentence as an
+        `InstallerError`; a folder Yu'lon has no record of reserves nothing.
+        """
+        return self._reservation(server_dir, press)
+
     @contextmanager
     def _reservation(
         self,

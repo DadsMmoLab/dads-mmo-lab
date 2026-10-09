@@ -526,7 +526,8 @@ class Controller:
         in a WSL distro (`wsl_distro`) -- a Linux path in that distro, read through its
         `\\\\wsl.localhost` share (T607; the other server's Docker is this one's, so its path is
         in this distro). A working dir this host cannot see, or one Docker has no label for, is
-        skipped (and logged), since there is no id file to put in it.
+        skipped (and logged). So is a folder Yu'lon did not build (no `native.STATE_FILE`): the
+        user's own compose project; Yu'lon writes no id file into a folder that is not its own.
         """
         found: dict[Path, str] = {}
         for name in containers:
@@ -539,6 +540,12 @@ class Controller:
                 logger.info(f"no server folder this host can see for {name} ({working!r})")
                 continue
             if folder.resolve() == self.server_dir.resolve():
+                continue
+            if not (folder / native.STATE_FILE).is_file():
+                # Not a server Yu'lon built: the user's own compose project in the way.
+                # Stopped as before, unreserved -- no id file written into their folder, and
+                # no reservation container run from their image (T568, Opus review).
+                logger.info(f"{folder} is not a Yu'lon server; stopping {name} unreserved")
                 continue
             found.setdefault(folder, name)
         return found

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Collection, Iterable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
@@ -1063,6 +1064,10 @@ class InstallEngine(Protocol):
     """
 
     def remove_kept_build(self, options: InstallOptions | None = None) -> str: ...
+
+    def reserved(
+        self, server_dir: Path, press: str
+    ) -> AbstractContextManager[docker.ClaimHeld | None]: ...
 
     """Remove a kept build (`native.PARKED_TAG_SUFFIX`) now: the Server tab's press (T224)."""
 
