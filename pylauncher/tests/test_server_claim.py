@@ -272,3 +272,15 @@ def test_two_threads_of_one_process_share_one_reservation(fake_docker: Path, ser
         thread.join(HANG_BOUND)
     assert len(seen) == 2 and seen[0] is seen[1]
     assert len(_runs(fake_docker)) == 1
+
+
+def test_a_reservation_its_press_lets_go_is_not_lost(fake_docker: Path, server: Path) -> None:
+    """The release ends the CLI too, and that is not a loss (the watcher reads `letting_go`).
+
+    Mutation this catches: the release not telling the watcher, so every finished press looks
+    like one that was lost from elsewhere and the next one is refused.
+    """
+    with docker.server_claim(server, press="Update", images=[IMAGE]) as held:
+        pass
+    time.sleep(0.3)  # the watcher has seen the CLI end by now
+    assert not held.lost.is_set()
