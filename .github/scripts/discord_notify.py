@@ -290,12 +290,52 @@ def _retry_after(exc: urllib.error.HTTPError) -> float:
     return min(max(wait, 0.0), 30.0)
 
 
-def make_discord(thread_env: str, username: str) -> Discord | None:
+def make_discord(thread_env: str, username: str, quiet: bool = False) -> Discord | None:
     webhook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     if not webhook:
-        print("DISCORD_WEBHOOK_URL is not set: nothing to post.")
+        if not quiet:
+            print("DISCORD_WEBHOOK_URL is not set: nothing to post.")
         return None
     return Discord(webhook, os.environ.get(thread_env, ""), username)
+
+
+def release_targets(only_release_channel: bool) -> list[tuple[str, Discord]] | None:
+    """Where a release is posted: the main webhook and, when set, the release channel's.
+
+    Returns (name, Discord) pairs, in order, never the same webhook and thread twice.
+    With only_release_channel the main webhook is left out. None means the request
+    cannot be met (only_release_channel without a usable release webhook).
+    """
+    main = make_discord("DISCORD_RELEASE_THREAD_ID", "Yu'lon releases", quiet=True)
+    extra = os.environ.get("DISCORD_RELEASE_WEBHOOK_URL", "").strip()
+    second = (
+        Discord(extra, os.environ.get("DISCORD_RELEASE_CHANNEL_THREAD_ID", ""), "Yu'lon releases")
+        if extra
+        else None
+    )
+    if second is not None and main is not None and _same_target(main, second):
+        second = None
+    if only_release_channel:
+        if second is None:
+            print(
+                "only_release_channel needs DISCORD_RELEASE_WEBHOOK_URL set to a webhook "
+                "different from DISCORD_WEBHOOK_URL: nothing posted.",
+                file=sys.stderr,
+            )
+            return None
+        return [("release channel", second)]
+    targets = []
+    if main is not None:
+        targets.append(("main channel", main))
+    if second is not None:
+        targets.append(("release channel", second))
+    if not targets:
+        print("DISCORD_WEBHOOK_URL is not set: nothing to post.")
+    return targets
+
+
+def _same_target(a: Discord, b: Discord) -> bool:
+    return (a.base, a.thread_id) == (b.base, b.thread_id)
 
 
 def load_event() -> dict:
@@ -592,14 +632,16 @@ def _earlier_attempt_succeeded() -> bool:
     return False
 
 
-def cmd_release(tag: str) -> int:
+def cmd_release(tag: str, only_release_channel: bool = False) -> int:
     if not tag:
         print("No release tag given.", file=sys.stderr)
         return 1
     if _earlier_attempt_succeeded():
         return 0
-    discord = make_discord("DISCORD_RELEASE_THREAD_ID", "Yu'lon releases")
-    if discord is None:
+    targets = release_targets(only_release_channel)
+    if targets is None:
+        return 1
+    if not targets:
         return 0
     quoted = urllib.parse.quote(tag)
     try:
@@ -632,13 +674,16 @@ def cmd_release(tag: str) -> int:
         "color": COLOR_RELEASE,
         "footer": {"text": tag},
     }
-    try:
-        msg_id = discord.post(embed)
-    except Exception as exc:
-        log(f"Discord post failed for {tag} ({type(exc).__name__}: {exc}).")
-        return 1
-    log(f"Posted release {tag} to Discord (msg_id={msg_id}).")
-    return 0
+    posted = 0
+    for name, discord in targets:
+        try:
+            msg_id = discord.post(embed)
+        except Exception as exc:
+            log(f"Discord post to the {name} failed for {tag} ({type(exc).__name__}: {exc}).")
+            continue
+        posted += 1
+        log(f"Posted release {tag} to the {name} (msg_id={msg_id}).")
+    return 0 if posted else 1
 
 
 def main(argv=None) -> int:
@@ -648,12 +693,17 @@ def main(argv=None) -> int:
     sub.add_parser("issue")
     rel = sub.add_parser("release")
     rel.add_argument("--tag", default=os.environ.get("RELEASE_TAG", ""))
+    rel.add_argument(
+        "--only-release-channel",
+        action="store_true",
+        default=os.environ.get("RELEASE_ONLY_CHANNEL", "").strip().lower() == "true",
+    )
     args = parser.parse_args(argv)
     if args.command == "merged":
         return cmd_merged()
     if args.command == "issue":
         return cmd_issue()
-    return cmd_release(args.tag.strip())
+    return cmd_release(args.tag.strip(), args.only_release_channel)
 
 
 if __name__ == "__main__":
