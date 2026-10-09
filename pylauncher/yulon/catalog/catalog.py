@@ -1193,6 +1193,18 @@ class TrinityCoreMmaps(MmapPlan):
             "the world server runs beside it. A number: exactly that many."
         ),
     )
+    generation: Annotated[StrictInt, Field(ge=1)] = Field(
+        default=1,
+        description=(
+            "T244: which generator this entry's pin carries, a number only ever raised. Every "
+            "record of a run says the generation it was made under (absent: 1); when an update "
+            "or a return to the pin finds a COMPLETE set made under an older one, the set is "
+            "thrown away and made again, as a failed run's kept tiles always are. Raised when "
+            "the generator changes what it writes: Centurion's 2 (CENTURION 4948d1a9) finds a "
+            "map's own tiles by their file names and no longer overruns on a four-digit map id, "
+            "so sets made before it have the wrong tiles for maps 0, 1 and 30."
+        ),
+    )
     tile_header: MmapTileHeader | None = Field(
         default=None,
         description=(

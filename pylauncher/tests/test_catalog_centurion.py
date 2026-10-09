@@ -28,6 +28,14 @@ server to latest..." (full recompile in 648 s): world ready 12 s after the start
 online, SRP6 3.3.5a login ok/wrong/unknown, Stop clean. Not proved there: the SOAP
 command channel, because that box's Yu'lon profile had lost the app account's password.
 
+T218/T244 (2026-10-08) moved the pin to 4948d1a9, ten commits after 6c6472c3 (compared on GitHub):
+the console `.revive` null-session fix (cs_misc.cpp, #1767), the mmaps_generator four-digit map id
+fix (MapBuilder.cpp, #1769), the playerbot grind spot cache in 250 ms slices (#1768), a bot
+sidestep at a wall corner and enhancement shaman melee (PathGenerator.cpp/.h, MoveSplineInit.cpp,
+Playerbot/Pve and Pvp), and the `printf` example in worldserver.conf.dist put on one line (#1766,
+line 4548, after every rate line `server_rates.py` cites). No SQL, CMake, dbc, World.cpp or
+World.h change, so every reading above still holds.
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -53,7 +61,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "6c6472c3b6aeb89169d7d49c45af7f7eab326743"
+REV = "4948d1a9290cb1046eede1dbf289789200ea050e"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
@@ -129,9 +137,20 @@ def test_the_map_data_takes_maps_cameras_and_vmaps_and_the_trees_own_dbcs() -> N
     assert assemble.argv == (f"{CORE}/bin/vmap4assembler", "Buildings", "vmaps")
     assert TC.extract.dbc_overlay_from == "centurion/dbc"
     assert TC.required_maps == (0, 1, 530)
-    assert TC.mmaps.argv == (f"{CORE}/bin/mmaps_generator", "--threads", "{{THREADS}}")
+    # `stdbuf -oL` (T244): stdout into Docker's log is block-buffered, and an abort does not flush
+    # it, so the "last lines" after a crash were up to 4 KB stale and the progress lagged.
+    assert TC.mmaps.argv == (
+        "stdbuf",
+        "-oL",
+        f"{CORE}/bin/mmaps_generator",
+        "--threads",
+        "{{THREADS}}",
+    )
     assert TC.mmaps.background is True
     assert TC.mmaps.min_files == 500
+    # T244: raised with the pin that fixed the generator, so a complete set an older one made
+    # (wrong tiles for maps 0, 1 and 30) is thrown away by Update / Return to the pin.
+    assert TC.mmaps.generation == 2
 
 
 def test_the_world_conf_keeps_the_updater_off_and_plays_like_the_live_realm() -> None:
