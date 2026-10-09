@@ -303,12 +303,16 @@ _SQL_HEX = re.compile(r"(?i)(?P<pre>\bX['\"]|['\"])[0-9a-f]{32,}(?P<post>['\"])|
 quoted or `0x` hex blob of 32 digits or more (a SHA-1 hash, a session key, `v`, `s`) by shape."""
 
 _AUTH_HEADER = re.compile(
-    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization[\"']?[ \t]*[=:][ \t]*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
+    r"(?i)(?<![\w-])(?P<head>(?:proxy-)?authorization(?P<key_quote>[\"'])?[ \t]*[=:][ \t]*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'"
+    r"|(?(key_quote)(?:null|none|true|false|-?\d+(?:\.\d+)?)(?=[ \t]*(?:[,}\]]|$))|(?!))"
+    r"|[^\r\n]+)"
 )
 """An `Authorization` header: the scheme and everything after it, whatever the scheme is
 (Basic, Bearer, Digest's whole parameter list, NTLM, a scheme invented tomorrow). A quoted
-value ends at its quote, so a JSON log line keeps its other fields."""
+value ends at its quote, so a JSON log line keeps its other fields. After a QUOTED key (a
+JSON or dict field) a bare `null`, boolean or number is a whole scalar and ends there; any
+other bare value is still taken to the end of the line."""
 _BEARER = re.compile(r"(?i)(?<![\w-])(?P<head>bearer[ \t]+)(?P<value>[A-Za-z0-9._~+/=-]{12,})")
 _BASIC = re.compile(
     r"(?<![\w-])(?P<head>[Bb]asic[ \t]+)"

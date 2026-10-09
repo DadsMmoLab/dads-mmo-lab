@@ -147,6 +147,21 @@ def test_an_authorization_header_of_any_scheme_loses_its_credential() -> None:
     assert Redactor.build([]).redact(json_line) == f'{{"Authorization": {MASK}, "url": "/status"}}'
 
 
+def test_a_json_authorization_field_that_is_not_a_string_keeps_the_rest_of_the_record() -> None:
+    for value in ("null", "true", "false", "none", "12"):
+        line = f'{{"authorization": {value}, "status": "failed", "url": "/health"}}'
+        want = f'{{"authorization": {MASK}, "status": "failed", "url": "/health"}}'
+        assert Redactor.build([]).redact(line) == want
+    nested = '{"headers": {"Authorization": null}, "status": "failed"}'
+    assert (
+        Redactor.build([]).redact(nested)
+        == f'{{"headers": {{"Authorization": {MASK}}}, "status": "failed"}}'
+    )
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    bare = f'{{"Authorization": Digest user=bob, response={secret}, "n": 1}}'
+    assert secret not in Redactor.build([]).redact(bare)
+
+
 def test_a_request_cookie_named_like_an_attribute_is_still_a_cookie() -> None:
     secret = "Zq" + secrets.token_hex(10) + "Wv"
     for name in ("path", "domain", "secure", "version", "expires", "samesite", "httponly"):
