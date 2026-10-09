@@ -960,6 +960,46 @@ def _fix_ups(
     return tuple(notes)
 
 
+# --------------------------------------------------------------- what the tab calls
+
+
+def default_folder() -> Path:
+    """Where a package is offered to be saved: Documents, else the home folder. Never the server."""
+    home = Path.home()
+    documents = home / "Documents"
+    return documents if documents.is_dir() else home
+
+
+@dataclass(frozen=True)
+class MoveServices:
+    """The four presses of the Move group, bound to one server. Fakes in tests."""
+
+    plan_export: Callable[[], ExportPlan]
+    export: Callable[[Path, bool], ExportResult]
+    """`(folder, stop_allowed)`."""
+    plan_import: Callable[[Path], ImportPlan]
+    run_import: Callable[[ImportPlan, str | None, bool, bool], ImportResult]
+    """`(plan, confirm, use_old_realm_name, stop_allowed)`."""
+    default_folder: Callable[[], Path] = default_folder
+
+
+def services_for(world: MoveWorld) -> MoveServices:
+    return MoveServices(
+        plan_export=lambda: plan_export(world),
+        export=lambda folder, stop_allowed: export_package(
+            world, folder, stop_allowed=stop_allowed
+        ),
+        plan_import=lambda path: plan_import(world, path),
+        run_import=lambda plan, confirm, old_name, stop_allowed: run_import(
+            world,
+            plan,
+            confirm=confirm,
+            use_old_realm_name=old_name,
+            stop_allowed=stop_allowed,
+        ),
+    )
+
+
 __all__ = [
     "BotMarker",
     "ExportPlan",
@@ -967,6 +1007,7 @@ __all__ = [
     "ImportPlan",
     "ImportResult",
     "MoveError",
+    "MoveServices",
     "MoveWorld",
     "Replaces",
     "engine_for",
@@ -974,4 +1015,5 @@ __all__ = [
     "plan_export",
     "plan_import",
     "run_import",
+    "services_for",
 ]

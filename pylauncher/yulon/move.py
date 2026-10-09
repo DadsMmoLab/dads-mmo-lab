@@ -298,7 +298,7 @@ class Package:
     def head(self, schema: str, size: int = 8192) -> bytes:
         """The first bytes of one dump, for reading its game record without extracting it."""
         member = self.member(schema)
-        with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as fh:
+        with zipfile.ZipFile(self.path) as archive, archive.open(member.file, mode="r") as fh:
             return fh.read(size)
 
     def extract(self, schema: str, folder: Path) -> Path:
@@ -312,8 +312,8 @@ class Package:
         digest = hashlib.sha256()
         size = 0
         try:
-            with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as source:
-                with target.open("xb") as sink:
+            with zipfile.ZipFile(self.path) as archive:
+                with archive.open(member.file, mode="r") as source, target.open("xb") as sink:
                     while chunk := source.read(_CHUNK):
                         digest.update(chunk)
                         size += len(chunk)
@@ -402,7 +402,7 @@ def read_package(path: Path) -> Package:
                     "was brought in."
                 )
             try:
-                with archive.open(member.file) as fh:
+                with archive.open(member.file, mode="r") as fh:
                     digest, size = _hash_stream(fh)
             except (OSError, zipfile.BadZipFile) as exc:
                 raise MovePackageError(_changed(path.name)) from exc
