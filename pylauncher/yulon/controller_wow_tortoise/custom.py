@@ -244,6 +244,13 @@ def complete(manifest: Manifest, clone: Path, *, shipped_addons: Mapping[str, st
     Re-validated. Raises `CompletionRefused` with the sentence of what it is not;
     the applier takes a first install's folder back and closes the sentence.
     """
+    if manifest.origin is not None and manifest.origin.addon:
+        # T613 review round 1: read as a package here, a route add-on whose repository
+        # holds data/sql/ became database changes. Only the route reads its own items.
+        raise CompletionRefused(
+            f"{manifest.name} came from Yu'lon's add-on route, which reads it as add-ons "
+            "alone; Tortoise's package reader does not read it."
+        )
     found = read_package(clone, manifest.name, shipped_addons, manifest.type)
     if isinstance(found, str):
         raise CompletionRefused(found)

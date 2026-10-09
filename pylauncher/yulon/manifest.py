@@ -627,6 +627,14 @@ class Origin(_Strict):
         ),
     )
     added: str = Field(min_length=1, description="ISO date the derivation happened.")
+    addon: bool = Field(
+        default=False,
+        description=(
+            "Made by the add-on route (`yulon.client_addons`, T613): the item is client "
+            "add-ons alone, completed by that route's reader only, and refused by the applier "
+            "the moment anything makes it more (SQL, settings, a rebuild)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _an_archive_says_which_zip(self) -> Origin:

@@ -207,14 +207,39 @@ def test_a_record_of_another_game_is_not_listed() -> None:
     assert "pfui" not in [m.id for m in tbc_modules.store().load_all("mod")]
 
 
-@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-centurion"])
-def test_the_routes_completion_is_the_appliers_hook_where_it_had_none(
+@pytest.mark.parametrize("game", GAMES)
+def test_the_routes_completion_is_the_appliers_add_on_hook_on_every_game(
     game: str, tmp_path: Path
 ) -> None:
+    """Tortoise too (review round 1): its own `recomplete` reads a package, not an add-on."""
     services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / "s")
 
     assert services.client_addons is not None
-    assert services.client_addons.applier.recomplete == services.client_addons.completer
+    applier = services.client_addons.applier
+    assert applier.addon_recomplete == services.client_addons.completer
+    assert applier.recomplete != services.client_addons.completer
+
+
+def test_a_shipped_list_that_will_not_load_makes_the_route_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.manifest_store import ManifestError, ManifestStore
+
+    def broken(self: object, kind: object, **_k: object) -> object:
+        raise ManifestError("manifest file missing: mods.json")
+
+    monkeypatch.setattr(ManifestStore, "load_all", broken)
+
+    services = ControllerServices.for_entry(CATALOG.get("wow-tbc"), tmp_path / "s")
+
+    assert services.client_addons is not None
+    assert services.client_addons.shipped_unreadable == "manifest file missing: mods.json"
+
+
+def test_make_offers_only_data_files_from_the_original_client() -> None:
+    """Review round 1: an add-on's files are not "carried over" by deleting them there."""
+    text = (Path(__file__).parents[1] / "yulon" / "ui" / "controller_view.py").read_text("utf-8")
+    assert "for copy in apply_module.data_receipts(server_dir)" in text
 
 
 def test_tortoise_keeps_its_own_hook(tmp_path: Path) -> None:

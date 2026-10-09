@@ -24,7 +24,14 @@ from pathlib import Path
 
 import pytest
 
-from yulon.apply import CLAIM_FILE, Applier, ClientCopy, FolderSource, read_client_copies
+from yulon.apply import (
+    CLAIM_FILE,
+    Applier,
+    ApplyRefusal,
+    ClientCopy,
+    FolderSource,
+    read_client_copies,
+)
 from yulon.manifest import Manifest, parse_manifest
 from yulon.module_source import copy_folder
 
@@ -73,11 +80,14 @@ def _install(
     server: str = "server",
     client: Path | None = None,
     files: dict[str, str] = FILES,
+    others: tuple[Path, ...] = (),
 ) -> tuple[Applier, Manifest, Path]:
     client = client if client is not None else _client(tmp_path)
     server_dir = tmp_path / server
     server_dir.mkdir(exist_ok=True)
     applier = Applier(server_dir, client_dir=client)
+    if others:
+        applier.other_server_dirs = lambda: others
     manifest = _manifest(outside=outside)
     applier.install(manifest, folder=FolderSource(_source(tmp_path, files), copy_folder))
     return applier, manifest, client / "Interface" / "AddOns" / "pfUI"
@@ -102,12 +112,16 @@ def test_an_outside_add_ons_install_records_every_file_it_copied_with_its_bytes(
     }
 
 
-def test_a_shipped_add_ons_install_records_no_receipts_as_before(tmp_path: Path) -> None:
-    """Its folder is never deleted, so there is nothing a receipt would be read for."""
+def test_a_shipped_add_ons_install_records_its_files_marked_shipped(tmp_path: Path) -> None:
+    """Review round 1: so no outside add-on takes them for its own. Never taken back."""
     applier, manifest, addon = _install(tmp_path, outside=False)
 
-    assert (addon / "pfUI.lua").is_file(), "the install did not happen"
-    assert read_client_copies(applier.clone_dir(manifest), item_id=ITEM) == ()
+    copies = read_client_copies(applier.clone_dir(manifest), item_id=ITEM)
+    assert {(Path(c.path).name, c.shipped, c.addon) for c in copies} == {
+        ("pfUI.toc", True, "pfUI"),
+        ("pfUI.lua", True, "pfUI"),
+        ("bags.lua", True, "pfUI"),
+    }
 
 
 def test_an_add_on_receipt_with_an_unreadable_add_on_name_is_not_a_receipt(
@@ -287,7 +301,9 @@ def test_identical_bytes_already_there_are_recorded_and_not_copied(tmp_path: Pat
     lua = addon / "pfUI.lua"
     os.utime(lua, (1_000_000_000, 1_000_000_000))
 
-    second, manifest, _addon = _install(tmp_path, server="two", client=client)
+    second, manifest, _addon = _install(
+        tmp_path, server="two", client=client, others=(first.server_dir,)
+    )
 
     assert lua.stat().st_mtime == 1_000_000_000, "the same bytes were copied again"
     copies = read_client_copies(second.clone_dir(manifest), item_id=ITEM)
@@ -298,8 +314,7 @@ def test_identical_bytes_already_there_are_recorded_and_not_copied(tmp_path: Pat
 def test_a_file_another_servers_receipt_names_is_left_for_it(tmp_path: Path) -> None:
     client = _client(tmp_path)
     first, manifest, addon = _install(tmp_path, server="one", client=client)
-    second, _m, _addon = _install(tmp_path, server="two", client=client)
-    second.other_server_dirs = lambda: (first.server_dir,)
+    second, _m, _addon = _install(tmp_path, server="two", client=client, others=(first.server_dir,))
 
     report = second.remove(manifest)
 
@@ -316,17 +331,15 @@ def test_a_file_another_servers_receipt_names_is_left_for_it(tmp_path: Path) -> 
     assert not os.path.lexists(addon), "the last server's Remove takes them back"
 
 
-def test_with_no_other_servers_seam_every_file_is_this_servers_to_take_back(
+def test_with_no_other_servers_seam_another_servers_add_on_reads_as_the_players(
     tmp_path: Path,
 ) -> None:
-    """The seam absent (a tab built outside the window): no other server is known."""
+    """The seam absent (a tab built outside the window): nothing proves whose it is, so ask."""
     client = _client(tmp_path)
     _install(tmp_path, server="one", client=client)
-    second, manifest, addon = _install(tmp_path, server="two", client=client)
 
-    second.remove(manifest)
-
-    assert not os.path.lexists(addon)
+    with pytest.raises(ApplyRefusal, match="already in this game client"):
+        _install(tmp_path, server="two", client=client)
 
 
 @pytest.mark.parametrize("bad", ["", "../pfUI", "pfUI/../Bagnon"])
@@ -415,3 +428,255 @@ def test_uninstall_reads_a_receipt_with_an_empty_add_on_name_as_none(tmp_path: P
     applier.take_back_everything()
 
     assert (addon / "pfUI.lua").is_file() and (addon / "pfUI.toc").is_file()
+
+
+# ------------------------------------------------------------------ review round 1 (4040f913)
+
+
+def _hand_installed(client: Path, files: dict[str, str] = FILES) -> Path:
+    """The player's own pfUI, put there by hand before Yu'lon: no receipt names it."""
+    folder = client / "Interface" / "AddOns" / "pfUI"
+    for rel, text in files.items():
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_text(text, encoding="utf-8")
+    return folder
+
+
+def test_a_players_own_add_on_of_that_name_is_refused_without_consent(tmp_path: Path) -> None:
+    """Identical bytes are not "already ours": nothing names them, so they are the player's."""
+    client = _client(tmp_path)
+    mine = _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(manifest, folder=FolderSource(_source(tmp_path), copy_folder))
+
+    assert str(refused.value) == (
+        "An add-on named pfUI is already in this game client, and Yu'lon did not put it there. "
+        "Say to replace it, and Yu'lon sets it aside and puts it back when this one is "
+        "removed. Nothing was changed."
+    )
+    assert not applier.clone_dir(manifest).exists()
+    assert sorted(p.name for p in mine.rglob("*") if p.is_file()) == [
+        "bags.lua",
+        "pfUI.lua",
+        "pfUI.toc",
+    ]
+    assert not list(mine.parent.glob("pfUI.yulon-*"))
+
+
+@pytest.mark.parametrize("theirs", [FILES, {**FILES, "pfUI.lua": "-- my older pfUI\n"}])
+def test_with_consent_the_players_add_on_is_set_aside_and_put_back_on_remove(
+    tmp_path: Path, theirs: dict[str, str]
+) -> None:
+    client = _client(tmp_path)
+    mine = _hand_installed(client, theirs)
+    before = {
+        p.relative_to(mine).as_posix(): p.read_bytes() for p in mine.rglob("*") if p.is_file()
+    }
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+
+    report = applier.install(
+        manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+
+    aside = mine.parent / "pfUI.yulon-addon-old"
+    assert aside.is_dir()
+    assert {
+        p.relative_to(aside).as_posix(): p.read_bytes() for p in aside.rglob("*") if p.is_file()
+    } == before
+    assert (mine / "pfUI.lua").read_text() == FILES["pfUI.lua"]
+    assert f"set your own pfUI add-on aside as {aside.name} in {mine.parent}" in report.done
+
+    removed = applier.remove(manifest)
+
+    assert not aside.exists()
+    assert {
+        p.relative_to(mine).as_posix(): p.read_bytes() for p in mine.rglob("*") if p.is_file()
+    } == before
+    assert f"put your own pfUI add-on back in {mine.parent}" in removed.done
+
+
+def test_a_players_add_on_set_aside_stays_aside_while_the_name_is_taken(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    mine = _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+    applier.install(
+        manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+    (mine / "pfUI.lua").write_text("-- edited after the install\n", encoding="utf-8")
+
+    removed = applier.remove(manifest)
+
+    aside = mine.parent / "pfUI.yulon-addon-old"
+    assert aside.is_dir() and (mine / "pfUI.lua").is_file()
+    assert (
+        f"your own pfUI add-on, which Yu'lon set aside as {aside} when it installed this (pfUI "
+        "is there again); rename it back to pfUI when you want it again"
+    ) in removed.left_behind
+
+
+def test_an_update_keeps_the_record_of_the_players_folder_set_aside(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    mine = _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+    applier.install(
+        manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+
+    applier.install(manifest, folder=FolderSource(_source(tmp_path), copy_folder))
+    applier.remove(manifest)
+
+    assert not (mine.parent / "pfUI.yulon-addon-old").exists()
+    assert (mine / "pfUI.lua").read_text() == FILES["pfUI.lua"], "the player's copy is back"
+
+
+def test_two_items_of_one_server_sharing_an_add_on_never_take_each_others_files(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    src = _source(tmp_path)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    one, two = _manifest(item="pfui"), _manifest(item="pfui-two")
+    applier.install(one, folder=FolderSource(src, copy_folder))
+    applier.install(two, folder=FolderSource(src, copy_folder))
+
+    report = applier.remove(one)
+
+    addon = client / "Interface" / "AddOns" / "pfUI"
+    assert (addon / "pfUI.lua").is_file() and (addon / "modules" / "bags.lua").is_file()
+    assert (
+        "3 files of the pfUI add-on, which pfui-two on this server also installed into this "
+        "game client: they stay until it is removed too"
+    ) in report.left_behind
+
+    applier.remove(two)
+
+    assert not addon.exists()
+
+
+def test_a_shipped_add_ons_files_are_never_taken_by_an_outside_one(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    src = _source(tmp_path)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    shipped, outside = _manifest(outside=False, item="shippedpf"), _manifest(item="pfui")
+    applier.install(shipped, folder=FolderSource(src, copy_folder))
+    applier.install(outside, folder=FolderSource(src, copy_folder))
+
+    applier.remove(outside)
+
+    assert (client / "Interface" / "AddOns" / "pfUI" / "pfUI.lua").is_file()
+
+
+def test_uninstall_leaves_a_shipped_add_on_as_before(tmp_path: Path) -> None:
+    applier, _manifest_, addon = _install(tmp_path, outside=False)
+
+    applier.take_back_everything()
+
+    assert (addon / "pfUI.lua").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
+def test_a_receipt_spelled_with_dot_dot_through_a_link_is_refused(tmp_path: Path) -> None:
+    """`AddOns/pfUI/L/../victim.txt` reads as inside, and through the link L it is not."""
+    applier, manifest, addon = _install(tmp_path)
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    victim = outside / "victim.txt"
+    victim.write_text("precious\n")
+    (addon / "L").symlink_to(outside / "sub", target_is_directory=True)
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text())
+    entry = dict(claim["client_files"][0])
+    entry["path"] = str(addon / "L" / ".." / "victim.txt")
+    entry["sha256"] = _sha("precious\n")
+    claim["client_files"].append(entry)
+    claim_path.write_text(json.dumps(claim))
+
+    report = applier.remove(manifest)
+
+    assert victim.read_text() == "precious\n"
+    assert any(
+        "victim.txt" in line and "outside the pfUI add-on folder" in line
+        for line in report.left_behind
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
+def test_a_receipt_whose_real_place_is_outside_the_add_on_is_refused(tmp_path: Path) -> None:
+    """No `..` at all: the add-on's folder holds a link made after the look, to elsewhere."""
+    applier, manifest, addon = _install(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("precious\n")
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text())
+    entry = dict(claim["client_files"][0])
+    entry["path"] = str(addon / "Real" / "victim.txt")
+    entry["sha256"] = _sha("precious\n")
+    claim["client_files"].append(entry)
+    claim_path.write_text(json.dumps(claim))
+    (addon / "Real").symlink_to(outside, target_is_directory=True)
+
+    applier.remove(manifest)
+
+    assert victim.read_text() == "precious\n"
+
+
+def test_an_aside_a_receipt_names_outside_its_files_place_is_never_moved(tmp_path: Path) -> None:
+    """A put-back renames the aside onto the receipt's name: from anywhere, into the client."""
+    applier, manifest, addon = _install(tmp_path)
+    elsewhere = tmp_path / "elsewhere.lua"
+    elsewhere.write_text("not an aside\n", encoding="utf-8")
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text())
+    for entry in claim["client_files"]:
+        if entry["path"].endswith("pfUI.lua"):
+            entry["aside"] = str(elsewhere)
+    claim_path.write_text(json.dumps(claim))
+
+    applier.remove(manifest)
+
+    assert elsewhere.read_text() == "not an aside\n"
+    assert not (addon / "pfUI.lua").exists()
+
+
+def test_a_receipt_not_spelled_as_its_own_plain_path_is_refused(tmp_path: Path) -> None:
+    """`modules/../pfUI.lua`: inside, by any reading, and still not a path Yu'lon wrote."""
+    applier, manifest, addon = _install(tmp_path)
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text())
+    for entry in claim["client_files"]:
+        if entry["path"].endswith("pfUI.lua"):
+            entry["path"] = str(addon / "modules" / ".." / "pfUI.lua")
+    claim_path.write_text(json.dumps(claim))
+
+    report = applier.remove(manifest)
+
+    assert (addon / "pfUI.lua").is_file()
+    assert any("modules/../pfUI.lua" in line for line in report.left_behind), report.left_behind
+
+
+def test_data_receipts_leave_out_every_add_on_receipt(tmp_path: Path) -> None:
+    from yulon.apply import client_receipts, data_receipts
+
+    applier, _manifest_, _addon = _install(tmp_path)
+
+    assert client_receipts(applier.server_dir) and data_receipts(applier.server_dir) == ()

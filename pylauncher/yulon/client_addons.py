@@ -55,6 +55,7 @@ from yulon.apply import (
     CompletionRefused,
     FolderSource,
     UncheckedApproval,
+    addon_only_refusal,
 )
 from yulon.git import CloneSpec, Git
 from yulon.log import get_logger
@@ -111,38 +112,22 @@ def client_only_refusal(manifest: Manifest) -> str:
     Asked before every Install, Update and Remove, before anything is cloned:
     the add-on route never runs SQL, writes a settings file, deploys or patches
     a server file, copies DBCs, or asks for a rebuild, and its applier on a game
-    with no module support (Centurion) must not start to.
+    with no module support (Centurion) must not start to. The rule is the
+    applier's (`apply.addon_only_refusal()`), which also holds every completion
+    of a route item to it.
     """
-    carried: list[str] = []
-    if manifest.type != "mod":
-        carried.append(f"a {manifest.type} for the server")
-    if manifest.sql:
-        carried.append("database changes")
-    if manifest.conf:
-        carried.append("settings files")
-    if manifest.deploy:
-        carried.append("files for the server")
-    if manifest.patches:
-        carried.append("patches")
-    if manifest.server_dbc:
-        carried.append("server DBC files")
-    if manifest.build.rebuild:
-        carried.append("a rebuild")
-    if manifest.folders:
-        carried.append("server folders")
-    if any(step.dest != "addons" for step in manifest.client):
-        carried.append("game client files outside Interface/AddOns")
-    if not carried:
-        return ""
-    return (
-        f"{manifest.name} is not only a client add-on: it carries {', '.join(carried)}, and "
-        f"Yu'lon's add-on route installs add-ons alone. {NOTHING_CHANGED}"
-    )
+    return addon_only_refusal(manifest)
 
 
 def is_client_addon(manifest: Manifest) -> bool:
-    """Whether `manifest` is an outside client add-on: derived, and add-ons alone."""
-    return manifest.origin is not None and not client_only_refusal(manifest)
+    """Whether `manifest` is one of this route's items: marked by its origin, add-ons alone.
+
+    The mark (`Origin.addon`), not the shape: a Tortoise box add-on is also add-ons
+    alone, and it is Tortoise's reader that completes it.
+    """
+    return (
+        manifest.origin is not None and manifest.origin.addon and not client_only_refusal(manifest)
+    )
 
 
 def notes_of(manifest: Manifest) -> tuple[str, ...]:
@@ -225,6 +210,12 @@ class ClientAddons:
     opener: client_packs.Opener = client_packs._open
     stage_clone: StageClone | None = None
     """How a git link is cloned for its first read; the applier's own git when None."""
+    shipped_unreadable: str = ""
+    """Why this game's shipped add-ons could not be read (`for_entry()`); set, the route refuses.
+
+    Without the list nothing stops an outside add-on landing on a shipped one's
+    folder, so the route says so instead of installing on a guess (review round 1).
+    """
 
     # ------------------------------------------------------------------ where things are
 
@@ -256,8 +247,17 @@ class ClientAddons:
 
     # ------------------------------------------------------------------ reading a source
 
+    def _refuse_without_the_shipped_list(self) -> None:
+        if self.shipped_unreadable:
+            raise AddonRefusal(
+                "Yu'lon could not read which add-ons it ships for this server "
+                f"({self.shipped_unreadable}), so it cannot tell whether this one would "
+                f"replace one of them. {NOTHING_CHANGED}"
+            )
+
     def _read(self, root: Path, label: str) -> tuple[Found, str]:
         """The add-ons `root` holds, checked, and the item's name; raises with the sentence."""
+        self._refuse_without_the_shipped_list()
         found = addon_layout.find_addons(
             root,
             interface=self.interface,
@@ -313,11 +313,12 @@ class ClientAddons:
 
     def from_folder(self, path: Path) -> Prepared:
         """An add-on folder (or a folder of add-ons) on this computer, read before any copy."""
+        self._refuse_without_the_shipped_list()
         if not path.is_dir():
             raise AddonRefusal(f"{path} is not a folder Yu'lon can read. {NOTHING_CHANGED}")
         addon_archive.check_folder(path)
         found, name = self._read(path, path.name)
-        origin = Origin(kind="folder", path=str(path), added=self.today().isoformat())
+        origin = Origin(kind="folder", path=str(path), added=self.today().isoformat(), addon=True)
         manifest = self._manifest(
             found,
             name,
@@ -330,9 +331,14 @@ class ClientAddons:
 
     def from_zip(self, path: Path, *, cancelled: Callable[[], bool] = lambda: False) -> Prepared:
         """A zip on this computer, unpacked into staging and read there."""
+        self._refuse_without_the_shipped_list()
         staged = addon_archive.stage_zip(path, cancelled=cancelled)
         origin = Origin(
-            kind="archive", path=str(path), sha256=staged.sha256, added=self.today().isoformat()
+            kind="archive",
+            path=str(path),
+            sha256=staged.sha256,
+            added=self.today().isoformat(),
+            addon=True,
         )
         return self._from_staged(staged, path.name, origin, came_from=str(path))
 
@@ -349,13 +355,18 @@ class ClientAddons:
         file; anything else must be a repository on GitHub, GitLab or Codeberg, and
         a GitHub `.../releases` link follows the newest release from then on.
         """
+        self._refuse_without_the_shipped_list()
         url = url.strip()
         if PurePosixPath(urllib.parse.urlsplit(url).path).suffix.casefold() == ".zip":
             staged = addon_archive.stage_link(
                 url, opener=self.opener, progress=progress, cancelled=cancelled
             )
             origin = Origin(
-                kind="archive", url=url, sha256=staged.sha256, added=self.today().isoformat()
+                kind="archive",
+                url=url,
+                sha256=staged.sha256,
+                added=self.today().isoformat(),
+                addon=True,
             )
             label = PurePosixPath(urllib.parse.urlsplit(url).path).name
             return self._from_staged(staged, label, origin, came_from=url)
@@ -366,7 +377,7 @@ class ClientAddons:
             found, name = self._read(folder, label)
         finally:
             addon_archive._remove(folder.parent)
-        origin = Origin(kind="link", added=self.today().isoformat())
+        origin = Origin(kind="link", added=self.today().isoformat(), addon=True)
         manifest = self._manifest(
             found, name, origin=origin, source=source, description=LINK_DESCRIPTION, came_from=url
         )
@@ -448,10 +459,28 @@ class ClientAddons:
         module_source.persist(self._user_root(), completed, shipped_ids=self.shipped_ids)
         return completed
 
-    def install(self, prepared: Prepared, *, replacing: bool = False) -> ApplyReport:
-        """Install what `from_*()` prepared through the tab's applier; the staging goes after."""
+    def replacement_question(self, prepared: Prepared) -> str | None:
+        """What to ask before an add-on of that name the player put there is replaced, or None.
+
+        The plan's words. A folder that no receipt of any item or server names is
+        the player's own; on yes, `install(replace_existing=True)` sets it aside and
+        its Remove puts it back. On no, nothing is done.
+        """
+        names = self.applier.players_addons(prepared.manifest)
+        if not names:
+            return None
+        return f"An add-on named {' and '.join(names)} is already in this client. Replace it?"
+
+    def install(
+        self, prepared: Prepared, *, replacing: bool = False, replace_existing: bool = False
+    ) -> ApplyReport:
+        """Install what `from_*()` prepared through the tab's applier; the staging goes after.
+
+        `replace_existing` is the player's yes to `replacement_question()`.
+        """
         manifest = prepared.manifest
         try:
+            self._refuse_without_the_shipped_list()
             self._guard(manifest)
             folder = (
                 FolderSource(prepared.folder, module_source.copy_folder)
@@ -462,7 +491,12 @@ class ClientAddons:
             recorded = module_source.recorded(self._user_root(), manifest)
             try:
                 report = self.applier.install(
-                    manifest, None, folder=folder, complete=self.completer, replacing=replacing
+                    manifest,
+                    None,
+                    folder=folder,
+                    complete=self.completer,
+                    replacing=replacing,
+                    replace_addons=replace_existing,
                 )
             except BaseException:
                 # The applier took a refused first install's folder back; the record

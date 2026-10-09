@@ -2473,22 +2473,24 @@ def _with_client_addons(
         applier.client_origins = origins
         applier.client_game = entry.id if origins else ""
     shipped: list[Manifest] = []
+    unreadable = ""
     if services.store is not None:
         try:
             shipped = [m for m in services.store.load_all("mod") if m.origin is None]
-        except Exception as exc:  # noqa: BLE001 - the tab is drawn; the log says why
+        except Exception as exc:  # noqa: BLE001 - the route refuses; the log says why
             logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
+            unreadable = " ".join(str(exc).split()) or type(exc).__name__
     route = client_addons.ClientAddons(
         applier=applier,
         game=entry.id,
         interface=interface,
         shipped=client_addons.shipped_addons(shipped),
         shipped_ids=tuple(m.id for m in shipped),
+        shipped_unreadable=unreadable,
     )
-    if applier.recomplete is None:
-        # T613 PR-2: an Update of an add-on from a link reads its clone again, as
-        # Tortoise's own hook does there (which is kept: it reads Tortoise's kinds).
-        applier.recomplete = route.completer
+    # T613 review round 1: a route item is read again by the route's reader alone, on
+    # every game; Tortoise's own hook (`recomplete`) is for the items its box brings.
+    applier.addon_recomplete = route.completer
     if own and isinstance(services.uninstall, purge.Uninstaller):
         services.uninstall.take_back_client_files = applier.take_back_everything
     return replace(
@@ -2545,6 +2547,8 @@ def module_kept_files(
     origins = _originals_of(play_client_dir, client_dir)
     found: set[Path] = set()
     for copy in apply_module.client_receipts(server_dir):
+        if copy.folder:
+            continue  # the player's add-on folder set aside: no file to keep
         path = apply_module.rebased(Path(copy.path), play_client_dir, origins)
         if path.is_relative_to(play_client_dir):
             found.add(path.relative_to(play_client_dir))
@@ -11531,7 +11535,8 @@ class ControllerView(QWidget):
         }
         copies = tuple(
             copy
-            for copy in apply_module.client_receipts(server_dir)
+            # T613 review round 1: `Data/` files only; an add-on's are not offered.
+            for copy in apply_module.data_receipts(server_dir)
             if Path(copy.path).is_relative_to(original)
             and Path(copy.path).is_file()
             and os.path.normcase(copy.path) not in shared

@@ -523,6 +523,7 @@ class GuardedApplier(Applier):
         release: upstream.Release | None = None,
         expect_head: str | None = None,
         record_move: bool = False,
+        replace_addons: bool = False,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill an
         # item's folder (from a link or a folder on this computer). Passed
@@ -551,6 +552,7 @@ class GuardedApplier(Applier):
                 release=release,
                 expect_head=expect_head,
                 record_move=record_move,
+                replace_addons=replace_addons,
             ),
             note,
         )

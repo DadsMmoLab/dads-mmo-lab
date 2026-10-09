@@ -528,68 +528,135 @@ def test_a_repository_add_on_is_updated_by_the_appliers_own_update(tmp_path: Pat
     assert updated == ["pfui"]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
 def test_a_first_install_refused_after_its_record_was_written_drops_that_record(
     tmp_path: Path,
 ) -> None:
-    """The completion recorded it; a link in the client refused the copy after. No record stays."""
-    route, addons = _route(tmp_path)
-    elsewhere = tmp_path / "elsewhere.toc"
-    elsewhere.write_text("not yours\n", encoding="utf-8")
-    (addons / "pfUI").mkdir()
-    (addons / "pfUI" / "pfUI.toc").symlink_to(elsewhere)
-    prepared = route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC}))
+    """The completion recorded it; the player's own folder of a newly found add-on refused it.
 
-    with pytest.raises(ApplyRefusal, match="through a link"):
+    Read at the link, the repository held pfUI; by the install it also holds pfUI_Config,
+    and the player has a pfUI_Config of their own. No record stays, no folder.
+    """
+    git = _Git({"pfUI/pfUI.toc": TOC})
+    route, addons = _route(tmp_path, git=git)
+    prepared = route.from_link("https://github.com/shagu/pfUI")
+    git.files = {"pfUI/pfUI.toc": TOC, "pfUI_Config/pfUI_Config.toc": TOC}
+    _tree(addons / "pfUI_Config", {"pfUI_Config.toc": "## Interface: 11200\n-- mine\n"})
+
+    with pytest.raises(ApplyRefusal, match="An add-on named pfUI_Config is already"):
         route.install(prepared)
 
     assert route.installed() == []
     assert not route.applier.clone_dir(prepared.manifest).exists()
-    assert elsewhere.read_text() == "not yours\n"
+    assert (addons / "pfUI_Config" / "pfUI_Config.toc").read_text().endswith("-- mine\n")
+    assert not (addons / "pfUI").exists()
 
 
-def test_an_install_without_a_completion_reads_an_add_on_again_through_the_hook(
+# ------------------------------------------------------------------ review round 1 (4040f913)
+
+
+def test_the_route_asks_before_replacing_the_players_own_add_on(tmp_path: Path) -> None:
+    route, addons = _route(tmp_path)
+    _tree(addons / "pfUI", {"pfUI.toc": TOC, "mine.lua": "-- mine\n"})
+    prepared = route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC}))
+
+    assert route.replacement_question(prepared) == (
+        "An add-on named pfUI is already in this client. Replace it?"
+    )
+    with pytest.raises(ApplyRefusal, match="already in this game client"):
+        route.install(route.from_folder(tmp_path / "pfUI"))
+    assert (addons / "pfUI" / "mine.lua").read_text() == "-- mine\n"
+
+    route.install(prepared, replace_existing=True)
+
+    assert (addons / "pfUI.yulon-addon-old" / "mine.lua").read_text() == "-- mine\n"
+    (manifest,) = route.installed()
+    route.remove(manifest)
+    assert (addons / "pfUI" / "mine.lua").read_text() == "-- mine\n"
+
+
+def test_no_question_when_the_folder_is_this_items_own(tmp_path: Path) -> None:
+    route, addons = _route(tmp_path)
+    folder = _tree(tmp_path / "pfUI", {"pfUI.toc": TOC})
+    assert route.replacement_question(route.from_folder(folder)) is None
+    route.install(route.from_folder(folder))
+
+    assert route.replacement_question(route.from_folder(folder)) is None
+
+
+def test_a_shipped_list_that_could_not_be_read_refuses_the_route(tmp_path: Path) -> None:
+    route, addons = _route(tmp_path)
+    route.shipped_unreadable = "manifest file missing: mods.json"
+    folder = _tree(tmp_path / "pfUI", {"pfUI.toc": TOC})
+
+    said = _refused(lambda: route.from_folder(folder))
+
+    assert said == (
+        "Yu'lon could not read which add-ons it ships for this server (manifest file missing: "
+        "mods.json), so it cannot tell whether this one would replace one of them. Nothing was "
+        "changed."
+    )
+    assert list(addons.iterdir()) == []
+
+
+def test_a_route_item_is_marked_as_the_routes() -> None:
+    from yulon.client_addons import is_client_addon
+
+    plain = _carrying()
+    assert plain.origin is not None and plain.origin.addon is False
+    assert not is_client_addon(plain), "a Tortoise box item is not the route's"
+
+
+def test_a_route_items_completion_is_the_routes_never_the_other_hook(tmp_path: Path) -> None:
+    git = _Git()
+    route, _addons = _route(tmp_path, git=git)
+    other: list[str] = []
+    route.applier.recomplete = lambda m, c: other.append(m.id) or m  # type: ignore[assignment,func-returns-value]
+    route.applier.addon_recomplete = route.completer
+    manifest = route.from_link("https://github.com/shagu/pfUI").manifest
+
+    route.applier.install(manifest)
+
+    assert other == []
+    assert [m.id for m in route.installed()] == ["pfui"]
+
+
+def test_a_completion_that_turns_a_route_item_into_more_is_refused(tmp_path: Path) -> None:
+    """Whatever completer runs, a route item comes out of it holding add-ons alone."""
+    git = _Git({**PFUI, "data/sql/world/x.sql": "DELETE FROM creature;\n"})
+    route, addons = _route(tmp_path, git=git)
+
+    def into_sql(manifest: Manifest, clone: Path) -> Manifest:
+        return parse_manifest(
+            {**manifest.model_dump(), "sql": [{"db": "world", "path": "data/sql/world/x.sql"}]}
+        )
+
+    route.applier.addon_recomplete = into_sql
+    manifest = route.from_link("https://github.com/shagu/pfUI").manifest
+
+    with pytest.raises(ApplyRefusal) as refused:
+        route.applier.install(manifest)
+
+    assert str(refused.value) == (
+        "pfUI is not only a client add-on now: it carries database changes, and Yu'lon's "
+        "add-on route installs add-ons alone. Nothing was changed."
+    )
+    assert not route.applier.clone_dir(manifest).exists()
+    assert list(addons.iterdir()) == []
+
+
+def test_the_base_applier_refuses_a_route_item_that_carries_more_before_any_clone(
     tmp_path: Path,
 ) -> None:
-    """`update()` reinstalls with no completion of its own: the applier's hook reads the clone.
-
-    The repository gained a second add-on since it was added; without the read the
-    record keeps one step and the new folder never reaches the client.
-    """
-    git = _Git({"pfUI/pfUI.toc": TOC})
-    applier = Applier(
-        tmp_path / "server",
-        client_dir=tmp_path / "client",
-        git=git,  # type: ignore[arg-type]
-        # The checkout's own answers, as git gives them for a clean clone of that link.
-        remote_url=lambda clone: "https://github.com/shagu/pfUI",
-        unmodified=lambda clone, rel: True,
-        no_local_commits=lambda clone, branch: True,
+    git = _Git()
+    applier = Applier(tmp_path / "server", client_dir=tmp_path / "client", git=git)  # type: ignore[arg-type]
+    manifest = _carrying(
+        source={"repo": "shagu/pfUI"},
+        origin={"kind": "link", "added": "x", "addon": True},
+        sql=[{"db": "world", "statement": "DELETE FROM x;"}],
     )
-    route, addons = _route(tmp_path, applier=applier, git=git)
-    route.applier.recomplete = route.completer
-    route.install(route.from_link("https://github.com/shagu/pfUI"))
-    (manifest,) = route.installed()
-    git.files = {"pfUI/pfUI.toc": TOC, "pfUI_Config/pfUI_Config.toc": TOC}
 
-    route.applier.install(manifest, replacing=True)
+    for press in (applier.install, applier.remove):
+        with pytest.raises(ApplyRefusal, match="it carries database changes"):
+            press(manifest)
 
-    assert (addons / "pfUI_Config" / "pfUI_Config.toc").is_file()
-    (again,) = route.installed()
-    assert sorted(c.name or "" for c in again.client) == ["pfUI", "pfUI_Config"]
-
-
-def test_the_hook_is_not_asked_for_a_shipped_manifest(tmp_path: Path) -> None:
-    asked: list[str] = []
-    applier = Applier(tmp_path / "server", client_dir=tmp_path / "client", git=_Git())  # type: ignore[arg-type]
-
-    def hook(manifest: Manifest, clone: Path) -> Manifest:
-        asked.append(manifest.id)
-        return manifest
-
-    applier.recomplete = hook
-    shipped = _carrying(origin=None, source={"repo": "shagu/pfUI"})
-
-    applier.install(shipped)
-
-    assert asked == []
+    assert git.clones == []

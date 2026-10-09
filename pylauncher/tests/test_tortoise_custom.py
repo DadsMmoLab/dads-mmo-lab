@@ -1142,3 +1142,36 @@ def test_reading_an_item_again_does_not_say_its_notes_twice(tmp_path: Path) -> N
     once = _complete(_link("you/old"), clone)
     twice = _complete(once, clone)
     assert len(custom.addon_notes(twice)) == 1
+
+
+def test_tortoises_reader_refuses_an_item_of_the_add_on_route(tmp_path: Path) -> None:
+    """The review's repro: read by Tortoise's rules, a route add-on became database changes."""
+    from yulon.manifest import parse_manifest
+
+    clone = _tree(
+        tmp_path / "pfui",
+        {
+            "pfUI/pfUI.toc": "## Interface: 11200\n## Title: pfUI\npfUI.lua\n",
+            "pfUI/pfUI.lua": "--\n",
+            "data/sql/world/world.sql": "DELETE FROM creature;\n",
+        },
+    )
+    route_item = parse_manifest(
+        {
+            "id": "pfui",
+            "name": "pfUI",
+            "type": "mod",
+            "game": GAME,
+            "source": {"repo": "https://github.com/a/pfUI"},
+            "origin": {"kind": "link", "added": "2026-10-09", "addon": True},
+            "build": {"rebuild": False, "restart": False},
+            "client": [{"src": "pfUI", "dest": "addons", "name": "pfUI"}],
+        }
+    )
+
+    sentence = _refused_completion(route_item, clone)
+
+    assert sentence == (
+        "pfUI came from Yu'lon's add-on route, which reads it as add-ons alone; Tortoise's "
+        "package reader does not read it."
+    )
