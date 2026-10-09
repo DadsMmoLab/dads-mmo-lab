@@ -3509,6 +3509,7 @@ def outlives_the_stop(text: str) -> bool:
         sentence in FORCE_STOP_WARNINGS
         or sentence == WORLD_SAVE_UNREAD
         or sentence.startswith(_WORLD_SAVE_FAILED_START)
+        or sentence.startswith(update_failure.OPENING)
     )
 
 
@@ -3526,6 +3527,10 @@ def _how_the_world_ended(world: str, wsl_distro: str | None) -> tuple[str, bool]
     if int(code) == 0:
         return WORLD_SAVED, False
     tail = log_tail(world, _EXIT_LINES, wsl_distro=wsl_distro) or ""
+    # T600: a world that exits 1 at a failed update was not saving anything; say the update.
+    failed_update = _ends_on_a_failed_update(ansi.strip(tail))
+    if failed_update:
+        return details_below(failed_update, ansi.strip(tail).strip()), True
     return details_below(world_save_failed(int(code)), ansi.strip(tail).strip()), True
 
 
@@ -4374,6 +4379,11 @@ def _stuck_at_a_failed_update(world: str, run: str, wsl_distro: str | None) -> s
         timeout=_LOAD_LOOK_TIMEOUT,
         wsl_distro=wsl_distro,
     )
+    return _ends_on_a_failed_update(tail)
+
+
+def _ends_on_a_failed_update(tail: str) -> str:
+    """`update_failure.explain()`'s sentence when `tail` ends on the failure line, or `""`."""
     lines = [line for line in tail.splitlines() if line.strip()]
     if not lines:
         return ""
