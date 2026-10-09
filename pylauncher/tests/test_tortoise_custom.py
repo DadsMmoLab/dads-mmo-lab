@@ -863,3 +863,22 @@ def test_a_settings_file_nobody_owns_is_kept_and_said(tmp_path: Path) -> None:
     )
     assert (server / "etc" / "modules" / "mod-x.conf").read_text(encoding="utf-8") == "[Mine]\n"
     assert any("was already there" in line and "never replaced" in line for line in report.skipped)
+
+
+def test_a_recorded_module_whose_folder_is_gone_does_not_hold_its_settings_file(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    shared = {"src/a.cpp": "int x;\n", "conf/shared.conf.dist": "[Shared]\n"}
+    first = _tortoise_applier(server, _Clone(shared), _Db(), client)
+    tortoise_modules.install_custom(first)(tortoise_modules.derive_link("you/mod-first"), None)
+    shutil.rmtree(server / "modules" / "mod-first")
+
+    second = _tortoise_applier(server, _Clone(shared), _Db(), client)
+    done = tortoise_modules.install_custom(second)(
+        tortoise_modules.derive_link("you/mod-second"), None
+    )
+    assert done.family == "module" and (server / "modules" / "mod-second").is_dir()
