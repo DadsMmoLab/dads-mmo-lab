@@ -508,6 +508,40 @@ def test_the_install_rule_is_read_at_each_commit(tmp_path: Path) -> None:
     assert raised is not None and "tw_char has 1 migration" in str(raised)
 
 
+def test_a_return_across_the_source_folder_rename_counts_the_same_file_as_shipped(
+    tmp_path: Path,
+) -> None:
+    """The running commit keeps `data/sql/char`, the target `data/sql/character`: same bytes."""
+    rec, server_dir, made = _ready(tmp_path)
+    bots = server_dir / BOTS.dest
+    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.trees[(bots, BOTS_PIN, "data/sql/character")] = {CHAR_NAME: CHAR}
+    rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.replace(
+        b"data/sql/char/", b"data/sql/character/"
+    ).replace(b'data/sql/char")', b'data/sql/character")')
+    rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
+
+    said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert not _asked(rec), "the same file under another source folder name was called lacked"
+
+
+def test_a_file_the_renamed_source_folder_does_not_carry_is_still_lacked(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    bots = server_dir / BOTS.dest
+    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.trees[(bots, BOTS_PIN, "data/sql/character")] = {}
+    rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.replace(
+        b"data/sql/char/", b"data/sql/character/"
+    ).replace(b'data/sql/char")', b'data/sql/character")')
+    rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "tw_char has 1 migration" in str(raised)
+
+
 @pytest.mark.parametrize("rev", ["old", "target"])
 def test_a_module_with_sql_and_no_install_rule_refuses(tmp_path: Path, rev: str) -> None:
     rec, server_dir, made = _ready(tmp_path)
