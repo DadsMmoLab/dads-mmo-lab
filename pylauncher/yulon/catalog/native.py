@@ -7679,7 +7679,15 @@ class StagedInstaller:
             # world that reads as down by then goes on to the import's guard.
             self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
             return False
-        if self.correction_check(options) != check:
+        now = self.correction_check(options)
+        if now.state == "busy":
+            # Another Yu'lon holds the server (T607 review): not a database that changed, and
+            # the holder is named by the reading itself.
+            raise InstallerError(
+                f"{now.why} Nothing was stopped and nothing was applied: the world server is "
+                f"still running."
+            )
+        if now != check:
             raise InstallerError(
                 f"{self.entry.name}'s databases have changed since the confirmation was shown, so "
                 f"there may be nothing left for this to apply. Nothing was stopped and nothing "
