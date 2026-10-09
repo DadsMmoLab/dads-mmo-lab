@@ -401,3 +401,17 @@ def test_when_the_other_servers_cannot_be_read_every_file_stays(tmp_path: Path) 
         f"the pfUI add-on folder in {addon.parent} (Yu'lon could not read whether another "
         "server also installed it into this game client, so it left it alone)"
     ) in report.left_behind
+
+
+def test_uninstall_reads_a_receipt_with_an_empty_add_on_name_as_none(tmp_path: Path) -> None:
+    """Read as a `Data/` receipt, Uninstall's rule would delete the file wherever it is."""
+    applier, manifest, addon = _install(tmp_path)
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    for entry in claim["client_files"]:
+        entry["addon"] = ""
+    claim_path.write_text(json.dumps(claim), encoding="utf-8")
+
+    applier.take_back_everything()
+
+    assert (addon / "pfUI.lua").is_file() and (addon / "pfUI.toc").is_file()

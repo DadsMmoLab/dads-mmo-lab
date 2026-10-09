@@ -526,3 +526,23 @@ def test_a_repository_add_on_is_updated_by_the_appliers_own_update(tmp_path: Pat
 
     assert route.update(manifest) == "the applier's report"
     assert updated == ["pfui"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs privileges on Windows")
+def test_a_first_install_refused_after_its_record_was_written_drops_that_record(
+    tmp_path: Path,
+) -> None:
+    """The completion recorded it; a link in the client refused the copy after. No record stays."""
+    route, addons = _route(tmp_path)
+    elsewhere = tmp_path / "elsewhere.toc"
+    elsewhere.write_text("not yours\n", encoding="utf-8")
+    (addons / "pfUI").mkdir()
+    (addons / "pfUI" / "pfUI.toc").symlink_to(elsewhere)
+    prepared = route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC}))
+
+    with pytest.raises(ApplyRefusal, match="through a link"):
+        route.install(prepared)
+
+    assert route.installed() == []
+    assert not route.applier.clone_dir(prepared.manifest).exists()
+    assert elsewhere.read_text() == "not yours\n"
