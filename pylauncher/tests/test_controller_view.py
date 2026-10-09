@@ -30278,7 +30278,7 @@ def test_a_remove_of_a_default_addon_is_remembered_and_an_install_lifts_it(
     assert default_addons.declined(server) == frozenset()
 
 
-def test_a_remove_that_stopped_half_way_is_still_the_players_remove(
+def test_a_remove_that_stopped_half_way_is_still_the_players_remove_of_the_addon(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     from yulon import default_addons
@@ -30290,7 +30290,7 @@ def test_a_remove_that_stopped_half_way_is_still_the_players_remove(
     assert default_addons.declined(server) == {"tortoise-gm-manager"}
 
 
-def test_a_remove_that_was_refused_up_front_is_not_noted(
+def test_an_addon_remove_that_was_refused_up_front_is_not_noted(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     from yulon import default_addons
