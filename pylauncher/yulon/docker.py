@@ -8356,6 +8356,14 @@ def reservation_lost(server_dir: Path | str) -> bool:
     return held is not None and held.held.lost.is_set()
 
 
+def _docker_must_answer(proc: subprocess.CompletedProcess[str]) -> None:
+    """Raise `ClaimDockerDown` when `proc` says Docker is not there or not answering (T568)."""
+    if _cli_missing(proc) or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr)):
+        raise ClaimDockerDown(
+            proc.stderr.strip() or "Docker is not answering; start Docker and try again."
+        )
+
+
 def _reservation_images(
     spec: ContainerSpec | None, images: Sequence[str], wsl_distro: str | None
 ) -> Iterator[str]:
@@ -8373,6 +8381,7 @@ def _reservation_images(
                 timeout=_CLAIM_ASK_TIMEOUT,
                 wsl_distro=wsl_distro,
             )
+            _docker_must_answer(proc)
             image = proc.stdout.strip() if proc.returncode == 0 else ""
             if image and image not in seen:
                 seen.add(image)
@@ -8393,6 +8402,7 @@ def _reservation_images(
         timeout=_CLAIM_ASK_TIMEOUT,
         wsl_distro=wsl_distro,
     )
+    _docker_must_answer(proc)
     if proc.returncode == 0:
         listed = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         for ref in [r for r in listed if "<none>" not in r][:_LISTED_IMAGES]:
@@ -8531,7 +8541,16 @@ def _new_reservation(
     labels = [(PRESS_LABEL, press), (WHO_LABEL, _who()), (PID_LABEL, str(os.getpid()))]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
-    for image in _reservation_images(spec, images, wsl_distro):
+    chain = _reservation_images(spec, images, wsl_distro)
+    while True:
+        try:
+            image = next(chain, None)
+        except ClaimDockerDown as down:
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(label, str(down)), moot=True
+            ) from down
+        if image is None:
+            break
         try:
             claim = _take_claim(
                 name,

@@ -69,15 +69,15 @@ if args[:1] == ["run"] and "-i" in args and (
     if (state / "claim-no-daemon").exists():
         sys.stderr.write("docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
         sys.exit(125)
-    if (state / "missing-images").exists():
+    image = args[args.index("--entrypoint") + 2] if "--entrypoint" in args else ""
+    if image and (state / "missing-images").exists():
         # T568: the image after `--entrypoint sh` is one the daemon does not have.
-        wanted = args[args.index("--entrypoint") + 2]
-        if wanted in (state / "missing-images").read_text(encoding="utf-8").split():
-            sys.stderr.write(f"docker: Error response from daemon: No such image: {{wanted}}\\n")
+        if image in (state / "missing-images").read_text(encoding="utf-8").split():
+            sys.stderr.write(f"docker: Error response from daemon: No such image: {{image}}\\n")
             sys.exit(125)
-    (state / "claim-images.log").open("a", encoding="utf-8").write(
-        args[args.index("--entrypoint") + 2] + "\\n"
-    )
+    if image:
+        with open(state / "claim-images.log", "a", encoding="utf-8") as tried:
+            tried.write(image + "\\n")
     while (state / "claim-slow").exists():  # the daemon takes its time (cold review of T543)
         time.sleep(0.02)
     labels = state / "labels"

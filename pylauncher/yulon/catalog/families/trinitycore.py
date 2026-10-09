@@ -95,6 +95,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     _speaking,
+    _reserving,
     _stop_control,
     build_cancel_note,
     folder_start_refusal,
@@ -2087,6 +2088,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     # -- extracting the map data again (Task 6) ---------------------------------
 
+    @_reserving(REEXTRACT_BUTTON)
     def reextract(
         self,
         options: InstallOptions | None = None,

@@ -230,6 +230,14 @@ def test_a_docker_that_is_not_there_does_not_refuse_a_start_it_will_fail_itself(
     assert ran == ["start"]
 
 
+def test_a_daemon_that_does_not_answer_does_not_refuse_a_start_either(
+    fake_docker: Path, server: Path
+) -> None:
+    (fake_docker / "no-answer").write_text("", encoding="utf-8")
+    start_staged(SPEC, server)
+    assert ran == ["start"]
+
+
 def test_a_folder_that_takes_no_id_file_does_not_refuse_a_start(
     fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -591,3 +599,66 @@ def test_the_real_hold_refuses_the_sql_while_another_yulon_holds_the_server(
         assert _name(server) in fake_containers(fake_docker), "their reservation was removed"
     finally:
         theirs.kill()
+
+
+# ------------------------------------------------------------------ install, and the classification
+
+
+def test_an_install_reserves_at_start_db_and_not_before(tmp_path: Path) -> None:
+    """Before `start-db` there is no database and no container to race on, and WotLK's
+    `clone-core` empties the folder (so the folder id would change under a held hold)."""
+    from tests.support_native import install
+
+    rec = Recorder()
+
+    @contextmanager
+    def claim(server_dir: Path, *, press: str, **_kw: Any) -> Iterator[None]:
+        rec.calls.append(f"reserve:{press}")
+        yield
+
+    install(rec, tmp_path / "wow", server_claim=claim)
+
+    assert rec.calls.count(f"reserve:{native.INSTALL_PRESS}") == 1
+    at = rec.calls.index(f"reserve:{native.INSTALL_PRESS}")
+    assert rec.calls[at + 1] == "start-db", rec.calls
+    assert "start-db" not in rec.calls[:at] and "build" in rec.calls[:at], rec.calls
+
+
+def test_an_install_refused_by_another_yulon_stops_before_the_database(tmp_path: Path) -> None:
+    from tests.support_native import install
+
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="Another Yu'lon is working on"):
+        install(rec, tmp_path / "wow", server_claim=_refusing([]))
+    assert "start-db" not in rec.calls and "one-shot:ac-db-import" not in rec.calls
+
+
+def test_every_press_of_the_engine_is_classified() -> None:
+    """A press added to the engine's protocol must say how it is reserved: a guard over the
+    protocol (`defects-live-between-the-parts`), not over the presses we remembered."""
+    import inspect
+
+    from yulon.catalog.families.trinitycore import TrinityCoreInstaller
+    from yulon.catalog.installer import InstallEngine
+    from yulon.catalog.native import StagedInstaller
+
+    presses = {
+        name
+        for name, member in vars(InstallEngine).items()
+        if not name.startswith("_")
+        and callable(member)
+        and inspect.signature(member).return_annotation == "Iterator[str]"
+    }
+    reserved = {
+        "rebuild",
+        "update_databases",
+        "update_to_latest",
+        "apply_corrections",
+        "adopt_as_imported",
+    }
+    # `run` reserves at its `start-db` stage (`_staged`); nothing else is a generator press.
+    assert presses == reserved | {"run"}, presses ^ (reserved | {"run"})
+    for name in reserved | {"repair_database"}:
+        assert hasattr(getattr(StagedInstaller, name), "__wrapped__"), f"{name} is not reserved"
+    assert hasattr(TrinityCoreInstaller.reextract, "__wrapped__")
+    assert not hasattr(StagedInstaller.run, "__wrapped__")
