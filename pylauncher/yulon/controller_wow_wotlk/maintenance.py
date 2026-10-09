@@ -675,6 +675,10 @@ def _dump_one(mysql: MysqlDocker, database: str, target: Path, game: Game) -> Du
             raise MaintenanceError(f"{game.id!r} is not a game id a backup can record")
         with partial.open("wb") as sink:
             sink.write(record.encode() + b"\n")
+            # mysqldump writes to the file DESCRIPTOR, not through this object, so
+            # a record still in Python's buffer would land after the dump (found on
+            # a live mariadb-dump, 2026-10-09; a fake that writes through `sink` hides it).
+            sink.flush()
             mysql.dump_into(database, sink)
         if partial.stat().st_size == len(record) + 1:
             # Only our own line: mysqldump wrote nothing. Said as `verify_dump()` says

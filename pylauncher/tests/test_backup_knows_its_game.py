@@ -12,6 +12,7 @@ rename, a copy to another folder or a package cannot separate it from the dump.
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 from collections.abc import Callable
 from datetime import datetime
@@ -101,6 +102,28 @@ def test_a_new_backup_names_its_game_in_every_file(tmp_path: Path) -> None:
     for dump in report.dumps:
         assert backup_game(dump.path) == "wow-unbound"
         verify_dump(dump.path, dump.database)  # still a complete, checkable dump
+
+
+class FdMysql(FakeMysql):
+    """A container whose dump goes to the file DESCRIPTOR, as mysqldump's does.
+
+    `DockerMysql` hands the sink to `subprocess.run(stdout=sink)`, and the child
+    writes to the fd directly, bypassing Python's buffer. A fake that writes through
+    `sink.write()` shares that buffer with the record and hides any ordering bug.
+    """
+
+    def dump_into(self, database: str, sink: IO[bytes]) -> None:
+        os.write(sink.fileno(), dump_of(database))  # type: ignore[attr-defined]
+
+
+def test_the_record_stays_ahead_of_a_dump_written_to_the_file_descriptor(
+    tmp_path: Path,
+) -> None:
+    """Found on a live mariadb-dump: the record sat in Python's buffer and landed AFTER it."""
+    report = backup(tmp_path, FdMysql(("acore_auth",)), game=WOTLK, running=running(DB), now=AT)
+    body = report.dumps[0].path.read_bytes()
+    assert body.startswith(b"-- yulon-backup: game=wow-wotlk\n-- MySQL dump")
+    assert backup_game(report.dumps[0].path) == "wow-wotlk"
 
 
 def test_the_record_is_ahead_of_the_banner_and_the_dump_still_starts_like_one(
