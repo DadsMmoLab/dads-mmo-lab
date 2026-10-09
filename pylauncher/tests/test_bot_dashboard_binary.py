@@ -31,6 +31,7 @@ from tests.test_bot_dashboard import (
 )
 from yulon import docker
 from yulon.catalog import bot_dashboard as files
+from yulon.catalog.catalog import CatalogEntry
 from yulon.controller_wow_tortoise import botdash, botpool
 from yulon.controller_wow_tortoise import botdash_binary as binary
 
@@ -49,18 +50,43 @@ def _sums(data: bytes = BINARY) -> bytes:
     return f"{_digest(data)}  {LINUX}\n{other}\n".encode()
 
 
-def _release(tag: str, *, binaries: bool = True, size: int | None = None) -> dict[str, object]:
+def _tag_date(tag: str) -> str:
+    """When the tag's commit was made: the changelog job's commit, early in the day."""
+    return f"{tag[1:]}T08:44:08Z"
+
+
+def _release(
+    tag: str,
+    *,
+    binaries: bool = True,
+    size: int | None = None,
+    updated_at: str | None = None,
+    state: str = "uploaded",
+    draft: bool = False,
+    prerelease: bool = False,
+) -> dict[str, object]:
     assets: list[dict[str, object]] = []
+    stamp = updated_at or f"{tag[1:]}T08:44:47Z"
     if binaries:
         assets = [
-            {"name": LINUX, "size": len(BINARY) if size is None else size, "state": "uploaded"},
-            {"name": SUMS_NAME, "size": 208, "state": "uploaded"},
-            {"name": "tortoise-observability-windows-amd64.exe", "size": 9, "state": "uploaded"},
+            {
+                "name": LINUX,
+                "size": len(BINARY) if size is None else size,
+                "state": state,
+                "updated_at": stamp,
+            },
+            {"name": SUMS_NAME, "size": 208, "state": "uploaded", "updated_at": stamp},
+            {
+                "name": "tortoise-observability-windows-amd64.exe",
+                "size": 9,
+                "state": "uploaded",
+                "updated_at": stamp,
+            },
         ]
     return {
         "tag_name": tag,
-        "draft": False,
-        "prerelease": False,
+        "draft": draft,
+        "prerelease": prerelease,
         "created_at": f"{tag[1:]}T08:00:00Z",
         "assets": assets,
     }
@@ -69,30 +95,38 @@ def _release(tag: str, *, binaries: bool = True, size: int | None = None) -> dic
 class _GitHub:
     """The API and the release downloads, as two seams. Records every address asked."""
 
-    def __init__(self) -> None:
+    def __init__(self, repo: str = "Sagiroth/TortoiseBots") -> None:
+        self.repo = repo
         self.releases: list[dict[str, object]] = [_release("v2026-10-09")]
         self.behind: dict[str, int] = {}
         """`behind_by` of the compare `tag...rev`: 0 means the tag is at or before the rev."""
         self.api_error: OSError | None = None
+        self.commit_dates: dict[str, str] = {}
+        """The date of the commit a tag names; `_tag_date()` when a tag is not here."""
         self.files: dict[str, bytes] = {}
         self.urls: list[str] = []
         self.api: list[str] = []
         self.serve("v2026-10-09")
 
     def serve(self, tag: str, *, binary_bytes: bytes = BINARY, sums: bytes | None = None) -> None:
-        base = f"https://github.com/Sagiroth/TortoiseBots/releases/download/{tag}/"
+        base = f"https://github.com/{self.repo}/releases/download/{tag}/"
         self.files[base + LINUX] = binary_bytes
         self.files[base + SUMS_NAME] = _sums() if sums is None else sums
 
     def drop(self, tag: str, name: str) -> None:
-        del self.files[f"https://github.com/Sagiroth/TortoiseBots/releases/download/{tag}/{name}"]
+        del self.files[f"https://github.com/{self.repo}/releases/download/{tag}/{name}"]
 
     def get(self, url: str, accept: str) -> bytes:
         self.api.append(url)
+        assert f"/repos/{self.repo}/" in url, f"asked about another repository: {url}"
         if self.api_error is not None:
             raise self.api_error
         if "/releases?" in url:
             return json.dumps(self.releases).encode()
+        if "/commits/" in url:
+            tag = url.split("/commits/")[1]
+            date = self.commit_dates.get(tag, _tag_date(tag))
+            return json.dumps({"commit": {"committer": {"date": date}}}).encode()
         if "/compare/" in url:
             tag = url.split("/compare/")[1].split("...")[0]
             behind = self.behind.get(tag, 0)
@@ -137,14 +171,19 @@ class _RecordingDocker(_Docker):
 
 
 def _setup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, rev: str | None = REV
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rev: str | None = REV,
+    entry: CatalogEntry = TORTOISE,
+    repo: str = "Sagiroth/TortoiseBots",
 ) -> tuple[Path, _RecordingDocker, _GitHub, botdash.Dashboard]:
     server_dir = _install(tmp_path)
     fake = _RecordingDocker(monkeypatch)
-    github = _GitHub()
+    github = _GitHub(repo)
     monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: rev)
     switch = botdash.Dashboard(
-        TORTOISE,
+        entry,
         server_dir,
         _Lifecycle(),  # type: ignore[arg-type]
         http_get=github.get,
@@ -440,7 +479,7 @@ def test_the_update_re_picks_the_binary_for_the_module_it_moved_to(
     assert context[LINUX] == BINARY
     assert any("prebuilt" in line and "v2026-10-09" in line for line in said)
     assert not _staging(server_dir).exists()
-    assert github.api[-1].endswith("..." + "c" * 40 + "?per_page=1&page=2"), github.api[-1]
+    assert any(u.endswith("..." + "c" * 40 + "?per_page=1&page=2") for u in github.api), github.api
 
 
 def test_a_rebuild_whose_binary_is_refused_falls_back_to_the_go_build(
@@ -459,3 +498,226 @@ def test_a_rebuild_whose_binary_is_refused_falls_back_to_the_go_build(
     assert [c for c in fake.contexts if LINUX in c] == []
     assert any("prebuilt" in line and "checksum" in line for line in said)
     assert not _staging(server_dir).exists()
+
+
+# -- upstream re-uploads the day's assets on every push (the owner's guard) ------
+
+
+def test_a_binary_uploaded_long_after_its_tag_was_made_is_not_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tag moves only when the changelog job succeeds; the binary may be a later push's."""
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = [_release("v2026-10-09", updated_at="2026-10-09T10:44:09Z")]  # +2 h 1 s
+
+    said = _on(switch)
+
+    assert github.urls == [], "nothing is downloaded from a release whose binary outran its tag"
+    assert fake.calls[0].startswith("build observability ")
+    why = [line for line in said if "prebuilt" in line]
+    assert len(why) == 1 and "after" in why[0] and "v2026-10-09" in why[0], said
+
+
+def test_a_binary_uploaded_within_two_hours_of_its_tag_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = [_release("v2026-10-09", updated_at="2026-10-09T10:44:08Z")]  # +2 h exactly
+
+    _on(switch)
+
+    assert any(u.endswith(LINUX) for u in github.urls)
+
+
+def test_a_release_that_outran_its_tag_is_skipped_for_an_older_one_that_did_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = [
+        _release("v2026-10-10", updated_at="2026-10-10T23:00:00Z"),
+        _release("v2026-10-09"),
+    ]
+    github.serve("v2026-10-10")
+
+    _on(switch)
+
+    assert github.urls[-1].endswith("/v2026-10-09/" + LINUX), github.urls
+    assert not any("/v2026-10-10/" in u for u in github.urls)
+
+
+def test_a_tag_whose_commit_date_cannot_be_read_is_not_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.commit_dates["v2026-10-09"] = "not a date"
+
+    _on(switch)
+
+    assert github.urls == []
+    assert fake.calls[0].startswith("build observability ")
+
+
+# -- the filters on what a release says about itself ------------------------------
+
+
+@pytest.mark.parametrize("flag", ["draft", "prerelease"])
+def test_a_draft_or_pre_release_is_never_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = [_release("v2026-10-10", **{flag: True}), _release("v2026-10-09")]
+    github.serve("v2026-10-10")
+
+    _on(switch)
+
+    assert not any("/v2026-10-10/" in u for u in github.urls)
+    assert any("/v2026-10-09/" in u for u in github.urls)
+
+
+def test_an_asset_that_is_not_uploaded_yet_is_not_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = [_release("v2026-10-10", state="starter"), _release("v2026-10-09")]
+    github.serve("v2026-10-10")
+
+    _on(switch)
+
+    assert not any("/v2026-10-10/" in u for u in github.urls)
+    assert any("/v2026-10-09/" in u for u in github.urls)
+
+
+def test_only_the_newest_ten_releases_are_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+
+    _on(switch)
+
+    assert "per_page=10" in github.api[0]
+
+
+# -- a disk that refuses the staging folder -----------------------------------------
+
+
+def test_a_dockerfile_that_cannot_be_written_falls_back_to_the_go_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    real = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "Dockerfile" and self.parent.name == binary.STAGING_DIR:
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+
+    said = _on(switch)
+
+    assert fake.calls[0].startswith("build observability ")
+    assert not _staging(server_dir).exists()
+    assert any("prebuilt" in line and "No space" in line for line in said), said
+
+
+def test_a_staging_folder_that_cannot_be_made_falls_back_to_the_go_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    _staging(server_dir).write_text("a file where the folder goes", encoding="utf-8")
+    real = binary.shutil.rmtree
+    monkeypatch.setattr(binary.shutil, "rmtree", lambda *_a, **_kw: None)  # cannot clear it
+
+    said = _on(switch)
+
+    monkeypatch.setattr(binary.shutil, "rmtree", real)
+    assert fake.calls[0].startswith("build observability ")
+    assert any("prebuilt" in line for line in said)
+
+
+# -- whose releases ----------------------------------------------------------------
+
+
+def _entry_with_bots_from(repo: str) -> CatalogEntry:
+    sources = [
+        s.model_copy(update={"repo": repo}) if s.dest.endswith("TortoiseBots") else s
+        for s in TORTOISE.emulator.sources
+    ]
+    emulator = TORTOISE.emulator.model_copy(update={"sources": sources})
+    return TORTOISE.model_copy(update={"emulator": emulator})
+
+
+def test_the_releases_come_from_the_repository_the_catalog_clones_the_module_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = _entry_with_bots_from("someone/TortoiseBots-fork")
+    server_dir, fake, github, switch = _setup(
+        tmp_path, monkeypatch, entry=entry, repo="someone/TortoiseBots-fork"
+    )
+
+    said = _on(switch)
+
+    assert github.urls[-1] == (
+        "https://github.com/someone/TortoiseBots-fork/releases/download/v2026-10-09/" + LINUX
+    )
+    assert any("v2026-10-09" in line for line in said)
+
+
+def test_a_module_that_does_not_come_from_github_has_no_prebuilt_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = _entry_with_bots_from("https://codeberg.org/someone/TortoiseBots")
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch, entry=entry)
+
+    said = _on(switch)
+
+    assert github.api == [] and github.urls == []
+    assert fake.calls[0].startswith("build observability ")
+    assert any("prebuilt" in line and "GitHub" in line for line in said), said
+
+
+# -- a Stop in a rebuild is a stopped build, not a switch that never was on -----------
+
+
+def test_a_stop_during_the_binary_download_of_a_rebuild_is_the_stopped_build_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    _on(switch)
+    fake.calls.clear()
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(botdash.RebuildLeftOwed) as stopped:
+        list(switch.rebuild(cancel))
+
+    assert "the build was stopped" in str(stopped.value)
+    assert "Stopped before anything was changed" not in str(stopped.value)
+    assert "still off" not in str(stopped.value)
+    assert not any(call.startswith("up ") for call in fake.calls)
+    assert files.state(server_dir).on, "the switch was on and stays on"
+    assert not _staging(server_dir).exists()
+
+
+def test_a_stop_during_the_binary_download_of_an_update_rebuild_stops_the_old_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    _on(switch)
+    fake.calls.clear()
+    heads = {"module": "b" * 40}
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: heads["module"])
+    cancel = threading.Event()
+
+    def update(_cancel: threading.Event | None) -> Iterator[str]:
+        heads["module"] = "c" * 40
+        cancel.set()  # the player presses Stop as the update ends
+        yield "engine: updated"
+
+    said = list(botdash.after_update(update, cancel, dashboard=switch))
+
+    text = "\n".join(said)
+    assert "the build was stopped" in text
+    assert "Stopped before anything was changed" not in text
+    assert "rm tortoise-observability" in fake.calls, "the old dashboard is stopped (T162)"
+    assert files.rebuild_owed(server_dir) is not None

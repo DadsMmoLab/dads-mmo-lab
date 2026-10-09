@@ -10,9 +10,9 @@ source for the tab's log panel.
 1. the refusals, before anything is written: no dashboard in this module's
    checkout, a compose file this app did not write, a mixed SELinux label;
 2. the image. First choice (T542) is TortoiseBots' prebuilt linux binary, from
-   the newest release at or before the module's commit, proved against the
-   release's sha256 file (`botdash_binary`); with none that fits, or a proof
-   that fails, one line says why and the image is built from `tools/observability`
+   the newest release at or before the module's commit, checked against the
+   checksum its release published (`botdash_binary`); with none that fits, or a checksum
+   that does not match, one line says why and the image is built from `tools/observability`
    in the module checkout the install already cloned (a Go build, a few minutes
    the first time). First because it is the slow step and the one most likely to
    fail -- a failure here has changed nothing;
@@ -373,6 +373,10 @@ class Dashboard:
                 self.server_dir, service, force_recreate=True, wsl_distro=distro
             )
             after = docker.container_ip(service, wsl_distro=distro)
+        except SwitchStopped:
+            # A Stop during the binary's download: the dashboard WAS on, so this
+            # is a stopped build like the one below, not "still off" (T542).
+            return _Failed("the build was stopped")
         except (SwitchError, docker.DockerCommandError, OSError) as exc:
             return _Failed(str(exc), built=built)
         try:
@@ -515,11 +519,16 @@ class Dashboard:
             )
         return context
 
+    def _binary_repo(self) -> str | None:
+        """The GitHub slug the catalog clones the bots module from; its releases hold the binary."""
+        source = botpool.module_source(self.entry)
+        return None if source is None else upstream.github_slug(source.repo)
+
     def _build_context(self, cancel: threading.Event | None) -> Generator[str, None, _Context]:
-        """What the image is built from: the proved prebuilt binary, else the module's source.
+        """What the image is built from: TortoiseBots' prebuilt binary, else the module's source.
 
         The prebuilt one (T542) when TortoiseBots has a release that fits this
-        server's bots module and its sha256 holds; otherwise ONE line saying why
+        server's bots module and its checksum holds; otherwise ONE line saying why
         and the Go build the switch always had. Raises `SwitchStopped` when the
         player's Stop ended the download, `SwitchError` when neither exists.
         The caller clears the staging folder once the build has run.
@@ -528,6 +537,7 @@ class Dashboard:
             staged = botdash_binary.stage(
                 self.server_dir,
                 self._module_head(),
+                self._binary_repo(),
                 get=self.http_get,
                 open_url=self.open_url,
                 cancelled=lambda: cancel is not None and cancel.is_set(),
@@ -544,8 +554,8 @@ class Dashboard:
             )
             return _Context(self._context())
         yield (
-            f"Using TortoiseBots' prebuilt bot dashboard from release {staged.tag}, "
-            "checked against the checksum that release published."
+            f"Using TortoiseBots' prebuilt bot dashboard from release {staged.tag}; the "
+            "download matches the checksum that release published."
         )
         return _Context(staged.context)
 
