@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
 - **Pack for another computer…** moves accounts and characters into a server of the same game on another computer.
+- **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
 
 ### Fixed
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
