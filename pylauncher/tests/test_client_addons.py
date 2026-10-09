@@ -660,3 +660,21 @@ def test_the_base_applier_refuses_a_route_item_that_carries_more_before_any_clon
             press(manifest)
 
     assert git.clones == []
+
+
+def test_a_completion_that_drops_the_routes_mark_is_refused(tmp_path: Path) -> None:
+    git = _Git()
+    route, addons = _route(tmp_path, git=git)
+
+    def unmarked(manifest: Manifest, clone: Path) -> Manifest:
+        data = manifest.model_dump()
+        data["origin"] = {**data["origin"], "addon": False}
+        return parse_manifest(data)
+
+    route.applier.addon_recomplete = unmarked
+    manifest = route.from_link("https://github.com/shagu/pfUI").manifest
+
+    with pytest.raises(ApplyRefusal, match="it carries no mark of the add-on route"):
+        route.applier.install(manifest)
+
+    assert list(addons.iterdir()) == []

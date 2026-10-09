@@ -3901,7 +3901,7 @@ class Applier:
             dropped = [
                 copy
                 for copy in previous_copies
-                if self._here(copy.path) not in now and not copy.folder and not copy.shipped
+                if self._here(copy.path) not in now and not copy.folder
             ]
             for copy in dropped:
                 if not copy.addon:
@@ -7206,8 +7206,6 @@ class Applier:
         dests: set[Path] = set()
         addons: list[ClientCopy] = []
         for _item, copy in self._receipts_by_item():
-            if copy.shipped:
-                continue  # a shipped add-on's files stay, as they always did
             if not copy.folder:
                 dests.add(self._here(copy.path))
             if copy.addon:
@@ -7325,7 +7323,7 @@ class Applier:
         """
         groups: dict[str, list[ClientCopy]] = {}
         for copy in copies:
-            if not copy.shipped:
+            if not copy.shipped:  # a shipped add-on's files stay, by Remove, Update, Uninstall
                 groups.setdefault(copy.addon, []).append(copy)
         others = self._other_receipts(item_id)
         for addon, mine in groups.items():

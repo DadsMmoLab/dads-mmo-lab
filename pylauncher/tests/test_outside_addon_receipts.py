@@ -714,9 +714,11 @@ def test_an_update_of_a_shipped_add_on_never_takes_a_dropped_file_back(tmp_path:
     assert (addon / "modules" / "bags.lua").is_file()
 
 
+@pytest.mark.parametrize("where", ["elsewhere", "beside, named otherwise"])
 def test_a_recorded_folder_aside_that_is_not_beside_the_add_on_is_never_moved(
-    tmp_path: Path,
+    tmp_path: Path, where: str
 ) -> None:
+    """One rule each: the right name in another folder, and another name beside it."""
     client = _client(tmp_path)
     _hand_installed(client)
     server = tmp_path / "server"
@@ -726,7 +728,10 @@ def test_a_recorded_folder_aside_that_is_not_beside_the_add_on_is_never_moved(
     applier.install(
         manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
     )
-    elsewhere = tmp_path / "Documents"
+    if where == "elsewhere":
+        elsewhere = tmp_path / "Documents" / "pfUI.yulon-addon-old"
+    else:
+        elsewhere = client / "Interface" / "AddOns" / "Bagnon"
     (elsewhere / "precious").mkdir(parents=True)
     claim_path = applier.clone_dir(manifest) / CLAIM_FILE
     claim = json.loads(claim_path.read_text())
