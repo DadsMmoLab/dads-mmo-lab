@@ -100,6 +100,8 @@ NETWORK_RUNNING = (
 # (`docker.server_claim()`). Each leads with who holds it and ends with what to do.
 PRESS_START = "Start"
 PRESS_STOP = "Stop"
+PRESS_BACKUP = "Backup"
+PRESS_RESTORE = "Restore"
 """The two press names the reservation's own lifecycle commands carry; the sentence below
 says "starting" and "stopping" for them and quotes any other press by name."""
 
@@ -124,10 +126,16 @@ def server_busy_elsewhere(
     started = f", started {since}" if since else ""
     by = f" by {who}" if who else ""
     if anyway:
+        worse = {
+            PRESS_RESTORE: " A restore that is loading the databases would be left half-loaded:"
+            " restore it again afterwards.",
+            PRESS_BACKUP: " A backup being taken would be left incomplete:"
+            " take it again afterwards.",
+        }.get(press, "")
         return (
             f"Another Yu'lon {_doing(press, label)}{started}{by}. Stopping now ends that too, "
             "wherever it is. A database file it is running may be left part-done, and that "
-            "Yu'lon will say what it left."
+            f"Yu'lon will say what it left.{worse}"
         )
     return (
         f"Another Yu'lon {_doing(press, label)}{started}{by}. Nothing was changed. Wait "

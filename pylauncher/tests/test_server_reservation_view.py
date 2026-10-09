@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from tests.test_controller_view import WOTLK, _Ps, _services, ps  # noqa: F401
-from yulon import docker
+from yulon import docker, forgetting
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import single_instance
 from yulon.ui.controller_view import ControllerView
@@ -280,3 +280,35 @@ _SPEC = docker.ContainerSpec(db="d", auth="a", world="w", ports=(1,))
 def _always_held(*_a: Any, **_kw: Any) -> Iterator[None]:
     raise docker.ServerReserved("Another Yu'lon is working on WoW.", HOLDER)
     yield
+
+
+@pytest.mark.parametrize(
+    ("press", "said"),
+    [
+        (forgetting.PRESS_RESTORE, "left half-loaded"),
+        (forgetting.PRESS_BACKUP, "left incomplete"),
+    ],
+)
+def test_stop_anyway_over_a_backup_or_restore_says_what_it_would_leave(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch, press: str, said: str
+) -> None:
+    """Codex review: a Restore's load cannot be cancelled, so the player is told before the Yes."""
+    asked = _Asked(None)
+    monkeypatch.setattr(controller_view_module, "_ask_with", asked)
+    holder = docker.ServerHolder("yulon-busy-abc", "id", press=press, who="pk@PC (WSL)")
+
+    view._stop_failed(_refused(holder))
+
+    (text,) = asked.texts
+    assert said in text, text
+    assert "Stopping now ends that too" in text
+
+
+def test_stop_anyway_over_an_ordinary_press_adds_nothing_about_the_databases(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _Asked(None)
+    monkeypatch.setattr(controller_view_module, "_ask_with", asked)
+    view._stop_failed(_refused(HOLDER))
+    (text,) = asked.texts
+    assert "half-loaded" not in text and "incomplete" not in text

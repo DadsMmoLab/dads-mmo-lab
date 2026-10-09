@@ -15485,7 +15485,7 @@ class ControllerView(QWidget):
                     docker.maintenance_lease(
                         self.services.controller.server_dir,
                         forgetting.BACKUP_HOLDS_THE_DATABASES,
-                        press="Backup",
+                        press=forgetting.PRESS_BACKUP,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
                     )
@@ -15512,7 +15512,7 @@ class ControllerView(QWidget):
                     docker.hold_the_server(
                         self.services.controller.server_dir,
                         forgetting.BACKUP_HOLDS_THE_SERVER,
-                        press="Backup",
+                        press=forgetting.PRESS_BACKUP,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
                     )
@@ -15658,7 +15658,7 @@ class ControllerView(QWidget):
                     docker.maintenance_lease(
                         self.services.controller.server_dir,
                         forgetting.RESTORE_HOLDS_THE_DATABASES,
-                        press="Restore",
+                        press=forgetting.PRESS_RESTORE,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
                     )
@@ -15678,7 +15678,7 @@ class ControllerView(QWidget):
                     docker.hold_the_server(
                         self.services.controller.server_dir,
                         forgetting.RESTORE_HOLDS_THE_SERVER,
-                        press="Restore",
+                        press=forgetting.PRESS_RESTORE,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
                     )

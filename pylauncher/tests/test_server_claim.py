@@ -401,3 +401,37 @@ def test_a_holder_docker_was_slow_to_name_is_asked_again_before_it_is_called_unk
         assert docker._CLAIM_ASK_TIMEOUT in looks
     finally:
         theirs.kill()
+
+
+# ------------------------------------------------------------------ the folder id (Codex review)
+
+
+def test_an_id_file_that_is_there_but_holds_no_id_refuses_instead_of_running_unreserved(
+    fake_docker: Path, server: Path
+) -> None:
+    """Two Yu'lons that both fail to read a present-but-bad id would both go ahead: refused.
+
+    Mutation this catches: `moot=True` for every folder with no id to be had.
+    """
+    (server / docker.FOLDER_ID_FILE).write_text("not an id", encoding="ascii")
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert refused.value.moot is False
+    assert docker.FOLDER_ID_FILE in str(refused.value) and "delete it" in str(refused.value)
+
+
+def test_a_folder_that_cannot_be_written_to_make_an_id_is_moot(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+
+    def refuse(*_args: object, **_kw: object) -> object:
+        raise PermissionError("read-only folder")
+
+    monkeypatch.setattr(tempfile, "mkstemp", refuse)
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert refused.value.moot is True
+    assert not (server / docker.FOLDER_ID_FILE).exists()

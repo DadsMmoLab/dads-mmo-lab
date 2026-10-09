@@ -8547,7 +8547,10 @@ def server_claim(
                 f"The folder would not give or take Yu'lon's id file, {FOLDER_ID_FILE}: if that "
                 "file is there, delete it; if the folder is read-only, make it writable.",
             ),
-            moot=True,
+            # A folder that will not take a new id file is one Yu'lon cannot write (T152's
+            # own line); an id file that IS there but cannot be read, or holds no id, is a
+            # managed server two Yu'lons would both go ahead on (Codex review): refused.
+            moot=not os.path.lexists(Path(server_dir) / FOLDER_ID_FILE),
         )
     name = SERVER_CLAIM_PREFIX + ident
     with _reserve_lock(name):
