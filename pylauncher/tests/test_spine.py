@@ -2894,6 +2894,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "REFUSAL and never a write. A folder that cannot be listed is passed over, as "
         "`links.walk` does, and the copy that follows then fails on it with its own sentence"
     ),
+    ("addon_archive.py", "sweep_stale"): (
+        "T613 PR-2. Lists Yu'lon's own `<cache>/addons/staging/` and `/downloads/` once at "
+        "start for the folders a stopped run left, and removes each one older than "
+        "`STALE_SECONDS` through `_remove()` (`rmtree.remove_tree`, which refuses a link). It "
+        "decides a removal only inside Yu'lon's cache, never in a game client or a server "
+        "folder; a folder that cannot be listed is passed over and logged"
+    ),
     ("client_packs.py", "_numbered_parts"): (
         "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
         "its `<name>.zip.partNN` pieces, which are then READ and joined into a `.joining` "
