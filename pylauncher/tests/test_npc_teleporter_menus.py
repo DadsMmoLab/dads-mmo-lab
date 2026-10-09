@@ -313,6 +313,13 @@ def _dist(variant: str, name: str) -> str:
         moved, count = re.subn(rf"(@GOSSIP_MENU\s*:=\s*){old}", rf"\g<1>{new}", text)
         assert count == 1
         return moved
+    if variant == "ony5":  # upstream moves the Onyxia row off menu+4
+        text = _dist("035da5d", name)
+        return text.replace(
+            "(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL", "(15, @GOSSIP_MENU+5, 11, 27, @ONY_LEVEL"
+        )
+    if variant == "nonpc" and name == "capital":  # the capital file did not create its NPC
+        return "-- nothing\n"
     return (DATA / f"npc-teleporter-{variant}" / f"teleporter_{name}.dist").read_text("utf-8")
 
 
@@ -647,3 +654,22 @@ def test_the_snapshot_covers_the_pin_the_catalog_ships() -> None:
         f"the WotLK pin moved to {core.rev}: re-run the gossip menu id scan over its base SQL "
         "and db_world updates, and re-check that 60000..60010 is still unused"
     )
+
+
+# --------------------------------------------------------------------------- T634 follow-ups
+
+
+def test_an_onyxia_row_that_upstream_moved_is_refused_in_plain_words() -> None:
+    """The UPDATE would match nothing; the install must say what changed, not pass."""
+    world = World()
+    with pytest.raises(Refused, match="Onyxia"):
+        _install(world, "ony5")
+
+
+def test_a_missing_capital_npc_gets_its_own_sentence() -> None:
+    """No row 190000 is not 'the files still use the old ids'."""
+    world = World()
+    with pytest.raises(Refused) as caught:
+        _install(world, "nonpc")
+    assert "50000" not in str(caught.value)
+    assert "190000" in str(caught.value)

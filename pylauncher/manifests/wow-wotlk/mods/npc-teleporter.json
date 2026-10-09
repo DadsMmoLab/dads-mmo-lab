@@ -26,6 +26,11 @@
       "verify": [
         {
           "db": "world",
+          "query": "SELECT 1 FROM creature_template WHERE entry=190000",
+          "missing": "NPC Teleporter's capital NPC (creature 190000) is not in the database after its capital file ran, so that file did not install it; look at the file's output above, fix what it names and install again"
+        },
+        {
+          "db": "world",
           "query": "SELECT 1 FROM creature_template WHERE entry=190000 AND gossip_menu_id NOT BETWEEN 50000 AND 50009",
           "missing": "NPC Teleporter's files in the downloaded copy still build the capital menus on gossip menu ids 50000-50009, which Mountaineer Pebblebitty and Maggran Earthbinder use; update the module (Update or Reinstall fetches the current files) and install again"
         }
@@ -34,7 +39,14 @@
     {
       "db": "world",
       "statement": "SET @tp_menu:=(SELECT gossip_menu_id FROM creature_template WHERE entry=190000); UPDATE conditions SET ConditionValue1={ony_level} WHERE SourceTypeOrReferenceId=15 AND SourceGroup=@tp_menu+4 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
-      "note": "T104: the Onyxia portal's level requirement, the one row teleporter_capital.dist builds from @ONY_LEVEL (upstream @06e5242: `(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL, 3, 0, ...)`); T564: its group is the capital NPC's menu + 4 wherever the menus are (60004 since upstream 38078d1d), read from creature_template.gossip_menu_id"
+      "note": "T104: the Onyxia portal's level requirement, the one row teleporter_capital.dist builds from @ONY_LEVEL (upstream @06e5242: `(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL, 3, 0, ...)`); T564: its group is the capital NPC's menu + 4 wherever the menus are (60004 since upstream 38078d1d), read from creature_template.gossip_menu_id",
+      "verify": [
+        {
+          "db": "world",
+          "query": "SELECT 1 FROM (SELECT COUNT(*) AS n FROM conditions WHERE SourceTypeOrReferenceId=15 AND SourceEntry=11 AND ConditionTypeOrReference=27 AND ConditionValue1 IN (60,80) AND SourceGroup=(SELECT gossip_menu_id FROM creature_template WHERE entry=190000)+4) t WHERE n=1",
+          "missing": "NPC Teleporter's Onyxia portal level could not be set: Yu'lon expects the Onyxia condition of the capital teleporter at the capital menu's id + 4, and the downloaded files no longer put it there (upstream changed its layout); the portal keeps the file's own level 60 until Yu'lon is updated for it"
+        }
+      ]
     },
     {
       "db": "world",
