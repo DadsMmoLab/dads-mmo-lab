@@ -5340,8 +5340,14 @@ class Applier:
             else nullcontext()
         )
         with ExitStack() as held:
+            held_by: object = None
             try:
                 held_by = held.enter_context(hold)
+            except docker.ServerReservationUnavailable as unavailable:
+                # Docker not answering, or a folder that takes no id file: met by the SQL in
+                # its own words, as every other press does (cold review of T568).
+                if not unavailable.moot:
+                    raise ApplyRefusal(str(unavailable)) from unavailable
             except SaidByYulon as refused:
                 # The holder's own sentence ("Another Yu'lon is working on ..."), shown as
                 # written; nothing was sent.

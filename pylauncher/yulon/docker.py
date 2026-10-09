@@ -8385,15 +8385,21 @@ def reservation_lost(server_dir: Path | str) -> bool:
     return held is not None and held.held.lost.is_set()
 
 
-def _wait_gone(name: str, wsl_distro: str | None, limit: float | None = None) -> bool:
+def _wait_gone(
+    name: str, wsl_distro: str | None, limit: float | None = None, *, container: str | None = None
+) -> bool:
     """Poll until the container `name` is gone from Docker; False if it is still there at `limit`.
+
+    With `container` (an id), it is that container being gone that is waited for: a newer
+    holder of the same name (another Yu'lon's Stop anyway took it) is not the one released.
 
     A daemon that does not answer reads as gone (no container could be shown): this is a wait
     for a removal in progress, not a proof.
     """
     deadline = time.monotonic() + (_GONE_WAIT_SECONDS if limit is None else limit)
     while True:
-        if _claim_facts(name, timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro) is None:
+        facts = _claim_facts(name, timeout=_CLAIM_ASK_TIMEOUT, wsl_distro=wsl_distro)
+        if facts is None or (container is not None and facts.container != container):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -8402,7 +8408,11 @@ def _wait_gone(name: str, wsl_distro: str | None, limit: float | None = None) ->
 
 def _docker_must_answer(proc: subprocess.CompletedProcess[str]) -> None:
     """Raise `ClaimDockerDown` when `proc` says Docker is not there or not answering (T568)."""
-    if _cli_missing(proc) or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr)):
+    if (
+        _cli_missing(proc)
+        or runner.timed_out(proc)
+        or (proc.returncode != 0 and _DAEMON_DOWN.search(proc.stderr))
+    ):
         raise ClaimDockerDown(
             proc.stderr.strip() or "Docker is not answering; start Docker and try again."
         )
@@ -8573,7 +8583,9 @@ def server_claim(
                 _release_claim(reservation.claim)
                 # Gone before the lock is let go: the next press of this process must not
                 # meet it dying (`_GONE_WAIT_SECONDS`).
-                _wait_gone(name, reservation.claim.wsl_distro)
+                _wait_gone(
+                    name, reservation.claim.wsl_distro, container=reservation.claim.container
+                )
 
 
 def _new_reservation(
@@ -8674,7 +8686,7 @@ def end_reservation(holder: ServerHolder, *, wsl_distro: str | None = None) -> b
     removed = _remove_claim(holder.container, wsl_distro=distro)
     # "Removal already in progress" is not a failure, only not yet done: the Stop that follows
     # must not meet the container dying.
-    return _wait_gone(holder.name, distro) if holder.name else removed
+    return _wait_gone(holder.name, distro, container=holder.container) if holder.name else removed
 
 
 def reservation_holder(

@@ -862,3 +862,30 @@ def test_a_reservation_already_lost_when_the_press_starts_stops_it_at_once(
     lost.set()
     cancel = native._end_on_loss(docker.ClaimHeld("yulon-busy-x", lost), None, threading.Event())
     assert cancel.is_set()
+
+
+def test_sql_runs_unreserved_when_the_reservation_is_moot_and_is_refused_when_it_is_not(
+    tmp_path: Path,
+) -> None:
+    """Like every other press: Docker not answering is met by the SQL in its own words.
+
+    Mutation this catches: every `ServerReservationUnavailable` refused (cold review note).
+    """
+
+    def unavailable(moot: bool) -> Any:
+        @contextmanager
+        def hold(press: str) -> Iterator[None]:
+            raise docker.ServerReservationUnavailable("Docker is not answering.", moot=moot)
+            yield
+
+        return hold
+
+    spy = _Spy()
+    applier, sql = _stackables(tmp_path / "a", spy, hold=unavailable(True))
+    applier.install(parse_manifest(STACKABLES))
+    assert sql.files, "a moot reservation refused the SQL"
+
+    applier, sql = _stackables(tmp_path / "b", _Spy(), hold=unavailable(False))
+    with pytest.raises(ApplyRefusal, match="Docker is not answering"):
+        applier.install(parse_manifest(STACKABLES))
+    assert sql.files == [] and sql.statements == []

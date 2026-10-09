@@ -191,6 +191,8 @@ if args[:1] == ["ps"]:
             sys.stdout.write("\\t".join([box.name, *(values.get(k, "") for k in keys)]) + "\\n")
     sys.exit(0)
 if args[:1] == ["inspect"]:
+    if (state / "inspect-hangs").exists():
+        time.sleep(3)  # T568: a daemon that is starting or paused: the caller's bound ends it
     # `docker.container_exit()`'s question (T303): a container still there is running.
     if (state / "no-answer").exists():
         sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")

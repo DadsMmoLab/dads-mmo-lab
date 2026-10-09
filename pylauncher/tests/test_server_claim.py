@@ -441,3 +441,40 @@ def test_a_folder_that_cannot_be_written_to_make_an_id_is_moot(
             pytest.fail("went ahead")
     assert refused.value.moot is True
     assert not (server / docker.FOLDER_ID_FILE).exists()
+
+
+# ------------------------------------------------------------------ cold review of T568
+
+
+def test_a_daemon_that_hangs_is_moot_not_no_image(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out look is "Docker is not answering", never "no image: press Rebuild".
+
+    Mutation this catches: the timeout counted as an absent image (a starting Docker Desktop
+    then refused every Start and every press with advice to rebuild).
+    """
+    (fake_docker / "inspect-hangs").write_text("", encoding="utf-8")
+    monkeypatch.setattr(docker, "_CLAIM_ASK_TIMEOUT", 0.3)
+    spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(1,))
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE], spec=spec):
+            pytest.fail("went ahead")
+    assert refused.value.moot is True
+    assert "Rebuild" not in str(refused.value)
+
+
+def test_the_wait_for_gone_is_for_its_own_container_not_the_name(
+    fake_docker: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After another Yu'lon's Stop anyway took the name, the old holder's release must not wait
+    out the clock for the NEW holder's container.
+
+    Mutation this catches: `_wait_gone` comparing only the name.
+    """
+    newer = docker._ClaimFacts("newer-container", "running", "n", "o")
+    monkeypatch.setattr(docker, "_claim_facts", lambda *_a, **_kw: newer)
+    began = time.monotonic()
+    assert docker._wait_gone("yulon-busy-x", None, container="older-container") is True
+    assert time.monotonic() - began < 1.0
+    assert docker._wait_gone("yulon-busy-x", None, container="newer-container", limit=0.3) is False
