@@ -128,13 +128,56 @@ def test_the_line_goes_back_when_the_loop_ends(qapp: object, ps: _Ps, tmp_path: 
     assert _said(view) == SERVER_ALL_RUNNING
 
 
-def test_a_cleared_verdict_gives_the_line_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+def test_a_cleared_verdict_gives_the_line_back_while_the_server_is_still_polled_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
     """Mutation: leave out the refresh in `_clear_the_verdict()`, and the loop sentence stays."""
     view = _view("wow-tortoise", ps, tmp_path, _Verdicts(LOOP))
     view.refresh_status()
     view.refresh_verdict()
     view._clear_the_verdict()
     assert _said(view) == SERVER_ALL_RUNNING
+
+
+def test_docker_dying_keeps_its_own_reason_when_the_verdict_is_cleared(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Server up, Docker dies: the poll says "come back when Docker answers", and the verdict
+    cleared after it must not put "already running" back under the Docker banner.
+
+    Mutation: drop the docker-banner guard and the standing-reason guard in
+    `_refresh_start_reason()`.
+    """
+    from yulon import docker
+
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(UP))
+    view.refresh_status()
+    view.refresh_verdict()
+    view._status_failed(docker.DockerCommandError("cannot connect to the Docker daemon"))
+    said = _said(view)
+    assert "Docker" in said and "already running" not in said
+
+    view._clear_the_verdict()
+    assert _said(view) == said
+    view._verdict_ready(LOOP)
+    assert _said(view) == said
+
+
+def test_a_stopped_distro_keeps_the_start_reason_it_has(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The distro stops after a poll saw the world up: no verdict can bring "already running"
+    back over a server that is not running.
+
+    Mutation: drop the distro guard in `_refresh_start_reason()` and the line is rewritten.
+    """
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(LOOP))
+    view.refresh_status()
+    view.refresh_verdict()
+    view._distro = "running"
+    before = _said(view)
+    view._distro_answered("stopped")
+    assert _said(view) == before
 
 
 def test_t159s_signature_points_at_apply_database_corrections(
@@ -213,3 +256,85 @@ def test_the_flag_does_not_flicker_on_the_fresh_run_between_two_crashes(tmp_path
 def test_a_world_that_is_not_looping_carries_no_flag(tmp_path: Path) -> None:
     tick = _loop_watch(tmp_path, {"r1": HONOR_LOG}, _loop_states(("exited", "r1")))
     assert not tick().honor_copy_missing
+
+
+def test_the_flag_goes_back_when_a_later_dead_run_lacks_the_signature(tmp_path: Path) -> None:
+    """Mutation: `self._honor = self._honor or ...` keeps the flag for ever."""
+    logs = {"r1": HONOR_LOG, "r2": "Loading spell chains...\n"}
+    tick = _loop_watch(
+        tmp_path,
+        logs,
+        _loop_states(
+            ("restarting", "r1"), ("restarting", "r1"), ("running", "r2"), ("restarting", "r2")
+        ),
+    )
+    tick()
+    assert tick().honor_copy_missing
+    tick()
+    assert not tick().honor_copy_missing
+
+
+def test_an_early_non_fatal_1146_does_not_point_at_the_corrections(tmp_path: Path) -> None:
+    """The table error is not the last thing the run said: it died for another reason.
+
+    Mutation: search the whole log instead of its tail.
+    """
+    log = HONOR_LOG + "".join(f"Loading thing {n}...\n" for n in range(40)) + "ASSERT failed\n"
+    tick = _loop_watch(tmp_path, {"r1": log}, _loop_states(("restarting", "r1")))
+    assert not tick().honor_copy_missing
+
+
+def test_the_line_follows_the_corrections_banner_showing_and_hiding(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The banner's check lands after the verdict: the pointer appears with it, and goes.
+
+    Mutation: leave `_refresh_start_reason()` out of `_refresh_corrections_banner()`.
+    """
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(HONOR_LOOP))
+    view.refresh_status()
+    view.refresh_verdict()
+    assert _said(view) == SERVER_LOOPING.format(restarts=28)
+    view._corrections = native.CorrectionCheck("stale", offered=("character_inventory_copy",))
+    view._refresh_corrections_banner()
+    assert _said(view) == SERVER_LOOPING_CORRECTIONS.format(restarts=28)
+    view._corrections = None
+    view._refresh_corrections_banner()
+    assert _said(view) == SERVER_LOOPING.format(restarts=28)
+
+
+def test_a_banner_up_over_our_own_sentence_leaves_it_to_the_banner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Mutation: drop the docker-banner guard (the standing-reason guard alone then passes
+    only because the reason is not ours; here it is)."""
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(LOOP))
+    view.refresh_status()
+    view.refresh_verdict()
+    view.docker_banner.setVisible(True)
+    view.refresh_verdict()
+    assert _said(view) == SERVER_LOOPING.format(restarts=28)
+
+
+def test_another_reason_on_start_is_not_overwritten(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Mutation: drop the standing-reason guard."""
+    from yulon.ui.widgets.reasons import set_enabled_why
+
+    verdicts = _Verdicts(UP)
+    view = _view("wow-tortoise", ps, tmp_path, verdicts)
+    view.refresh_status()
+    view.refresh_verdict()
+    set_enabled_why(view.start_button, "Something that knows more.")
+    verdicts.now = LOOP
+    view.refresh_verdict()
+    assert _said(view) == "Something that knows more."
+
+
+def test_a_held_badge_keeps_the_line_as_it_is(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Mutation: drop the `_badge_held` guard, and a cleared verdict rewrites the loop line."""
+    view = _view("wow-tortoise", ps, tmp_path, _Verdicts(LOOP))
+    view.refresh_status()
+    view.refresh_verdict()
+    view._hold_badge("restarting")
+    view.refresh_verdict()
+    assert _said(view) == SERVER_LOOPING.format(restarts=28)

@@ -282,6 +282,9 @@ class Verdict:
         )
 
 
+HONOR_TAIL = 10
+"""How many of a dead run's last lines may carry T159's error: it is the cause of death, so
+it sits just above the assert, and an earlier non-fatal one must not be taken for it (T629)."""
 HONOR_COPY_MISSING = re.compile(r"\[1146\] Table '[^']*character_inventory_copy' doesn't exist")
 """T159's crash: honor maintenance truncates a table no SQL made (`ObjectMgr.cpp:10126`)."""
 
@@ -598,6 +601,7 @@ class Dashboard:
                     state.started_at, uptime, dead=state.status == "restarting"
                 ),
             )
+        self._honor_run, self._honor = None, False  # a loop that ended takes its cause with it
         if state.status != "running":
             return Verdict(
                 "stopped",
@@ -634,7 +638,8 @@ class Dashboard:
                 logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
                 return self._honor
             self._honor_run = run
-            self._honor = HONOR_COPY_MISSING.search(log) is not None
+            tail = "\n".join([text for text in log.splitlines() if text.strip()][-HONOR_TAIL:])
+            self._honor = HONOR_COPY_MISSING.search(tail) is not None
         return self._honor
 
     def _foreign_data_hint(self, run: str, status: str) -> str:

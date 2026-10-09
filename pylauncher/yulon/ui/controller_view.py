@@ -5392,6 +5392,8 @@ SERVER_LOOPING_CORRECTIONS = (
     "Press Apply database corrections… above to make it."
 )
 """The same, when the log carries T159's signature and the banner offers the press (T629)."""
+_LOOPING_OPENING = "The world server keeps restarting"
+"""How both loop sentences begin: tells one of ours from another reason on Start (T629)."""
 
 RESTART_LABEL = "Restart"
 RESTART_TIP = (
@@ -9366,6 +9368,15 @@ class ControllerView(QWidget):
         status = self._last_polled
         if status is None or self._busy or not status.all_running:
             return
+        if (
+            self._badge_held is not None
+            or not self.docker_banner.isHidden()
+            or self._distro not in (None, "running")
+        ):
+            return  # Docker's, the hold's or the distro's words stand
+        now = reason_of(self.start_button)
+        if now and now != SERVER_ALL_RUNNING and not now.startswith(_LOOPING_OPENING):
+            return  # not a sentence of ours: it was set by something that knows more
         set_enabled_why(self.start_button, self._start_reason())
 
     def _badge_word(self, status: InstallStatus) -> str:
@@ -19387,13 +19398,16 @@ class ControllerView(QWidget):
             self.corrections_banner_label.setText(check.why)
             self.corrections_banner_button.setVisible(False)
             self.corrections_banner.setVisible(True)
+            self._refresh_start_reason()
             return
         if check is None or check.state != "stale":
             self.corrections_banner.setVisible(False)
+            self._refresh_start_reason()
             return
         self.corrections_banner_label.setText(native.corrections_banner_text(check))
         self.corrections_banner_button.setVisible(True)
         self.corrections_banner.setVisible(True)
+        self._refresh_start_reason()
 
     def apply_database_corrections(self) -> bool:
         """Ask, then apply the corrected steps the banner names (T129). False if not started.
