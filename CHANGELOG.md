@@ -37,6 +37,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Set level** on a character in the world now saves it, so the Characters list shows the new level.
 - **My Party** no longer says the Lua engine is switched off when its settings file says true.
 - Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
+- Stopping a Tortoise server just after it starts now waits for its save, instead of warning that characters may be missing.
 - A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
 - An account created with a GM level on a running Tortoise server is GM at once, with no restart.
 - While Yu'lon is open, a Tortoise realm shows offline while it reloads after a crash, and not over a running server.
