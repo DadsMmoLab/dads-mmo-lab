@@ -83,7 +83,7 @@ _OTHER_NUMBER = re.compile(r"(?<![\w.])([0-9]+)(?!\w|\.[0-9])")
 """A whole number standing alone in prose (not part of a word, a version or a decimal)."""
 
 _DECIMALISH = re.compile(
-    r"[0-9]\.[0-9]|\b(?:rate|multiplier|factor|fraction|decimal|float|percent(?:age)?|ratio)\b",
+    r"[0-9]\.[0-9]|(?<!\w)\.[0-9]|\b(?:rate|multiplier|factor|fraction|decimal|float|percent(?:age)?|ratio)\b",
     re.IGNORECASE,
 )
 """Prose that says a value may carry a decimal point, so a whole-number default is not proof."""
@@ -244,8 +244,7 @@ def _help(lines: Iterable[str]) -> str | None:
     return text
 
 
-_NUMBER_TOKEN = re.compile(r"(?<![\w.])-?[0-9](?:\w|\.(?=\w))*")
-"""A number-looking word: `2`, `2.5`, `0x2`, `-1`, `3rd`. Only exactly `0` and `1` fit a switch."""
+_BARE_PUNCTUATION = "()[]{}<>:;,.!?|\"'"
 
 _NEGATIVE_IN_PROSE = re.compile(r"(?<![\w.])-[0-9]")
 """A negative number written in a comment (`-1 for no limit`): the key is read as signed."""
@@ -278,6 +277,19 @@ _A_QUANTITY = re.compile(
 """
 
 
+def _names_another_value(prose: str) -> bool:
+    """Whether any word with a digit in it is not exactly `0` or `1`, brackets and stops trimmed.
+
+    `-1`, `2.5`, `.5`, `0x2`, `+1`, `3rd` are all further values of the key, whatever the
+    spelling: a switch holds two, so the key is a number (or text), never a switch.
+    """
+    for word in prose.split():
+        core = word.strip(_BARE_PUNCTUATION)
+        if any(ch.isdigit() for ch in core) and core not in ("0", "1"):
+            return True
+    return False
+
+
 def _is_a_toggle(key: str, prose: str) -> bool:
     """Whether a 0/1 default is a switch: the comment or the name says on/off, and no other number.
 
@@ -287,10 +299,8 @@ def _is_a_toggle(key: str, prose: str) -> bool:
     """
     if any(int(n) not in (0, 1) for n in _OTHER_NUMBER.findall(prose)) or _A_QUANTITY.search(prose):
         return False
-    if _NEGATIVE_IN_PROSE.search(prose) or any(
-        token not in ("0", "1") for token in _NUMBER_TOKEN.findall(prose)
-    ):
-        return False  # `-1`, `2.5`, `0x2` are further values, not a `0` or a `1`
+    if _names_another_value(prose):
+        return False
     numbers = {int(n) for n in _OTHER_NUMBER.findall(prose)}
     return bool(_TOGGLE_IN_PROSE.search(prose) or numbers == {0, 1} or _TOGGLE_IN_NAME.search(key))
 

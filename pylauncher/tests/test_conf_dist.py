@@ -430,6 +430,16 @@ def test_a_debug_or_trace_name_alone_does_not_make_a_switch() -> None:
             "1",
         ),
         (
+            "a leading-dot third value under Default:",
+            "#    Mod.Frac\n"
+            "#        Description: Enable the module.\n"
+            "#        Default:     0 - Disabled\n"
+            "#                     1 - Normal\n"
+            "#                     -.5 - Half\n"
+            "Mod.Frac = 0\n",
+            "0",
+        ),
+        (
             "`on` in a sentence is not a switch",
             "# Item entry given to the player on login\nMod.LoginItem = 0\n",
             "0",
@@ -455,7 +465,7 @@ def test_a_key_with_more_than_two_values_or_only_everyday_words_is_not_a_switch(
     on writes 1); a number box is always safe.
     """
     (item,) = conf_dist.parse(text)
-    decimal = "2.5" in text
+    decimal = "2.5" in text or ".5" in text
     assert (item.default, item.type) == (default, None if decimal else "int"), name
 
 
