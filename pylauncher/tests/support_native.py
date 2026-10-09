@@ -495,6 +495,17 @@ class Recorder:
     about the folders it reads and not the whole tree.
     """
 
+    trees: dict[tuple[Path, str], tuple[str, ...] | None] = field(default_factory=dict)
+    """T630: `tree_files()`'s answer per `(checkout, commit)`: the paths that commit tracks.
+
+    Absent is a commit tracking nothing under the asked folders; `None` is git that
+    could not say. Filtered by the pathspecs asked, as `git ls-tree` filters. Read
+    from here and never from the disk, as the real seam reads the commit's tree.
+    """
+
+    db_was_up: bool | None = True
+    """What `db_running()` answers for the database container (T630): up, by default."""
+
     diff_lines: dict[tuple[Path, str, str, str], tuple[str, ...] | None] = field(
         default_factory=dict
     )
@@ -573,6 +584,24 @@ class Recorder:
             for status, path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
+        said = self.trees.get((dest, rev), ())
+        if said is None:
+            return None
+        return tuple(
+            path
+            for path in said
+            if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
+        )
+
+    def db_running(self, container: str) -> bool | None:
+        self.calls.append(f"db-running?:{container}")
+        return self.db_was_up
+
+    def stop_db(self, containers: list[str]) -> None:
+        self.calls.append(f"stop-db:{','.join(containers)}")
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
@@ -878,6 +907,9 @@ class Recorder:
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
+            tree_files=self.tree_files,
+            db_running=self.db_running,
+            stop_db=self.stop_db,
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
@@ -1124,8 +1156,9 @@ class FakeSnapshot:
         return snapshot.PutBack(restored=copy.databases, safety=safety)
 
     def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        """The real forgetting (`snapshot.prune_older()`), on the files a test laid (T633)."""
         self.rec.calls.append("prune")
-        return ()
+        return snapshot.prune_older(copy.directory, copy.files)
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

@@ -158,10 +158,11 @@ def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     """Remove every update copy in `directory` that is not in `keep`. Never raises.
 
     The owner's rule of 2026-10-04: only the last copy per server is kept. Called
-    once a copy is no longer the only good one there is -- after the new build came
-    up, or after the copy went back -- never when a copy is taken: a copy that could
-    not be put back is named in the sentence as the one to restore, and the next
-    press must not remove it before the player has.
+    only once a press SUCCEEDED -- its new build up and its world ready (T633, the
+    owner's "Delete only after success" of 2026-10-09) -- never when a copy is taken
+    and never after a failure, a Stop, a refusal or a rollback: a copy that could not
+    be put back is named in the sentence as the one to restore, and an earlier
+    update's copy is what "Return to the tested pin…" needs to go back (T630).
 
     The rollback's own safety copies (`ROLLBACK_SAFETY_LABEL`) go the same way:
     the newest per database is kept, every older one removed. The timestamp
@@ -201,7 +202,9 @@ def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     return tuple(removed)
 
 
-def copy_from_before(directory: Path, database: str, updates: Sequence[str]) -> Path | None:
+def copy_from_before(
+    directory: Path, database: str, updates: Sequence[str], *, game: str
+) -> Path | None:
     """The newest complete dump of `database` in `directory` naming none of `updates`; never raises.
 
     What "Return to the tested pin…" names when the database already has updates the
@@ -210,9 +213,9 @@ def copy_from_before(directory: Path, database: str, updates: Sequence[str]) -> 
     from before THAT update, which after a second update is not before the first, and a
     restore of a copy that still holds them would cost the player everything since and
     open nothing. Any label counts (a backup the player took, an update's copy, a
-    restore's safety copy); a dump that was cut short, or that has no `updates` table,
-    is not one a restore can be sent to. None when there is no such dump or the folder
-    cannot be read.
+    restore's safety copy); a dump that was cut short, that has no `updates` table, or
+    that Restore would refuse as another game's (`_recorded_for()`), is not one a restore
+    can be sent to. None when there is no such dump or the folder cannot be read.
     """
     try:
         found = sorted(
@@ -223,9 +226,43 @@ def copy_from_before(directory: Path, database: str, updates: Sequence[str]) -> 
     except OSError:
         return None
     for path in reversed(found):
-        if _holds_none_of(path, updates):
+        if _recorded_for(path, game) and _holds_none_of(path, updates):
             return path
     return None
+
+
+_DUMP_BANNER = re.compile(rb"(?:\A|\n)--\s+(MySQL|MariaDB)\s+dump\s")
+_GAME_RECORD_LEAD = b"-- yulon-backup:"
+_GAME_RECORD = re.compile(rb"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
+
+
+def _recorded_for(path: Path, game: str) -> bool:
+    """Would Maintenance's Restore take this dump as `game`'s? Never raises (T630, T603).
+
+    `maintenance.backup_game()`'s reading, spelled again because `catalog/` must not
+    import a controller package (a test pins the two on every shape): the records in
+    the preamble above the dump's banner. No record is an older backup, which Restore
+    asks about and then takes; a record of another game, one that does not read, or
+    two that disagree, Restore refuses -- WotLK and Unbound share their schema names.
+    """
+    try:
+        with path.open("rb") as dump:
+            head = dump.read(_EDGE_BYTES)
+    except OSError:
+        return False
+    banner = _DUMP_BANNER.search(head)
+    if banner is None:
+        return False
+    found: set[str] = set()
+    for line in head[: banner.start()].split(b"\n"):
+        line = line.rstrip(b" \t\r")
+        if not line.startswith(_GAME_RECORD_LEAD):
+            continue
+        record = _GAME_RECORD.fullmatch(line)
+        if record is None:
+            return False
+        found.add(record.group(1).decode("ascii"))
+    return found <= {game}
 
 
 def _holds_none_of(path: Path, updates: Sequence[str]) -> bool:

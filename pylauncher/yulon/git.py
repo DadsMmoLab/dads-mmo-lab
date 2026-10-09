@@ -924,6 +924,16 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
+def tree_files_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git ls-tree -r -z --name-only <rev> -- <paths>`: the files one commit tracks (T630)."""
+    return ["ls-tree", "-r", "-z", "--name-only", rev, "--", *paths]
+
+
+def parse_tree_files(raw: str) -> tuple[str, ...]:
+    """The paths of a `ls-tree -z --name-only` answer, unquoted, in git's order."""
+    return tuple(path for path in raw.split("\0") if path)
+
+
 def changed_lines_args(old: str, new: str, path: str) -> list[str]:
     """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
     return [*_DIFF_ARGS, "-U0", old, new, "--", path]
@@ -1581,6 +1591,21 @@ class RunnerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
+
+        The commit's own list, not the disk's: an untracked file, or one a sparse
+        checkout leaves out, is not something the commit ships.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *tree_files_args(rev, paths)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
@@ -2489,6 +2514,17 @@ class ContainerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, tree_files_args(rev, paths), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import stat
 import tempfile
 from collections.abc import Generator, Iterator, Mapping, Sequence
@@ -78,6 +79,12 @@ APPLIED_UPDATES_QUESTION = "SELECT name FROM updates WHERE name IN "
 AzerothCore's updater, and mod-playerbots' own on its database, write one `updates`
 row per file it applied, keyed by the file's base name (`apply.read_ledger()` asks
 the same table), and nothing ever takes a row back: updates only go forward."""
+
+_DATED = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{2}")
+"""An update named by its date, `YYYY_MM_DD_NN`: the only names whose order means age."""
+
+_SORTING_FOLDERS = frozenset({"updates", "archive", "base", "custom", "pending"})
+"""Folders under `data/sql` that sort updates rather than name a database (T630)."""
 
 NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
 
@@ -582,16 +589,35 @@ class AzerothCoreInstaller(StagedInstaller):
             "the code you run has; asking the databases whether they already hold "
             f"{'it' if count == 1 else 'them'}."
         )
-        applied = self._applied_of(server_dir, lacked)
-        if not applied:
-            yield "None of them was applied, so the older server can start on your databases."
+        # The database is put back down if this started it, on every way out: the
+        # refusal says nothing was started or changed (cold review of a72e048f).
+        database = self.entry.container_spec().db
+        was_up = self._database_was_up(database)
+        try:
+            applied = self._applied_of(server_dir, lacked)
+            if applied:
+                backups = server_dir / snapshot.BACKUPS_FOLDER
+                copies = {
+                    name: snapshot.copy_from_before(backups, name, held, game=self.entry.id)
+                    for name, held in applied.items()
+                }
+                raise InstallerError(newer_updates_refusal(applied, copies))
+        except BaseException:
+            if was_up is False:
+                logger.info(self._stop_the_database_again(database))
+            raise
+        if was_up is False:
+            yield self._stop_the_database_again(database)
+        yield "None of them was applied, so the older server can start on your databases."
+        return None
+
+    def _database_was_up(self, container: str) -> bool | None:
+        """Whether the database container ran before the check asked it; None = unknown."""
+        try:
+            return self._seams.ask_db_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
             return None
-        backups = server_dir / snapshot.BACKUPS_FOLDER
-        copies = {
-            database: snapshot.copy_from_before(backups, database, names)
-            for database, names in applied.items()
-        }
-        raise InstallerError(newer_updates_refusal(applied, copies))
 
     def _updates_the_target_lacks(
         self, moved: Sequence[tuple[EmulatorSource, Path, str]]
@@ -599,11 +625,18 @@ class AzerothCoreInstaller(StagedInstaller):
         """Base names of the update files going back removes and the target does not ship.
 
         Per moved source, git's answer about `SQL_FOLDER` between the commit it was on
-        and the one it stands on now. A removed file still counts out when the target
-        ships its name anywhere under that folder (an update upstream archived), or
-        ships a name in the same folder that sorts at or after it: AzerothCore's and
-        mod-playerbots' updates are named by date, so that one is older than what the
-        target has, which a Return that moves forward (T588) over a squash removes.
+        and the one it stands on now, and the target commit's own file list (`git
+        ls-tree`, never the disk: an untracked or sparse-checkout file is not shipped).
+        A removed file still counts out when:
+
+        * the target ships the same name for the same database (`_database_part()`:
+          an update upstream moved to its archive), never one for another database --
+          `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
+        * it and a file the target ships in the same folder are both dated
+          (`YYYY_MM_DD_NN`, how AzerothCore and mod-playerbots name their updates) and
+          the target's sorts at or after it: it is older than what the target has,
+          which a Return that moves forward (T588) over a squash removes. A name that
+          is not dated says nothing about order (cold review of a72e048f).
         """
         lacked: dict[str, None] = {}
         for source, dest, old in moved:
@@ -629,13 +662,31 @@ class AzerothCoreInstaller(StagedInstaller):
             ]
             if not removed:
                 continue
-            shipped = _sql_names(dest / SQL_FOLDER, recursive=True)
+            tracked = self._seams.tree_files(dest, new, (SQL_FOLDER,))
+            if tracked is None:
+                raise InstallerError(
+                    updates_unread(
+                        f"going back takes away in {source.repo}",
+                        f"git could not list the SQL files {new[:7]} ships",
+                    )
+                )
+            shipped = {
+                (_database_part(path), posixpath.basename(path))
+                for path in tracked
+                if path.endswith(".sql")
+            }
+            beside: dict[str, list[str]] = {}
+            for path in tracked:
+                if path.endswith(".sql"):
+                    beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
             for path in removed:
                 name = posixpath.basename(path)
-                if name in shipped:
+                if (_database_part(path), name) in shipped:
                     continue
-                beside = _sql_names(dest / posixpath.dirname(path), recursive=False)
-                if any(other >= name for other in beside):
+                if _DATED.match(name) and any(
+                    _DATED.match(other) and other >= name
+                    for other in beside.get(posixpath.dirname(path), ())
+                ):
                     continue
                 lacked[name] = None
         return tuple(lacked)
@@ -1039,11 +1090,22 @@ class AzerothCoreInstaller(StagedInstaller):
         yield from self.stage_import(ctx, CallableGate(self._probe, self._reset), service)
 
 
-def _sql_names(folder: Path, *, recursive: bool) -> frozenset[str]:
-    """The base names of the `.sql` files in `folder` (or under it); empty when it is not there."""
-    try:
-        found = folder.rglob("*.sql") if recursive else folder.glob("*.sql")
-        return frozenset(path.name for path in found if path.is_file())
-    except OSError as exc:
-        logger.warning(f"could not list the SQL files in {folder}: {exc}")
-        return frozenset()
+def _database_part(path: str) -> tuple[str, ...]:
+    """Which database an update file under `SQL_FOLDER` is for, as its folders name it (T630).
+
+    The folders between `data/sql` and the file, less those that only sort updates
+    (`updates`, `archive`, `base`, `custom`, `pending`) and version or year folders
+    (`6.x`, `2026`); `pending_db_world` and `db-world` read as `db_world`. So the
+    core's `updates/db_world/` and `archive/db_world/6.x/` are one database, and
+    mod-playerbots' `playerbots/updates/` and `playerbots/archive/2026/` another.
+    """
+    parts = posixpath.dirname(path).split("/")
+    if parts[:2] == SQL_FOLDER.split("/"):
+        parts = parts[2:]
+    named = []
+    for part in parts:
+        if not part or part in _SORTING_FOLDERS or part[0].isdigit():
+            continue
+        part = part.removeprefix("pending_").replace("-", "_")
+        named.append(part)
+    return tuple(named)
