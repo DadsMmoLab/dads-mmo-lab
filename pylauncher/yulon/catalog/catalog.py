@@ -995,6 +995,19 @@ class SourcePatch(_Strict):
         description="One sentence the install log says when the patch is applied: what it fixes.",
     )
 
+    obsolete_when_absent: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "A line of text the patch exists to remove (T600). When every file the patch edits "
+            "exists and none still contains it, the patch is skipped with a note instead of "
+            "applied or refused: upstream fixed the defect itself, so a moved tip must not "
+            "refuse an update over a patch it no longer needs. A file that still contains it "
+            "but no longer matches the patch is still refused. None: the patch is always "
+            "applied or refused."
+        ),
+    )
+
     @field_validator("file")
     @classmethod
     def _file_stays_inside_installers(cls, value: str) -> str:

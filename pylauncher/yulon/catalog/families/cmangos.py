@@ -352,6 +352,8 @@ class CmangosInstaller(StagedInstaller):
             root = ctx.server_dir / spec.source
             yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
             results = self._resolve(spec, text, root)
+            if not results:
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
             for result in results:
                 if result.applied and result.present:
                     yield (
@@ -1095,7 +1097,8 @@ class CmangosInstaller(StagedInstaller):
             return
         for spec, text in loaded:
             yield f"Checking {spec.file} still applies to the new {spec.source}."
-            self._resolve(spec, text, server_dir / spec.source, dry_run=True)
+            if not self._resolve(spec, text, server_dir / spec.source, dry_run=True):
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
         yield "Every source patch this app carries still applies."
 
     def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
@@ -1117,7 +1120,10 @@ class CmangosInstaller(StagedInstaller):
             text = self._patch_text(spec)
             root = server_dir / spec.source
             yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
-            for result in self._resolve(spec, text, root):
+            results = self._resolve(spec, text, root)
+            if not results:
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
+            for result in results:
                 if result.applied:
                     yield f"Patched {result.path}."
                 else:
@@ -1143,10 +1149,37 @@ class CmangosInstaller(StagedInstaller):
         and says nothing was changed, so a class name in front of it would be
         noise, as `_write_dockerfile` says of `DockerfileError`.
         """
+        if self._obsolete(spec, text, root):
+            return ()
         try:
             return patch.apply(text, root, name=spec.file, dry_run=dry_run)
         except patch.PatchError as exc:
             raise InstallerError(str(exc)) from exc
+
+    def _obsolete(self, spec: SourcePatch, text: str, root: Path) -> bool:
+        """Whether the defect `spec` removes is already gone from every file it edits (T600).
+
+        Only for a patch whose catalog row names `obsolete_when_absent`. Every file the patch
+        edits must exist and lack that text; one that is missing, unreadable or still has it
+        leaves the ordinary apply (and its refusal) in charge, because a hang that is still
+        there must not be built.
+        """
+        marker = spec.obsolete_when_absent
+        if marker is None:
+            return False
+        try:
+            paths = {hunk.path for hunk in patch.parse(text)}
+            return bool(paths) and all(
+                marker not in (root.joinpath(*path.split("/"))).read_text(encoding="utf-8")
+                for path in paths
+            )
+        except (OSError, UnicodeDecodeError, patch.PatchError):
+            return False
+
+    OBSOLETE_NOTE = (
+        "{file} is not needed: {source} no longer has the code it removes (upstream fixed it, or "
+        "it is already out). Leaving the sources as they are."
+    )
 
     def _refuse_to_patch_what_will_not_be_rebuilt(
         self, ctx: StageContext, loaded: Sequence[tuple[SourcePatch, str]]

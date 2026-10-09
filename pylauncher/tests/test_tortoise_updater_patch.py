@@ -15,12 +15,17 @@ byte, from tortoise-wow at `187af788` (the pin), read on 2026-10-09.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from tests.support_native import Recorder
+
 from yulon import resources
 from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.installer import InstallerError
 from yulon.catalog.families import patch
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-187af788"
@@ -121,3 +126,83 @@ def test_the_pin_is_the_one_whose_updater_was_read() -> None:
         "replace the fixture under tests/fixtures/tortoise-187af788 and AUDITED_PIN; if it "
         "does not, drop the patch row, the patch file and the fixture together (T600)."
     )
+
+
+# -- the patch is skipped, not refused, when upstream has already removed the read ----------
+
+
+def _engine() -> CmangosInstaller:
+    entry, _block = _native()
+    return CmangosInstaller(entry, seams=Recorder().seams(platform_id=lambda: "linux"))
+
+
+def _server(tmp_path: Path, edit: Callable[[str], str] | None = None) -> Path:
+    server = tmp_path / "srv"
+    target = server / CORE_DEST / REL
+    target.parent.mkdir(parents=True)
+    text = (FIXTURE / REL).read_text(encoding="utf-8")
+    target.write_text(edit(text) if edit else text, encoding="utf-8")
+    return server
+
+
+def _upstream_fixed(text: str) -> str:
+    """Upstream's own fix: the read gone, the lines around it rewritten by them."""
+    return text.replace(
+        "                std::string line;\n                std::getline(std::cin, line);\n"
+        "                return false;\n",
+        "                return false; // upstream: no wait\n",
+    )
+
+
+def _moved_but_still_blocking(text: str) -> str:
+    """Upstream edited next to the read and left it in: the patch no longer applies."""
+    return text.replace(
+        "                std::string line;\n",
+        '                std::string line;\n                sLog.outError("more");\n',
+    ).replace("failed to apply.", "failed to apply!")
+
+
+def test_the_catalog_names_the_read_whose_absence_makes_the_patch_obsolete() -> None:
+    _entry, block = _native()
+    assert block.patches[0].obsolete_when_absent == "std::getline(std::cin"
+
+
+def test_an_update_whose_new_rev_already_dropped_the_read_skips_the_patch_with_a_note(
+    tmp_path: Path,
+) -> None:
+    """Upstream's own fix must not refuse the whole update.
+
+    Mutation: drop the obsolete check in `_resolve()` and the dry run raises, naming the file.
+    """
+    server = _server(tmp_path, _upstream_fixed)
+    before = (server / CORE_DEST / REL).read_bytes()
+    engine = _engine()
+    checked = list(engine.check_carried_patches(server))
+    applied = list(engine.apply_carried_patches(server))
+    assert any("no longer has" in line for line in checked + applied), (checked, applied)
+    assert (server / CORE_DEST / REL).read_bytes() == before
+
+
+def test_a_new_rev_that_still_blocks_but_moved_under_the_patch_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The hang would come back, so the update stays refused and names the file.
+
+    Mutation: treat every non-applying patch as obsolete and this builds a hanging core.
+    """
+    server = _server(tmp_path, _moved_but_still_blocking)
+    with pytest.raises(InstallerError, match="AutoUpdater.cpp"):
+        list(_engine().check_carried_patches(server))
+
+
+def test_the_stage_and_a_second_press_agree_when_the_read_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    """The install stage on a checkout this patch (or upstream) already fixed: a note, no error."""
+    server = _server(tmp_path)
+    engine = _engine()
+    from tests.test_families_cmangos import context
+
+    list(engine.apply_carried_patches(server))  # patched now
+    said = list(engine._patch_sources(context(server)))
+    assert any("no longer has" in line or "already carries" in line for line in said), said
