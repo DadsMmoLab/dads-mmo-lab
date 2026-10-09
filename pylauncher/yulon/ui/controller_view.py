@@ -7486,6 +7486,8 @@ class ControllerView(QWidget):
         # the last status poll's answer, so either one landing second can set the
         # badge. A crash-looping world is in `docker ps` between its restarts.
         self._world_loops = False
+        # T608: whether the last verdict shown carried a failed database update (T600).
+        self._world_failed = False
         # T451: whether the last verdict shown said the world is up AND printed its
         # ready marker. Until one does, all-containers-running reads STARTING.
         self._world_ready = False
@@ -8645,6 +8647,7 @@ class ControllerView(QWidget):
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
+        self._world_failed = bool(result.failure)
         self._world_ready = result.state == "up" and result.ready
         if self._last_polled is not None:
             # T391: a loop seen after the poll takes REALM ONLINE down now, and
@@ -8661,6 +8664,10 @@ class ControllerView(QWidget):
         """
         if self._world_loops and status.world:
             return "loop"
+        if self._world_failed and status.world:
+            # T608: a world stuck at a failed update is in `docker ps` and prints no ready
+            # marker, so the poll said running and T451 said starting, for ever.
+            return "failed"
         word = _realm_badge_status(status)
         if word == "running" and not self._world_ready and self.services.dashboard is not None:
             # T451: `docker ps` calls the world running seconds, or a whole map
@@ -8680,6 +8687,7 @@ class ControllerView(QWidget):
         self.verdict_label.setVisible(False)
         self.last_verdict = None
         self._world_loops = False
+        self._world_failed = False
         self._world_ready = False
 
     # ------------------------------------------- the movement-map job (T179)

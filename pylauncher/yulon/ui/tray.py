@@ -98,6 +98,8 @@ def status_words(status: str) -> str:
         return "Partly up"
     if status == "loop":
         return "Crash loop"
+    if status == "failed":
+        return "Update failed"
     tone = realm_tone(status)
     return {
         "up": "Realm online",
