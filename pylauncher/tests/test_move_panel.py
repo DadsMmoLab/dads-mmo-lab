@@ -38,7 +38,12 @@ def manifest(realm: str | None = "Old Realm") -> Manifest:
         game=move.GameRef(id="wow-wotlk", name="WoW WotLK"),
         databases=(
             move.Member(
-                schema="acore_auth", role="auth", file="db/acore_auth.sql", bytes=1, sha256=DIGEST
+                schema="acore_auth",
+                role="auth",
+                file="db/acore_auth.sql",
+                bytes=1,
+                sha256=DIGEST,
+                tables=("account",),
             ),
         ),
         schema_evidence={"acore_auth": Evidence(kind="updates", count=1, digest=DIGEST)},

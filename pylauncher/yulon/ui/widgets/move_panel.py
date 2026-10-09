@@ -91,8 +91,9 @@ def bring_in_question(plan: ImportPlan) -> str:
         f"(and {counts.bot_accounts} bot accounts) from {plan.path.name}?",
         f"Packed on {manifest.made_by.made[:16].replace('T', ' ')} ({manifest.game.name}).",
         "",
-        "Their logins and passwords come with them, and so do GM levels. This server's own "
-        "world, realm address and settings are left as they are.",
+        "Their logins and passwords come with them, and so do GM levels and the bots. "
+        "This server's own accounts, characters and bots are replaced; its world, realm "
+        "address and settings are left as they are.",
     ]
     if plan.replaces is not None:
         lines += ["", plan.replaces.sentence]

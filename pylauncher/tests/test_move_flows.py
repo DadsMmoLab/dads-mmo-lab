@@ -42,6 +42,7 @@ def dump_text(database: str, *, record: str | None = "wow-wotlk") -> bytes:
         lead
         + b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n"
         + f"CREATE DATABASE /*!32312 IF NOT EXISTS*/ `{database}`;\nUSE `{database}`;\n".encode()
+        + b"DROP TABLE IF EXISTS `t`;\nCREATE TABLE `t` (\n  `a` int\n);\n"
         + b"INSERT INTO `t` VALUES (1);\n-- Dump completed on 2026-10-09 15:30:00\n"
     )
 
@@ -59,6 +60,8 @@ class Db:
         realm: str = "Local Realm",
         version_table: str | None = "updates",
         fail_load_of: str | None = None,
+        extra_tables: dict[str, dict[str, int]] | None = None,
+        fail_dump_of: str | None = None,
     ) -> None:
         self.events = events
         self.present = present
@@ -67,6 +70,8 @@ class Db:
         self.realm = realm
         self.version_table = version_table
         self.fail_load_of = fail_load_of
+        self.fail_dump_of = fail_dump_of
+        self.extra_tables = extra_tables or {}  # schema -> {table: rows} the target alone has
         self.queries: list[str] = []
         self.executed: list[str] = []
         self.ignored: dict[str, tuple[str, ...]] = {}
@@ -78,6 +83,8 @@ class Db:
         self.events.append(f"dump:{database}")
         self.ignored[database] = ignore
         sink.write(dump_text(database, record=None))
+        if self.fail_dump_of == database:
+            raise MaintenanceError(f"The backup of {database} did not finish.")
 
     def load_from(self, source: IO[bytes]) -> None:
         body = source.read()
@@ -92,8 +99,20 @@ class Db:
         self.events.append("exec")
         self.executed.append(sql)
 
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]:
+        own = (("t", "BASE TABLE"),) if database != "acore_playerbots" else (("t", "BASE TABLE"),)
+        extra = tuple((n, "BASE TABLE") for n in self.extra_tables.get(database, {}))
+        realm = (("realmlist", "BASE TABLE"),) if database == "acore_auth" else ()
+        return (*own, *extra, *realm)
+
     def query(self, sql: str) -> str:
         self.queries.append(sql)
+        rows = re.fullmatch(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`;", sql)
+        if rows is not None:
+            schema, table = rows.groups()
+            if table == "realmlist":
+                return "1\n"
+            return f"{self.extra_tables.get(schema, {}).get(table, 0)}\n"
         if "information_schema.TABLES" in sql:
             return f"{self.version_table}\n" if self.version_table else ""
         if "COUNT(*)" in sql:
@@ -134,6 +153,9 @@ class Box:
 
         def stop_server() -> bool:
             self.events.append("stop")
+            if self.stop_fails:
+                self.up.remove(self.spec.world)  # half-way: the world is down, the rest is not
+                raise RuntimeError("docker stop failed")
             self.up.clear()
             return True
 
@@ -434,7 +456,9 @@ def make_package(
     for schema, record in records.items():
         path = src / f"{schema}.sql"
         path.write_bytes(dump_text(schema, record=record))
-        dumps.append(DumpFile(schema, "auth" if schema.endswith("auth") else "characters", path))
+        dumps.append(
+            DumpFile(schema, "auth" if schema.endswith("auth") else "characters", path, ("t",))
+        )
     evidence = {
         s: Evidence(kind="updates", count=2, digest=_digest(("2024_01_a", "2024_01_b")))
         for s in records
@@ -867,3 +891,137 @@ def test_the_target_moving_to_another_version_since_the_plan_refuses(tmp_path: P
             box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
         )
     assert not [e for e in box.events if e.startswith(("load:", "dump:"))]
+
+
+# ------------------------------------------------------------ cold review (Opus) findings
+
+
+def test_a_dump_that_goes_on_to_write_into_another_database_is_not_loaded(
+    tmp_path: Path,
+) -> None:
+    """`verify_dump` reads the head; the engine's plan scans all of the file."""
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": "wow-wotlk"})
+    # Rebuild the characters member with a second database named after its own.
+    src = tmp_path / "joined"
+    src.mkdir()
+    auth = src / "acore_auth.sql"
+    auth.write_bytes(dump_text("acore_auth"))
+    chars = src / "acore_characters.sql"
+    chars.write_bytes(
+        dump_text("acore_characters").replace(
+            b"-- Dump completed", b"USE `acore_world`;\nDROP TABLE `creature`;\n-- Dump completed"
+        )
+    )
+    header = Header(
+        game_id="wow-wotlk",
+        game_name="WoW WotLK",
+        realm_name=None,
+        channel_account=None,
+        bot_prefix=None,
+        counts=Counts(accounts=0, characters=0, bot_accounts=0),
+        schema_evidence={
+            s: Evidence(kind="updates", count=2, digest=_digest(("2024_01_a", "2024_01_b")))
+            for s in ("acore_auth", "acore_characters")
+        },
+        excluded=(),
+        made=AT,
+    )
+    joined = tmp_path / "joined.zip"
+    move.write_package(
+        joined,
+        header,
+        [
+            DumpFile("acore_auth", "auth", auth, ("t",)),
+            DumpFile("acore_characters", "characters", chars, ("t",)),
+        ],
+    )
+    del package
+    box = target(tmp_path)
+    forged = move_flows.ImportPlan(
+        path=joined,
+        manifest=move.read_package(joined).manifest,
+        refusals=(),
+        schemas=("acore_auth", "acore_characters"),
+        counts=(0, 0),
+    )
+    with pytest.raises(MaintenanceError, match="writes into acore_characters, acore_world"):
+        move_flows.run_import(
+            box.world, forged, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_a_package_that_calls_the_world_database_its_characters_is_refused(
+    tmp_path: Path,
+) -> None:
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_world": "wow-wotlk"})
+    plan = move_flows.plan_import(target(tmp_path).world, package)
+    assert not plan.allowed
+    joined = " ".join(plan.refusals)
+    assert "holds acore_world as its characters database" in joined
+
+
+def test_non_empty_data_the_file_does_not_cover_refuses_the_plan(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    db = Db(
+        [],
+        present=("acore_auth", "acore_characters", "acore_world", "acore_playerbots"),
+        extra_tables={
+            "acore_playerbots": {"playerbots_random_bots": 5},
+            "acore_characters": {"mod_transmog": 12, "mod_empty": 0},
+        },
+    )
+    plan = move_flows.plan_import(target(tmp_path, db=db).world, package)
+    assert not plan.allowed
+    said = plan.refusals[0]
+    assert "acore_playerbots.playerbots_random_bots" in said
+    assert "acore_characters.mod_transmog" in said
+    assert "mod_empty" not in said
+    assert "refers to its characters" in said
+
+
+def test_a_server_with_only_the_realm_row_and_empty_extras_is_not_refused(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    db = Db([], extra_tables={"acore_characters": {"mod_empty": 0}})
+    assert move_flows.plan_import(target(tmp_path, db=db).world, package).allowed
+
+
+def test_data_the_file_does_not_cover_that_appears_after_the_plan_refuses_the_run(
+    tmp_path: Path,
+) -> None:
+    box, _package, plan = ready(tmp_path)
+    box.db.extra_tables = {"acore_characters": {"mod_transmog": 3}}
+    with pytest.raises(MaintenanceError, match="mod_transmog"):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert not [e for e in box.events if e.startswith(("load:", "dump:"))]
+
+
+def test_a_backup_that_fails_part_way_leaves_no_dump_behind(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), db=Db([], fail_dump_of="acore_characters"))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="INCOMPLETE"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    backups = maintenance.backups_dir(box.server_dir)
+    assert not [p for p in backups.glob("*_move_*")], "an auth dump with every verifier stayed"
+
+
+def test_a_stop_that_fails_half_way_still_has_the_server_started_again(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    box.stop_fails = True
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(RuntimeError, match="docker stop failed"):
+        move_flows.export_package(box.world, folder, stop_allowed=True)
+    assert box.events[-1] == "start"
+
+
+def test_a_realm_name_with_a_backslash_survives_the_clients_escaping(tmp_path: Path) -> None:
+    db = Db([], realm="Back\\\\slash")  # what mysql --batch prints for Back\slash
+    box = Box(tmp_path, running_now=("ac-database",), db=db)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    manifest = move_flows.export_package(box.world, folder, stop_allowed=False).manifest
+    assert manifest.realm_name == "Back\\slash"

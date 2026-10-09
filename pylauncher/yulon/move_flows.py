@@ -126,6 +126,7 @@ class FlowMysql(Protocol):
     def load_from(self, source: IO[bytes]) -> None: ...
     def query(self, sql: str) -> str: ...
     def execute(self, sql: str) -> None: ...
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]: ...
 
 
 BackupFn = Callable[..., BackupReport]
@@ -350,7 +351,9 @@ def _read_realm_name(world: MoveWorld, auth: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 - the name is a courtesy, never a reason to refuse
         logger.info(f"could not read the realm name: {exc}")
         return None
-    name = out.strip("\r\n")
+    # `--batch` writes a backslash as two; a realm name never holds a control character
+    # (the manifest grammar), so that is the only escape to undo.
+    name = out.strip("\r\n").replace("\\\\", "\\")
     return name or None
 
 
@@ -448,10 +451,10 @@ def export_package(world: MoveWorld, folder: Path, *, stop_allowed: bool) -> Exp
     if _server_is_up(world) and not stop_allowed:
         raise MoveError(RUNNING_NEEDS_A_YES_EXPORT)
     stopped = False
-    if _server_is_up(world):
-        world.stop_server()
-        stopped = True
     try:
+        if _server_is_up(world):
+            stopped = True  # set first: a stop that fails half-way still leaves it to start again
+            world.stop_server()
         result = _export_locked(world, folder)
     except BaseException as exc:
         if stopped:
@@ -503,11 +506,7 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
         counts = _read_counts(world, roles)
         realm = _read_realm_name(world, roles["auth"])
         wanted = list(roles.values())
-        report = world.backup(
-            only=wanted,
-            label="move",
-            ignore_tables={roles["auth"]: (world.entry.realmlist.table,)},
-        )
+        report = _backup_for_the_package(world, wanted, roles["auth"])
         try:
             marker = world.marker()
             left_out = tuple(
@@ -531,13 +530,45 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
                 made=made,
             )
             by_schema = {schema: role for role, schema in roles.items()}
-            dumps = [DumpFile(d.database, by_schema[d.database], d.path) for d in report.dumps]
+            dumps = [
+                DumpFile(d.database, by_schema[d.database], d.path, _tables_of(d.database, d.path))
+                for d in report.dumps
+            ]
             dest = folder / move.package_filename(world.game.id, made)
             manifest = move.write_package(dest, header, dumps)
         finally:
             for dump in report.dumps:
                 dump.path.unlink(missing_ok=True)
     return ExportResult(path=dest, manifest=manifest, restarted=None)
+
+
+def _tables_of(schema: str, path: Path) -> tuple[str, ...]:
+    """The tables a finished dump holds, read from the file itself."""
+    tables = maintenance.tables_in_copy(path).get(schema)
+    if not tables:
+        raise MoveError(f"The copy of {schema} lists no table, so it was not packed.")
+    return tables
+
+
+def _backup_for_the_package(world: MoveWorld, wanted: Sequence[str], auth: str) -> BackupReport:
+    """The engine's backup of the packed schemas, and no stray dump if it fails part-way.
+
+    The dumps are this run's own files in `backups/`, and an auth dump among them holds every
+    account's verifier: left behind after a failure, Restore would list it as an ordinary backup.
+    """
+    directory = maintenance.backups_dir(world.server_dir)
+    before = {p.name for p in directory.glob("*")} if directory.is_dir() else set()
+    try:
+        return world.backup(
+            only=wanted,
+            label="move",
+            ignore_tables={auth: (world.entry.realmlist.table,)},
+        )
+    except BaseException:
+        for path in directory.glob("*_move_*"):
+            if path.name not in before:
+                path.unlink(missing_ok=True)
+        raise
 
 
 # --------------------------------------------------------------- import: the plan
@@ -677,6 +708,7 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             roles = _present_roles(world)
             here = _read_versions(world, roles)
             counts = _survey_counts(world, roles)
+            uncovered = _data_the_file_does_not_cover(world, manifest, roles)
     except MaintenanceError as exc:
         return ImportPlan(path=path, manifest=manifest, refusals=(str(exc),), schemas=schemas)
     except Exception as exc:  # noqa: BLE001 - Docker not answering is a refusal
@@ -691,6 +723,8 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
         refusals.append(said)
     if counts is None:
         refusals.append(_COUNT_UNKNOWN)
+    if uncovered:
+        refusals.append(_uncovered_sentence(uncovered))
     return ImportPlan(
         path=path,
         manifest=manifest,
@@ -716,6 +750,51 @@ def _survey_counts(world: MoveWorld, roles: Mapping[Role, str]) -> tuple[int, in
         logger.info(f"could not count the target's players: {exc}")
         return None
     return counts.accounts, counts.characters
+
+
+_UNCOVERED = (
+    "This server holds data that the file does not cover and that refers to its characters "
+    "({names}). Bringing the file in would leave that data pointing at the wrong characters, "
+    "so Yu'lon will not do it. Install the same modules on both servers (or remove those "
+    "here), then try again. {undone}"
+)
+
+
+def _data_the_file_does_not_cover(
+    world: MoveWorld, manifest: Manifest, roles: Mapping[Role, str]
+) -> list[str]:
+    """Non-empty tables, in the schemas an import touches, that the package holds no copy of.
+
+    The engine's load is a merge: a table the file holds is replaced and one it does not hold
+    stays. Rows kept that way are keyed by character and account ids the import reuses
+    (a module's per-character table, the random-bot registry of a server whose file has no
+    bots), so they would attach to the wrong people. Empty ones are harmless and not listed.
+    """
+    held = {m.schema_name: set(m.tables) for m in manifest.databases}
+    # The realm row is the one table left out of a package on purpose (it is this server's own).
+    kept_on_purpose = {(roles.get("auth"), world.entry.realmlist.table)}
+    found: list[str] = []
+    for role in ROLES:
+        schema = roles.get(role)
+        if schema is None:
+            continue
+        for name, kind in world.mysql.tables(schema):
+            if name in held.get(schema, set()) or kind == "VIEW":
+                continue
+            if (schema, name) in kept_on_purpose:
+                continue
+            quoted = name.replace("`", "``")
+            rows = world.mysql.query(f"SELECT COUNT(*) FROM `{schema}`.`{quoted}`;").strip()
+            if not rows.isdigit():
+                raise MoveError(f"The row count of {schema}.{name} came back as {rows!r}.")
+            if int(rows) > 0:
+                found.append(f"{schema}.{name}")
+    return found
+
+
+def _uncovered_sentence(found: Sequence[str]) -> str:
+    shown = ", ".join(found[:6]) + (f" and {len(found) - 6} more" if len(found) > 6 else "")
+    return _UNCOVERED.format(names=shown, undone=_NOT_IN)
 
 
 def _load_order(world: MoveWorld) -> Callable[[str], int]:
@@ -846,6 +925,9 @@ def _import_locked(
     counts = _survey_counts(world, roles)
     if counts is None or counts != plan.counts:
         raise MoveError(CHANGED_SINCE_THE_PLAN)
+    uncovered = _data_the_file_does_not_cover(world, manifest, roles)
+    if uncovered:
+        raise MoveError(_uncovered_sentence(uncovered))
 
     present = set(world.mysql.databases())
     existing = [s for s in plan.schemas if s in present]
@@ -905,6 +987,13 @@ def _checked_plans(
         restore_plan = world.plan_restore(path)
         if not restore_plan.allowed:
             raise MoveError(f"{' '.join(restore_plan.refusals)} {_NOT_IN}")
+        if restore_plan.databases != (schema,):
+            # `verify_dump` reads only the head of the file; the engine's plan scans all of it.
+            # A dump that goes on to `USE` another database would load into that one.
+            raise MoveError(
+                f"db/{schema}.sql writes into {', '.join(restore_plan.databases) or 'nothing'}, "
+                f"not only into {schema}, so Yu'lon will not load it. {_NOT_IN}"
+            )
         plans.append((schema, restore_plan))
     return plans
 

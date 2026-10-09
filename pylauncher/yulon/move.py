@@ -105,6 +105,9 @@ class Member(_Strict):
     file: str
     bytes: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tables: tuple[str, ...] = Field(min_length=1)
+    """The tables and views the dump holds: how an import tells what the target has that the
+    file does not cover (rows there may point at characters the import replaces)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -113,6 +116,14 @@ class Member(_Strict):
     def _schema_grammar(cls, value: str) -> str:
         if not _SCHEMA.fullmatch(value):
             raise ValueError("a schema name is letters, digits and underscores")
+        return value
+
+    @field_validator("tables")
+    @classmethod
+    def _table_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if not name or len(name) > 64 or any(ord(c) < 32 for c in name):
+                raise ValueError("a table name is printable text of up to 64 characters")
         return value
 
     @field_validator("file")
@@ -201,6 +212,7 @@ class DumpFile:
     schema_name: str
     role: Role
     path: Path
+    tables: tuple[str, ...]
 
 
 def package_filename(game_id: str, made: datetime) -> str:
@@ -231,6 +243,7 @@ def write_package(dest: Path, header: Header, dumps: Sequence[DumpFile]) -> Mani
                 file=f"db/{dump.schema_name}.sql",
                 bytes=size,
                 sha256=digest,
+                tables=tuple(dump.tables),
             )
         )
     manifest = Manifest(

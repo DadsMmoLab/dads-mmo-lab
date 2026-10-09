@@ -57,7 +57,7 @@ def dump(tmp_path: Path, schema: str, role: str = "auth", body: bytes | None = N
         + schema.encode()
         + b"`;\n"
     )
-    return DumpFile(schema, role, path)  # type: ignore[arg-type]
+    return DumpFile(schema, role, path, tables=("t",))  # type: ignore[arg-type]
 
 
 def pack(tmp_path: Path, *schemas: str) -> Path:
