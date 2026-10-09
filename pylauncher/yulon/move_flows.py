@@ -99,6 +99,11 @@ CHANGED_SINCE_THE_PLAN = (
     "The file or this server changed after the plan was shown, so the yes given then no "
     "longer covers what would happen now. Nothing was brought in; look at it again."
 )
+WHOLE_SERVER_FILE = (
+    "This file holds a whole server, not only its accounts and characters. Bring it in from "
+    "the Catalog (Bring from another computer… on the game's tile): it is installed as a new "
+    "server there. Nothing was brought in."
+)
 INSTALL_RECORD_DAMAGED = (
     "This server's install record is damaged, so Yu'lon cannot tell that the folder is its "
     "own and will not move accounts in or out of it."
@@ -134,7 +139,8 @@ class FlowMysql(Protocol):
 
 BackupFn = Callable[..., BackupReport]
 PlanRestoreFn = Callable[[Path], RestorePlan]
-RestoreFn = Callable[[RestorePlan, str], RestoreReport]
+RestoreFn = Callable[..., RestoreReport]
+"""`(plan, safety_label, *, before_load=None) -> RestoreReport`."""
 
 
 @dataclass(frozen=True)
@@ -200,7 +206,9 @@ def engine_for(
             path, server_dir, game=game, spec=spec, running=running, wsl_distro=wsl_distro
         )
 
-    def restore(plan: RestorePlan, safety_label: str) -> RestoreReport:
+    def restore(
+        plan: RestorePlan, safety_label: str, *, before_load: Callable[[], object] | None = None
+    ) -> RestoreReport:
         return maintenance.restore(
             plan,
             mysql,
@@ -211,6 +219,7 @@ def engine_for(
             running=running,
             wsl_distro=wsl_distro,
             safety_label=safety_label,
+            before_load=before_load,
         )
 
     return backup, plan_restore, restore
@@ -249,11 +258,11 @@ def _refuse_if_unsafe(world: MoveWorld) -> None:
         raise MoveError(_UNFINISHED_RESTORE)
 
 
-def _present_roles(world: MoveWorld) -> dict[Role, str]:
+def _present_roles(world: MoveWorld, wanted: Sequence[Role] = ROLES) -> dict[Role, str]:
     """Role -> schema, for the roles this game has AND this server's database holds now."""
     schemas = world.entry.schema_map()
     present = set(world.mysql.databases())
-    return {role: schemas[role] for role in ROLES if role in schemas and schemas[role] in present}
+    return {role: schemas[role] for role in wanted if role in schemas and schemas[role] in present}
 
 
 # --------------------------------------------------------------- reading a server
@@ -478,6 +487,21 @@ class ExportResult:
 
     def text(self) -> str:
         counts = self.manifest.counts
+        server = self.manifest.server
+        if server is not None:
+            confs = sum(1 for f in server.files if f.kind == "conf")
+            lines = [
+                f"Packed the whole server into {self.path}: "
+                f"{', '.join(m.schema_name for m in self.manifest.databases)}, {confs} setting "
+                f"files and {len(server.modules)} modules, with {counts.accounts} accounts and "
+                f"{counts.characters} characters ({counts.bot_accounts} bot accounts).",
+                f"{self.path.stat().st_size / (1024 * 1024):.1f} MB.",
+                self.manifest.secrets,
+                "On the new computer, press Bring from another computer… on this game's Catalog "
+                "tile: it builds the server again at the same version, then puts all of this in.",
+                *self.notes,
+            ]
+            return "\n".join(lines)
         lines = [
             f"Packed {counts.accounts} accounts and {counts.characters} characters "
             f"({counts.bot_accounts} bot accounts) into {self.path}.",
@@ -490,9 +514,25 @@ class ExportResult:
         return "\n".join(lines)
 
 
-def export_package(world: MoveWorld, folder: Path, *, stop_allowed: bool) -> ExportResult:
-    """Pack this server's accounts and characters into `folder`, and say what was done."""
+SERVER_ROLES: tuple[Role, ...] = ("auth", "characters", "world", "playerbots", "ale")
+"""The roles a whole-server package holds (level 2), in the order they are loaded."""
+
+
+def export_package(
+    world: MoveWorld,
+    folder: Path,
+    *,
+    stop_allowed: bool,
+    whole: Callable[[], move.ServerFacts] | None = None,
+) -> ExportResult:
+    """Pack this server's accounts and characters into `folder`, and say what was done.
+
+    With `whole` (level 2), the whole server: every database but the logs, the realm row kept,
+    and what `whole()` reads off the server folder (`move_server.gather_server_facts`). That is
+    read FIRST, before the server is stopped, so a refusal there stops nothing.
+    """
     _refuse_if_unsafe(world)
+    facts = whole() if whole is not None else None
     if _server_is_up(world) and not stop_allowed:
         raise MoveError(RUNNING_NEEDS_A_YES_EXPORT)
     stopped = False
@@ -500,7 +540,7 @@ def export_package(world: MoveWorld, folder: Path, *, stop_allowed: bool) -> Exp
         if _server_is_up(world):
             stopped = True  # set first: a stop that fails half-way still leaves it to start again
             world.stop_server()
-        result = _export_locked(world, folder)
+        result = _export_locked(world, folder, facts)
     except BaseException as exc:
         if stopped:
             problem = _start_again(world)
@@ -529,10 +569,12 @@ def _start_again(world: MoveWorld) -> str | None:
     return None
 
 
-def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
+def _export_locked(
+    world: MoveWorld, folder: Path, facts: move.ServerFacts | None = None
+) -> ExportResult:
     undone = "Nothing was packed."
     with _database_session(world, because="nothing was packed", undone=undone):
-        roles = _present_roles(world)
+        roles = _present_roles(world, SERVER_ROLES if facts is not None else ROLES)
         schemas = world.entry.schema_map()
         for needed in EVIDENCE_ROLES:
             if needed not in roles:
@@ -551,14 +593,25 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
         evidence = {schema: v for schema, v in versions.items() if v is not None}
         counts = _read_counts(world, roles)
         realm = _read_realm_name(world, roles["auth"])
+        if facts is not None and "world" not in roles:
+            raise MoveError(
+                f"This server has no {schemas['world']}, so there is no whole server to pack. "
+                f"{undone}"
+            )
         wanted = list(roles.values())
-        report = _backup_for_the_package(world, wanted, roles["auth"])
+        report = _backup_for_the_package(world, wanted, roles["auth"] if facts is None else None)
         try:
             marker = world.marker()
+            why = "not part of accounts and characters" if facts is None else "logs"
             left_out = tuple(
-                f"{name} (not part of accounts and characters)"
+                f"{name} ({why})"
                 for name in world.mysql.databases()
                 if name not in wanted and name not in maintenance.SYSTEM_SCHEMAS
+            )
+            realm_note = (
+                (f"{world.entry.realmlist.table} of {roles['auth']} (the realm's own address)",)
+                if facts is None
+                else ()
             )
             made = world.now()
             header = Header(
@@ -569,10 +622,7 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
                 bot_prefix=marker.prefix if marker is not None else None,
                 counts=counts,
                 schema_evidence=evidence,
-                excluded=(
-                    *left_out,
-                    f"{world.entry.realmlist.table} of {roles['auth']} (the realm's own address)",
-                ),
+                excluded=(*left_out, *realm_note),
                 made=made,
             )
             by_schema = {schema: role for role, schema in roles.items()}
@@ -580,8 +630,15 @@ def _export_locked(world: MoveWorld, folder: Path) -> ExportResult:
                 DumpFile(d.database, by_schema[d.database], d.path, _tables_of(d.database, d.path))
                 for d in report.dumps
             ]
-            dest = folder / move.package_filename(world.game.id, made)
-            manifest = move.write_package(dest, header, dumps)
+            kind: move.Kind = "server" if facts is not None else "characters"
+            dest = folder / move.package_filename(world.game.id, made, kind=kind)
+            manifest = move.write_package(
+                dest,
+                header,
+                dumps,
+                server=facts.spec if facts is not None else None,
+                files=facts.files if facts is not None else (),
+            )
         finally:
             for dump in report.dumps:
                 dump.path.unlink(missing_ok=True)
@@ -596,7 +653,9 @@ def _tables_of(schema: str, path: Path) -> tuple[str, ...]:
     return tables
 
 
-def _backup_for_the_package(world: MoveWorld, wanted: Sequence[str], auth: str) -> BackupReport:
+def _backup_for_the_package(
+    world: MoveWorld, wanted: Sequence[str], auth: str | None
+) -> BackupReport:
     """The engine's backup of the packed schemas, and no stray dump if it fails part-way.
 
     The dumps are this run's own files in `backups/`, and an auth dump among them holds every
@@ -608,7 +667,9 @@ def _backup_for_the_package(world: MoveWorld, wanted: Sequence[str], auth: str) 
         return world.backup(
             only=wanted,
             label="move",
-            ignore_tables={auth: (world.entry.realmlist.table,)},
+            # A whole server keeps its realm row (the old name travels; the address is put
+            # right on the new computer). Accounts and characters leave it with the server.
+            ignore_tables={auth: (world.entry.realmlist.table,)} if auth is not None else None,
         )
     except BaseException:
         for path in directory.glob("*_move_*"):
@@ -683,6 +744,11 @@ def _replaces(accounts: int, characters: int) -> Replaces | None:
 
 def _record_refusals(world: MoveWorld, package: move.Package) -> list[str]:
     """One refusal per dump whose game record is missing, unreadable or another game's."""
+    return record_refusals(world.game.id, world.game.name, package)
+
+
+def record_refusals(game_id: str, game_name: str, package: move.Package) -> list[str]:
+    """`_record_refusals` for a caller with no server yet (a whole-server import, level 2)."""
     refusals: list[str] = []
     for member in package.manifest.databases:
         try:
@@ -692,10 +758,8 @@ def _record_refusals(world: MoveWorld, package: move.Package) -> list[str]:
             continue
         if found is None:
             refusals.append(move.unlabeled_dump(member.file))
-        elif found != world.game.id:
-            refusals.append(
-                move.dump_from_another_game(member.file, _game_name(found), world.game.name)
-            )
+        elif found != game_id:
+            refusals.append(move.dump_from_another_game(member.file, _game_name(found), game_name))
     return refusals
 
 
@@ -740,6 +804,8 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
     except MovePackageError as exc:
         return ImportPlan(path=path, manifest=None, refusals=(str(exc),))
     manifest = package.manifest
+    if manifest.kind != "characters":
+        return ImportPlan(path=path, manifest=None, refusals=(WHOLE_SERVER_FILE,))
     refusals = [*_record_refusals(world, package), *_shape_refusals(world, manifest)]
     try:
         _refuse_if_unsafe(world)
@@ -1144,10 +1210,26 @@ class MoveServices:
     run_import: Callable[[ImportPlan, str | None, bool, bool], ImportResult]
     """`(plan, confirm, use_old_realm_name, stop_allowed)`."""
     default_folder: Callable[[], Path] = default_folder
+    export_server: Callable[[Path, bool], ExportResult] | None = None
+    """`(folder, stop_allowed)`: the whole server (level 2). None draws no such press."""
+    world: MoveWorld | None = None
+    """The server these presses act on, for a whole-server import's steps after its install."""
 
 
-def services_for(world: MoveWorld) -> MoveServices:
+def services_for(
+    world: MoveWorld, whole: Callable[[], move.ServerFacts] | None = None
+) -> MoveServices:
     return MoveServices(
+        world=world,
+        export_server=(
+            (
+                lambda folder, stop_allowed: export_package(
+                    world, folder, stop_allowed=stop_allowed, whole=whole
+                )
+            )
+            if whole is not None
+            else None
+        ),
         plan_export=lambda: plan_export(world),
         export=lambda folder, stop_allowed: export_package(
             world, folder, stop_allowed=stop_allowed

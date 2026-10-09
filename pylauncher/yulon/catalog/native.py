@@ -9761,6 +9761,28 @@ class StagedInstaller:
             ),
         )
 
+    def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
+        """Write `rows` into the install record, keeping every other source's row (T601).
+
+        For a server built from a move package at commits that are not this catalog's pins:
+        the rows say where each source stands, so the Server tab offers Update or Return the
+        way it does after a press (`_against_the_catalog`). Re-read here for
+        `_record_source_revs`' reason. False when the record would not be read or written.
+        """
+        if not rows:
+            return True
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            logger.warning(
+                f"{server_dir} would not say what it is; the moved-in rows were not written"
+            )
+            return False
+        keep = {row.repo for row in rows}
+        merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(rows)
+        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
+        written = read_state(server_dir, valid=self.stage_names())
+        return written is not None and set(rows) <= set(written.source_revs)
+
     def _remember_refused(self, server_dir: Path, refused: UpdateRefused) -> None:
         """Record the upstream commit an update refused, so the tab stops offering it (T179).
 
