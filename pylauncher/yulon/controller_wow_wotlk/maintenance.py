@@ -1311,11 +1311,6 @@ def restore(
     except OSError as exc:
         raise MaintenanceError(f"could not read {plan.backup}: {exc}") from exc
     with source:
-        if os.fstat(source.fileno()).st_size != plan.size_bytes:
-            raise MaintenanceError(
-                f"{plan.backup.name} is not the file that was checked — it changed in between. "
-                "Nothing was restored; look at it again."
-            )
         return _restore_from(
             source,
             plan,
@@ -1353,6 +1348,11 @@ def _restore_from(
         raise MaintenanceError(f"restore refused: {_wrong_game_refusal(recorded, game)}")
     if recorded is None and not plan.unlabeled_accepted:
         raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
+    if _digest_of(source, plan.backup.name) != fresh.content_digest:
+        raise MaintenanceError(
+            f"{plan.backup.name} is not the file that was checked — it changed in between. "
+            "Nothing was restored; look at it again."
+        )
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     # `fresh`, not `plan`: the marker is the one thing here that can appear
@@ -1448,6 +1448,24 @@ def _restore_from(
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
+
+
+def _digest_of(source: IO[bytes], name: str) -> str:
+    """SHA-256 of an open file, then rewound: the handle's own answer to "is this the file checked".
+
+    One more read of the file, hashing only. It is what closes the gap between the
+    re-plan's scan (by path) and the open that follows it: what is loaded is the content
+    that was hashed and agreed to, not whatever the path names by then.
+    """
+    digest = hashlib.sha256()
+    try:
+        source.seek(0)
+        while chunk := source.read(_SCAN_CHUNK):
+            digest.update(chunk)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return digest.hexdigest()
 
 
 def _recorded_game_of(source: IO[bytes], name: str) -> str | None:

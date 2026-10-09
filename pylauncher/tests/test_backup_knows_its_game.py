@@ -429,6 +429,22 @@ def test_a_file_whose_size_changed_when_it_is_opened_is_not_loaded(
     assert mysql.loaded == []
 
 
+def test_a_same_size_file_with_other_content_when_it_is_opened_is_not_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapped between the re-plan's scan and the open, same size, same record, same
+    schemas: only the handle's own digest tells it from the file that was agreed to."""
+    path = write(tmp_path, line_for("wow-wotlk") + dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK)
+    original = path.read_bytes()
+    path.write_bytes(original.replace(b"VALUES (1)", b"VALUES (2)"))
+    monkeypatch.setattr(maintenance, "plan_restore", lambda *a, **k: made)
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="is not the file that was checked"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
 def test_an_acknowledgement_does_not_unrefuse_a_wrong_game(tmp_path: Path) -> None:
     path = write(tmp_path, line_for("wow-unbound") + dump_of("acore_characters"))
     made = dataclasses.replace(plan(path, tmp_path, WOTLK), unlabeled_accepted=True)
