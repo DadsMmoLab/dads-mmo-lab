@@ -582,3 +582,39 @@ def test_tree_files_lists_what_the_commit_tracks_and_not_the_disk(tmp_path: Path
         "--",
         "data/sql",
     ]
+
+
+def test_a_stopped_database_is_started_from_yulons_compose_not_the_targets(
+    tmp_path: Path,
+) -> None:
+    """Live on m910q, 2026-10-09: with the server stopped the check had to start the database,
+    and the move had just put the TARGET's own `docker-compose.yml` in the core checkout.
+    `compose up ub-database` refused that file ("service ub-worldserver has neither an image
+    nor a build context"), so the press refused as "could not start the database" instead of
+    naming the updates. Yu'lon's compose is written back before the family's check now.
+    """
+    from tests.support_native import UPSTREAM_COMPOSE
+    from yulon import docker
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    rec.db_was_up = False
+    compose = server_dir / composegen.BASE_FILE
+
+    def start_db(spec: object, folder: Path, *, because: str = "") -> None:
+        rec.calls.append("start-db")
+        if compose.read_text(encoding="utf-8") == UPSTREAM_COMPOSE:
+            raise docker.DockerCommandError(
+                'service "ub-worldserver" has neither an image nor a build context specified'
+            )
+        rec.db_started = True
+
+    made = engine(rec, start_db=start_db)
+    made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    message = str(raised.value)
+    assert "acore_playerbots has 2 updates the tested commit does not have" in message, message
+    assert compose.read_text(encoding="utf-8") != UPSTREAM_COMPOSE, "the compose went back"
+    assert {rec.heads[server_dir / s.dest] for s in ENTRY.emulator.sources} == {OLD}

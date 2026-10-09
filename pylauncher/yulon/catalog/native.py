@@ -9484,7 +9484,9 @@ class StagedInstaller:
            ahead of the image, which is the state this whole method is arranged
            to prevent.
         3. The moves, one source at a time, each remembered as it happens, then
-           the family's reading of what they brought (`check_moved_sources()`,
+           what this app owns written back over what they brought (T630: a
+           family's check may start the database, which needs Yu'lon's compose),
+           then the family's reading of what they brought (`check_moved_sources()`,
            T179), which can refuse.
         4. The carried patches: resolved dry (which can refuse), then written;
            then the family's background work stopped (`before_rebuild()`).
@@ -9603,9 +9605,13 @@ class StagedInstaller:
                 # T179: the family reads what the move brought (TrinityCore's SQL
                 # snapshot) and may refuse it, while every source can still go back
                 # and nothing has been built, written or stopped.
+                # T630 (live, m910q): Yu'lon's own compose goes back over the one the move
+                # brought BEFORE the family reads the move, because AzerothCore's check may
+                # have to start a stopped database, and `compose up` refuses the target's
+                # file. A refusal below puts the sources back and writes it again.
+                yield from self._rewrite_what_we_own(server_dir, opts, state)
                 changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
                 yield from self.check_carried_patches(server_dir)
-                yield from self._rewrite_what_we_own(server_dir, opts, state)
                 yield from self.apply_carried_patches(server_dir)
                 # After every refusal -- the source checks above included -- and
                 # before the compile: `rebuild()`'s reason, one step earlier. Not
