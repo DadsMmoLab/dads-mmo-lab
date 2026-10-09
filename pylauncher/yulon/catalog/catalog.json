@@ -1268,6 +1268,7 @@
                   "keys": {
                     "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
                     "ForcePinAccountRank": "10",
+                    "LogFilter_SQLText": "1",
                     "LogsDir": "\"../logs/\""
                   }
                 }

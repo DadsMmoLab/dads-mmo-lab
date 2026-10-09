@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to defaults**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
 
 ### Changed

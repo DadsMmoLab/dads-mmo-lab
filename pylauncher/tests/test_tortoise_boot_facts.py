@@ -733,6 +733,26 @@ def test_the_world_does_not_print_every_sql_statement_it_runs() -> None:
     ), "the dist ships 0, which prints every statement the world runs"
 
 
+def test_the_login_server_does_not_print_every_sql_statement_it_runs() -> None:
+    """realmd prints them too, session keys included, and its dist has no key for it (T618).
+
+    Read at the pinned rev (187af788): `realmd/Main.cpp:203` calls `sLog.Initialize()`, the
+    same `Log.cpp:358-370` that reads `LogFilter_SQLText` (default `false`, `Log.cpp:49`)
+    for mangosd, and `realmd.conf.dist.in` ships `LogLevel = 1`, the level `Execute` and
+    `_Query` (`DatabaseMysql.cpp:229`, `:357`) log `SQL: ...` at. `AuthSocket.cpp:990` runs
+    `UPDATE account SET sessionkey = '<80 hex>' ...` through them, so a support zip carried
+    the login credential. `realmd.conf.dist.in` does not mention the key at all, so the
+    patch appends it.
+    """
+    keys = _native().cmangos.conf.files["realmd.conf"].keys  # type: ignore[union-attr]
+    assert (
+        keys.get("LogFilter_SQLText") == "1"
+    ), "the key is absent, so realmd prints every statement"
+    assert keys.get("LogFilter_SQLText") == (
+        _native().cmangos.conf.files["mangosd.conf"].keys.get("LogFilter_SQLText")  # type: ignore[union-attr]
+    ), "the world and the login server must agree"
+
+
 def test_the_two_confs_this_image_does_not_ship_as_plain_dists_name_their_templates() -> None:
     """`materialise()`'s default is `<name>.dist` beside the file, and twice it is wrong here.
 
