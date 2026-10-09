@@ -791,7 +791,7 @@ CORRECTIONS_CANCEL_NOTE = (
 )
 """`RERUN_CANCEL_NOTE`'s counterpart for T129's press: the gate already reads a finished import."""
 
-CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable"]
+CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable", "busy"]
 
 
 @dataclass(frozen=True)
@@ -6202,6 +6202,10 @@ class Seams:
     """T568: a press's reservation of its server across processes (`docker.server_claim()`).
 
     A server inside a WSL distro binds it to that distro's Docker (`in_wsl()`)."""
+    reservation_holder: Callable[..., docker.ServerHolder | None] = docker.reservation_holder
+    """T607: who holds a server's reservation (`docker.reservation_holder()`, inspect only).
+
+    Asked by the corrections reading, so a retry is not offered over another Yu'lon's press."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -6414,6 +6418,7 @@ class Seams:
             run_container=refused("Running an install container"),
             folder_claim=refused("Claiming a server folder for an extraction"),
             server_claim=on(docker.server_claim, wsl_distro=distro),
+            reservation_holder=on(docker.reservation_holder, wsl_distro=distro),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
@@ -7471,13 +7476,40 @@ class StagedInstaller:
         """
         server_dir = self.server_dir(options or InstallOptions())
         try:
-            return self._correction_check(self._update_context(server_dir, None))
+            check = self._correction_check(self._update_context(server_dir, None))
+            return self._busy_elsewhere(server_dir, check)
         except Exception as exc:  # noqa: BLE001 - a status path has nowhere to put one
             logger.warning(f"could not compare {server_dir}'s install plan with this app's: {exc}")
             return CorrectionCheck(
                 "unreadable",
                 why=f"this install's databases could not be asked ({type(exc).__name__}: {exc})",
             )
+
+    def _busy_elsewhere(self, server_dir: Path, check: CorrectionCheck) -> CorrectionCheck:
+        """A `stale` reading is `busy` while another Yu'lon holds this server (T607, T568 plan 6).
+
+        Its stuck world-update rows may be that Yu'lon's press, still running, and a retry
+        offered over it would race it. Inspect only; asked of `stale` readings only, so a
+        status poll of a current install costs the daemon nothing. A holder this process is
+        (the press reading its own check under its reservation) does not count, and a daemon
+        that will not say leaves the reading as it was: the press takes the reservation
+        itself and refuses in its own words.
+        """
+        if check.state != "stale":
+            return check
+        try:
+            holder = self._seams.reservation_holder(server_dir)
+        except Exception as exc:  # noqa: BLE001 - the press asks again, and refuses in words
+            logger.info(f"could not ask who holds {server_dir}'s reservation: {exc}")
+            return check
+        if holder is None or holder.here:
+            return check
+        return CorrectionCheck(
+            "busy",
+            why=forgetting.corrections_held_elsewhere(
+                self.entry.name, holder.press, holder.since(), holder.who
+            ),
+        )
 
     def _correction_check(self, ctx: StageContext) -> CorrectionCheck:
         """The family's reading. The spine keeps no per-phase record, so it knows nothing."""

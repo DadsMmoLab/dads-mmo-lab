@@ -4793,6 +4793,11 @@ _corrections_clock = time.monotonic
 """The clock the waits above are measured on; a test moves its own."""
 
 
+BUSY_ASKED_AGAIN_AFTER = 30.0
+"""Seconds before a corrections reading of `busy` (another Yu'lon holds the server) is asked
+again, for as long as it stays so (T607). One `docker inspect` and the ledger read each time."""
+
+
 class _AskAgain:
     """One reading's ask-again schedule (T381, T420): when it is due, and how often it was asked.
 
@@ -4815,6 +4820,15 @@ class _AskAgain:
             return False
         self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
         return True
+
+    def arm_for_busy(self) -> None:
+        """Ask again in `BUSY_ASKED_AGAIN_AFTER` seconds, however often it has been asked (T607).
+
+        The answer was "another Yu'lon holds this server": it ends when that Yu'lon's job does,
+        which no bounded wait can promise, and a banner that never lifts is worse than a look
+        every half minute while it stands.
+        """
+        self.due = _corrections_clock() + BUSY_ASKED_AGAIN_AFTER
 
     def is_due(self) -> bool:
         """True once, when the wait is over; the ask it permits is counted."""
@@ -18205,6 +18219,9 @@ class ControllerView(QWidget):
 
     def _ask_again_later_if_unanswered(self, result: native.CorrectionCheck) -> None:
         """T381: an `unreadable` corrections reading is asked again (`_arm_ask_again`)."""
+        if result.state == "busy" and self._import_asked:
+            self._ask_again_corrections.arm_for_busy()
+            return
         self._arm_ask_again(
             self._ask_again_corrections, result.state == "unreadable", "corrections"
         )
@@ -18222,10 +18239,17 @@ class ControllerView(QWidget):
 
     def _refresh_corrections_banner(self) -> None:
         check = self._corrections
+        if check is not None and check.state == "busy":
+            # Another Yu'lon holds the server (T607): the sentence, and no button to race it.
+            self.corrections_banner_label.setText(check.why)
+            self.corrections_banner_button.setVisible(False)
+            self.corrections_banner.setVisible(True)
+            return
         if check is None or check.state != "stale":
             self.corrections_banner.setVisible(False)
             return
         self.corrections_banner_label.setText(native.corrections_banner_text(check))
+        self.corrections_banner_button.setVisible(True)
         self.corrections_banner.setVisible(True)
 
     def apply_database_corrections(self) -> bool:
