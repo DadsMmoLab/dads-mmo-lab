@@ -581,6 +581,11 @@ def _reserved_for(
         yield
 
 
+GUI_HOLD_BUDGET_SECONDS = 15.0
+"""How long a hold taken on the GUI thread waits to be made (T610): the Tuning saves, the
+channel's roll-back and Repair. Past it the take is the "could not reserve" sentence."""
+
+
 def server_hold(
     server_dir: Path | str,
     press: str,

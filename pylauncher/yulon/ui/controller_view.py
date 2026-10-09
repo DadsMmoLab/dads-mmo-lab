@@ -2733,10 +2733,6 @@ def _steam_seam(
     )
 
 
-GUI_HOLD_BUDGET_SECONDS = 15.0
-"""How long a write made on the GUI thread waits to take the server's hold (T610)."""
-
-
 def _server_hold_for(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2747,9 +2743,10 @@ def _server_hold_for(
 ) -> Callable[[str], contextlib.AbstractContextManager[None]]:
     """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
 
-    A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it.
+    A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it. A
+    caller may pass its own per call (`hold(press, budget=...)`): the channel's roll-back does.
     """
-    return lambda press: docker.server_hold(
+    return lambda press, budget=budget: docker.server_hold(
         server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
     )
 
@@ -2840,7 +2837,7 @@ def _assemble(
         ),
         # The Tuning tab's saves run on the GUI thread, so this one's wait is bounded.
         hold_server=_server_hold_for(
-            entry, server_dir, spec, wsl_distro=wsl_distro, budget=GUI_HOLD_BUDGET_SECONDS
+            entry, server_dir, spec, wsl_distro=wsl_distro, budget=docker.GUI_HOLD_BUDGET_SECONDS
         ),
         backup=backup,
         # HERE, in the shared half, for the rebuild's reason one line further
@@ -3213,9 +3210,7 @@ def _for_wotlk(
         templates_root=resources.installers_dir(),
         # T607: the account it creates and the files `enable` writes are written under
         # this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         # The scheme is the entry's or nothing: `or "azerothcore"` stood here
         # until 2026-09-09, which handed an entry whose scheme is unmeasured the
@@ -3620,9 +3615,7 @@ def _for_tbc(
         templates_root=resources.installers_dir(),
         # T607: the account it creates and the files `enable` writes are written under
         # this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tbc_accounts.create_account(sql, name, pw, gm_level=level),
@@ -3780,9 +3773,7 @@ def _for_vanilla(
         templates_root=resources.installers_dir(),
         # T607: the account it creates and the files `enable` writes are written under
         # this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: vanilla_accounts.create_account(
@@ -3965,9 +3956,7 @@ def _for_centurion(
         templates_root=resources.installers_dir(),
         # T607: the account it creates and the files `enable` writes are written under
         # this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: centurion_accounts.create_account(
@@ -4207,9 +4196,7 @@ def _for_tortoise(
         templates_root=resources.installers_dir(),
         # T607: the account it creates and the files `enable` writes are written under
         # this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         install_id=composegen.install_id(server_dir),
         db_password=password,
         create=lambda name, pw, level: tortoise_accounts.create_account(
@@ -4401,9 +4388,7 @@ def _for_tortoise(
         module_moved=module_moved,
         image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
         # T607: the whole rebuild is held under this server's cross-process reservation.
-        hold_server=lambda press: docker.server_hold(
-            server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
-        ),
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     return replace(
         services,
