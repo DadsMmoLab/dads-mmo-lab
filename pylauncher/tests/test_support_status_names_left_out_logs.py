@@ -19,6 +19,14 @@ from yulon.support import bundle
 from yulon.support.sources import Sources
 
 
+@pytest.fixture(autouse=True)
+def _size_cap_tests_run_without_the_quick_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the zip's SIZE cap; the cleaner's read budget (T638, its own tests
+    are `test_support_bundle_quick.py`) would shorten their logs before the cap is reached."""
+    for name in ("OLD_TAIL", "OLD_BUDGET", "RECENT_BUDGET"):
+        monkeypatch.setattr(bundle, name, 1 << 40)
+
+
 def _status(dest: Path, **report: object) -> str:
     fields: dict[str, object] = {
         "path": dest,
