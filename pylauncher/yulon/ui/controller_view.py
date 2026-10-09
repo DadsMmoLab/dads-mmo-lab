@@ -102,6 +102,7 @@ from yulon import (
     server_rates,
     server_time_zone,
     serverlock,
+    sql_log_offer,
     tuning,
     unbound_settings,
     useraccounts,
@@ -6756,6 +6757,20 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
+TUNING_LOG_OFFER = (
+    "{files} makes this server print every database statement it runs into its log "
+    "({key} is off), which fills the log and can slow a busy world. Turn it off? "
+    "Only that one line changes, and a backup of the file is kept."
+)
+"""The Tuning tab's one-line offer (T619) for a server installed before the key was set."""
+TUNING_LOG_OFFER_OFF = "Turn it off"
+TUNING_LOG_OFFER_KEEP = "Keep it as it is"
+TUNING_LOG_OFFER_WROTE = (
+    "Set {key} to on in {file}. A backup of the file as it was is beside it at {backup}.\n{rule}"
+)
+TUNING_LOG_OFFER_FAILED = "{file} was not changed: {why}"
+TUNING_LOG_OFFER_KEPT = "Left {files} as it is. Yu'lon will not ask again."
+
 TUNING_RESTARTING = (
     "restarting the server… then waiting for the world server to report ready and stay up."
 )
@@ -10029,6 +10044,9 @@ class ControllerView(QWidget):
             self.tuning_banner_button.setEnabled(False)
             # T94: a reset writes the same confs, and its undo puts them back.
             self.tuning_reset_button.setEnabled(False)
+            # T619: and so does the SQL-log offer's "Turn it off" -- it writes mangosd.conf
+            # under whatever is running. "Keep it as it is" writes no conf and stays live.
+            set_enabled_why(self.tuning_log_offer_off_button, wait_for(job))
             self.compose_banner_button.setEnabled(False)
             # T99: the bot count is one of those confs (or the compose override
             # a recreate is reading), and its owed-job button is the banner's.
@@ -10076,6 +10094,8 @@ class ControllerView(QWidget):
             self._set_time_zone_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
+            # T619: "Turn it off" is back, if the offer is still made.
+            self._refresh_sql_log_offer()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -19350,6 +19370,26 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.tuning_banner.setVisible(False)
+        # T619: the offer to stop an old server printing every SQL statement. Its own
+        # strip and not the banner above: the banner is for jobs OWED, this one asks.
+        self.tuning_log_offer = QWidget(tab)
+        log_offer_box = QHBoxLayout(self.tuning_log_offer)
+        log_offer_box.setContentsMargins(8, 6, 8, 6)
+        self.tuning_log_offer_label = QLabel("", self.tuning_log_offer)
+        self.tuning_log_offer_label.setWordWrap(True)
+        self.tuning_log_offer_off_button = QPushButton(TUNING_LOG_OFFER_OFF, self.tuning_log_offer)
+        self.tuning_log_offer_off_button.clicked.connect(self.turn_off_sql_log)
+        self.tuning_log_offer_keep_button = QPushButton(
+            TUNING_LOG_OFFER_KEEP, self.tuning_log_offer
+        )
+        self.tuning_log_offer_keep_button.clicked.connect(self.keep_sql_log)
+        log_offer_box.addWidget(self.tuning_log_offer_label, 1)
+        log_offer_box.addWidget(self.tuning_log_offer_off_button)
+        log_offer_box.addWidget(self.tuning_log_offer_keep_button)
+        self.tuning_log_offer.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.tuning_log_offer.setVisible(False)
         # The same shape as the Modules tab, so the same rule (T73): the cards
         # are what grows, the report is what the last press did and no taller.
         self.tuning_report = _ReportBox(tab)
@@ -19359,6 +19399,7 @@ class ControllerView(QWidget):
         self.tuning_report_strip = _ReportStrip(self.tuning_report, tab)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
+        box.addWidget(self.tuning_log_offer)
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
@@ -19456,6 +19497,68 @@ class ControllerView(QWidget):
         self._look_up_bot_count()
         # T171: and the time zone, which a reset keeps but a hand edit moves.
         self._look_up_time_zone()
+        self._refresh_sql_log_offer()
+
+    def _refresh_sql_log_offer(self) -> None:
+        """Show the SQL-log offer for the confs that still owe an answer (T619); else hide it.
+
+        Two small file reads, like the rates rows beside it. While a job runs the strip is
+        still shown, with "Turn it off" greyed (`_set_busy`): that button writes a conf.
+        """
+        offered = sql_log_offer.offers(self.entry, self.services.controller.server_dir)
+        self._sql_log_offered = tuple(o.file for o in offered)
+        if not offered:
+            self.tuning_log_offer.setVisible(False)
+            return
+        self.tuning_log_offer_label.setText(
+            TUNING_LOG_OFFER.format(
+                files=" and ".join(Path(o.file).name for o in offered), key=sql_log_offer.KEY
+            )
+        )
+        set_enabled_why(
+            self.tuning_log_offer_off_button, wait_for(self._busy_job) if self._busy else None
+        )
+        self.tuning_log_offer.setVisible(True)
+
+    @Slot()
+    def turn_off_sql_log(self) -> None:
+        """The offer's "Turn it off": that one key, a backup first, a restart owed (T619)."""
+        if self._busy:  # the button is greyed then; this is for a press that gets past it
+            return
+        server_dir = self.services.controller.server_dir
+        try:
+            done = sql_log_offer.turn_off(self.entry, server_dir, self._sql_log_offered)
+        except (tuning.TuningError, OSError) as exc:
+            self.tuning_report.setPlainText(
+                TUNING_LOG_OFFER_FAILED.format(file=", ".join(self._sql_log_offered), why=exc)
+            )
+            self.action_failed.emit(str(exc))
+            return
+        said = []
+        for one in done:
+            self._note_tuning_owed(one.file)
+            said.append(
+                TUNING_LOG_OFFER_WROTE.format(
+                    key=sql_log_offer.KEY,
+                    file=one.file,
+                    backup=one.backup.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(one.file)),
+                )
+            )
+        if said:
+            self.tuning_report.setPlainText("\n".join(said))
+        self.reload_tuning()
+
+    @Slot()
+    def keep_sql_log(self) -> None:
+        """The offer's "Keep it as it is": write nothing and do not ask again (T619)."""
+        sql_log_offer.keep(self.entry, self.services.controller.server_dir, self._sql_log_offered)
+        self.tuning_report.setPlainText(
+            TUNING_LOG_OFFER_KEPT.format(
+                files=" and ".join(Path(f).name for f in self._sql_log_offered)
+            )
+        )
+        self._refresh_sql_log_offer()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
         """The Server rates card (T302), the modules' rows, then the server's own bot keys
