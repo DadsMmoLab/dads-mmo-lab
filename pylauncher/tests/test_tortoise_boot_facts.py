@@ -714,6 +714,25 @@ def test_both_restart_keys_the_owner_named_are_written_off() -> None:
     assert keys["AutoRestart.MaxServerUptime"] == "0", "the dist ships three days"
 
 
+def test_the_world_does_not_print_every_sql_statement_it_runs() -> None:
+    """The pinned core's `mangosd.conf.dist.in` ships `LogFilter_SQLText = 0`, which PRINTS them.
+
+    Read at the pinned rev (187af788): `DatabaseMysql.cpp:229` and `:357` log
+    `[N ms] SQL: ...` through `BASIC_FILTER_LOG(LOG_FILTER_SQL_TEXT, ...)`, which prints
+    when the console level is 1 or more and the filter is NOT set. `LogFilter_SQLText`
+    (`Log.cpp:49`) is that filter, so `1` is the value that silences it. A player's 500-bot
+    world filled its log, 92-99% of every line, with honor saves, character loads and
+    corpse writes, and had lag spikes.
+
+    `LogSQL` is NOT the key: it only appends GM-command statements to a dated file
+    (`Database::PExecuteLog`). Pinning it here would pass while the flood went on.
+    """
+    keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    assert (
+        keys.get("LogFilter_SQLText") == "1"
+    ), "the dist ships 0, which prints every statement the world runs"
+
+
 def test_the_two_confs_this_image_does_not_ship_as_plain_dists_name_their_templates() -> None:
     """`materialise()`'s default is `<name>.dist` beside the file, and twice it is wrong here.
 
