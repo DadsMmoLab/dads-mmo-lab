@@ -28,6 +28,7 @@ from tests.test_plan_corrections import (
 from yulon import docker, forgetting, resources, runner
 from yulon.catalog import native
 from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.installer import InstallerError
 from yulon.ui import controller_view as controller_view_module
 
 
@@ -90,7 +91,11 @@ def _holder(**fields: object) -> docker.ServerHolder:
 
 
 def _engine(
-    db: _Mariadb, asked: list[Path], holder: docker.ServerHolder | None
+    db: _Mariadb,
+    asked: list[Path],
+    holder: docker.ServerHolder | None,
+    *,
+    world: bool = False,
 ) -> CmangosInstaller:
     rec = Recorder()
     rec.db_started = True
@@ -106,7 +111,7 @@ def _engine(
             platform_id=lambda: "linux",
             exec_stdin=db.exec_stdin,
             sql_query=db.query,
-            world_running=lambda container: False,
+            world_running=lambda container: world,
             db_running=lambda container: True,
             reservation_holder=reservation_holder,
         ),
@@ -241,3 +246,45 @@ def test_a_busy_reading_that_clears_brings_the_button_back(
 def test_the_seam_is_bound_to_the_wsl_distro() -> None:
     seams = native.Seams.in_wsl("dml-ubuntu")
     assert seams.reservation_holder is not docker.reservation_holder
+
+
+def test_busy_re_asks_do_not_use_up_the_budget_of_an_unreadable_reading(
+    qapp: object, ps: _Ps, tmp_path: Path, clock: _Clock
+) -> None:
+    """Review of b66833f0: each 30 s busy re-ask was counted, so an `unreadable` reading that
+    followed found its bounded waits (T381) already spent."""
+    from yulon.ui.controller_view import BUSY_ASKED_AGAIN_AFTER, CORRECTIONS_ASKED_AGAIN_AFTER
+
+    route = _Answers(*(["busy"] * 9), "unreadable")
+    view = _view(ps, tmp_path, route)
+    _database(ps, view, up=True)
+    for _ in range(8):
+        clock.now += BUSY_ASKED_AGAIN_AFTER
+        _database(ps, view, up=True)
+    clock.now += BUSY_ASKED_AGAIN_AFTER
+    _database(ps, view, up=True)  # the ninth look reads busy for the last time
+    asked_before = route.checks
+    for wait in CORRECTIONS_ASKED_AGAIN_AFTER * 2:  # more than it may ask
+        clock.now += wait
+        _database(ps, view, up=True)
+    unreadable_asks = route.checks - asked_before
+    assert unreadable_asks >= len(CORRECTIONS_ASKED_AGAIN_AFTER), unreadable_asks
+
+
+def test_a_press_whose_recheck_reads_busy_names_the_holder_and_not_a_changed_database(
+    tmp_path: Path,
+) -> None:
+    """Review of b66833f0: the press's re-check before it stops a running world read the busy
+    state as "the databases have changed" and told the player to Refresh."""
+    db = _Mariadb(tmp_path)
+    imported_with(db, OLD, tmp_path)
+    options = folder(tmp_path)
+    shown = _engine(db, [], None, world=True).correction_check(options)  # the dialog's reading
+    assert shown.state == "stale"
+    engine = _engine(db, [], _holder(), world=True)  # another Yu'lon holds it by press time
+    with pytest.raises(InstallerError) as refused:
+        list(engine.apply_corrections(shown, options))
+    said = str(refused.value)
+    assert "Another Yu'lon is working on" in said and "Update the server to latest" in said, said
+    assert "have changed" not in said, said
+    assert "Nothing was stopped" in said and "still running" in said, said

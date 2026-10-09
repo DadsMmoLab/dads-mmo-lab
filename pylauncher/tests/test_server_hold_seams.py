@@ -253,3 +253,32 @@ def test_server_hold_refuses_with_the_holders_press_and_the_servers_name(
         assert "Link accounts" in str(refused.value), "the refused press is named"
     finally:
         theirs.kill()
+
+
+def test_a_repair_while_another_yulon_holds_the_server_says_so_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Review of b66833f0: the hold's refusal was read as "the database could not be reached"
+    ("Start the server") and the holder's sentence was lost."""
+    from tests.test_install_channel import _save, _Scripted
+
+    _save(tmp_path, password="stale")
+    resets: list[str] = []
+    channel = setup.InstallChannel(
+        WOTLK,
+        _installed(tmp_path),
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *a: resets.append("create"),
+        reset=lambda name, pw: resets.append("reset"),
+        channel_for=lambda _e: _Scripted(["no", "yes"]),
+        config_dir=tmp_path / "config",
+        hold_server=_Hold([], refuse=True),
+    )
+    channel.check()
+    state = channel.repair()
+    assert isinstance(state, setup.Refused)
+    assert "Another Yu'lon is working on WoW" in state.reason, state.reason
+    assert "database" not in state.reason.lower()
+    assert resets == [], "the account was touched under another Yu'lon's job"
+    assert state.password == "stale"

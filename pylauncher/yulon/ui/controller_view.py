@@ -4903,17 +4903,20 @@ class _AskAgain:
     def __init__(self) -> None:
         self.due: float | None = None
         self.count = 0
+        self._busy = False
 
     def forget(self) -> None:
         """The database went down or came back: nothing is owed, nothing was asked."""
         self.due = None
         self.count = 0
+        self._busy = False
 
     def arm(self) -> bool:
         """Arm the next wait after an unreadable answer. False once the waits are spent."""
         if self.count >= len(CORRECTIONS_ASKED_AGAIN_AFTER):
             return False
         self.due = _corrections_clock() + CORRECTIONS_ASKED_AGAIN_AFTER[self.count]
+        self._busy = False
         return True
 
     def arm_for_busy(self) -> None:
@@ -4924,13 +4927,16 @@ class _AskAgain:
         every half minute while it stands.
         """
         self.due = _corrections_clock() + BUSY_ASKED_AGAIN_AFTER
+        self._busy = True
 
     def is_due(self) -> bool:
         """True once, when the wait is over; the ask it permits is counted."""
         if self.due is None or _corrections_clock() < self.due:
             return False
         self.due = None
-        self.count += 1
+        if not self._busy:  # a busy re-ask is not one of the unreadable reading's bounded waits
+            self.count += 1
+        self._busy = False
         return True
 
 

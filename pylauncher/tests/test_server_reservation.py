@@ -823,7 +823,6 @@ def test_a_relative_sql_text_is_not_sent_once_the_hold_is_lost(tmp_path: Path) -
     from yulon import module_answers
 
     lost = threading.Event()
-    lost.set()
 
     @contextmanager
     def hold(press: str) -> Iterator[docker.ClaimHeld]:
@@ -831,6 +830,13 @@ def test_a_relative_sql_text_is_not_sent_once_the_hold_is_lost(tmp_path: Path) -
 
     db = _Db()
     applier = Applier(tmp_path, sql=db, world_running=lambda: False, hold_server=hold)
+
+    def lose_before_the_sql(*_a: object) -> bool:
+        # After every between-steps check of the action (T607) and before the SQL's own.
+        lost.set()
+        return False
+
+    applier._start_the_database_for_direct_sql = lose_before_the_sql  # type: ignore[method-assign]
     with pytest.raises(ApplyRefusal) as refused:
         applier.install(_mob(), _all("2"))
     assert "no more SQL was sent" in str(refused.value)

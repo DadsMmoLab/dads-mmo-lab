@@ -195,6 +195,14 @@ SQL_HOLD_LOST = (
 )
 
 
+ACTION_HOLD_LOST = (
+    "Another Yu'lon stopped this server while this was being done, so the rest was not done. "
+    "What ran before that stays as it is: press the module's button again once the server is "
+    "stopped."
+)
+"""A Modules action ended between two of its steps by another Yu'lon's "Stop anyway" (T607)."""
+
+
 def server_reservation_unavailable(label: str, said: str) -> str:
     """No reservation could be made at all: no Docker, no image, a daemon that would not answer."""
     return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."

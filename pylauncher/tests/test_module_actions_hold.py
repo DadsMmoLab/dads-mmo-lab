@@ -177,3 +177,120 @@ def test_a_put_back_holds_the_server_and_a_refused_one_moves_nothing(tmp_path: P
     rig.applier.put_back(rig.manifest, last=last)
     assert rig.head() == a
     assert spy.events == [f"hold:Put back {rig.manifest.name}", "release"]
+
+
+# ---------------------------------------- review of b66833f0: "Stop anyway" ends the whole action
+
+
+def test_an_install_stops_between_its_steps_once_the_hold_is_lost(tmp_path: Path) -> None:
+    """The loss was read only by the SQL: the clone's deploy, folders and conf went on."""
+    spy = _Spy()
+    applier = _applier(tmp_path, spy, NO_SQL)
+    real_clone = applier.git.clone
+
+    def clone_then_lose(spec: Any) -> None:
+        real_clone(spec)
+        spy.lost.set()  # another Yu'lon's "Stop anyway", right after the clone
+
+    applier.git.clone = clone_then_lose  # type: ignore[method-assign]
+    with pytest.raises(ApplyRefusal) as stopped:
+        applier.install(parse_manifest(NO_SQL))
+    assert "stopped this server" in str(stopped.value)
+    assert not (tmp_path / "env/dist/etc/lua_scripts/a.lua").exists(), "the deploy still ran"
+    assert not (tmp_path / "env/dist/etc/extra_scripts").exists(), "the folders were still made"
+
+
+def test_an_action_whose_hold_was_already_lost_does_nothing_at_all(tmp_path: Path) -> None:
+    spy = _Spy()
+    spy.lost.set()
+    applier = _applier(tmp_path, spy, NO_SQL)
+    for action in (applier.install, applier.configure, applier.remove):
+        with pytest.raises(ApplyRefusal):
+            action(parse_manifest(NO_SQL))
+    assert "clone" not in spy.events
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_remove_stops_between_its_steps_once_the_hold_is_lost(tmp_path: Path) -> None:
+    spy = _Spy()
+    applier = _applier(tmp_path, spy, NO_SQL)
+    applier.install(parse_manifest(NO_SQL))
+    real_undeploy = applier._undeploy
+
+    def lose_then_undeploy(*args: Any) -> None:
+        spy.lost.set()
+        real_undeploy(*args)
+
+    applier._undeploy = lose_then_undeploy  # type: ignore[method-assign]
+    with pytest.raises(ApplyRefusal):
+        applier.remove(parse_manifest(NO_SQL))
+    assert applier.clone_dir(
+        parse_manifest(NO_SQL)
+    ).is_dir(), "the clone was deleted after the loss"
+
+
+def _lose_after(applier: Applier, spy: _Spy, name: str, nth: int = 1) -> list[str]:
+    """Make the hold lost right after the `nth` call of the applier's step `name`.
+
+    Returns the list that records every step called, by name, so a test can say which step must
+    NOT have run once the loss was known.
+    """
+    calls: list[str] = []
+    for each in (
+        "_deploy _folders _patches _sql _conf _client _dbc _finish_claim _undeploy _unfolders "
+        "_unclient _refuse_checkout_links"
+    ).split():
+        real = getattr(applier, each)
+        seen = {"n": 0}
+
+        def wrapped(
+            *args: Any, _real: Any = real, _name: str = each, _seen: Any = seen, **kwargs: Any
+        ) -> Any:
+            calls.append(_name)
+            _seen["n"] += 1
+            out = _real(*args, **kwargs)
+            if _name == name and _seen["n"] == nth:
+                spy.lost.set()
+            return out
+
+        setattr(applier, each, wrapped)
+    return calls
+
+
+# (action, step after which the hold is lost, its nth call, the step that must not run after it)
+BETWEEN_STEPS = [
+    ("install", "_deploy", 1, "_folders"),
+    ("install", "_folders", 1, "_patches"),
+    ("install", "_sql", 1, "_conf"),
+    ("install", "_conf", 1, "_patches"),
+    ("install", "_sql", 2, "_client"),
+    ("install", "_dbc", 1, "_finish_claim"),
+    ("configure", "_refuse_checkout_links", 1, "_patches"),
+    ("configure", "_sql", 1, "_conf"),
+    ("remove", "_refuse_checkout_links", 1, "_patches"),
+    ("remove", "_sql", 1, "_undeploy"),
+    ("remove", "_undeploy", 1, "_unfolders"),
+    ("remove", "_unfolders", 1, "_unclient"),
+    ("remove", "_unclient", 1, "rmtree"),
+]
+
+
+@pytest.mark.parametrize(("action", "after", "nth", "target"), BETWEEN_STEPS)
+def test_each_step_of_an_action_checks_the_hold_before_it_runs(
+    tmp_path: Path, action: str, after: str, nth: int, target: str
+) -> None:
+    spy = _Spy()
+    applier = _applier(tmp_path, spy, NO_SQL)
+    manifest = parse_manifest(NO_SQL)
+    if action == "remove":
+        applier.install(manifest)
+    calls = _lose_after(applier, spy, after, nth)
+    with pytest.raises(ApplyRefusal) as stopped:
+        getattr(applier, action)(manifest)
+    assert "stopped this server" in str(stopped.value)
+    positions = [i for i, called in enumerate(calls) if called == after]
+    assert len(positions) >= nth, f"{after} ran {len(positions)} time(s): the case tests nothing"
+    if target == "rmtree":
+        assert applier.clone_dir(manifest).is_dir(), "the clone was deleted after the loss"
+    else:
+        assert target not in calls[positions[nth - 1] + 1 :], calls
