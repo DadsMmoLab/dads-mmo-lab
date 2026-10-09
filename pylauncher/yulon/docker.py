@@ -948,6 +948,41 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
     return name if isinstance(name, str) and name else None
 
 
+def compose_service_images(
+    server_dir: Path, services: Sequence[str], *, wsl_distro: str | None = None
+) -> dict[str, str] | None:
+    """The image each of `services` runs, as compose reads this folder; None if it cannot say.
+
+    Asked of `compose config`, which layers the override over the base as `up` will, so
+    it is what compose would start. A folder moved since it was made still names its images
+    after the id it was made with, whatever its new path hashes to (T627).
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    named = parsed.get("services") if isinstance(parsed, dict) else None
+    if not isinstance(named, dict):
+        return None
+    found: dict[str, str] = {}
+    for service in services:
+        entry = named.get(service)
+        image = entry.get("image") if isinstance(entry, dict) else None
+        if isinstance(image, str) and image:
+            found[service] = image
+    return found
+
+
 def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
     """Freeze this install's compose project name into its own `.env`.
 

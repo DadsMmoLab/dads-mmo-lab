@@ -101,6 +101,7 @@ from yulon import (
     purge,
     reset_defaults,
     resources,
+    server_build_gone,
     server_build_presses,
     server_rates,
     server_time_zone,
@@ -11003,6 +11004,14 @@ class ControllerView(QWidget):
             logger.warning(f"{self.entry.name}: Start could not reach Docker: {exc}")
             msg = START_FAILED_NO_DOCKER
             self._put_the_docker_banner_up(exc)
+        elif not _said_by_yulon(exc) and server_build_gone.names_a_gone_build(self.entry, raw):
+            # T627: compose tried to pull this server's `yulon.local` image because Docker has
+            # lost it (the check before Start missed it, or Docker was not asked). The player
+            # is told what is gone and what moves it on; Docker's words stay under Details.
+            msg = server_build_gone.gone_sentence(
+                self.entry, self.services.controller.server_dir, after_an_attempt=True
+            )
+            why = raw
         elif not _said_by_yulon(exc):
             # T214: something broke -- Docker's or the system's own words. The
             # line says so; the words go under Details and, through

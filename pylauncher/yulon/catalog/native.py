@@ -90,6 +90,7 @@ from yulon import (
     realm_flag,
     resources,
     runner,
+    server_build_gone,
     server_build_presses,
     serverlock,
     update_failure,
@@ -8750,6 +8751,11 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        if servers_down is None:
+            # T628: before the first stage, so the recipe is not rewritten and no compile starts.
+            retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+            if retired is not None:
+                raise InstallerError(retired)
         if servers_down is None or not servers_down.finishes_start_refusal:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does, when it says so).
@@ -11611,6 +11617,9 @@ class StagedInstaller:
         (`Seams.head_sha`). Where git cannot answer the press goes on, and so
         does this: None. No record or no recorded build is None too.
         """
+        retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+        if retired is not None:
+            return retired
         clash = self._modules_that_take_the_cores_names(server_dir)
         if clash is not None:
             return clash
