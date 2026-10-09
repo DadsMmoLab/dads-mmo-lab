@@ -159,6 +159,21 @@ def server_busy_elsewhere(
     )
 
 
+def corrections_held_elsewhere(label: str, press: str, since: str, who: str) -> str:
+    """The Server tab's banner while another Yu'lon holds the server (T607, T568 plan 6).
+
+    A sentence and no button: its world updates may still be running, and a retry offered over
+    them would race them. The banner is asked again, so it goes when the holder does.
+    """
+    started = f", started {since}" if since else ""
+    by = f" by {who}" if who else ""
+    return (
+        f"Another Yu'lon is working on {label} ({press or 'a job'}){started}{by}; its world "
+        "updates may still be running, so no retry is offered. Nothing changes until it is "
+        "done."
+    )
+
+
 def server_reservation_left(label: str, name: str, this_press: str) -> str:
     """This user's own reservation, left in Docker by a crash Docker kept (T568 section 6)."""
     return (
@@ -192,6 +207,14 @@ SQL_HOLD_LOST = (
     "The statements before that already ran: press the module's button again once the server "
     "is stopped."
 )
+
+
+ACTION_HOLD_LOST = (
+    "Another Yu'lon stopped this server while this was being done, so the rest was not done. "
+    "What ran before that stays as it is: press the module's button again once the other "
+    "Yu'lon is done."
+)
+"""A Modules action ended between two of its steps by another Yu'lon's "Stop anyway" (T607)."""
 
 
 def server_reservation_unavailable(label: str, said: str) -> str:

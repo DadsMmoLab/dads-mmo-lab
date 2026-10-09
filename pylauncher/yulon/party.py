@@ -64,6 +64,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -75,6 +76,7 @@ from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.said import SaidByYulon
 from yulon.tuning import core_bool
 
 logger = get_logger(__name__)
@@ -2650,6 +2652,10 @@ class AccountLink:
     """Set when nothing was written and nothing could be: this module's word."""
 
 
+LINK_PRESS = "Link accounts"
+"""The press name on the reservation the account-link write takes (T607)."""
+
+
 def account_of_sql(entry: CatalogEntry, master: str) -> str:
     """The account a character is on, id and name, in one cross-schema read.
 
@@ -3050,6 +3056,7 @@ class InstallParty:
         level_setter: LevelSetter | None = None,
         link_writer: SqlWriter | None = None,
         altbots: AltbotMemory | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -3068,6 +3075,8 @@ class InstallParty:
         # a second seam beside `sql` rather than a wider `sql`, so the read half
         # keeps the guarantee its own type makes.
         self._link_writer = link_writer
+        # T607: the server's cross-process hold (`docker.server_hold`) around the link write.
+        self._hold_server = hold_server
         # T26 round 2. The record `members()` unions with the bot marker, and
         # the reason it is a seam is the reason `link_writer` is one: the tests
         # for every sentence this object says must not be tests that need a
@@ -3518,7 +3527,15 @@ class InstallParty:
         (my_id, mine), (their_id, theirs), half = found
         script = link_transaction_sql(self.entry, master_account=my_id, other_account=their_id)
         try:
-            answered = self._link_writer.query("playerbots", script)
+            with ExitStack() as held:
+                if self._hold_server is not None:
+                    try:
+                        held.enter_context(self._hold_server(LINK_PRESS))
+                    except SaidByYulon as refused:
+                        # Another Yu'lon is working on this server (T607): its own sentence,
+                        # and nothing was written.
+                        return AccountLink(False, mine, theirs, str(refused), blocker=str(refused))
+                answered = self._link_writer.query("playerbots", script)
         except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
             logger.warning(f"could not link {mine} and {theirs}: {exc}")
             return AccountLink(

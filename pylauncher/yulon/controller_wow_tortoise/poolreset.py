@@ -84,6 +84,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -98,6 +99,7 @@ from yulon.channel import Channel
 from yulon.controller import StartRefused
 from yulon.controller_wow_tortoise import botpool
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -1027,6 +1029,10 @@ def _wait(seconds: float, cancel: threading.Event | None) -> None:
         time.sleep(seconds)
 
 
+REBUILD_PRESS = "Rebuild random bots"
+"""The press name on the reservation a bot pool rebuild takes (T607)."""
+
+
 @dataclass
 class PoolRebuild:
     """The Bots tab's "Rebuild random bots…", bound to one Tortoise install.
@@ -1054,6 +1060,9 @@ class PoolRebuild:
     poll_s: float = POLL_S
     image_id: Callable[[str], str | None] = docker.image_id
     """T225: the image a tag names, for the stopped-build check before anything is done."""
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None
+    """T607: the server's cross-process hold (`docker.server_hold`), taken for the whole rebuild
+    -- the backup, the enrolment, the key write, the restart and the watch. None holds nothing."""
 
     def take_module_moved(self) -> botpool.Move | None:
         """Did the last update press move TortoiseBots, and is its restart owed? Answered once."""
@@ -1107,11 +1116,31 @@ class PoolRebuild:
         flow's own restart covers it; a flow that fails before that restart
         runs it anyway (a Stop does not, like T123's own cancel).
 
+        The whole flow runs under the server's cross-process hold (T607), taken before the
+        backup: another Yu'lon's Start, Update or Rebuild refuses while this one rewrites
+        the bot count's file and restarts the world, and this one is refused with theirs.
+
         Raises:
             PoolResetError: a server no start may run on (T197: nothing was done), a
                 backup that failed (nothing else was done), a key that could not be
-                written, a failed restart, or a refusal the module logged.
+                written, a failed restart, or a refusal the module logged -- or another
+                Yu'lon holding the server (nothing was done).
         """
+        with ExitStack() as held:
+            if self.hold_server is not None:
+                try:
+                    held.enter_context(self.hold_server(REBUILD_PRESS))
+                except SaidByYulon as refused:
+                    raise PoolResetError(str(refused)) from refused
+            yield from self._rebuild(backup=backup, cancel=cancel, restart_owed=restart_owed)
+
+    def _rebuild(
+        self,
+        *,
+        backup: Callable[[], object] | None,
+        cancel: threading.Event | None,
+        restart_owed: bool,
+    ) -> Iterator[str]:
         # T197 fix round 4: the restart this ends in would be refused, and by then the
         # key is written and armed for the first start after the repair. Asked first,
         # of the folder (`native.owed_start_refusal`, the one start guard a Tortoise
@@ -1506,6 +1535,7 @@ def for_entry(
     module_moved: botpool.ModuleMoved,
     world_started: Callable[[], str] = lambda: "",
     image_id: Callable[[str], str | None] = docker.image_id,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
 ) -> PoolRebuild | None:
     """The press for an install whose bots module is compiled in and whose bot conf is known.
 
@@ -1528,4 +1558,5 @@ def for_entry(
         module_moved=module_moved,
         world_started=world_started,
         image_id=image_id,
+        hold_server=hold_server,
     )

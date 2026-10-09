@@ -792,7 +792,7 @@ CORRECTIONS_CANCEL_NOTE = (
 )
 """`RERUN_CANCEL_NOTE`'s counterpart for T129's press: the gate already reads a finished import."""
 
-CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable"]
+CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable", "busy"]
 
 
 @dataclass(frozen=True)
@@ -4970,6 +4970,13 @@ READY_ANYWAY_IN_THE_WATCH = (
 """`READY_STOPPED_IN_THE_WATCH` for the escape pressed in the watch after a Stop during the load
 (T247 review): the first press came in the load, not in the watch, and the sentence says so."""
 
+READY_LOST_IN_THE_WATCH = (
+    "The world server reported ready, and this server's reservation in Docker then ended from "
+    "elsewhere (another Yu'lon stopped it, or Docker restarted) in the last moment of the minute "
+    "it is watched, so this build was not proved to stay up."
+)
+"""The reservation lost in the watch's last pause: not a Stop that came too late (T607)."""
+
 READY_STOP_TOO_LATE = (
     "Stop was pressed after the new build had already been watched for the whole minute, so it "
     "came too late to matter: the build is kept."
@@ -6391,6 +6398,10 @@ class Seams:
     """T568: a press's reservation of its server across processes (`docker.server_claim()`).
 
     A server inside a WSL distro binds it to that distro's Docker (`in_wsl()`)."""
+    reservation_holder: Callable[..., docker.ServerHolder | None] = docker.reservation_holder
+    """T607: who holds a server's reservation (`docker.reservation_holder()`, inspect only).
+
+    Asked by the corrections reading, so a retry is not offered over another Yu'lon's press."""
     copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
@@ -6603,6 +6614,7 @@ class Seams:
             run_container=refused("Running an install container"),
             folder_claim=refused("Claiming a server folder for an extraction"),
             server_claim=on(docker.server_claim, wsl_distro=distro),
+            reservation_holder=on(docker.reservation_holder, wsl_distro=distro),
             copy_from_image=refused("Copying templates out of an image"),
             exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
             sql_query=on(docker.sql_query, wsl_distro=distro),
@@ -6663,6 +6675,11 @@ class PressCancel(threading.Event):
     def is_set(self) -> bool:
         return super().is_set() or self._lost.is_set() or self.player_stopped()
 
+    @property
+    def reservation_lost(self) -> threading.Event:
+        """The reservation's loss, which `withdraw_stop()` must not take back (T607)."""
+        return self._lost
+
     def player_stopped(self) -> bool:
         """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
         return self._stop is not None and self._stop.is_set()
@@ -6699,6 +6716,9 @@ def _end_on_loss(
     `done` ends the watcher when the press does.
     """
     ending = cancel if cancel is not None else threading.Event()
+    # Told apart from the player's Stop: `withdraw_stop()` takes back a Stop that came too late,
+    # and must not take back a loss (T607).
+    ending.reservation_lost = held.lost  # type: ignore[attr-defined]
     if held.lost.is_set():
         ending.set()
         return ending
@@ -7689,13 +7709,40 @@ class StagedInstaller:
         """
         server_dir = self.server_dir(options or InstallOptions())
         try:
-            return self._correction_check(self._update_context(server_dir, None))
+            check = self._correction_check(self._update_context(server_dir, None))
+            return self._busy_elsewhere(server_dir, check)
         except Exception as exc:  # noqa: BLE001 - a status path has nowhere to put one
             logger.warning(f"could not compare {server_dir}'s install plan with this app's: {exc}")
             return CorrectionCheck(
                 "unreadable",
                 why=f"this install's databases could not be asked ({type(exc).__name__}: {exc})",
             )
+
+    def _busy_elsewhere(self, server_dir: Path, check: CorrectionCheck) -> CorrectionCheck:
+        """A `stale` reading is `busy` while another Yu'lon holds this server (T607, T568 plan 6).
+
+        Its stuck world-update rows may be that Yu'lon's press, still running, and a retry
+        offered over it would race it. Inspect only; asked of `stale` readings only, so a
+        status poll of a current install costs the daemon nothing. A holder this process is
+        (the press reading its own check under its reservation) does not count, and a daemon
+        that will not say leaves the reading as it was: the press takes the reservation
+        itself and refuses in its own words.
+        """
+        if check.state != "stale":
+            return check
+        try:
+            holder = self._seams.reservation_holder(server_dir)
+        except Exception as exc:  # noqa: BLE001 - the press asks again, and refuses in words
+            logger.info(f"could not ask who holds {server_dir}'s reservation: {exc}")
+            return check
+        if holder is None or holder.here:
+            return check
+        return CorrectionCheck(
+            "busy",
+            why=forgetting.corrections_held_elsewhere(
+                self.entry.name, holder.press, holder.since(), holder.who
+            ),
+        )
 
     def _correction_check(self, ctx: StageContext) -> CorrectionCheck:
         """The family's reading. The spine keeps no per-phase record, so it knows nothing."""
@@ -7850,7 +7897,15 @@ class StagedInstaller:
             # world that reads as down by then goes on to the import's guard.
             self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
             return False
-        if self.correction_check(options) != check:
+        now = self.correction_check(options)
+        if now.state == "busy":
+            # Another Yu'lon holds the server (T607 review): not a database that changed, and
+            # the holder is named by the reading itself.
+            raise InstallerError(
+                f"{now.why} Nothing was stopped and nothing was applied: the world server is "
+                f"still running."
+            )
+        if now != check:
             raise InstallerError(
                 f"{self.entry.name}'s databases have changed since the confirmation was shown, so "
                 f"there may be nothing left for this to apply. Nothing was stopped and nothing "
@@ -13862,8 +13917,11 @@ class StagedInstaller:
                     if ctx.cancel is not None and ctx.cancel.is_set():
                         # The lead's ruling: too late means the press SUCCEEDED. The
                         # Stop is taken back, so the rest of the press runs and the
-                        # panel says it finished (`withdraw_stop()`).
-                        withdraw_stop(ctx.cancel)
+                        # panel says it finished (`withdraw_stop()`). A reservation lost
+                        # from elsewhere is not a Stop (T607): the server was stopped under
+                        # the press, so it ends as a loss earlier in the watch does.
+                        if not withdraw_stop(ctx.cancel):
+                            raise StoppedInTheWatch(READY_LOST_IN_THE_WATCH)
                         yield READY_STOP_TOO_LATE
                     yield "The server is up."
                     return
