@@ -207,7 +207,7 @@ def read_shelf(
         return Shelf(folder, (), refused, None, game_id)
     folder_id = (folder_st.st_dev, folder_st.st_ino)
     rows = _rows_in(folder, game_id)
-    kept = _protections(
+    kept, firm = _protections(
         server_dir,
         rows,
         game_id=game_id,
@@ -218,7 +218,11 @@ def read_shelf(
     final: list[ShelfRow] = []
     for r in rows:
         reason = kept.get(r.name)
-        final.append(replace(r, kept_because=reason, cannot_delete=_why_not(r, reason, refused)))
+        final.append(
+            replace(
+                r, kept_because=reason, cannot_delete=_why_not(r, reason, r.name in firm, refused)
+            )
+        )
     final.sort(key=lambda r: (r.made_at, r.name), reverse=True)
     return Shelf(folder, tuple(final), refused, folder_id, game_id)
 
@@ -238,7 +242,7 @@ def _outside(folder: Path, server_dir: Path) -> str | None:
     return None
 
 
-def _why_not(r: ShelfRow, kept: str | None, refused: str | None) -> str | None:
+def _why_not(r: ShelfRow, kept: str | None, firm: bool, refused: str | None) -> str | None:
     if refused:
         return refused
     if not r.named_by_yulon:
@@ -246,7 +250,7 @@ def _why_not(r: ShelfRow, kept: str | None, refused: str | None) -> str | None:
             "Yu'lon did not make this file (its name is not one of Yu'lon's backup names), so "
             "it will not delete it. Delete it in your file manager if you want it gone."
         )
-    if kept:
+    if kept and (firm or not r.unchecked):
         return f"Yu'lon keeps this one: {kept}"
     if r.links > 1:
         return (
@@ -320,20 +324,37 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
     else:
         try:
             maintenance.verify_dump(path)
-            game = maintenance.backup_game(path)
-            usable = True
         except MaintenanceError as exc:
+            # Only this, a positive failure of the dump's own banner and trailer, makes a
+            # file "unusable". A read that failed proves nothing about it.
             problem = str(exc)
             if isinstance(exc.__cause__, OSError):
-                # A read that failed proves nothing about the file: never "unusable".
                 unchecked = True
                 problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
+        else:
+            try:
+                game = maintenance.backup_game(path)
+                usable = True
+            except MaintenanceError as exc:
+                # Whole, but the record of which game it is from cannot be read: Restore will
+                # not use it, and Yu'lon will not call it broken either.
+                unchecked = True
+                problem = (
+                    "Its game record could not be read, so Yu'lon cannot tell which game it "
+                    f"is from ({exc.__cause__ or exc})."
+                )
     label, database = candidates[0]
     if usable:
         for cand_label, cand_db in candidates:
             try:
                 maintenance.verify_dump(path, cand_db)
-            except MaintenanceError:
+            except MaintenanceError as exc:
+                if isinstance(exc.__cause__, OSError):
+                    # Cannot tell which reading is right: keep the first (label included) and
+                    # hold the file back, rather than let a later reading drop its label.
+                    usable, unchecked = False, True
+                    problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
+                    break
                 continue
             label, database = cand_label, cand_db
             break
@@ -396,11 +417,19 @@ def _protections(
     installed: Mapping[str, frozenset[str]] | None,
     marker: object,
     now: datetime | None = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], set[str]]:
+    """`(why each kept file is kept, the names kept for a reason that also bars a Delete)`.
+
+    A file held back only because Yu'lon cannot check it is kept from every sweep but may be
+    removed by a single Delete; a file anything else protects may not.
+    """
+    firm: set[str] = set()
     kept: dict[str, str] = {}
 
-    def keep(name: str, why: str) -> None:
+    def keep(name: str, why: str, *, hard: bool = True) -> None:
         kept.setdefault(name, why)
+        if hard:
+            firm.add(name)
 
     def good(r: ShelfRow) -> bool:
         """A whole dump: a `.partial`, a cut-short file or one not yet checked is never cover."""
@@ -409,9 +438,14 @@ def _protections(
     # 0. a file that could not be read, and a `.partial` that may still be written
     clock = (now or datetime.now()).timestamp()
     for r in rows:
+        young = clock - r.identity[3] / 1e9 < _IN_USE_MINUTES * 60
         if r.unchecked:
-            keep(r.name, f"{r.problem} It is kept until Yu'lon can check it.")
-        elif r.kind == "partial" and clock - r.identity[3] / 1e9 < _IN_USE_MINUTES * 60:
+            keep(
+                r.name,
+                f"{r.problem} Clean up never removes it; only Delete\u2026 does.",
+                hard=False,
+            )
+        elif young and (r.kind == "partial" or (r.kind == "dump" and not r.usable)):
             keep(
                 r.name,
                 f"it may still be writing: it was changed less than {_IN_USE_MINUTES} minutes ago.",
@@ -494,7 +528,7 @@ def _protections(
                             r.name,
                             f"it was taken before {item} was installed, and {item} still is.",
                         )
-    return kept
+    return kept, firm
 
 
 def _installed_here(server_dir: Path) -> set[str]:
@@ -509,7 +543,11 @@ def _installed_here(server_dir: Path) -> set[str]:
         try:
             with os.scandir(server_dir / folder) as listing:
                 found.update(e.name for e in listing if not e.name.startswith(".") and e.is_dir())
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError:
+            # Only a folder that is plainly not there holds nothing. A link that leads nowhere
+            # is there, and unreadable.
+            if os.path.lexists(server_dir / folder):
+                raise
             continue
     return found
 
@@ -556,7 +594,10 @@ def _select(shelf: Shelf, rule: Rule, now: datetime) -> list[ShelfRow]:
     allowed = {
         r.name
         for r in shelf.rows
-        if r.cannot_delete is None and not r.read_only and not _foreign(r, shelf.game_id)
+        if r.cannot_delete is None
+        and r.kept_because is None
+        and not r.read_only
+        and not _foreign(r, shelf.game_id)
     }
     chosen: dict[str, ShelfRow] = {}
     if rule.keep_newest is not None:
@@ -668,7 +709,7 @@ def _remove_under_the_lease(
             raise _changed(name)
         if r.cannot_delete:
             raise ShelfRefusal(f"{name}: {r.cannot_delete} Nothing was deleted.")
-        if plan.rule is not None and r.read_only:
+        if plan.rule is not None and (r.read_only or r.kept_because):
             raise _changed(name)
     if plan.rule is not None:
         again = plan_clean_up(fresh, plan.rule, now=plan.now)

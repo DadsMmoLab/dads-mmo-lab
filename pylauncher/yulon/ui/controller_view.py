@@ -15538,6 +15538,8 @@ class ControllerView(QWidget):
             lines.append("It is marked read-only. Yu'lon will clear that mark to delete it.")
         if not row.usable:
             lines.append(f"It cannot be restored: {row.problem}")
+        if row.kept_because:
+            lines.append(f"Yu'lon would have kept it: {row.kept_because}")
         if not ask_yes_no(self, "Delete this backup?", "\n\n".join(lines)):
             return
         self._run_shelf_job("the delete", lambda: seam.delete(plan), "Deleting\u2026")

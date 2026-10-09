@@ -56,10 +56,15 @@ def put(
     game: str | None = GAME,
     whole: bool = True,
     pad: int = 0,
+    fresh: bool = False,
 ) -> Path:
+    """A dump in the folder. A cut-short one is made old unless `fresh`: a young one may be
+    in flight and is kept (T604 review)."""
     middle = f"{label}_" if label else ""
     path = folder_of(server) / f"{stamp}_{middle}{database}.sql"
     path.write_bytes(dump_of(database, game=game, whole=whole, pad=pad))
+    if not whole and not fresh:
+        age(path)
     return path
 
 
@@ -1120,3 +1125,125 @@ def test_a_partial_just_inside_the_half_hour_is_kept(server: Path) -> None:
     edge.write_bytes(b"half")
     age(edge, 29)
     assert row(shelf(server), edge.name).kept_because
+
+
+# ------------------------------------------------ the second Opus review (one more MUST)
+
+TWO_RECORDS = (
+    b"-- yulon-backup: game=wow-wotlk\n-- yulon-backup: game=wow-tbc\n"
+    + BANNER
+    + b"USE `acore_world`;\n-- Dump completed on x\n"
+)
+
+
+def test_a_whole_dump_with_an_unreadable_game_record_is_held_back_not_unusable(
+    server: Path,
+) -> None:
+    """Probe G: the only copy of a database, whole but for two conflicting records."""
+    only = folder_of(server) / "20261001_100000_acore_world.sql"
+    only.write_bytes(TWO_RECORDS)
+    put(server, "20261005_100000", "acore_characters")
+    found = shelf(server)
+    r = row(found, only.name)
+    assert r.usable is False
+    assert r.unchecked is True
+    assert "game record could not be read" in (r.kept_because or "")
+    assert (
+        only.name
+        not in backup_shelf.plan_clean_up(found, Rule(include_unusable=True), now=NOW).names
+    )
+    assert only.name not in backup_shelf.plan_clean_up(found, Rule(keep_newest=1), now=NOW).names
+    assert (
+        only.name not in backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW).names
+    )
+
+
+def test_only_a_single_delete_removes_a_file_held_back_for_its_record(
+    server: Path, calls: Calls
+) -> None:
+    only = folder_of(server) / "20261001_100000_acore_world.sql"
+    only.write_bytes(TWO_RECORDS)
+    found = shelf(server)
+    plan = backup_shelf.plan_delete(found, only.name)
+    assert plan.names == (only.name,)
+    carry(server, plan)
+    assert not only.exists()
+
+
+def test_a_held_back_file_a_restore_marker_names_is_still_not_deletable(server: Path) -> None:
+    named = folder_of(server) / "20261001_100000_pre-restore_acore_world.sql"
+    named.write_bytes(TWO_RECORDS)
+    marker = maintenance.InterruptedRestore(
+        marker=maintenance.marker_path(server),
+        backup=named,
+        databases=("acore_world",),
+        safety_backup=(),
+        started_at="x",
+    )
+    found = backup_shelf.read_shelf(server, game_id=GAME, installed=NONE_INSTALLED, marker=marker)
+    with pytest.raises(ShelfRefusal):
+        backup_shelf.plan_delete(found, named.name)
+
+
+def test_a_clean_up_plan_refuses_if_a_file_it_names_was_held_back_since(
+    server: Path, calls: Calls
+) -> None:
+    a = put(server, "20261001_100000", "acore_world")
+    put(server, "20261009_100000", "acore_world")
+    plan = backup_shelf.plan_clean_up(shelf(server), Rule(keep_newest=1), now=NOW)
+    assert plan.names == (a.name,)
+    a.write_bytes(
+        TWO_RECORDS
+    )  # a changed file also changes identity; the held-back check is its own
+    with pytest.raises(ShelfRefusal):
+        carry(server, plan)
+    assert a.exists()
+
+
+def test_a_fresh_cut_short_dump_is_in_use_and_kept_an_old_one_is_not(server: Path) -> None:
+    """Probe J: a `>` redirect writing straight to the final name, no trailer yet."""
+    put(server, "20261005_100000", "acore_world")
+    young = put(server, "20261009_120000", "acore_world", whole=False, fresh=True)
+    old = put(server, "20261001_100000", "acore_characters", whole=False)
+    found = shelf(server)
+    assert "may still be writing" in (row(found, young.name).kept_because or "")
+    assert row(found, young.name).cannot_delete
+    assert row(found, old.name).kept_because is None
+    sweep = backup_shelf.plan_clean_up(found, Rule(include_unusable=True), now=NOW)
+    assert young.name not in sweep.names
+    assert old.name in sweep.names
+
+
+@pytest.mark.parametrize("kind", ["dangling-link", "file"])
+def test_a_clone_folder_that_is_a_dangling_link_or_a_file_keeps_the_undo_copies(
+    server: Path, kind: str
+) -> None:
+    first = put(server, "20261001_100000", label="before-mod-x")
+    put(server, "20261009_100000")
+    if kind == "dangling-link":
+        os.symlink("/nonexistent/clones", server / "modules")
+    else:
+        (server / "modules").write_text("not a folder")
+    found = backup_shelf.read_shelf(server, game_id=GAME)
+    assert "could not read" in (row(found, first.name).kept_because or "")
+
+
+def test_a_read_error_while_naming_the_database_keeps_the_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = put(server, "20261001_100000", label="before-mod-x")
+    real = maintenance.verify_dump
+    calls_seen: list[str | None] = []
+
+    def flaky(p: Path, database: str | None = None) -> int:
+        calls_seen.append(database)
+        if database is not None:
+            raise MaintenanceError(f"could not read {p}: busy") from OSError("busy")
+        return real(p, database)
+
+    monkeypatch.setattr(backup_shelf.maintenance, "verify_dump", flaky)
+    r = row(shelf(server), path.name)
+    assert r.label == "before-mod-x"
+    assert r.item == "mod-x"
+    assert r.unchecked is True
+    assert r.kept_because
