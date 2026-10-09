@@ -75,6 +75,7 @@ from yulon.controller_wow_wotlk.maintenance import (
 from yulon.controller_wow_wotlk.maintenance import (
     forget_interrupted_restore as forget_interrupted_restore,
 )
+from yulon.controller_wow_wotlk.maintenance import game_of as game_of
 from yulon.controller_wow_wotlk.maintenance import (
     interrupted_restore as interrupted_restore,
 )
@@ -125,6 +126,7 @@ def backup(
     return _backup(
         server_dir,
         mysql,
+        game=game_of(game.entry()),
         only=only,
         label=label,
         spec=docker_ctl.SPEC,
@@ -152,6 +154,7 @@ def plan_restore(
     return _plan_restore(
         backup_file,
         server_dir,
+        game=game_of(game.entry()),
         spec=docker_ctl.SPEC,
         running=running,
         wsl_distro=wsl_distro,
@@ -183,6 +186,7 @@ def restore(
     return _restore(
         plan,
         mysql,
+        game=game_of(game.entry()),
         confirm=confirm,
         spec=docker_ctl.SPEC,
         core_databases=game.core_databases(),

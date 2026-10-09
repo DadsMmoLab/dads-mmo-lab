@@ -91,6 +91,10 @@ from yulon.controller_wow_wotlk.maintenance import (
     verify_dump as verify_dump,
 )
 
+GAME = _shared.game_of(docker_ctl.ENTRY)
+"""Which game these backups are from (T603): the record every dump carries, and the one
+a restore checks. TBC and Vanilla share their schema names, so this is what tells them apart."""
+
 CORE_DATABASES: tuple[str, ...] = docker_ctl.ENTRY.core_databases()
 """`realmd`, `characters`, `mangos` — the three whose absence is worth an alarm.
 
@@ -131,6 +135,7 @@ def backup(
     return _shared.backup(
         server_dir,
         mysql,
+        game=GAME,
         only=only,
         label=label,
         spec=docker_ctl.SPEC,
@@ -158,6 +163,7 @@ def plan_restore(
     return _shared.plan_restore(
         backup_file,
         server_dir,
+        game=GAME,
         spec=docker_ctl.SPEC,
         running=running,
         wsl_distro=wsl_distro,
@@ -178,6 +184,7 @@ def restore(
     return _shared.restore(
         plan,
         mysql,
+        game=GAME,
         confirm=confirm,
         spec=docker_ctl.SPEC,
         core_databases=CORE_DATABASES,

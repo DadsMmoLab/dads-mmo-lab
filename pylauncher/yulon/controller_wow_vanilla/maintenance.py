@@ -147,6 +147,7 @@ def backup(
     return shared.backup(
         server_dir,
         mysql,
+        game=shared.game_of(entry()),
         only=only,
         label=label,
         spec=docker_ctl.SPEC,
@@ -175,6 +176,7 @@ def plan_restore(
     return shared.plan_restore(
         backup_file,
         server_dir,
+        game=shared.game_of(entry()),
         spec=docker_ctl.SPEC,
         running=running,
         wsl_distro=wsl_distro,
@@ -200,6 +202,7 @@ def restore(
     return shared.restore(
         plan,
         mysql,
+        game=shared.game_of(entry()),
         confirm=confirm,
         spec=docker_ctl.SPEC,
         core_databases=CORE_DATABASES,
