@@ -2875,6 +2875,16 @@ class Client(_Strict):
             "this server has no such known signature."
         ),
     )
+    addon_interface: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The `## Interface:` number this client's add-ons are written for (T613): 30300 "
+            "for 3.3.5a, 20400 for 2.4.3, 11200 for 1.12 (a Turtle client too). "
+            "`addon_layout.band()` takes from its major version's first number up to it. "
+            "None: this game takes no client add-ons."
+        ),
+    )
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()

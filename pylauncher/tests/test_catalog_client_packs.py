@@ -186,6 +186,7 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
                 "required_build",
                 "also_builds",
                 "foreign_data_dies_after",
+                "addon_interface",
                 "realmlist_file",
                 "notes",
             }
