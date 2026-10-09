@@ -365,6 +365,25 @@ def test_put_back_moves_the_move_to_skipped(tmp_path: Path) -> None:
     assert any("back on" in line for line in report.done), report.done
 
 
+def test_put_back_reads_the_clone_again_through_the_hook_it_is_given(tmp_path: Path) -> None:
+    """T596: the hook sees the clone at the OLDER commit, and its manifest is what is applied."""
+    rig = _rig(tmp_path)
+    a, _b = _updated_a_to_b(rig)
+    last = rig.applier.last_update(rig.manifest)
+    assert last is not None
+    seen: list[str] = []
+
+    def again(manifest: Manifest, clone: Path) -> Manifest:
+        seen.append((clone / "src" / "x.cpp").read_text(encoding="utf-8").strip())
+        return manifest.model_copy(update={"description": "read again at the old commit"})
+
+    report = rig.applier.put_back(rig.manifest, last=last, complete=again)
+
+    assert rig.head() == a
+    assert seen == ["// A"], "read after the checkout, not before it"
+    assert report.item_id == ITEM
+
+
 def test_put_back_refused_on_an_edited_tree(tmp_path: Path) -> None:
     """Test 7: `--force` would throw the player's edit away, so nothing moves."""
     rig = _rig(tmp_path)

@@ -963,3 +963,64 @@ def test_an_update_that_brings_a_settings_file_another_module_owns_is_refused(
         applier.update(listed["mod-up"])
     now = {m.id: m for m in tortoise_modules.store().load_all("module")}["mod-up"]
     assert [c.file for c in now.conf] == ["etc/modules/mod-up.conf"], "nothing new was recorded"
+
+
+def test_a_put_back_reads_the_older_clone_again_too(tmp_path: Path) -> None:
+    """Codex review: after a failed build the put-back applies the manifest that commit fits."""
+    from yulon.apply import LastUpdate
+
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    git = _Clone({"src/a.cpp": "int x;\n", "conf/mod-pb.conf.dist": "[Pb]\n"})
+    applier = _tortoise_applier(server, git, _Db(), client)
+    url = "https://github.com/you/mod-pb"
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(url), None)
+    git.files["conf/mod-pb-new.conf.dist"] = "[PbNew]\n"
+    applier.remote_url = lambda _dest: url  # type: ignore[method-assign]
+    applier.unmodified = lambda _dest, _path: True  # type: ignore[method-assign]
+    applier.no_local_commits = lambda _dest, _branch: True  # type: ignore[method-assign]
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    applier.update(listed["mod-pb"])
+    assert len({m.id: m for m in tortoise_modules.store().load_all("module")}["mod-pb"].conf) == 2
+
+    # The old commit has only the first settings file.
+    del git.files["conf/mod-pb-new.conf.dist"]
+    (server / "modules" / "mod-pb" / "conf" / "mod-pb-new.conf.dist").unlink()
+    seen: list[object] = []
+    import yulon.apply as apply_module
+
+    original = apply_module.Applier.put_back
+
+    def spy(self: object, manifest: object, values: object = None, **kwargs: object) -> object:
+        seen.append(kwargs.get("complete"))
+        raise RuntimeError("stop here: only the hook is being looked at")
+
+    apply_module.Applier.put_back = spy  # type: ignore[method-assign,assignment]
+    try:
+        with pytest.raises(RuntimeError, match="stop here"):
+            applier.put_back(
+                {m.id: m for m in tortoise_modules.store().load_all("module")}["mod-pb"],
+                last=LastUpdate(
+                    item_id="mod-pb", from_sha="a" * 40, to_sha="b" * 40, source="ledger"
+                ),
+            )
+    finally:
+        apply_module.Applier.put_back = original  # type: ignore[method-assign]
+    assert seen and seen[0] is not None, "the guarded put-back hands the base the recompleter"
+
+
+def test_a_shipped_item_is_never_read_again_by_the_outside_hook(tmp_path: Path) -> None:
+    """A shipped addon has a source and no origin: the hook is for what the player brought."""
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    applier = _tortoise_applier(
+        server, _Clone({"TortoiseBotsManager.toc": "## Interface: 11200\n"}), _Db(), client
+    )
+
+    def boom(manifest: Manifest, clone: Path) -> Manifest:
+        raise AssertionError("a shipped item was read by the outside hook")
+
+    applier.recomplete = boom
+    shipped = tortoise_modules.store().load("mod", "tortoise-bots-manager")
+    assert shipped.origin is None and shipped.source is not None
+    applier.install(shipped, None)

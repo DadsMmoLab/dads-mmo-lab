@@ -492,6 +492,12 @@ class GuardedApplier(Applier):
         place stops the world from starting after the next Rebuild (Codex review).
         """
 
+    def _recompleter_for(self, manifest: Manifest) -> Completer | None:
+        """`recomplete`, for an item brought from a link (T596); None for any other."""
+        if manifest.origin is not None and manifest.source is not None:
+            return self.recomplete
+        return None
+
     def _guard(self, manifest: Manifest, action: When) -> str:
         check_manifest(manifest)
         return check_restart_is_survivable(
@@ -534,13 +540,7 @@ class GuardedApplier(Applier):
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
         note = self._guard(manifest, "install")
-        if (
-            complete is None
-            and self.recomplete is not None
-            and manifest.origin is not None
-            and manifest.source is not None
-        ):
-            complete = self.recomplete
+        complete = complete or self._recompleter_for(manifest)
         return _with_note(
             super().install(
                 manifest,
@@ -580,7 +580,16 @@ class GuardedApplier(Applier):
             note = "auto-update guard: not asked, this put-back follows a failed build"
         else:
             note = self._guard(manifest, "install")
-        return _with_note(super().put_back(manifest, values, last=last, automatic=automatic), note)
+        return _with_note(
+            super().put_back(
+                manifest,
+                values,
+                last=last,
+                automatic=automatic,
+                complete=self._recompleter_for(manifest),
+            ),
+            note,
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")

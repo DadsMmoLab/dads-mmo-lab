@@ -3914,8 +3914,13 @@ class Applier:
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: Completer | None = None,
     ) -> ApplyReport:
         """Put `manifest`'s clone back on `last.from_sha` and re-apply it there (T557).
+
+        `complete` is the same hook `install()` takes (T596): an outside item whose
+        update changed what its clone holds is read again at the older commit, so the
+        manifest applied is the one that commit's files fit.
 
         `automatic` is the put-back a failed Rebuild makes by itself, as against the
         press on the row. Nothing here differs; a subclass's guard may (the Tortoise
@@ -3986,6 +3991,7 @@ class Applier:
                     first_configure_sql=False,
                     expect_head=last.to_sha,
                     restore=last,
+                    complete=complete,
                 )
         finally:
             if self._reader("head_sha", HeadReader)(clone) == last.from_sha:
