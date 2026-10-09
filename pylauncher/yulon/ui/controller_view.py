@@ -6927,18 +6927,34 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
 TUNING_LOG_OFFER = (
-    "{files} makes this server print every database statement it runs into its log "
+    "{files} {make} this server print every database statement it runs into its log "
     "({key} is off), which fills the log and can slow a busy world. Turn it off? "
-    "Only that one line changes, and a backup of the file is kept."
+    "Only that one line changes, and a backup of {each} is kept."
 )
-"""The Tuning tab's one-line offer (T619) for a server installed before the key was set."""
+"""The Tuning tab's one-line offer (T619) for a server installed before the key was set.
+
+Worded for one file or several by `_sql_log_words()`: the offer can name mangosd.conf and
+realmd.conf together."""
 TUNING_LOG_OFFER_OFF = "Turn it off"
 TUNING_LOG_OFFER_KEEP = "Keep it as it is"
 TUNING_LOG_OFFER_WROTE = (
     "Set {key} to on in {file}. A backup of the file as it was is beside it at {backup}.\n{rule}"
 )
-TUNING_LOG_OFFER_FAILED = "{file} was not changed: {why}"
-TUNING_LOG_OFFER_KEPT = "Left {files} as it is. Yu'lon will not ask again."
+TUNING_LOG_OFFER_FAILED = "{files} {was} not changed: {why}"
+TUNING_LOG_OFFER_KEPT = "Left {files} as {it}. Yu'lon will not ask again."
+
+
+def _sql_log_words(names: Sequence[str]) -> dict[str, str]:
+    """The SQL-log offer's file list and the words that agree with how many it names."""
+    one = len(names) == 1
+    return {
+        "files": " and ".join(names),
+        "make": "makes" if one else "make",
+        "each": "the file" if one else "each file",
+        "it": "it is" if one else "they are",
+        "was": "was" if one else "were",
+    }
+
 
 TUNING_RESTARTING = (
     "restarting the server… then waiting for the world server to report ready and stay up."
@@ -15935,9 +15951,13 @@ class ControllerView(QWidget):
         self._retain_after_backup = False
         actions.addWidget(self.plan_restore_button)
         actions.addWidget(self.restore_button)
-        actions.addWidget(self.delete_backup_button)
-        actions.addWidget(self.clean_up_button)
         actions.addStretch(1)
+        # A row of their own: beside Restore the four presses cut "Show restore plan" short at
+        # the app's 960 px minimum width and below.
+        shelf_row = QHBoxLayout()
+        shelf_row.addWidget(self.delete_backup_button)
+        shelf_row.addWidget(self.clean_up_button)
+        shelf_row.addStretch(1)
 
         self.maintenance_report = QPlainTextEdit(tab)
         self.maintenance_report.setReadOnly(True)
@@ -15960,6 +15980,7 @@ class ControllerView(QWidget):
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
         backups_box.addLayout(actions)
+        backups_box.addLayout(shelf_row)
         backups_box.addWidget(self.restore_reasons)
 
         restore = QGroupBox("Restore", tab)
@@ -19809,7 +19830,7 @@ class ControllerView(QWidget):
             return
         self.tuning_log_offer_label.setText(
             TUNING_LOG_OFFER.format(
-                files=" and ".join(Path(o.file).name for o in offered), key=sql_log_offer.KEY
+                key=sql_log_offer.KEY, **_sql_log_words([Path(o.file).name for o in offered])
             )
         )
         set_enabled_why(
@@ -19839,7 +19860,7 @@ class ControllerView(QWidget):
                 done = sql_log_offer.turn_off(entry, server_dir, offered)
             except (tuning.TuningError, OSError) as exc:
                 return TuningWrite(
-                    TUNING_LOG_OFFER_FAILED.format(file=", ".join(offered), why=exc),
+                    TUNING_LOG_OFFER_FAILED.format(why=exc, **_sql_log_words(offered)),
                     failed=str(exc),
                 )
             said = [
@@ -19865,7 +19886,7 @@ class ControllerView(QWidget):
         sql_log_offer.keep(self.entry, self.services.controller.server_dir, self._sql_log_offered)
         self.tuning_report.setPlainText(
             TUNING_LOG_OFFER_KEPT.format(
-                files=" and ".join(Path(f).name for f in self._sql_log_offered)
+                **_sql_log_words([Path(f).name for f in self._sql_log_offered])
             )
         )
         self._refresh_sql_log_offer()

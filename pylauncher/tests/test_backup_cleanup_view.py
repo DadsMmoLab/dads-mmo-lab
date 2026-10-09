@@ -631,3 +631,29 @@ def test_the_dialog_does_not_count_a_gz_as_a_file_it_would_delete(
     assert "(0)" in dialog.unusable_check.text()
     assert not dialog.unusable_check.isEnabled()
     dialog.deleteLater()
+
+
+@pytest.mark.parametrize("size", [(800, 640), (960, 640), (1280, 800)], ids=lambda s: f"{s[0]}")
+def test_no_maintenance_button_is_cut_short_down_to_800_wide(
+    view: ControllerView, size: tuple[int, int]
+) -> None:
+    """A Backups row of four presses cut "Show restore plan" to "Show restore plar" at 800 px.
+
+    Every button on the tab, measured by its own font against its own width, in the real window,
+    down to 800 px wide (under the app's own 960 minimum, which a small screen can force).
+    Mutation this catches: Delete… and Clean up… put back on the row beside Restore.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from tests.test_controller_view import _at, _clipped, _controller_in_the_real_window
+
+    window, tab = _controller_in_the_real_window(view, "Maintenance")
+    try:
+        window.setMinimumSize(800, 600)
+        _at(window, size)
+        shown = [b for b in tab.findChildren(QPushButton) if b.isVisibleTo(tab)]
+        assert view.plan_restore_button in shown and view.clean_up_button in shown
+        cut = [why for b in shown if (why := _clipped(b)) is not None]
+        assert cut == [], f"at {size}: {cut}"
+    finally:
+        window.close()

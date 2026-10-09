@@ -347,6 +347,48 @@ def test_turn_it_off_while_another_yulon_holds_the_server_writes_nothing(
     assert shown(view)
 
 
+def test_two_files_are_spoken_of_as_two(qapp: object, ps, tmp_path: Path) -> None:
+    """The offer, its refusal and its "kept" agree with how many files they name.
+
+    Mutation this catches: "mangosd.conf and realmd.conf makes ..." / "... as it is" again.
+    """
+    lay(tmp_path)
+    lay(tmp_path, "LogFilter_SQLText = 0\n", REALMD)
+    view = view_for(tortoise(), tmp_path)
+    text = view.tuning_log_offer_label.text()
+    assert "mangosd.conf and realmd.conf make this server print" in text
+    assert "a backup of each file is kept" in text
+    view.tuning_log_offer_keep_button.click()
+    assert view.tuning_report.toPlainText().startswith(
+        "Left mangosd.conf and realmd.conf as they are."
+    )
+
+
+def test_one_file_is_spoken_of_as_one(qapp: object, ps, tmp_path: Path) -> None:
+    lay(tmp_path)
+    view = view_for(tortoise(), tmp_path)
+    text = view.tuning_log_offer_label.text()
+    assert "mangosd.conf makes this server print" in text
+    assert "a backup of the file is kept" in text
+    view.tuning_log_offer_keep_button.click()
+    assert view.tuning_report.toPlainText().startswith("Left mangosd.conf as it is.")
+
+
+def test_a_refused_write_of_two_files_says_were(
+    qapp: object, ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lay(tmp_path)
+    lay(tmp_path, "LogFilter_SQLText = 0\n", REALMD)
+    view = view_for(tortoise(), tmp_path)
+
+    def refuse(*_a: object, **_k: object):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sql_log_offer.tuning, "write", refuse)
+    view.tuning_log_offer_off_button.click()
+    assert f"{MANGOSD} and {REALMD} were not changed: disk full" in view.tuning_report.toPlainText()
+
+
 def test_turn_it_off_is_greyed_while_a_job_runs_and_back_when_it_ends(
     qapp: object, ps, tmp_path: Path
 ) -> None:

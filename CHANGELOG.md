@@ -36,13 +36,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
 - Modules, Party links, channel setup and bot rebuilds refuse while another Yu'lon works on the server.
 - **Stop** no longer waits long on a slow Docker to reserve the server; it goes ahead after a few seconds.
-- Account, character and settings changes wait for another Yu'lon working on the server, and say who holds it.
+- Account, character and settings changes refuse while another Yu'lon works on the server, and name who holds it.
 - The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
 - **Save logs for support…** now says how many logs it left out of the zip, and why, before you send it.
 - A Tortoise world that fails a database update now stops and names the file and error, instead of hanging.
 - The realm badge says UPDATE FAILED, not STARTING, for a Tortoise world stuck at a failed database update.
 - An older Tortoise server is offered **Turn it off** for its SQL log spam on the Tuning tab, without a full reset.
-- Saving settings no longer freezes the window; Network **Apply**, uninstall and the time zone wait for another Yu'lon.
+- Saving settings no longer freezes the window.
+- Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
 
 ### Changed
 
