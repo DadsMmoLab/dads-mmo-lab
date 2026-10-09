@@ -483,6 +483,14 @@ class GuardedApplier(Applier):
         self.arming = arming
         self.world_running = world_running
         self.settings_for = settings_for
+        self.recomplete: Completer | None = None
+        """Reads an outside item's clone again when an Install or Update puts it on new code.
+
+        Set by `modules.applier()` (T596). An upstream update can add or rename a
+        `conf/*.conf.dist`, add SQL or an add-on, and the manifest persisted at the first
+        install knows none of them: a server module whose new settings file is not put in
+        place stops the world from starting after the next Rebuild (Codex review).
+        """
 
     def _guard(self, manifest: Manifest, action: When) -> str:
         check_manifest(manifest)
@@ -526,6 +534,13 @@ class GuardedApplier(Applier):
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
         note = self._guard(manifest, "install")
+        if (
+            complete is None
+            and self.recomplete is not None
+            and manifest.origin is not None
+            and manifest.source is not None
+        ):
+            complete = self.recomplete
         return _with_note(
             super().install(
                 manifest,

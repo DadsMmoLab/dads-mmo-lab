@@ -500,7 +500,7 @@ class _Clone:
 
     def clone(self, spec: CloneSpec) -> None:
         _tree(spec.dest, self.files)
-        (spec.dest / ".git").mkdir()
+        (spec.dest / ".git").mkdir(exist_ok=True)
 
 
 class _Db:
@@ -901,3 +901,35 @@ def test_a_kept_settings_file_identical_to_the_modules_own_is_not_called_differe
     )
     said = [line for line in report.skipped if "was already there" in line]
     assert len(said) == 1 and "differs" not in said[0] and "check it" not in said[0]
+
+
+def test_an_update_of_an_outside_module_reads_its_clone_again(tmp_path: Path) -> None:
+    """Codex review: a settings file the new code adds must be put in place before the Rebuild.
+
+    The persisted manifest knew one `conf/*.conf.dist`; the update brings a second, and the
+    world would not start with the module compiled in and that file missing.
+    """
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    git = _Clone({"src/a.cpp": "int x;\n", "conf/mod-up.conf.dist": "[Up]\n"})
+    applier = _tortoise_applier(server, git, _Db(), client)
+    url = "https://github.com/you/mod-up"
+    manifest = tortoise_modules.derive_link(url)
+    tortoise_modules.install_custom(applier)(manifest, None)
+    assert not (server / "etc" / "modules" / "mod-up-extra.conf").exists()
+
+    git.files["conf/mod-up-extra.conf.dist"] = "[UpExtra]\n"
+    applier.remote_url = lambda _dest: url  # type: ignore[method-assign]
+    applier.unmodified = lambda _dest, _path: True  # type: ignore[method-assign]
+    applier.no_local_commits = lambda _dest, _branch: True  # type: ignore[method-assign]
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    applier.update(listed["mod-up"])
+
+    assert (server / "etc" / "modules" / "mod-up-extra.conf").read_text(encoding="utf-8") == (
+        "[UpExtra]\n"
+    )
+    now = {m.id: m for m in tortoise_modules.store().load_all("module")}["mod-up"]
+    assert sorted(c.file for c in now.conf) == [
+        "etc/modules/mod-up-extra.conf",
+        "etc/modules/mod-up.conf",
+    ]

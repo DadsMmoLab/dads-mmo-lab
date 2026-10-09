@@ -395,7 +395,7 @@ def applier(
     `sql_backup` is T596's `OutsideSqlBackup`: the backup before an outside
     item's database changes. Absent, none is taken.
     """
-    return autoupdate.guarded_applier(
+    guarded = autoupdate.guarded_applier(
         server_dir,
         sql=sql,
         arming=arming,
@@ -405,6 +405,9 @@ def applier(
         client_dir=client_dir,
         sql_backup=sql_backup,
     )
+    # An item brought from a link is read again whenever its clone is put on new code.
+    guarded.recomplete = complete
+    return guarded
 
 
 def apply_module(
