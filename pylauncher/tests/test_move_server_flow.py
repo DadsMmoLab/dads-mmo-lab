@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -364,9 +364,14 @@ class FakeApplier:
         self.server_dir = server_dir
         self.installed: list[tuple[str, str | None, Mapping[str, str] | None]] = []
 
+    world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
+
     def install(
         self, manifest: Manifest, values: Mapping[str, str] | None = None
     ) -> apply.ApplyReport:
+        if self.world_up():
+            # The real applier's refusal of a module's SQL while the world runs.
+            raise apply.ApplyRefusal(f"{manifest.id}: the world server is running")
         self.events.append(f"module:{manifest.id}")
         self.installed.append(
             (manifest.id, manifest.source.rev if manifest.source else None, values)
@@ -395,6 +400,8 @@ class Move:
         self.events = self.target.events
         self.engine = FakeEngine(self.events)
         self.applier = FakeApplier(self.events, self.target.server_dir)
+        spec = self.target.spec
+        self.applier.world_up = lambda: spec.world in self.target.up  # type: ignore[method-assign]
         self.rows: list[tuple[move_server.SourceRevRow, ...]] = []
         self.rebuilds = 0
         self.plan = plan_for(self.path, self.target.server_dir)
@@ -404,6 +411,9 @@ class Move:
         def rebuild(cancel: threading.Event | None) -> Iterator[str]:
             self.rebuilds += 1
             self.events.append("rebuild")
+            # A real rebuild ends with the server started on what it compiled.
+            spec = self.target.spec
+            self.target.up[:] = [spec.db, spec.auth, spec.world]
             yield "rebuilt"
 
         return move_server.MovedInServer(
@@ -447,6 +457,7 @@ def test_the_run_installs_then_puts_everything_in_in_order(tmp_path: Path) -> No
     assert order == [
         "install",
         "rows",
+        "stop",
         "module:mod-transmog",
         "rebuild",
         "stop",
@@ -746,4 +757,6 @@ def test_the_server_is_stopped_before_a_conf_is_laid(
 
     monkeypatch.setattr(move_server, "_write_bytes", write)
     mv.run()
-    assert mv.events.index("stop") < mv.events.index("write:worldserver.conf")
+    write = mv.events.index("write:worldserver.conf")
+    rebuilt = mv.events.index("rebuild")
+    assert rebuilt < write and "stop" in mv.events[rebuilt:write]

@@ -956,6 +956,13 @@ class MovedInInstall:
                 f"{self.entry.name} has no module installer here, so no module was put back."
             )
         installed = server.installed()
+        if any(
+            p.manifest.id not in installed.get(str(p.manifest.type), frozenset())
+            for p in self.plan.modules
+        ):
+            # The install ends with the world running, and the applier refuses a module's SQL
+            # while a world holds those databases in memory (`Applier._refuse_while_running`).
+            yield from _stop_if_running(server.world)
         for planned in self.plan.modules:
             manifest = planned.manifest
             if planned.carried is not None:
