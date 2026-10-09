@@ -719,27 +719,68 @@ def load_workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-def test_merged_workflow_has_no_concurrency_group_that_could_drop_a_run():
-    wf = load_workflow("discord-merged.yml")
+DISCORD_WORKFLOW = "discord-merged.yml"  # the one file GitHub registers; all three jobs
+
+
+def discord_job(name):
+    return load_workflow(DISCORD_WORKFLOW)["jobs"][name]
+
+
+def test_there_is_one_discord_workflow_file_with_the_three_jobs():
+    assert sorted(p.name for p in WORKFLOWS.glob("discord-*")) == [DISCORD_WORKFLOW]
+    wf = load_workflow(DISCORD_WORKFLOW)
+    assert sorted(wf["jobs"]) == ["issue", "merged", "release"]
+    on = wf[True]
+    assert on["push"]["branches"] == ["Yulon"]
+    assert on["issues"]["types"] == ["opened", "closed", "reopened"]
+    assert on["workflow_run"] == {"workflows": ["release"], "types": ["completed"]}
+    assert sorted(on["workflow_dispatch"]["inputs"]) == [
+        "no_summary",
+        "only_release_channel",
+        "tag",
+    ]
+    assert wf["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "issues": "write",
+        "actions": "read",
+    }
+
+
+def test_each_discord_job_runs_only_for_its_own_event():
+    for job, event in (("merged", "push"), ("issue", "issues")):
+        cond = " ".join(discord_job(job)["if"].split())
+        assert f"github.event_name == '{event}'" in cond
+        assert "workflow_dispatch" not in cond and "workflow_run" not in cond
+    release = " ".join(discord_job("release")["if"].split())
+    assert "github.event_name == 'workflow_dispatch'" in release
+    assert "github.event_name == 'workflow_run' &&" in release
+    assert "github.event_name == 'push'" not in release and "'issues'" not in release
+
+
+def test_merged_job_has_no_concurrency_group_that_could_drop_a_run():
+    wf = load_workflow(DISCORD_WORKFLOW)
     assert "concurrency" not in wf
-    assert all("concurrency" not in job for job in wf["jobs"].values())
+    assert "concurrency" not in wf["jobs"]["merged"]
+    assert "concurrency" not in wf["jobs"]["release"]
 
 
-def test_issue_workflow_queues_per_issue_without_cancelling():
-    conc = load_workflow("discord-issue-posts.yml")["concurrency"]
+def test_issue_job_queues_per_issue_without_cancelling():
+    assert "concurrency" not in load_workflow(DISCORD_WORKFLOW)
+    conc = discord_job("issue")["concurrency"]
     assert "github.event.issue.number" in conc["group"]
     assert conc["cancel-in-progress"] is False
 
 
 def test_release_workflow_passes_the_run_to_the_script_and_gates_on_success_and_tag():
-    job = load_workflow("discord-release-posts.yml")["jobs"]["notify"]
+    job = discord_job("release")
     cond = job["if"]
     assert "run_attempt" not in cond  # the script decides, from the earlier attempts
     assert "workflow_dispatch" in cond
     assert "workflow_run.conclusion == 'success'" in cond
     assert "startsWith(github.event.workflow_run.head_branch, 'v')" in cond
     env = job["steps"][-1]["env"]
-    assert load_workflow("discord-release-posts.yml")["permissions"]["actions"] == "read"
+    assert load_workflow(DISCORD_WORKFLOW)["permissions"]["actions"] == "read"
     assert env["RELEASE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
     assert env["RELEASE_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
 
@@ -783,10 +824,9 @@ def test_a_first_attempt_and_a_manual_repost_post_without_asking(world, monkeypa
 
 
 def test_workflows_never_put_event_fields_inside_run_scripts():
-    for name in ("discord-merged.yml", "discord-issue-posts.yml", "discord-release-posts.yml"):
-        for job in load_workflow(name)["jobs"].values():
-            for step in job["steps"]:
-                assert "${{" not in step.get("run", ""), name
+    for name, job in load_workflow(DISCORD_WORKFLOW)["jobs"].items():
+        for step in job["steps"]:
+            assert "${{" not in step.get("run", ""), name
 
 
 # --- limits, threads, switches ----------------------------------------------
@@ -857,10 +897,11 @@ REPO_GUARD = "github.repository == 'DadsMmoLab/dads-mmo-lab'"
 def test_every_discord_job_runs_only_in_the_main_repository():
     # A fork carries the workflows after a sync and may hold its own secrets: without
     # this guard its sync pushes and test tags would post to the channel a second time.
-    for name in ("discord-merged.yml", "discord-issue-posts.yml", "discord-release-posts.yml"):
-        for job in load_workflow(name)["jobs"].values():
-            cond = " ".join(str(job.get("if", "")).split())
-            assert cond == REPO_GUARD or guards_the_whole_condition(cond), (name, cond)
+    jobs = load_workflow(DISCORD_WORKFLOW)["jobs"]
+    assert jobs
+    for name, job in jobs.items():
+        cond = " ".join(str(job.get("if", "")).split())
+        assert cond == REPO_GUARD or guards_the_whole_condition(cond), (name, cond)
 
 
 def guards_the_whole_condition(cond):
@@ -1043,11 +1084,11 @@ def test_merged_and_issue_posts_stay_on_the_main_webhook(world, monkeypatch):
 
 
 def test_release_workflow_passes_the_second_channel_secret_var_and_input():
-    wf = load_workflow("discord-release-posts.yml")
+    wf = load_workflow(DISCORD_WORKFLOW)
     dispatch = wf[True]["workflow_dispatch"]["inputs"]["only_release_channel"]
     assert dispatch["type"] == "boolean" and dispatch["default"] is False
     assert dispatch["required"] is False
-    env = wf["jobs"]["notify"]["steps"][-1]["env"]
+    env = wf["jobs"]["release"]["steps"][-1]["env"]
     assert env["DISCORD_RELEASE_WEBHOOK_URL"] == "${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}"
     assert (
         env["DISCORD_RELEASE_CHANNEL_THREAD_ID"] == "${{ vars.DISCORD_RELEASE_CHANNEL_THREAD_ID }}"
@@ -1055,12 +1096,29 @@ def test_release_workflow_passes_the_second_channel_secret_var_and_input():
     assert (
         env["RELEASE_ONLY_CHANNEL"] == "${{ inputs.only_release_channel == true && 'true' || '' }}"
     )
-    assert "github.repository == 'DadsMmoLab/dads-mmo-lab'" in wf["jobs"]["notify"]["if"]
+    assert "github.repository == 'DadsMmoLab/dads-mmo-lab'" in wf["jobs"]["release"]["if"]
 
 
-def test_only_the_release_workflow_gets_the_second_webhook():
-    for name in ("discord-merged.yml", "discord-issue-posts.yml"):
-        assert "DISCORD_RELEASE_WEBHOOK_URL" not in (WORKFLOWS / name).read_text(encoding="utf-8")
+def test_only_the_release_job_gets_the_second_webhook():
+    jobs = load_workflow(DISCORD_WORKFLOW)["jobs"]
+    for name in ("merged", "issue"):
+        assert "DISCORD_RELEASE_WEBHOOK_URL" not in json.dumps(jobs[name])
+    assert "DISCORD_RELEASE_WEBHOOK_URL" in json.dumps(jobs["release"])
+
+
+def test_each_job_gets_the_env_it_needs():
+    jobs = load_workflow(DISCORD_WORKFLOW)["jobs"]
+    for name, thread in (
+        ("merged", "DISCORD_PR_THREAD_ID"),
+        ("issue", "DISCORD_ISSUE_THREAD_ID"),
+        ("release", "DISCORD_RELEASE_THREAD_ID"),
+    ):
+        env = jobs[name]["steps"][-1]["env"]
+        assert env["GH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}", name
+        assert env["DISCORD_WEBHOOK_URL"] == "${{ secrets.DISCORD_WEBHOOK_URL }}", name
+        assert env[thread] == "${{ vars." + thread + " }}", name
+        assert "ANTHROPIC_API_KEY" in env, name
+        assert jobs[name]["steps"][-1]["run"].endswith(f"discord_notify.py {name}"), name
 
 
 # --- @everyone on the release channel only ----------------------------------
