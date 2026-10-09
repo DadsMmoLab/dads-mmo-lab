@@ -32,9 +32,10 @@ permissions:
 jobs:
   notify:
     if: >-
+      github.repository == 'DadsMmoLab/dads-mmo-lab' && (
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'v'))
+      startsWith(github.event.workflow_run.head_branch, 'v')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

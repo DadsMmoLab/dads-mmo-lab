@@ -835,3 +835,15 @@ def test_previous_tag_stays_in_the_public_family(world):
         {"tag_name": "v0.9.14-Public"},
     ]
     assert dn._previous_tag("v0.9.15-Public") == "v0.9.14-Public"
+
+
+REPO_GUARD = "github.repository == 'DadsMmoLab/dads-mmo-lab'"
+
+
+def test_every_discord_job_runs_only_in_the_main_repository():
+    # A fork carries the workflows after a sync and may hold its own secrets: without
+    # this guard its sync pushes and test tags would post to the channel a second time.
+    for name in ("discord-merged.yml", "discord-issues.yml", "discord-release.yml"):
+        for job in load_workflow(name)["jobs"].values():
+            cond = " ".join(str(job.get("if", "")).split())
+            assert cond == REPO_GUARD or cond.startswith(f"{REPO_GUARD} && ("), (name, cond)
