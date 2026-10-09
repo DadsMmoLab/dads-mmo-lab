@@ -982,7 +982,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "what a family stops before a rebuild, an update or a return to the tested commit",
         {
             "azerothcore": supported(
-                "AzerothCoreInstaller writes its carried patches and lays its Lua scripts (T553)"
+                "AzerothCoreInstaller writes its patches and checks its Lua scripts can be laid"
             ),
             "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
             "trinitycore": supported("TrinityCoreInstaller stops a running movement-map job"),

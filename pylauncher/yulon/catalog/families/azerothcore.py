@@ -379,12 +379,11 @@ class AzerothCoreInstaller(StagedInstaller):
         yield from scriptdeploy.lay(ctx.server_dir, block.lua_scripts)
 
     def _carried(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
-        """Write the carried patches and lay the Lua scripts; what an update and a rebuild need."""
+        """Write the carried patches; what an update and a rebuild need before the compile."""
         block = self._block()
         if block.patches:
             patches = carried.loaded(self.entry.name, self.installers_root, block.patches)
             yield from carried.apply_lines(patches, server_dir, quiet=quiet)
-        yield from scriptdeploy.lay(server_dir, block.lua_scripts, quiet=quiet)
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """The spine's compose files, plus every path a carried patch edits (T553).
@@ -428,29 +427,49 @@ class AzerothCoreInstaller(StagedInstaller):
             )
 
     def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
-        """Write the patches and lay the scripts into moved (or put back) sources (T553).
+        """Write the patches into moved (or put back) sources (T553).
 
         The update route calls this after the fetch's reset, and the restore calls
-        it after putting the old commits back, so the scripts on disk follow the
-        checkout they came from either way.
+        it after putting the old commits back. The Lua scripts are not laid here
+        (T562): they wait for the old world to stop (`lay_scripts()`).
         """
         yield from self._carried(server_dir, quiet=False)
+
+    def lays_scripts_with_the_servers_down(self, server_dir: Path) -> bool:
+        """Does this install have Lua scripts to lay, or lay again, or remove (T562)?
+
+        True for an entry with `lua_scripts`, and for one that dropped them while the
+        record of what an earlier press laid is still there.
+        """
+        return bool(self._block().lua_scripts) or scriptdeploy.record_path(server_dir).exists()
+
+    def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
+        """Lay the entry's Lua scripts from the checkout as it stands now (T562).
+
+        The world reads them when it starts, on a GM `.reload ale` and with
+        `ALE.AutoReload`, so a rebuild or an update lays them with the old world
+        stopped: laid during the compile they would be read by a world still running
+        the old binary. A rollback calls this again from the put-back sources.
+        """
+        yield from scriptdeploy.lay(server_dir, self._block().lua_scripts, quiet=quiet)
 
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
     ) -> Iterator[str]:
-        """Before any rebuild compiles: the patches on disk and the scripts laid (T553).
+        """Before any rebuild compiles: the patches on disk, and the scripts' refusals asked (T553).
 
         A Rebuild compiles the tree as it stands, so a checkout that lost its patch
         (re-cloned, or reset by hand) gets it back here rather than compiling
         without it; a tree that has it says nothing. Quiet: on the update route the
         same work has just run in `apply_carried_patches()`.
 
-        The scripts are laid here while the old world may still be running, so a
-        `.reload ale` or a crash-restart in the compile window loads the new
-        scripts on the old binary (T562 moves the laying to the servers-down step).
+        The scripts are NOT laid here (T562): `lay_scripts()` lays them once the old
+        world has stopped. What is asked here is whether they can be, a source that is
+        gone or a link, a link where they go, so that refusal still comes before an hour
+        of compiling and with nothing changed.
         """
         yield from self._carried(server_dir, quiet=True)
+        scriptdeploy.check_layable(server_dir, self._block().lua_scripts)
 
     def repair_database_stages(self) -> tuple[Stage, ...]:
         """The spine's four, after the client-data download (T377).
