@@ -264,14 +264,22 @@ def test_two_threads_of_one_process_share_one_reservation(fake_docker: Path, ser
     here so a change to it is made on purpose.
     """
     seen: list[threading.Event] = []
-    gate = threading.Barrier(2)
+    first_in = threading.Event()
+    second_in = threading.Event()
 
-    def take() -> None:
+    def first() -> None:
         with docker.server_claim(server, press="p", images=[IMAGE]) as held:
             seen.append(held.lost)
-            gate.wait(HANG_BOUND)
+            first_in.set()
+            assert second_in.wait(HANG_BOUND)  # held until the second has taken its share
 
-    threads = [threading.Thread(target=take) for _ in range(2)]
+    def second() -> None:
+        assert first_in.wait(HANG_BOUND)  # the first is inside: this one is the nested take
+        with docker.server_claim(server, press="p", images=[IMAGE]) as held:
+            seen.append(held.lost)
+            second_in.set()
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
     for thread in threads:
         thread.start()
     for thread in threads:
