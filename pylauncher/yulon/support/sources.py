@@ -649,23 +649,30 @@ def system_info(
         machine_part = machine()
     except Exception:  # boundary: system-info.txt is always written
         machine_part = ["Machine size: could not read"]
+    silent = set(silent_targets)
+
+    def ask(distro: str | None) -> tuple[str, str]:
+        """The version line and the size line; a docker that did not answer is asked once."""
+        version = _ask_version(docker_version, distro, silent)
+        if version == SKIPPED or version.startswith("not reachable"):
+            silent.add(distro)
+        return version, _ask_size(engine, distro, silent)
+
+    here, here_size = ask(None)
     lines = [
         f"Yu'lon {__version__}",
         f"Operating system: {host_platform.platform()}",
         f"Python: {sys.version.split()[0]}",
         f"Qt: {sources.qt_version or 'not reported'}",
         *machine_part,
-        f"Docker on this machine: {_ask_version(docker_version, None, silent_targets)}",
-        f"Docker on this machine sees: {_ask_size(engine, None, silent_targets)}",
+        f"Docker on this machine: {here}",
+        f"Docker on this machine sees: {here_size}",
     ]
     distros = sorted({distro for install in sources.installs if (distro := install.wsl_distro)})
     for distro in distros:
-        lines.append(
-            f"Docker in WSL distro {distro}: {_ask_version(docker_version, distro, silent_targets)}"
-        )
-        lines.append(
-            f"Docker in WSL distro {distro} sees: {_ask_size(engine, distro, silent_targets)}"
-        )
+        version, size = ask(distro)
+        lines.append(f"Docker in WSL distro {distro}: {version}")
+        lines.append(f"Docker in WSL distro {distro} sees: {size}")
     lines += ["", f"Servers Yu'lon knows about: {len(sources.installs)}"]
     for install in sources.installs:
         where = f", WSL distro {install.wsl_distro}" if install.wsl_distro else ""

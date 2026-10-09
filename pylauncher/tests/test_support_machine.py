@@ -255,3 +255,88 @@ def test_system_info_asks_each_wsl_distros_docker_for_its_size(tmp_path: Path) -
     )
     assert "Docker in WSL distro Ubuntu sees: 2 CPUs, 2.0 GiB memory" in text
     assert "Docker on this machine sees: could not read" in text
+
+
+def test_a_docker_that_did_not_answer_the_version_is_not_asked_its_size(tmp_path: Path) -> None:
+    from yulon.support.sources import InstallFacts
+
+    wsl = InstallFacts("wow-wotlk", "0badc0de", tmp_path / "w", "Ubuntu", None)
+    sources = Sources(platform.config_dir(), None, (wsl,))
+    asked: list[str | None] = []
+
+    def engine(distro: str | None) -> tuple[int, int] | None:
+        asked.append(distro)
+        return (1, 1)
+
+    def version(distro: str | None) -> str | None:
+        if distro == "Ubuntu":
+            raise RuntimeError("wedged")
+        return None
+
+    text = system_info(sources, version, machine=lambda: [], engine=engine)
+    assert asked == []
+    assert "Docker on this machine sees: skipped" in text
+    assert "Docker in WSL distro Ubuntu sees: skipped" in text
+
+
+def test_a_docker_that_answered_the_version_is_asked_its_size(tmp_path: Path) -> None:
+    asked: list[str | None] = []
+
+    def engine(distro: str | None) -> tuple[int, int] | None:
+        asked.append(distro)
+        return (1, 1024**3)
+
+    system_info(_sources(), lambda _: "27", machine=lambda: [], engine=engine)
+    assert asked == [None]
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-16-le-bom"])
+def test_wslconfig_with_a_byte_order_mark_is_read(tmp_path: Path, encoding: str) -> None:
+    body = "[wsl2]\r\nmemory=6GB\r\nprocessors=3\r\n"
+    data = (
+        b"\xff\xfe" + body.encode("utf-16-le")
+        if encoding == "utf-16-le-bom"
+        else body.encode(encoding)
+    )
+    (tmp_path / ".wslconfig").write_bytes(data)
+    probe = Probe("win32", home=lambda: tmp_path)
+    assert wslconfig_lines(probe) == ["WSL2 limits (.wslconfig): memory=6GB, processors=3"]
+
+
+def test_wslconfig_utf_16_big_endian_is_read(tmp_path: Path) -> None:
+    (tmp_path / ".wslconfig").write_bytes(b"\xfe\xff" + "[wsl2]\nmemory=2GB\n".encode("utf-16-be"))
+    assert wslconfig_lines(Probe("win32", home=lambda: tmp_path)) == [
+        "WSL2 limits (.wslconfig): memory=2GB"
+    ]
+
+
+@pytest.mark.parametrize("value", ["8GB # note", "8GB ; note", "8GB#note"])
+def test_wslconfig_ignores_an_inline_comment(value: str) -> None:
+    probe = _probe("win32", files={"/home/bob/.wslconfig": f"[wsl2]\nmemory={value}\n"})
+    assert wslconfig_lines(probe) == ["WSL2 limits (.wslconfig): memory=8GB"]
+
+
+def test_the_bundle_hands_its_machine_and_engine_seams_to_system_info(tmp_path: Path) -> None:
+    import zipfile
+
+    from yulon.support import bundle
+    from yulon.support.redact import Redactor
+
+    asked: list[str | None] = []
+
+    def engine(distro: str | None) -> tuple[int, int] | None:
+        asked.append(distro)
+        return (3, 2 * 1024**3)
+
+    seams = bundle.Seams(
+        live_logs=lambda install, silent: [],
+        docker_version=lambda distro: "27",
+        machine=lambda: ["CPU: seam"],
+        docker_size=engine,
+    )
+    dest = tmp_path / "s.zip"
+    bundle.build(dest, _sources(), Redactor.build([]), seams=seams)
+    info = zipfile.ZipFile(dest).read("system-info.txt").decode()
+    assert "CPU: seam" in info
+    assert "Docker on this machine sees: 3 CPUs, 2.0 GiB memory" in info
+    assert asked == [None]

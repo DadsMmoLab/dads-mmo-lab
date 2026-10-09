@@ -10,6 +10,7 @@ nothing here is a secret, and no path is printed.
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import sys
@@ -42,9 +43,13 @@ def _run(argv: list[str]) -> str | None:
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except OSError:
         return None
+    # PowerShell 5 writes `.wslconfig` as UTF-8 with a BOM (Set-Content) or UTF-16 (Out-File, `>`).
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace")
+    return data.decode("utf-8-sig", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -139,7 +144,7 @@ def wslconfig_lines(probe: Probe) -> list[str]:
             section = line.strip("[] ").lower()
         elif section == "wsl2" and "=" in line:
             key, _, value = line.partition("=")
-            key, value = key.strip().lower(), value.strip()
+            key, value = key.strip().lower(), re.split(r"[#;]", value, maxsplit=1)[0].strip()
             if key in ("memory", "processors") and _WSL_VALUE.fullmatch(value):
                 found.append(f"{key}={value}")
     if not found:
