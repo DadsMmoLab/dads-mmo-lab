@@ -92,6 +92,13 @@ RESTORE_HOLDS_THE_DATABASES = (
     "A restore is writing into this server's databases on its Maintenance tab. Wait for "
     "it to finish, then try again."
 )
+# T604: the Maintenance tab deleting old backups holds the databases' lease like a Backup does,
+# so a dump cannot start into a folder being cleared.
+PRESS_DELETE_BACKUPS = "Delete backups"
+DELETE_HOLDS_THE_DATABASES = (
+    "Old backups are being deleted on this server's Maintenance tab. Wait for that to "
+    "finish, then try again."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."
