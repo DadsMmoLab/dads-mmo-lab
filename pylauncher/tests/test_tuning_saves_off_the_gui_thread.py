@@ -17,10 +17,21 @@ from typing import Any
 
 import pytest
 
-from tests.test_controller_view import _Ps, _tuning_view
-from tests.test_more_writes_hold import HELD, TUNING_FILE, _Hold, _conf, ps  # noqa: F401
-from yulon import docker
+from tests.test_controller_view import _Ps
+from tests.test_more_writes_hold import HELD, TUNING_FILE, _conf, _Hold
 from yulon.ui import controller_view as cv
+
+
+@pytest.fixture
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    from yulon import runner
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(cv, "threaded_job_runner", lambda _parent: run_inline)
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
+
 
 Job = tuple[Callable[[], object], Callable[[object], None], Callable[[object], None]]
 

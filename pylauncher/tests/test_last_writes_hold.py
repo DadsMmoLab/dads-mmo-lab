@@ -10,7 +10,6 @@ guard classifies every `ControllerServices` seam, so a new one has to say whethe
 
 from __future__ import annotations
 
-import ast
 import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,11 +19,21 @@ import pytest
 
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.test_controller_view import _Ps
-from tests.test_more_writes_hold import CATALOG_WOTLK, HELD, _Hold, _Nothing, ps  # noqa: F401
+from tests.test_more_writes_hold import CATALOG_WOTLK, HELD, _Hold, _Nothing
 from yulon import bot_population as botpop
-from yulon import docker, networking, platform, purge, reset_defaults, resources
-from yulon import server_time_zone
+from yulon import docker, networking, platform, purge, reset_defaults, server_time_zone
 from yulon.ui import controller_view as controller_view_module
+
+
+@pytest.fixture
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    from yulon import runner
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
 
 
 @pytest.fixture
@@ -400,7 +409,7 @@ _MODULES = "tests.test_module_actions_hold"
 # Every field of `ControllerServices`, and what it is to the server's databases and files. A new
 # field fails `test_every_services_seam_says_what_it_writes` until it is put in one of:
 #   held:    writes, inside the hold; the value names the test that drives it with a refusing hold
-#   lower:   writes, and the layer below takes the hold (the engine's presses, the Applier); says where
+#   lower:   writes, and the layer below takes the hold (the engine's presses, the Applier)
 #   reads:   reads the server, or the world, and writes none of it
 #   outside: writes something that is not this server's databases or files
 #   open:    writes and does not hold yet; the value names the ticket (and the set is pinned below)
