@@ -31,6 +31,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -44,6 +45,7 @@ from yulon import (
     client_names,
     docker,
     folder_swap,
+    forgetting,
     links,
     module_answers,
     module_moves,
@@ -3053,6 +3055,8 @@ class Applier:
         # one package's file (T599: the read-then-send of a ledger entry is inside it too).
         # Absent means the behaviour every caller had before: no cross-process hold.
         self._hold_server = hold_server
+        # The `lost` event of the hold this press holds, while it holds one (T568).
+        self._hold_lost: threading.Event | None = None
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -5337,12 +5341,16 @@ class Applier:
         )
         with ExitStack() as held:
             try:
-                held.enter_context(hold)
+                held_by = held.enter_context(hold)
             except SaidByYulon as refused:
                 # The holder's own sentence ("Another Yu'lon is working on ..."), shown as
                 # written; nothing was sent.
                 raise ApplyRefusal(str(refused)) from refused
-            self._sql_held(manifest, clone, vals, when, log, undo)
+            self._hold_lost = getattr(held_by, "lost", None)
+            try:
+                self._sql_held(manifest, clone, vals, when, log, undo)
+            finally:
+                self._hold_lost = None
 
     def _sql_held(
         self,
@@ -5739,6 +5747,11 @@ class Applier:
             return None, f"{type(exc).__name__}: {exc}"
         return bool(rows.strip()), ""
 
+    def _refuse_if_the_hold_was_lost(self) -> None:
+        """No statement is sent once another Yu'lon's Stop anyway ended this press's hold (T568)."""
+        if self._hold_lost is not None and self._hold_lost.is_set():
+            raise ApplyRefusal(forgetting.SQL_HOLD_LOST)
+
     def _precondition_met(self, step: SqlStep, log: _Log) -> bool:
         """Whether this step's turn has come — and if not, why, in the report.
 
@@ -5766,6 +5779,7 @@ class Applier:
           precondition is about ONE step's own tables; a manifest's other steps
           are not implicated and are not held back by it.
         """
+        self._refuse_if_the_hold_was_lost()
         if step.precondition is None:
             return True
         found, why = self._ask_db(step.precondition)

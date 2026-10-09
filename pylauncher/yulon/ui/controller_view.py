@@ -9910,8 +9910,14 @@ class ControllerView(QWidget):
 
     def _stop_over(self, holder: docker.ServerHolder) -> bool:
         """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
-        docker.end_reservation(holder)
-        return self.services.controller.stop()
+        if docker.end_reservation(holder):
+            return self.services.controller.stop()
+        # The holder's reservation would not go (Docker slow, a refused removal): the Stop the
+        # player confirmed still stops -- "Stop always stops" -- without a reservation of its
+        # own, for this one Stop only.
+        logger.warning(f"{holder.name} could not be removed; stopping without a reservation")
+        with docker.stopping_regardless():
+            return self.services.controller.stop()
 
     def _offer_to_clear_a_leftover(self, exc: object) -> None:
         """T568: a refusal naming this user's own leftover reservation offers [Clear it].

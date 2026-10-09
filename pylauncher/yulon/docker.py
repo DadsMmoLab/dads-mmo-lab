@@ -645,6 +645,25 @@ LOST_RESERVATION = (
 )
 """Why a start, recreate or remove inside a lost reservation is refused (T568 section 3)."""
 
+_REGARDLESS = threading.local()
+
+
+@contextmanager
+def stopping_regardless() -> Iterator[None]:
+    """A Stop inside the block makes no reservation, and so cannot be refused by one (T568).
+
+    For the one Stop the player confirmed with "Stop anyway" when the holder's reservation
+    could not be removed: "Stop always stops". Thread-local and scoped to the block, so no
+    other Stop, and no other thread, is unreserved by it.
+    """
+    before = getattr(_REGARDLESS, "on", False)
+    _REGARDLESS.on = True
+    try:
+        yield
+    finally:
+        _REGARDLESS.on = before
+
+
 _LIFECYCLE_PRESS = {
     "start": forgetting.PRESS_START,
     "start_staged": forgetting.PRESS_START,
@@ -685,7 +704,7 @@ def _in_flight(
     try:
         stopping = press == forgetting.PRESS_STOP
         with contextlib.ExitStack() as reserved:
-            if RESERVATIONS_ON:
+            if RESERVATIONS_ON and not (stopping and getattr(_REGARDLESS, "on", False)):
                 try:
                     claim = reserved.enter_context(
                         server_claim(

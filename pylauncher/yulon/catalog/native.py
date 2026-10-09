@@ -82,6 +82,7 @@ from yulon import (
     database_presence,
     dbsecret,
     docker,
+    forgetting,
     git,
     module_answers,
     networking,
@@ -6455,6 +6456,44 @@ def recorded_install_id(server_dir: Path) -> str:
     return ident
 
 
+class PressCancel(threading.Event):
+    """A press's cancel: the player's Stop, or its reservation lost (T549, T568).
+
+    Read live, not copied by a thread: a tool's watcher or a stage's check sees the
+    claim's loss the moment it is set, as it sees a Stop.
+    """
+
+    def __init__(self, stop: threading.Event | None, lost: threading.Event) -> None:
+        super().__init__()
+        self._stop = stop
+        self._lost = lost
+        anyway = getattr(stop, "anyway", None)
+        if anyway is not None:
+            self.anyway = anyway
+
+    def is_set(self) -> bool:
+        return super().is_set() or self._lost.is_set() or self.player_stopped()
+
+    def player_stopped(self) -> bool:
+        """The player's own Stop, told apart from the claim's loss (cold review of T549)."""
+        return self._stop is not None and self._stop.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            step = _PRESS_CANCEL_POLL
+            if deadline is not None:
+                step = min(step, deadline - time.monotonic())
+                if step <= 0:
+                    return False
+            self._lost.wait(step)  # wakes at once on the loss; polls the Stop
+        return True
+
+
+_PRESS_CANCEL_POLL = 0.05
+"""How often `PressCancel.wait()` looks at the player's Stop. Not a deadline."""
+
+
 def _reserving(
     press: str | Callable[[Mapping[str, Any]], str],
 ) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
@@ -6476,8 +6515,19 @@ def _reserving(
             given = signature.bind(self, *args, **kwargs).arguments
             options = given.get("options") or InstallOptions()
             named = press if isinstance(press, str) else press(given)
-            with self._reservation(self.server_dir(options), named, given.get("cancel")):
-                yield from method(self, *args, **kwargs)
+            with self._reservation(self.server_dir(options), named, given.get("cancel")) as held:
+                if held is not None:
+                    # Codex adversarial review: a press whose reservation another Yu'lon's
+                    # "Stop anyway" removed must end at its next check, as a Stop does.
+                    kwargs["cancel"] = PressCancel(given.get("cancel"), held.lost)
+                try:
+                    yield from method(self, *args, **kwargs)
+                except GeneratorExit:
+                    raise
+                except BaseException:
+                    if held is not None and held.lost.is_set():
+                        yield forgetting.reservation_lost_line(named)
+                    raise
 
         return reserved
 
@@ -6698,7 +6748,7 @@ class StagedInstaller:
         cancel: threading.Event | None = None,
         *,
         images: Sequence[str] | None = None,
-    ) -> Iterator[None]:
+    ) -> Iterator[docker.ClaimHeld | None]:
         """This server's reservation across processes, for a press; a refusal is a sentence.
 
         Only for a folder Yu'lon has a record of: a press on any other folder refuses by
@@ -6708,12 +6758,13 @@ class StagedInstaller:
         the holder's sentence and nothing was changed.
         """
         if not (server_dir / STATE_FILE).is_file():
-            yield
+            yield None
             return
         refs = self.image_refs_at(server_dir) if images is None else tuple(images)
         stack = ExitStack()
+        held: docker.ClaimHeld | None = None
         try:
-            stack.enter_context(
+            held = stack.enter_context(
                 self._seams.server_claim(
                     server_dir,
                     press=press,
@@ -6732,7 +6783,7 @@ class StagedInstaller:
         except docker.ServerHeldError as refused:
             raise InstallerError(str(refused)) from refused
         with stack:
-            yield
+            yield held if isinstance(held, docker.ClaimHeld) else None
 
     def server_dir(self, options: InstallOptions) -> Path:
         """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""

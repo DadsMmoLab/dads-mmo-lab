@@ -153,6 +153,23 @@ def server_reservation_unsaid(label: str, name: str, this_press: str) -> str:
     )
 
 
+def reservation_lost_line(press: str) -> str:
+    """What a press says last when its reservation ended from elsewhere while it ran (T568)."""
+    return (
+        f"This server's reservation in Docker ended from elsewhere while \u201c{press}\u201d was "
+        "running (it was stopped from another Yu'lon, or Docker restarted), so the job was "
+        "stopped and started nothing after that. Press Start or Rebuild to bring the server "
+        "up on what is on disk."
+    )
+
+
+SQL_HOLD_LOST = (
+    "Another Yu'lon stopped this server while this was being applied, so no more SQL was sent. "
+    "The statements before that already ran: press the module's button again once the server "
+    "is stopped."
+)
+
+
 def server_reservation_unavailable(label: str, said: str) -> str:
     """No reservation could be made at all: no Docker, no image, a daemon that would not answer."""
     return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."

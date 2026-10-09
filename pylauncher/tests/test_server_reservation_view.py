@@ -8,6 +8,8 @@ lock; another user's leftover shows its command only. Fixtures are `test_control
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -201,3 +203,56 @@ def test_clear_it_is_not_offered_otherwise(
     monkeypatch.setattr(docker, "end_reservation", lambda h: removed.append(h) or True)
     view.clear_the_leftover_reservation()
     assert removed == [], why
+
+
+# ------------------------------------------------------------------ Stop anyway always stops
+
+
+def test_stop_anyway_stops_even_when_the_holders_reservation_would_not_be_removed(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex adversarial review: a removal that fails left the Stop refused again by the same
+    reservation, with the question already spent. The one confirmed override stops regardless.
+
+    Mutation this catches: `_stop_over` stopping under the ordinary reservation whatever
+    `end_reservation()` answered.
+    """
+    from tests.test_server_reservation import ran, stop_staged
+
+    ran.clear()
+    monkeypatch.setattr(controller_view_module, "_ask_with", _Asked("yes"))
+    monkeypatch.setattr(docker, "end_reservation", lambda holder: False)
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    monkeypatch.setattr(docker, "server_claim", _always_held)  # the holder is still there
+    monkeypatch.setattr(
+        view.services.controller, "stop", lambda: stop_staged(_SPEC, tmp_path) or True
+    )
+
+    view._stop_failed(_refused(HOLDER))
+
+    assert ran == ["stop"], "the confirmed Stop did not stop"
+
+
+def test_a_later_stop_is_not_unreserved(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The override is for that one Stop: the next ordinary Stop meets the holder as before."""
+    from tests.test_server_reservation import ran, stop_staged
+
+    ran.clear()
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    monkeypatch.setattr(docker, "server_claim", _always_held)
+    with docker.stopping_regardless():
+        stop_staged(_SPEC, tmp_path)
+    with pytest.raises(docker.ServerReserved):
+        stop_staged(_SPEC, tmp_path)
+    assert ran == ["stop"]
+
+
+_SPEC = docker.ContainerSpec(db="d", auth="a", world="w", ports=(1,))
+
+
+@contextmanager
+def _always_held(*_a: Any, **_kw: Any) -> Iterator[None]:
+    raise docker.ServerReserved("Another Yu'lon is working on WoW.", HOLDER)
+    yield

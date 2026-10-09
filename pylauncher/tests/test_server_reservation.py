@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -662,3 +663,108 @@ def test_every_press_of_the_engine_is_classified() -> None:
         assert hasattr(getattr(StagedInstaller, name), "__wrapped__"), f"{name} is not reserved"
     assert hasattr(TrinityCoreInstaller.reextract, "__wrapped__")
     assert not hasattr(StagedInstaller.run, "__wrapped__")
+
+
+# ------------------------------------------------------------------ a lost reservation ends it
+# Codex adversarial review: after "Stop anyway" removed the holder's container, a press
+# kept running for the rest of its work. Its cancel now reads the reservation's loss.
+
+
+class _Toy:
+    """The bit of an installer `@_reserving` needs, over a reservation the test controls."""
+
+    def __init__(self, held: docker.ClaimHeld) -> None:
+        self.held = held
+        self.seen: list[Any] = []
+
+    def server_dir(self, options: InstallOptions) -> Path:
+        assert options.server_dir is not None
+        return options.server_dir
+
+    @contextmanager
+    def _reservation(
+        self, server_dir: Path, press: str, cancel: threading.Event | None = None
+    ) -> Iterator[docker.ClaimHeld]:
+        yield self.held
+
+    @native._reserving("A toy press")
+    def press(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        fail_after_loss: bool = False,
+    ) -> Iterator[str]:
+        self.seen.append(cancel)
+        yield "working"
+        if fail_after_loss:
+            self.held.lost.set()
+            raise InstallerError("the press stopped")
+        yield "done"
+
+
+def test_a_press_is_cancelled_when_its_reservation_is_lost(tmp_path: Path) -> None:
+    held = docker.ClaimHeld("yulon-busy-x", threading.Event())
+    toy = _Toy(held)
+    stop = threading.Event()
+    lines = toy.press(InstallOptions(server_dir=tmp_path), cancel=stop)
+    assert next(lines) == "working"
+    (cancel,) = toy.seen
+    assert cancel is not stop and not cancel.is_set()
+    held.lost.set()
+    assert cancel.is_set(), "the press does not see its reservation lost"
+    assert not stop.is_set(), "the player's own Stop was set for it"
+    stop.set()
+    assert cancel.is_set() and cancel.player_stopped()
+    lines.close()
+
+
+def test_a_press_stopped_by_a_loss_says_what_happened_and_what_to_press(tmp_path: Path) -> None:
+    toy = _Toy(docker.ClaimHeld("yulon-busy-x", threading.Event()))
+    out: list[str] = []
+    with pytest.raises(InstallerError, match="the press stopped"):
+        for line in toy.press(InstallOptions(server_dir=tmp_path), fail_after_loss=True):
+            out.append(line)
+    assert out[0] == "working"
+    said = out[-1]
+    assert "A toy press" in said and "ended from elsewhere" in said, said
+    assert "started nothing" in said and "Press Start or Rebuild" in said, said
+
+
+def test_a_press_that_failed_for_another_reason_adds_nothing(tmp_path: Path) -> None:
+    held = docker.ClaimHeld("yulon-busy-x", threading.Event())
+    toy = _Toy(held)
+    out: list[str] = []
+
+    @native._reserving("A toy press")
+    def failing(self: _Toy, options: Any = None, *, cancel: Any = None) -> Iterator[str]:
+        yield "working"
+        raise InstallerError("a plain failure")
+
+    with pytest.raises(InstallerError, match="a plain failure"):
+        for line in failing(toy, InstallOptions(server_dir=tmp_path)):
+            out.append(line)
+    assert out == ["working"]
+
+
+def test_sql_stops_when_the_hold_is_lost_between_statements(tmp_path: Path) -> None:
+    """Mutation this catches: no loss check, so every statement went on after the Stop."""
+    lost = threading.Event()
+    spy = _Spy()
+
+    @contextmanager
+    def hold(press: str) -> Iterator[docker.ClaimHeld]:
+        yield docker.ClaimHeld("yulon-busy-x", lost)
+
+    applier, sql = _stackables(tmp_path, spy, hold=hold)
+    real = sql.run_statement
+
+    def first_statement_then_the_loss(db: str, statement: str) -> None:
+        real(db, statement)
+        lost.set()  # another Yu'lon's Stop anyway removed the reservation
+
+    sql.run_statement = first_statement_then_the_loss  # type: ignore[method-assign]
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(parse_manifest(STACKABLES))
+    assert len(sql.statements) == 1 and sql.files == [], "SQL went on after the hold was lost"
+    assert "stopped" in str(refused.value) and "no more SQL was sent" in str(refused.value)
