@@ -239,7 +239,11 @@ def ps(monkeypatch: pytest.MonkeyPatch):
     """`test_controller_view`'s Docker-free `runner.run`."""
     from tests.test_controller_view import _Ps
     from yulon import runner
+    from yulon.ui import controller_view as cv
+    from yulon.ui.widgets.job import run_inline
 
+    # "Turn it off" is a Tuning write, run on the job runner inside the server hold (T622).
+    monkeypatch.setattr(cv, "threaded_job_runner", lambda _parent: run_inline)
     fake = _Ps()
     monkeypatch.setattr(runner, "run", fake)
     return fake
@@ -320,6 +324,26 @@ def test_a_refused_write_says_so_and_leaves_the_offer_up(
     view.tuning_log_offer_off_button.click()
     assert path.read_bytes() == DIST.encode()
     assert "disk full" in view.tuning_report.toPlainText()
+    assert shown(view)
+
+
+def test_turn_it_off_while_another_yulon_holds_the_server_writes_nothing(
+    qapp: object, ps, tmp_path: Path
+) -> None:
+    """T622's rule for every conf write, on T619's button: the hold first, then the file.
+
+    Mutation this catches: `turn_off_sql_log()` writing straight through again.
+    """
+    from tests.test_more_writes_hold import HELD, _Hold
+
+    path = lay(tmp_path)
+    view = view_for(tortoise(), tmp_path)
+    object.__setattr__(view.services, "hold_server", _Hold(refuse=True))
+    view.tuning_log_offer_off_button.click()
+    assert path.read_bytes() == DIST.encode()
+    assert not list(path.parent.glob("mangosd.conf.*")), "a backup was made under the hold"
+    assert view._tuning_owed == {}
+    assert HELD in view.tuning_report.toPlainText()
     assert shown(view)
 
 

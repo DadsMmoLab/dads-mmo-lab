@@ -19816,32 +19816,45 @@ class ControllerView(QWidget):
 
     @Slot()
     def turn_off_sql_log(self) -> None:
-        """The offer's "Turn it off": that one key, a backup first, a restart owed (T619)."""
+        """The offer's "Turn it off": that one key, a backup first, a restart owed (T619).
+
+        A conf write like Save file's, so it goes through `_write_tuning()` (T622): on the job
+        runner, inside the server's cross-process hold, and refused while another Tuning write
+        is still going.
+        """
         if self._busy:  # the button is greyed then; this is for a press that gets past it
             return
-        server_dir = self.services.controller.server_dir
-        try:
-            done = sql_log_offer.turn_off(self.entry, server_dir, self._sql_log_offered)
-        except (tuning.TuningError, OSError) as exc:
-            self.tuning_report.setPlainText(
-                TUNING_LOG_OFFER_FAILED.format(file=", ".join(self._sql_log_offered), why=exc)
-            )
-            self.action_failed.emit(str(exc))
+        if self._tuning_write_refused():
             return
-        said = []
-        for one in done:
-            self._note_tuning_owed(one.file)
-            said.append(
+        entry = self.entry
+        server_dir = self.services.controller.server_dir
+        offered = self._sql_log_offered
+        before = self.tuning_report.toPlainText()
+
+        def body() -> TuningWrite:
+            try:
+                done = sql_log_offer.turn_off(entry, server_dir, offered)
+            except (tuning.TuningError, OSError) as exc:
+                return TuningWrite(
+                    TUNING_LOG_OFFER_FAILED.format(file=", ".join(offered), why=exc),
+                    failed=str(exc),
+                )
+            said = [
                 TUNING_LOG_OFFER_WROTE.format(
                     key=sql_log_offer.KEY,
                     file=one.file,
                     backup=one.backup.name,
                     rule=tuning.apply_sentence(tuning.file_rule(one.file)),
                 )
+                for one in done
+            ]
+            return TuningWrite(
+                "\n".join(said) if said else before,
+                owed=tuple(one.file for one in done),
+                reload=True,
             )
-        if said:
-            self.tuning_report.setPlainText("\n".join(said))
-        self.reload_tuning()
+
+        self._write_tuning("Turn off the SQL log", body)
 
     @Slot()
     def keep_sql_log(self) -> None:
