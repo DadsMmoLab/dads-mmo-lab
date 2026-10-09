@@ -6,6 +6,11 @@
 # followed by the exclusions inside it.
 *
 !src/tortoise-wow
+# Modules the player brought (T596): `<server>/modules/<name>`, laid over the core's own
+# `modules/` by the Dockerfile. Their history and this app's claim file stay behind.
+!modules
+modules/*/.git
+modules/*/.yulon-clone.json
 src/tortoise-wow/.git
 # TortoiseBots is cloned as a SECOND source INTO the core tree, at the path the
 # core's CMake globs for modules (`modules/TortoiseBots`). The re-include above

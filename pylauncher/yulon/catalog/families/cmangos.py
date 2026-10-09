@@ -67,6 +67,7 @@ import fnmatch
 import os
 import posixpath
 import queue
+import re
 import threading
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
@@ -1598,6 +1599,7 @@ class CmangosInstaller(StagedInstaller):
                 secrets=ctx.secrets,
             )
             written = dockerfile.write(ctx.server_dir, text, ignore)
+            made = self._make_the_modules_folder(ctx.server_dir, text)
         except dockerfile.CarriedSecretError as exc:
             # AHEAD of the `DockerfileError` arm below, which it subclasses.
             # `render()` proved a token value carries this install's password and
@@ -1671,6 +1673,33 @@ class CmangosInstaller(StagedInstaller):
                 yield f"Wrote {name}"
             else:
                 yield f"{name} is already exactly what this install needs."
+        if made:
+            yield "Made the modules/ folder the build copies in (no module is in it yet)."
+
+    _COPIES_MODULES = re.compile(r"^COPY\s+(?:--\S+\s+)*modules/", re.MULTILINE)
+
+    def _make_the_modules_folder(self, server_dir: Path, recipe: str) -> bool:
+        """Make `<server>/modules/` when the recipe copies it in, so the `COPY` cannot fail (T596).
+
+        A recipe that lays the server's `modules/` over the core's (Tortoise's, for the
+        server modules a player brings from a link or a folder) names a folder a server
+        that took no module does not have, and BuildKit fails a `COPY` whose source is
+        missing from the context. Keyed on the rendered recipe and not on the game, so
+        the stage makes exactly the folder the file it just wrote asks for. An existing
+        folder, and whatever is in it, is left alone. True when it was made.
+        """
+        if self._COPIES_MODULES.search(recipe) is None:
+            return False
+        folder = server_dir / "modules"
+        if folder.is_dir():
+            return False
+        if os.path.lexists(folder):
+            raise InstallerError(
+                f"{folder} is in the way: this install's build copies a modules/ folder in, and "
+                "that is not a folder. Move it aside and press again."
+            )
+        folder.mkdir(parents=True)
+        return True
 
     def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
         """The folder the tools read the client from: itself, or a view of it in `view` (T260).
