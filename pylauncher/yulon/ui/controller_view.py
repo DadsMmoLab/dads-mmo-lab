@@ -1710,7 +1710,12 @@ class Pathfinding:
 
 
 def _pathfinding(
-    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None,
+    hold: docker.BudgetedHold,
+    poll_hold: docker.BudgetedHold,
 ) -> Pathfinding | None:
     """The job's seam where the entry makes its movement maps in the background.
 
@@ -1718,13 +1723,20 @@ def _pathfinding(
     every game the way the time zone is. Not for a server inside a WSL distro: the
     job runs on THIS host's Docker (`mmaps.DockerRunner`), which would be asked about
     a container it has never heard of.
+
+    T623: the job runs for hours and never holds the server for its run. Start and Stop hold
+    while they write (`hold`; a held server says the holder's sentence and starts or stops
+    nothing); the status poll is handed `poll_hold` (bounded) and takes it only for a transition
+    it must record.
     """
     if wsl_distro is not None or mmaps.background_block(entry) is None:
         return None
     return Pathfinding(
-        status=lambda: mmaps.mmaps_status(server_dir, entry),
-        start=lambda: mmaps.start_mmaps(server_dir, entry),
-        stop=lambda: mmaps.stop_mmaps(server_dir, entry),
+        status=lambda: mmaps.mmaps_status(server_dir, entry, hold=poll_hold),
+        start=_under_the_hold(
+            hold, mmaps.START_PRESS, lambda: mmaps.start_mmaps(server_dir, entry)
+        ),
+        stop=_under_the_hold(hold, PATHFINDING_STOP, lambda: mmaps.stop_mmaps(server_dir, entry)),
     )
 
 
@@ -3020,7 +3032,19 @@ def _assemble(
         ),
         # T179. HERE for T171's reason: whether a server makes its movement maps
         # in the background is a catalog fact (`mmaps.background_block`).
-        pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
+        pathfinding=_pathfinding(
+            entry,
+            server_dir,
+            wsl_distro=wsl_distro,
+            hold=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            poll_hold=_server_hold_for(
+                entry,
+                server_dir,
+                spec,
+                wsl_distro=wsl_distro,
+                budget=docker.GUI_HOLD_BUDGET_SECONDS,
+            ),
+        ),
         # T179 Task 6. HERE for the same reason: whether an update can leave the
         # map data or the world tables owing is the entry's engine's fact.
         world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
@@ -9025,7 +9049,11 @@ class ControllerView(QWidget):
         self.pathfinding_start_button.setEnabled(
             can_start and not self._busy and not self._pathfinding_pressing
         )
-        self.pathfinding_stop_button.setEnabled(can_stop and not self._pathfinding_pressing)
+        # T623: not beside a press of this app either. Its server hold is shared with the job's
+        # own, so only the view keeps the two apart; the press stops the job itself.
+        self.pathfinding_stop_button.setEnabled(
+            can_stop and not self._busy and not self._pathfinding_pressing
+        )
 
     @Slot()
     def start_pathfinding(self) -> None:
@@ -9039,7 +9067,7 @@ class ControllerView(QWidget):
     def stop_pathfinding(self) -> None:
         """Stop a running job: its container goes, its finished tiles stay, nothing switches on."""
         seam = self.services.pathfinding
-        if seam is None or self._pathfinding_pressing:
+        if seam is None or self._busy or self._pathfinding_pressing:
             return
         self._press_pathfinding(seam.stop, None)
 

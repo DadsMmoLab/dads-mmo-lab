@@ -56,6 +56,12 @@ tile away. Every run uses the entry's `threads`, a retry after a crash included:
 the owner's stopgap of one thread after a crash was dropped when one thread crashed
 at 16-17 % live too (2026-10-05), so it only made the retry hours slower.
 
+**The cross-process hold (T623).** The job runs for hours, so it never holds the server for
+its run. Only the moments that write do: the Server tab's Start and Stop (wrapped by the
+controller's `_pathfinding`) and a status poll's transitions (`mmaps_status(hold=)`). Every press
+below that replaces or removes `data/mmaps` already reserves the server, and finds a running job
+from the record, so another Yu'lon's press never races it.
+
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
 through hooks in the install spine and in `purge`; the job is started again
@@ -64,6 +70,7 @@ once a rebuild's server is ready.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -526,11 +533,19 @@ def mmaps_status(
     clock: Clock | None = None,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
+    hold: docker.BudgetedHold | None = None,
 ) -> MmapsStatus:
     """The job's state for the Server tab, reconciled with Docker; never raises for Docker.
 
     Asks Docker (an inspect, a bounded log tail, the world server's start time),
     so a caller on the GUI thread should poll it from a worker.
+
+    `hold` (T623): the server's cross-process hold, for the poll's TRANSITIONS only -- a run
+    that ended, a lost container, a finished set that is no longer whole, the conf switch still
+    owed. A poll that finds one takes the hold (bounded, `docker.GUI_HOLD_BUDGET_SECONDS`),
+    reads and asks Docker again inside it, and records; one that cannot take it writes nothing
+    and answers with what it read, and the next poll tries again. A poll with nothing to record
+    is a read and takes nothing. No `hold`: record inline, as a press that holds already does.
 
     Raises:
         MmapsError: the entry has no background movement maps, or the record
@@ -538,7 +553,7 @@ def mmaps_status(
     """
     job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
     with _LOCK:
-        return _reconcile(job, runner or DockerRunner(), clock or _utc_now)
+        return _reconcile(job, runner or DockerRunner(), clock or _utc_now, hold)
 
 
 def start_mmaps(
@@ -893,25 +908,69 @@ def remove_for_uninstall(
 # -- the moving parts ---------------------------------------------------------------
 
 
-def _reconcile(job: Job, run: Runner, now: Clock) -> MmapsStatus:
-    """The record brought up to what Docker says; the status that follows from it."""
+RECORD_PRESS = "Record the pathfinding data's result"
+"""The press another Yu'lon is told about while a poll records a transition under the hold."""
+
+
+class _WriteNeeded(Exception):
+    """A poll read a transition it must record: carries the status to answer if it cannot.
+
+    Raised only on the read-only pass (`held=False`), before anything is written; the
+    pass under the hold (`held=True`) never raises it.
+    """
+
+    def __init__(self, unrecorded: MmapsStatus) -> None:
+        super().__init__("a transition to record")
+        self.unrecorded = unrecorded
+
+
+def _reconcile(
+    job: Job, run: Runner, now: Clock, hold: docker.BudgetedHold | None = None
+) -> MmapsStatus:
+    """The record brought up to what Docker says; the status that follows from it.
+
+    Without a `hold` every write is made inline (a press that holds the server already, a
+    test). With one (T623) the first pass only reads; a transition it would have to write
+    is done again under the hold, from a fresh read, or answered unrecorded when the hold is
+    refused (another Yu'lon works on the server) or cannot be made.
+    """
+    if hold is None:
+        return _reconcile_pass(job, run, now, held=True)
+    try:
+        return _reconcile_pass(job, run, now, held=False)
+    except _WriteNeeded as need:
+        unrecorded = need.unrecorded
+    with contextlib.ExitStack() as taken:
+        try:
+            taken.enter_context(hold(RECORD_PRESS, budget=docker.GUI_HOLD_BUDGET_SECONDS))
+        except docker.ServerHeldError as exc:
+            logger.info(f"{job.container}: not recorded yet, the server is held ({exc})")
+            return unrecorded
+        return _reconcile_pass(job, run, now, held=True)
+
+
+def _reconcile_pass(job: Job, run: Runner, now: Clock, *, held: bool) -> MmapsStatus:
     record = read_record(job.server_dir)
     if record is None:
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if record.state in ("queued", "running"):
-        return _reconcile_live(job, record, run, now)
+        return _reconcile_live(job, record, run, now, held)
     if record.state == "done":
-        return _done_status(job, record, run, now)
+        return _done_status(job, record, run, now, held)
     return _failed_status(job, record)
 
 
-def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
+def _reconcile_live(
+    job: Job, record: Record, run: Runner, now: Clock, held: bool = True
+) -> MmapsStatus:
     # Always the name THIS folder's job has (`container_name()`), never one read
     # off the record: a record edited by hand must not point a removal elsewhere.
     facts = run.inspect(job.container, timeout=STATUS_TIMEOUT)
     if not facts.status and not facts.missing:
         return replace(_status_of(record), docker_unanswered=True)
     if facts.missing:
+        if not held:
+            raise _WriteNeeded(_status_of(record))
         why = (
             "its container is gone (Docker was restarted or it was removed) before it finished."
             if record.state == "running"
@@ -931,9 +990,15 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
         moved = replace(
             latest, state="running", container_id=record.container_id or facts.container_id
         )
+        # T623: a progress write, never under the hold. It changes only the percentage, the
+        # map and the container's id of a run that is still running; a poll must not run a
+        # Docker reservation every few seconds, and a stale one is fail-safe: the next poll
+        # finds the container gone and records a failed run (under the hold).
         if moved != record:
             _write_record(job.server_dir, moved)
         return _status_of(moved)
+    if not held:
+        raise _WriteNeeded(_status_of(latest))
     return _finished(job, latest, facts, tail, run, now)
 
 
@@ -1047,7 +1112,9 @@ def _refresh_world_data(job: Job) -> None:
         pass
 
 
-def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
+def _done_status(
+    job: Job, record: Record, run: Runner, now: Clock, held: bool = True
+) -> MmapsStatus:
     """A complete set: switched on once (retried until it was), and whether a restart is due.
 
     Counted again first: a set emptied since (a new extraction, Task 6, or a hand)
@@ -1055,6 +1122,8 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
     """
     plan = job.block.mmaps
     if _set_size(job) < plan.min_files:
+        if not held:
+            raise _WriteNeeded(_status_of(record, pathfinding_on=_pathfinding_on(job)))
         # A poll never raises for this: a folder it cannot clear, or a switch it
         # cannot turn off, is a failed state with its reason (fix round 2).
         try:
@@ -1070,6 +1139,8 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
         logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:
+        if not held:
+            raise _WriteNeeded(_status_of(record, pathfinding_on=_pathfinding_on(job)))
         try:
             conf.set_keys(job.world_conf, {PATHFINDING_KEY: "1"})
         except InstallerError as exc:
