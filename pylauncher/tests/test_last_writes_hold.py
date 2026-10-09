@@ -520,7 +520,11 @@ SEAMS: dict[str, tuple[str, str]] = {
     "set_client_dir": ("outside", "the app's own state"),
     "set_play_client_dir": ("outside", "the app's own state"),
     "other_server_dirs": ("reads", "a listing"),
-    "pathfinding": ("open", "T623: the movement-map job writes data/mmaps and its record"),
+    "pathfinding": (
+        "held",
+        "tests.test_pathfinding_hold."
+        "test_the_assembled_start_is_refused_while_another_yulon_holds_the_server",
+    ),
     "world_upkeep": (
         "lower",
         "reextract and finish_world_reimport carry @_reserving "
@@ -545,7 +549,7 @@ SEAMS: dict[str, tuple[str, str]] = {
     ),
 }
 
-OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding"}
+OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}
 """Pinned: closing one of these is an edit here, and a new one is a decision, not a drift."""
 
 

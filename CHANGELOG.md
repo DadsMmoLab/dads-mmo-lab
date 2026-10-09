@@ -44,6 +44,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - An older Tortoise server is offered **Turn it off** for its SQL log spam on the Tuning tab, without a full reset.
 - Saving settings no longer freezes the window.
 - Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
+- Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
 
 ### Changed
 
