@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
+- Modules, Party links, channel setup and bot rebuilds wait for another Yu'lon too; **Stop** never hangs on Docker.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.
 - My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
