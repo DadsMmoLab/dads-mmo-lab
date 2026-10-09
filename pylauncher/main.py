@@ -1557,6 +1557,9 @@ def build_window() -> object:
                 install.wsl_distro,
                 install.play_client_dir,
             )
+            opened = controllers.get((install.game, install.server_dir))
+            if opened is not None:
+                opened.put_default_addons_later()  # T612: off the Play path, a few seconds on
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
     # The Catalog was made current before `currentChanged` was connected, so

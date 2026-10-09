@@ -5893,6 +5893,63 @@ class Applier:
             log.done.append(f"client {step.src} → {step.dest}")
         log.client_copies = list(log.current_copies.values())
 
+    def _missing_addon_files(self, manifest: Manifest) -> list[tuple[Path, Path]]:
+        """`(clone file, client path)` for each file of an `addons` step the client lacks (T612).
+
+        Reads the existing clone and the client folder and nothing else: no git, no network.
+        A file still there under any spelling of its name (`_plan_onto()`) is not missing,
+        whatever the player did to its contents.
+        """
+        clone = self.clone_dir(manifest)
+        if self.client_dir is None or not clone.is_dir():
+            return []
+        lacking: list[tuple[Path, Path]] = []
+        for step in manifest.client:
+            src = clone / step.src
+            if step.dest != "addons" or not src.is_dir():
+                continue
+            _look_again(clone, step.src)
+            target = self._client_target(step, src)
+            lacking.extend(
+                (source, dest)
+                for source, dest in _plan_onto(src, target)
+                if not os.path.lexists(dest)
+            )
+        return lacking
+
+    def client_files_missing(self, manifest: Manifest) -> tuple[Path, ...]:
+        """The client files of `manifest`'s add-on steps that its clone has and the client lacks.
+
+        T612. A deleted ready-to-play client, made again, or an add-on folder deleted by hand,
+        leaves the clone installed and the files gone. Local reads only.
+        """
+        return tuple(dest for _source, dest in self._missing_addon_files(manifest))
+
+    def put_back_client_files(self, manifest: Manifest) -> tuple[Path, ...]:
+        """Copy back, from the existing clone, each add-on file the client lacks; the paths put.
+
+        T612. Never touches git or the network, never overwrites a file that is there (an
+        edit stays), and records nothing: the clone's claim is what it was. Writes through
+        no link (`_link_on_the_way()`).
+
+        Raises:
+            ApplyError: a link now stands on the way to a file, or a file could not be copied.
+        """
+        ready = self.client_dir is not None and self._writes_a_ready_client()
+        put: list[Path] = []
+        for source, dest in self._missing_addon_files(manifest):
+            link = self._link_on_the_way(dest, ready, file=True)
+            if link is not None:
+                raise ApplyError(
+                    f"{link} is a link to another place, so {manifest.id} was not put back "
+                    "into your game client there: writing through it would change what it "
+                    "points to."
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _copy_unshared(source, dest)
+            put.append(dest)
+        return tuple(put)
+
     def _client_target(self, step: ClientFile, src: Path) -> Path:
         """The client folder a `client` step copies into, under the names already on disk."""
         assert self.client_dir is not None
