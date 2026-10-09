@@ -33,7 +33,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -3057,6 +3057,7 @@ class Applier:
         self._hold_server = hold_server
         # The `lost` event of the hold this press holds, while it holds one (T568).
         self._hold_lost: threading.Event | None = None
+        self._held_depth = 0
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -3204,7 +3205,7 @@ class Applier:
         """
         self._refuse_a_server_source(manifest)
         log = _Log()
-        with self._says_the_database_is_up(log):
+        with self._held(f"Install {manifest.name}"), self._says_the_database_is_up(log):
             return self._install(
                 manifest,
                 values,
@@ -3806,14 +3807,15 @@ class Applier:
             if release is not None
             else None
         )
-        return self.install(
-            manifest,
-            values,
-            first_configure_sql=False,
-            release=release,
-            expect_head=checked,
-            record_move=True,
-        )
+        with self._held(f"Update {manifest.name}"):
+            return self.install(
+                manifest,
+                values,
+                first_configure_sql=False,
+                release=release,
+                expect_head=checked,
+                record_move=True,
+            )
 
     def last_update(self, manifest: Manifest) -> LastUpdate | None:
         """The commit `manifest`'s clone was on before its last update, or None (T557).
@@ -3936,7 +3938,7 @@ class Applier:
             )
         log = _Log()
         try:
-            with self._says_the_database_is_up(log):
+            with self._held(f"Put back {manifest.name}"), self._says_the_database_is_up(log):
                 return self._install(
                     manifest,
                     values,
@@ -4369,6 +4371,10 @@ class Applier:
         primitive it applies is real and its UI is a roadmap item, but do not
         count it when reasoning about what actually guards a user today.
         """
+        with self._held(f"Configure {manifest.name}"):
+            return self._configure(manifest, values)
+
+    def _configure(self, manifest: Manifest, values: Mapping[str, str] | None) -> ApplyReport:
         vals = self._values(manifest, values)
         log = _Log()
         self._check_values(manifest, "configure", vals, log)
@@ -4399,6 +4405,10 @@ class Applier:
         asks only when there is no usable record, and then a person answered.
         """
         self._refuse_a_server_source(manifest)
+        with self._held(f"Remove {manifest.name}"):
+            return self._remove(manifest, values)
+
+    def _remove(self, manifest: Manifest, values: Mapping[str, str] | None) -> ApplyReport:
         vals = self._values(manifest, values)
         relative = reapplies_on_top(manifest)
         applied, _why = self.applied_record(manifest) if relative else (None, "")
@@ -5334,17 +5344,28 @@ class Applier:
         readings, the database start, any ledger read, and every statement.
         """
         direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
-        hold = (
-            self._hold_server(f"{when.capitalize()} {manifest.name}")
-            if direct and self._hold_server is not None
-            else nullcontext()
-        )
+        with self._held(f"{when.capitalize()} {manifest.name}", needed=direct):
+            self._sql_held(manifest, clone, vals, when, log, undo)
+
+    @contextmanager
+    def _held(self, press: str, *, needed: bool = True) -> Iterator[None]:
+        """The server's cross-process hold for the block, shared with an outer one (T568, T607).
+
+        An Install, a Remove and a Configure take it for the whole action: they clone into
+        `modules/`, copy files into the server folder, make folders and edit conf files, which
+        is what another Yu'lon's Rebuild or Update reads while it builds. The SQL inside shares
+        that hold (one reservation, one loss event, the outer press's name); a bare `_sql()`
+        takes its own, and only for an action that sends direct SQL.
+        """
+        if not needed or self._hold_server is None or self._held_depth:
+            yield
+            return
         with ExitStack() as held:
             held_by: object = None
             try:
-                held_by = held.enter_context(hold)
+                held_by = held.enter_context(self._hold_server(press))
             except docker.ServerReservationUnavailable as unavailable:
-                # Docker not answering, or a folder that takes no id file: met by the SQL in
+                # Docker not answering, or a folder that takes no id file: met by the press in
                 # its own words, as every other press does (cold review of T568).
                 if not unavailable.moot:
                     raise ApplyRefusal(str(unavailable)) from unavailable
@@ -5353,9 +5374,11 @@ class Applier:
                 # written; nothing was sent.
                 raise ApplyRefusal(str(refused)) from refused
             self._hold_lost = getattr(held_by, "lost", None)
+            self._held_depth += 1
             try:
-                self._sql_held(manifest, clone, vals, when, log, undo)
+                yield
             finally:
+                self._held_depth -= 1
                 self._hold_lost = None
 
     def _sql_held(
