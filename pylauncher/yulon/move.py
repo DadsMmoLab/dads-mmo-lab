@@ -40,6 +40,7 @@ from typing import IO, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 import yulon
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -69,8 +70,12 @@ _BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 
 
-class MovePackageError(RuntimeError):
-    """A package that cannot be used, in a sentence the player can read as it is."""
+class MovePackageError(MaintenanceError):
+    """A package that cannot be used, in a sentence the player can read as it is.
+
+    A `MaintenanceError`, so the Maintenance tab shows it the way it shows every other
+    refusal of a backup or restore: the sentence as it is, a program's words folded.
+    """
 
 
 class _Strict(BaseModel):
@@ -290,7 +295,7 @@ class Package:
                 return member
         raise MovePackageError(f"{self.path.name} holds no {schema} database.")
 
-    def head(self, schema: str, size: int = 1 << 16) -> bytes:
+    def head(self, schema: str, size: int = 8192) -> bytes:
         """The first bytes of one dump, for reading its game record without extracting it."""
         member = self.member(schema)
         with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as fh:

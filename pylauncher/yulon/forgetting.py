@@ -90,6 +90,20 @@ RESTORE_HOLDS_THE_DATABASES = (
     "A restore is writing into this server's databases on its Maintenance tab. Wait for "
     "it to finish, then try again."
 )
+MOVE_HOLDS_THE_SERVER = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
+    "with the database started on its own for it. Wait for that to finish, then try again. "
+    "Nothing was started or stopped."
+)
+MOVE_HOLDS_THE_DATABASES = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance "
+    "tab. Wait for that to finish, then try again."
+)
+MOVE_RUNNING = (
+    "Accounts and characters are being packed or brought in on this server's Maintenance "
+    "tab, and removing the server now would leave its databases half-written. Wait for it "
+    "to finish, then try again. Nothing was removed."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."

@@ -1,0 +1,836 @@
+"""T601 level 1: packing a server's accounts and characters, and bringing them into another.
+
+The REAL maintenance engine runs here (backup, plan_restore, restore, the marker, the
+safety copies); only the database container, Docker and the controller are doubles. So
+the order of things (stop, dump, start; backup, then load, then fix-ups) is the engine's
+order, and the guards are the flow's own.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import IO
+
+import pytest
+
+from yulon import docker, move, move_flows
+from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.controller_wow_wotlk import maintenance
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+from yulon.move import Counts, DumpFile, Evidence, Header
+from yulon.move_flows import MoveWorld
+from yulon.ownership import Ownership
+
+CATALOG = load_catalog()
+AT = datetime(2026, 10, 9, 15, 30, 0)
+
+
+def entry(game_id: str) -> CatalogEntry:
+    return CATALOG.get(game_id)
+
+
+def dump_text(database: str, *, record: str | None = "wow-wotlk") -> bytes:
+    if record is None:
+        lead = b""
+    elif record.startswith("--"):
+        lead = record.encode() + b"\n"  # a hand-written line, whatever it says
+    else:
+        lead = f"-- yulon-backup: game={record}\n".encode()
+    return (
+        lead
+        + b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n"
+        + f"CREATE DATABASE /*!32312 IF NOT EXISTS*/ `{database}`;\nUSE `{database}`;\n".encode()
+        + b"INSERT INTO `t` VALUES (1);\n-- Dump completed on 2026-10-09 15:30:00\n"
+    )
+
+
+class Db:
+    """The database container: schemas, scripted answers to the move's questions, a log."""
+
+    def __init__(
+        self,
+        events: list[str],
+        present: tuple[str, ...] = ("acore_auth", "acore_characters", "acore_world"),
+        *,
+        updates: tuple[str, ...] = ("2024_01_a", "2024_01_b"),
+        counts: tuple[int, int, int] = (0, 0, 0),
+        realm: str = "Local Realm",
+        version_table: str | None = "updates",
+        fail_load_of: str | None = None,
+    ) -> None:
+        self.events = events
+        self.present = present
+        self.updates = updates
+        self.counts = counts
+        self.realm = realm
+        self.version_table = version_table
+        self.fail_load_of = fail_load_of
+        self.queries: list[str] = []
+        self.executed: list[str] = []
+        self.ignored: dict[str, tuple[str, ...]] = {}
+
+    def databases(self) -> tuple[str, ...]:
+        return self.present
+
+    def dump_into(self, database: str, sink: IO[bytes], ignore: tuple[str, ...] = ()) -> None:
+        self.events.append(f"dump:{database}")
+        self.ignored[database] = ignore
+        sink.write(dump_text(database, record=None))
+
+    def load_from(self, source: IO[bytes]) -> None:
+        body = source.read()
+        used = re.search(rb"USE `([^`]+)`", body)
+        assert used is not None
+        name = used.group(1).decode()
+        if self.fail_load_of == name:
+            raise MaintenanceError("The database did not load the backup.")
+        self.events.append(f"load:{name}")
+
+    def execute(self, sql: str) -> None:
+        self.events.append("exec")
+        self.executed.append(sql)
+
+    def query(self, sql: str) -> str:
+        self.queries.append(sql)
+        if "information_schema.TABLES" in sql:
+            return f"{self.version_table}\n" if self.version_table else ""
+        if "COUNT(*)" in sql:
+            return "\t".join(str(n) for n in self.counts) + "\n"
+        if "realmlist" in sql:
+            return f"{self.realm}\n"
+        if "`updates`" in sql:
+            return "".join(f"{name}\n" for name in self.updates)
+        raise AssertionError(f"unscripted query: {sql}")
+
+
+class Box:
+    """One server's doubles, wired the way the app wires them."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        game_id: str = "wow-wotlk",
+        *,
+        running_now: tuple[str, ...] = (),
+        db: Db | None = None,
+        ownership: Ownership = Ownership.OWNED,
+    ) -> None:
+        self.entry = entry(game_id)
+        self.spec = self.entry.container_spec()
+        self.server_dir = tmp_path / f"server-{game_id}"
+        self.server_dir.mkdir()
+        self.events: list[str] = []
+        self.db = db or Db(self.events)
+        self.db.events = self.events
+        self.up: list[str] = list(running_now)
+        self.ownership = ownership
+        self.stop_fails = False
+        self.start_fails = False
+
+        def running() -> list[str]:
+            return list(self.up)
+
+        def stop_server() -> bool:
+            self.events.append("stop")
+            self.up.clear()
+            return True
+
+        def start_server() -> None:
+            self.events.append("start")
+            if self.start_fails:
+                raise RuntimeError("compose could not start")
+            self.up.extend([self.spec.db, self.spec.auth, self.spec.world])
+
+        def bring_up(because: str) -> bool:
+            if self.spec.db in self.up:
+                return False
+            self.events.append("db-up")
+            self.up.append(self.spec.db)
+            return True
+
+        def take_down() -> None:
+            self.events.append("db-down")
+            self.up.remove(self.spec.db)
+
+        backup, plan_restore, restore = move_flows.engine_for(
+            self.entry, self.server_dir, self.db, running=running, wsl_distro=None
+        )
+        self.world = MoveWorld(
+            entry=self.entry,
+            game=maintenance.game_of(self.entry),
+            server_dir=self.server_dir,
+            mysql=self.db,
+            backup=backup,
+            plan_restore=plan_restore,
+            restore=restore,
+            running=running,
+            ownership=lambda: self.ownership,
+            stop_server=stop_server,
+            start_server=start_server,
+            bring_up=bring_up,
+            take_down=take_down,
+            channel_account="YULON_AAAA1111",
+            marker=lambda: move_flows.BotMarker("RNDBOT"),
+            now=lambda: AT,
+        )
+
+
+def packed(tmp_path: Path, *, game_id: str = "wow-wotlk", realm: str = "Source Realm") -> Path:
+    """A package made by the real export, from a server of `game_id`."""
+    root = tmp_path / f"source-{game_id}"
+    root.mkdir(exist_ok=True)
+    source = Box(
+        root, game_id, running_now=(entry(game_id).container_spec().db,), db=Db([], realm=realm)
+    )
+    folder = tmp_path / f"out-{game_id}"
+    folder.mkdir(exist_ok=True)
+    return move_flows.export_package(source.world, folder, stop_allowed=False).path
+
+
+# =============================================================== export
+
+
+def test_export_packs_auth_and_characters_and_never_the_world(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    result = move_flows.export_package(box.world, folder, stop_allowed=False)
+    package = move.read_package(result.path)
+    assert [m.schema_name for m in package.manifest.databases] == [
+        "acore_auth",
+        "acore_characters",
+    ]
+    assert result.path.name == "yulon-move-wow-wotlk-20261009-1530-keep-private.zip"
+    assert result.path.parent == folder
+    assert "dump:acore_world" not in box.events
+
+
+def test_export_includes_the_bot_and_lua_schemas_when_the_server_has_them(tmp_path: Path) -> None:
+    db = Db(
+        [],
+        present=("acore_auth", "acore_characters", "acore_world", "acore_playerbots", "acore_ale"),
+    )
+    box = Box(tmp_path, running_now=("ac-database",), db=db)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    result = move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert {m.schema_name: m.role for m in result.manifest.databases} == {
+        "acore_auth": "auth",
+        "acore_characters": "characters",
+        "acore_playerbots": "playerbots",
+        "acore_ale": "ale",
+    }
+
+
+def test_the_auth_dump_leaves_the_realm_row_behind(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert box.db.ignored["acore_auth"] == ("realmlist",)
+    assert box.db.ignored["acore_characters"] == ()
+
+
+def test_the_manifest_carries_the_evidence_the_counts_and_the_realm(tmp_path: Path) -> None:
+    db = Db([], counts=(2, 3, 500), realm="Baerthe's Realm", updates=("a", "b", "c"))
+    box = Box(tmp_path, running_now=("ac-database",), db=db)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    manifest = move_flows.export_package(box.world, folder, stop_allowed=False).manifest
+    assert manifest.counts == Counts(accounts=2, characters=3, bot_accounts=500)
+    assert manifest.realm_name == "Baerthe's Realm"
+    assert manifest.channel_account == "YULON_AAAA1111"
+    assert manifest.bot_prefix == "RNDBOT"
+    evidence = manifest.schema_evidence["acore_auth"]
+    assert (evidence.kind, evidence.count) == ("updates", 3)
+    assert "acore_world" not in manifest.schema_evidence
+    assert "acore_world" in manifest.excluded[0]
+
+
+def test_the_temporary_dumps_are_gone_and_nothing_else_in_backups_is_touched(
+    tmp_path: Path,
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    backups = box.server_dir / "sql_scripts" / "backups"
+    backups.mkdir(parents=True)
+    mine = backups / "20260101_000000_acore_auth.sql"
+    mine.write_bytes(b"an older backup the player made")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert sorted(p.name for p in backups.iterdir()) == [mine.name]
+
+
+def test_a_running_server_is_not_stopped_without_a_yes(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert str(raised.value) == move_flows.RUNNING_NEEDS_A_YES_EXPORT
+    assert box.events == []
+    assert not list(folder.iterdir())
+
+
+def test_with_a_yes_the_server_is_stopped_then_packed_then_started_again(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    result = move_flows.export_package(box.world, folder, stop_allowed=True)
+    assert box.events[0] == "stop"
+    assert box.events[-1] == "start"
+    assert box.events.index("stop") < box.events.index("dump:acore_auth")
+    assert box.events.index("dump:acore_characters") < box.events.index("start")
+    assert result.restarted is True
+
+
+def test_the_server_is_started_again_even_when_the_packing_fails(tmp_path: Path) -> None:
+    db = Db([], version_table=None)  # the version cannot be read: the export refuses
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"), db=db)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError):
+        move_flows.export_package(box.world, folder, stop_allowed=True)
+    assert box.events[0] == "stop"
+    assert box.events[-1] == "start"
+    assert not list(folder.iterdir())
+
+
+def test_a_start_that_fails_is_said_and_the_package_is_still_given(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    box.start_fails = True
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    result = move_flows.export_package(box.world, folder, stop_allowed=True)
+    assert result.path.exists()
+    assert result.restarted is False
+    assert "could not be started again" in " ".join(result.notes)
+    assert "compose could not start" not in " ".join(result.notes)  # raw words stay in the log
+
+
+def test_a_stopped_server_has_its_database_started_alone_and_put_back(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert box.events[0] == "db-up"
+    assert box.events[-1] == "db-down"
+    assert "start" not in box.events and "stop" not in box.events
+
+
+def test_a_database_that_was_already_up_is_left_up(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert "db-down" not in box.events
+
+
+def test_the_database_is_put_back_when_the_packing_fails(tmp_path: Path) -> None:
+    box = Box(tmp_path, db=Db([], version_table=None))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert box.events[-1] == "db-down"
+
+
+def test_an_unreadable_version_refuses_the_export_in_plain_words(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), db=Db([], version_table=None))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert str(raised.value) == (
+        "Yu'lon could not read the database version of acore_auth, so a package made from "
+        "it could not be checked on the other computer. Nothing was packed."
+    )
+
+
+def test_a_damaged_install_record_refuses_both_directions(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), ownership=Ownership.UNKNOWN)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="install record"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+
+
+def test_an_unfinished_restore_refuses_the_export(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    marker = maintenance.marker_path(box.server_dir)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="did not finish"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+
+
+def test_a_server_without_characters_cannot_be_packed(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), db=Db([], present=("acore_auth",)))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="has no acore_characters"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+
+
+def test_the_maintenance_lease_is_held_for_the_whole_export(tmp_path: Path) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with docker.maintenance_lease(box.server_dir, "a backup is running"):
+        with pytest.raises(MaintenanceError, match="a backup is running"):
+            move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert box.events == []
+
+
+# =============================================================== import: the plan
+
+
+def target(
+    tmp_path: Path,
+    name: str = "target",
+    game_id: str = "wow-wotlk",
+    *,
+    db: Db | None = None,
+    running_now: tuple[str, ...] = ("ac-database",),
+) -> Box:
+    root = tmp_path / name
+    root.mkdir(exist_ok=True)
+    return Box(root, game_id, running_now=running_now, db=db)
+
+
+def test_a_package_for_the_same_game_and_version_is_allowed(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    plan = move_flows.plan_import(target(tmp_path).world, package)
+    assert plan.allowed, plan.refusals
+    assert plan.replaces is None
+    assert plan.schemas == ("acore_auth", "acore_characters")
+
+
+def test_a_package_from_another_game_is_refused_before_the_database_is_asked(
+    tmp_path: Path,
+) -> None:
+    package = packed(tmp_path, game_id="wow-wotlk")
+    box = target(tmp_path, game_id="wow-unbound")
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert plan.refusals == (
+        "This file holds WoW WotLK characters; this server is WoW Unbound. "
+        "Characters can only go into a server of the same game.",
+    )
+    assert box.db.queries == []
+
+
+def make_package(
+    tmp_path: Path, records: dict[str, str | None], *, manifest_game: str = "wow-wotlk"
+) -> Path:
+    """A package whose dump files carry exactly the given records, as a hand-made one might."""
+    src = tmp_path / "hand"
+    src.mkdir(exist_ok=True)
+    dumps = []
+    for schema, record in records.items():
+        path = src / f"{schema}.sql"
+        path.write_bytes(dump_text(schema, record=record))
+        dumps.append(DumpFile(schema, "auth" if schema.endswith("auth") else "characters", path))
+    evidence = {
+        s: Evidence(kind="updates", count=2, digest=_digest(("2024_01_a", "2024_01_b")))
+        for s in records
+    }
+    header = Header(
+        game_id=manifest_game,
+        game_name="WoW WotLK" if manifest_game == "wow-wotlk" else "WoW Unbound",
+        realm_name="Old Realm",
+        channel_account="YULON_BBBB2222",
+        bot_prefix="RNDBOT",
+        counts=Counts(accounts=1, characters=1, bot_accounts=0),
+        schema_evidence=evidence,
+        excluded=(),
+        made=AT,
+    )
+    dest = tmp_path / f"hand-{len(list(tmp_path.glob('hand-*.zip')))}.zip"
+    move.write_package(dest, header, dumps)
+    return dest
+
+
+def _digest(names: tuple[str, ...]) -> str:
+    return move_flows.digest_of(names)
+
+
+def test_a_dump_with_no_game_record_is_refused_stricter_than_restore(tmp_path: Path) -> None:
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": None})
+    plan = move_flows.plan_import(target(tmp_path).world, package)
+    assert not plan.allowed
+    assert plan.refusals == (move.unlabeled_dump("db/acore_characters.sql"),)
+    assert "does not say which game it is from" in plan.refusals[0]
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "-- yulon-backup: game = wow-wotlk",
+        "-- yulon-backup game=wow-wotlk",
+        "-- Yulon-Backup: game=wow-wotlk",
+        "--yulon-backup: game=wow-wotlk",
+        "-- yulon-backup: game=WOW-WOTLK",
+    ],
+)
+def test_a_nearly_right_record_is_no_record_at_all(tmp_path: Path, spelling: str) -> None:
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": spelling})
+    plan = move_flows.plan_import(target(tmp_path).world, package)
+    assert not plan.allowed, spelling
+    assert plan.refusals, spelling
+
+
+def test_a_dump_from_another_game_inside_a_package_that_claims_this_one_is_refused(
+    tmp_path: Path,
+) -> None:
+    package = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": "wow-unbound"})
+    plan = move_flows.plan_import(target(tmp_path).world, package)
+    assert not plan.allowed
+    assert plan.refusals == (
+        move.dump_from_another_game("db/acore_characters.sql", "WoW Unbound", "WoW WotLK"),
+    )
+
+
+def test_a_package_at_another_database_version_is_refused_and_nothing_is_changed(
+    tmp_path: Path,
+) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], updates=("2024_01_a", "2024_01_b", "2024_02_new")))
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "not at the same version as this server's" in plan.refusals[0]
+    assert "acore_auth: 2 updates in the file, 3 here" in plan.refusals[0]
+    assert "dump:acore_auth" not in box.events
+
+
+def test_a_target_whose_version_cannot_be_read_refuses(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], version_table=None))
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "this server's version could not be read" in plan.refusals[0]
+
+
+def test_a_package_that_does_not_open_is_a_refusal_not_a_crash(tmp_path: Path) -> None:
+    junk = tmp_path / "junk.zip"
+    junk.write_bytes(b"nope")
+    plan = move_flows.plan_import(target(tmp_path).world, junk)
+    assert plan.refusals == (move.NOT_A_PACKAGE,)
+
+
+def test_a_damaged_install_record_refuses_the_import(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    box.ownership = Ownership.UNKNOWN
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "install record" in plan.refusals[0]
+
+
+# ------------------------------------------------ import: players are asked about
+
+
+def test_a_target_with_players_must_be_asked_and_says_how_many(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], counts=(2, 3, 500)))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed
+    assert plan.replaces is not None
+    assert plan.replaces.sentence == (
+        "This server already has 3 characters on 2 accounts. Bringing these in REPLACES them; "
+        "a copy of this server's accounts and characters is taken first. Replace?"
+    )
+
+
+def test_a_target_with_only_accounts_is_asked_too(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], counts=(1, 0, 0)))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.replaces is not None
+    assert "1 account" in plan.replaces.sentence
+    assert "no characters" in plan.replaces.sentence
+
+
+def test_bots_and_the_apps_own_account_are_not_players(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], counts=(0, 0, 500)))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.replaces is None
+    counting = [q for q in box.db.queries if "COUNT(*)" in q]
+    assert counting, "the target was counted"
+    assert "RNDBOT" in counting[0], "bots are told apart by the marker prefix"
+    assert "YULON_" in counting[0], "the command-channel account is not a player"
+
+
+def test_a_count_that_cannot_be_read_refuses_instead_of_assuming_none(tmp_path: Path) -> None:
+    class NoCount(Db):
+        def query(self, sql: str) -> str:
+            if "COUNT(*)" in sql:
+                raise MaintenanceError("the query failed: ERROR 1146")
+            return super().query(sql)
+
+    package = packed(tmp_path)
+    box = target(tmp_path, db=NoCount([]))
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert (
+        "could not tell whether this server already has accounts or characters" in plan.refusals[0]
+    )
+
+
+def test_a_running_target_is_planned_without_a_database_start(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed
+    assert plan.server_running is True
+    assert "db-up" not in box.events
+
+
+def test_planning_puts_a_database_it_started_back(tmp_path: Path) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path, running_now=())
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed
+    assert box.events == ["db-up", "db-down"]
+
+
+# =============================================================== import: the run
+
+
+def ready(tmp_path: Path, **kw: object) -> tuple[Box, Path, move_flows.ImportPlan]:
+    package = packed(tmp_path)
+    box = target(tmp_path, **kw)  # type: ignore[arg-type]
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    box.events.clear()
+    return box, package, plan
+
+
+def test_the_run_takes_its_copy_first_then_loads_auth_then_characters(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    events = [e for e in box.events if e.startswith(("dump:", "load:"))]
+    first_load = events.index("load:acore_auth")
+    assert events[:first_load] and all(e.startswith("dump:") for e in events[:first_load])
+    assert events.index("load:acore_auth") < events.index("load:acore_characters")
+    assert "load:acore_world" not in events
+    assert result.schemas == ("acore_auth", "acore_characters")
+
+
+def test_the_copy_before_the_move_is_named_in_the_result(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert result.copies
+    assert all("before-move" in p.name for p in result.copies)
+    assert all(p.exists() for p in result.copies)
+    assert "before-move" in result.text()
+
+
+def test_the_extracted_dumps_do_not_stay_behind(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    backups = maintenance.backups_dir(box.server_dir)
+    assert not [p for p in backups.iterdir() if p.is_dir()]
+
+
+def test_replacing_players_needs_the_plans_own_token(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500)))
+    for wrong in (None, "", "yes", "True", plan.token[::-1]):
+        with pytest.raises(MaintenanceError) as raised:
+            move_flows.run_import(
+                box.world, plan, confirm=wrong, use_old_realm_name=False, stop_allowed=False
+            )
+        assert str(raised.value) == move_flows.REPLACE_NEEDS_A_YES
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_with_the_token_the_players_are_replaced_and_the_copy_exists_before_the_first_load(
+    tmp_path: Path,
+) -> None:
+    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500)))
+    result = move_flows.run_import(
+        box.world, plan, confirm=plan.token, use_old_realm_name=False, stop_allowed=False
+    )
+    loads = [i for i, e in enumerate(box.events) if e.startswith("load:")]
+    dumps = [i for i, e in enumerate(box.events) if e.startswith("dump:")]
+    assert loads and dumps and max(dumps[:2]) < min(loads)
+    assert result.schemas == ("acore_auth", "acore_characters")
+
+
+def test_the_target_gaining_players_since_the_plan_refuses(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    assert plan.replaces is None
+    box.db.counts = (1, 1, 0)  # somebody made a character after the plan was shown
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.run_import(
+            box.world, plan, confirm=plan.token, use_old_realm_name=False, stop_allowed=False
+        )
+    assert str(raised.value) == move_flows.CHANGED_SINCE_THE_PLAN
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_a_package_replaced_since_the_plan_refuses(tmp_path: Path) -> None:
+    box, package, plan = ready(tmp_path)
+    other = make_package(tmp_path, {"acore_auth": "wow-wotlk", "acore_characters": "wow-wotlk"})
+    other.replace(package)
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert str(raised.value) == move_flows.CHANGED_SINCE_THE_PLAN
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_a_refused_plan_cannot_be_run(tmp_path: Path) -> None:
+    package = packed(tmp_path, game_id="wow-wotlk")
+    box = target(tmp_path, game_id="wow-unbound")
+    plan = move_flows.plan_import(box.world, package)
+    with pytest.raises(MaintenanceError, match="same game"):
+        move_flows.run_import(
+            box.world, plan, confirm=plan.token, use_old_realm_name=False, stop_allowed=True
+        )
+    assert box.events == []
+
+
+def test_a_running_server_is_not_stopped_for_an_import_without_a_yes(tmp_path: Path) -> None:
+    box, _package, plan = ready(
+        tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver")
+    )
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    assert str(raised.value) == move_flows.RUNNING_NEEDS_A_YES_IMPORT
+    assert box.events == []
+
+
+def test_with_a_yes_the_server_is_stopped_and_left_stopped(tmp_path: Path) -> None:
+    box, _package, plan = ready(
+        tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver")
+    )
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=True
+    )
+    assert box.events[0] == "stop"
+    assert "start" not in box.events
+    assert "Start the server" in result.text()
+
+
+def test_a_load_that_fails_names_what_was_loaded_and_where_the_copies_are(
+    tmp_path: Path,
+) -> None:
+    box, _package, plan = ready(tmp_path, db=Db([], fail_load_of="acore_characters"))
+    with pytest.raises(MaintenanceError) as raised:
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    said = str(raised.value)
+    assert "acore_auth was brought in" in said
+    assert "acore_characters was not" in said
+    assert "before-move" in said
+    backups = maintenance.backups_dir(box.server_dir)
+    assert not [p for p in backups.iterdir() if p.is_dir()], "the extracted dumps are cleaned up"
+    assert maintenance.marker_path(box.server_dir).exists(), "the engine's marker stays"
+
+
+# ------------------------------------------------ import: the fix-ups
+
+
+def test_the_old_command_channel_accounts_are_deleted_before_the_account_table_is_touched(
+    tmp_path: Path,
+) -> None:
+    box, _package, plan = ready(tmp_path)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    sql = "\n".join(box.db.executed)
+    assert "DELETE FROM `acore_auth`.`account_access`" in sql
+    assert "DELETE FROM `acore_auth`.`account`" in sql
+    assert sql.index("account_access") < sql.index("DELETE FROM `acore_auth`.`account`")
+    assert "YULON_AAAA1111" in sql
+    assert "REGEXP" in sql
+
+
+def test_session_keys_are_cleared_with_the_column_each_core_uses(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert "UPDATE `acore_auth`.`account` SET `session_key` = NULL" in "\n".join(box.db.executed)
+
+
+@pytest.mark.parametrize(
+    ("game_id", "fragment"),
+    [
+        ("wow-tbc", "UPDATE `realmd`.`account` SET `sessionkey` = ''"),
+        ("wow-vanilla", "UPDATE `realmd`.`account` SET `sessionkey` = ''"),
+        ("wow-centurion", "UPDATE `centurion_auth`.`account` SET `session_key_auth` = NULL"),
+    ],
+)
+def test_session_key_columns_per_core(tmp_path: Path, game_id: str, fragment: str) -> None:
+    assert fragment in move_flows.session_key_sql(entry(game_id))
+
+
+def test_the_realm_name_stays_this_servers_by_default(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert "SET `name`" not in "\n".join(box.db.executed)
+
+
+def test_the_old_realm_name_comes_over_only_when_asked_for(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert (
+        "UPDATE `acore_auth`.`realmlist` SET `name` = 'Source Realm' WHERE `id` = 1"
+        in "\n".join(box.db.executed)
+    )
+
+
+def test_a_realm_name_with_a_quote_cannot_break_out_of_the_statement() -> None:
+    sql = move_flows.realm_name_sql(entry("wow-wotlk"), "Bob's \\ Realm")
+    assert sql == "UPDATE `acore_auth`.`realmlist` SET `name` = 'Bob''s \\\\ Realm' WHERE `id` = 1;"
+
+
+def test_the_result_says_what_stayed_behind_and_what_to_do_next(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    text = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    ).text()
+    assert "world database" in text
+    assert "GM levels" in text
+    assert "Start the server" in text
+    assert "Repair" in text  # the command channel is repaired from the Server tab
+
+
+def test_the_database_is_put_back_after_an_import_on_a_stopped_server(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path, running_now=())
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert box.events[0] == "db-up"
+    assert box.events[-1] == "db-down"
+
+
+def test_the_lease_refuses_an_import_beside_a_backup(tmp_path: Path) -> None:
+    box, _package, plan = ready(tmp_path)
+    with docker.maintenance_lease(box.server_dir, "a backup is running"):
+        with pytest.raises(MaintenanceError, match="a backup is running"):
+            move_flows.run_import(
+                box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+            )
+    assert not [e for e in box.events if e.startswith("load:")]
