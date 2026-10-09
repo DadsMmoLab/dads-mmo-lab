@@ -579,7 +579,9 @@ class Dashboard:
                 state.started_at,
                 uptime,
                 warning=self._foreign_data_hint(state.started_at, state.status),
-                failure=self._update_failure(state.started_at, uptime),
+                failure=self._update_failure(
+                    state.started_at, uptime, dead=state.status == "restarting"
+                ),
             )
         if state.status != "running":
             return Verdict(
@@ -620,7 +622,8 @@ class Dashboard:
             return ""
         if self._hint_run != run:
             try:
-                log = self._log_of(self.spec.world, run)
+                # The tick's one read, shared with `_update_failure()` (T600) in the same loop.
+                log = self._run_log(run)
             except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
                 logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
                 return ""
@@ -833,7 +836,7 @@ class Dashboard:
         """
         return self._failure_text if self._failure_run == run else ""
 
-    def _update_failure(self, run: str, uptime: timedelta | None) -> str:
+    def _update_failure(self, run: str, uptime: timedelta | None, *, dead: bool = False) -> str:
         """The sentence for a failed update in run `run`'s own log, or `""` (T600).
 
         Asked only for an entry whose catalog `ready.fatal` covers the core's failure line,
@@ -843,7 +846,9 @@ class Dashboard:
         shared); an older one is read bounded to its first span, like the realm keeper's,
         because the updater runs in the first minutes and a long-lived world's log is large.
         A log that could not be read (an exception, or the empty text `_logs()` answers for a
-        Docker that would not talk) settles nothing and is asked again.
+        Docker that would not talk) settles nothing and is asked again. A `dead` run (a loop's
+        `restarting` one) writes no more lines, so one read that returned something settles it:
+        a loop's log is read once per run, as T593's hint reads it.
         """
         if not self._reads_update_failures:
             return ""
@@ -872,6 +877,8 @@ class Dashboard:
         except Exception as exc:  # noqa: BLE001 - an unreadable log is no answer, not a crash
             logger.warning(f"could not read {self.entry.id}'s world log for a failed update: {exc}")
             return ""
+        if dead and log.strip():
+            self._failure_settled = True
         self._failure_text = update_failure.explain(log)
         return self._failure_text
 
