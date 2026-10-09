@@ -8697,11 +8697,24 @@ def server_claim(
     finally:
         # The one letting go decides how long to wait, not the press that made it (T607 review):
         # a Stop that outlives a Rebuild's reservation is the last out, and must not hang.
-        _let_go(name, lock, reservation, quick=budget_end is not None, patient=budget_end is None)
+        _let_go(
+            name,
+            lock,
+            reservation,
+            quick=budget_end is not None,
+            patient=budget_end is None,
+            wsl_distro=reservation.claim.wsl_distro,
+        )
 
 
 def _let_go(
-    name: str, lock: threading.Lock, reservation: _Reservation, *, quick: bool, patient: bool
+    name: str,
+    lock: threading.Lock,
+    reservation: _Reservation,
+    *,
+    quick: bool,
+    patient: bool,
+    wsl_distro: str | None = None,
 ) -> None:
     """Drop one hold on `reservation`; the last one releases the container.
 
@@ -8715,7 +8728,7 @@ def _let_go(
         threading.Thread(
             target=_let_go,
             args=(name, lock, reservation),
-            kwargs={"quick": quick, "patient": True},
+            kwargs={"quick": quick, "patient": True, "wsl_distro": wsl_distro},
             name="yulon-busy-release",
             daemon=True,
         ).start()
@@ -8730,7 +8743,7 @@ def _let_go(
             # meet it dying (`_GONE_WAIT_SECONDS`).
             _wait_gone(
                 name,
-                reservation.claim.wsl_distro,
+                wsl_distro,
                 limit=_QUICK_RELEASE_SECONDS if quick else None,
                 container=reservation.claim.container,
             )
