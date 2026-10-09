@@ -2892,6 +2892,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and only inside that one add-on's folder; an unreadable listing takes the "
         "receipt's own spelling"
     ),
+    ("apply.py", "_put_the_players_folder_back"): (
+        "T613 re-review. Lists the client's `Interface/AddOns` to find the add-on's name in the "
+        "case it has on disk, before putting the player's own folder back from its recorded "
+        "aside. It decides only whether that name is free; the rename is only from an aside "
+        "beside it with Yu'lon's aside name, never a link"
+    ),
     ("apply.py", "_holds_more_than"): (
         "T613 PR-2. Walks an outside add-on's folder after its Remove (`links.walk`, never "
         "into a link) only to SAY whether it still holds files Yu'lon did not put there; "

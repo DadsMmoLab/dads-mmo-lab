@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from yulon.apply import (
+    ADDON_ASIDES_FILE,
     CLAIM_FILE,
     Applier,
     ApplyRefusal,
@@ -455,9 +456,9 @@ def test_a_players_own_add_on_of_that_name_is_refused_without_consent(tmp_path: 
         applier.install(manifest, folder=FolderSource(_source(tmp_path), copy_folder))
 
     assert str(refused.value) == (
-        "An add-on named pfUI is already in this game client, and Yu'lon did not put it there. "
-        "Say to replace it, and Yu'lon sets it aside and puts it back when this one is "
-        "removed. Nothing was changed."
+        "An add-on named pfUI is already in this game client, and Yu'lon did not put it there, "
+        "so it did not replace it. Move or rename your own pfUI folder in Interface/AddOns "
+        "first, then install again. Nothing was changed."
     )
     assert not applier.clone_dir(manifest).exists()
     assert sorted(p.name for p in mine.rglob("*") if p.is_file()) == [
@@ -521,7 +522,8 @@ def test_a_players_add_on_set_aside_stays_aside_while_the_name_is_taken(tmp_path
     assert aside.is_dir() and (mine / "pfUI.lua").is_file()
     assert (
         f"your own pfUI add-on, which Yu'lon set aside as {aside} when it installed this (pfUI "
-        "is there again); rename it back to pfUI when you want it again"
+        f"is there again); Yu'lon keeps a note of it in {server / ADDON_ASIDES_FILE}; rename it "
+        "back to pfUI when you want it again"
     ) in removed.left_behind
 
 
@@ -739,6 +741,11 @@ def test_a_recorded_folder_aside_that_is_not_beside_the_add_on_is_never_moved(
         if entry.get("folder"):
             entry["aside"] = str(elsewhere)
     claim_path.write_text(json.dumps(claim))
+    # The note beside the server says the same, or it would put the real aside back.
+    notes = _noted(server)
+    for note in notes:
+        note["aside"] = str(elsewhere)
+    (server / ADDON_ASIDES_FILE).write_text(json.dumps(notes), encoding="utf-8")
 
     report = applier.remove(manifest)
 
@@ -794,3 +801,166 @@ def test_the_play_keep_list_leaves_out_a_folder_set_aside(tmp_path: Path) -> Non
 
     assert Path("Interface/AddOns/pfUI") not in kept
     assert Path("Interface/AddOns/pfUI/pfUI.lua") in kept
+
+
+# ------------------------------------------------------------------ re-review (63674663)
+
+MINE = "-- my own hand-installed pfUI\n"
+
+
+def _replaced(tmp_path: Path) -> tuple[Applier, Manifest, Path, Path]:
+    """The player's own pfUI, replaced with their yes: it sits aside, recorded."""
+    client = _client(tmp_path)
+    own = client / "Interface" / "AddOns" / "pfUI"
+    own.mkdir()
+    (own / "pfUI.lua").write_text(MINE)
+    (own / "extra.lua").write_text("mine\n")
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+    applier.install(
+        manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+    return applier, manifest, own, own.parent / "pfUI.yulon-addon-old"
+
+
+def _noted(server: Path) -> list[dict[str, str]]:
+    from yulon.apply import ADDON_ASIDES_FILE
+
+    path = server / ADDON_ASIDES_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+def test_setting_the_players_folder_aside_notes_it_beside_the_server(tmp_path: Path) -> None:
+    applier, _manifest_, own, aside = _replaced(tmp_path)
+
+    assert _noted(applier.server_dir) == [
+        {"item": ITEM, "addon": "pfUI", "target": str(own), "aside": str(aside)}
+    ]
+
+
+def test_putting_it_back_drops_the_note(tmp_path: Path) -> None:
+    applier, manifest, own, aside = _replaced(tmp_path)
+
+    applier.remove(manifest)
+
+    assert (own / "pfUI.lua").read_text() == MINE and not aside.exists()
+    assert _noted(applier.server_dir) == []
+
+
+def test_an_update_that_moves_the_add_on_in_its_source_still_puts_the_folder_back(
+    tmp_path: Path,
+) -> None:
+    """(C) Matched by add-on name, not by the step: `pfUI` became `sub/pfUI` upstream."""
+    applier, _m, own, aside = _replaced(tmp_path)
+    moved = tmp_path / "source2"
+    for rel, text in FILES.items():
+        (moved / "sub" / "pfUI" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (moved / "sub" / "pfUI" / rel).write_text(text, encoding="utf-8")
+    newer = parse_manifest(
+        {
+            "id": ITEM,
+            "name": "pfUI",
+            "type": "mod",
+            "game": "wow-vanilla",
+            "origin": {"kind": "folder", "path": "/somewhere/pfUI", "added": "2026-10-09"},
+            "client": [{"src": "sub/pfUI", "dest": "addons", "name": "pfUI"}],
+        }
+    )
+    applier.install(newer, folder=FolderSource(moved, copy_folder), replacing=True)
+
+    report = applier.remove(newer)
+
+    assert (own / "pfUI.lua").read_text() == MINE, report.left_behind
+    assert not aside.exists()
+
+
+def test_an_update_that_drops_the_add_on_still_puts_the_folder_back_at_remove(
+    tmp_path: Path,
+) -> None:
+    applier, _m, own, aside = _replaced(tmp_path)
+    other = tmp_path / "source3"
+    (other / "Other").mkdir(parents=True)
+    (other / "Other" / "Other.toc").write_text("## Interface: 11200\n")
+    renamed = parse_manifest(
+        {
+            "id": ITEM,
+            "name": "pfUI",
+            "type": "mod",
+            "game": "wow-vanilla",
+            "origin": {"kind": "folder", "path": "/somewhere/pfUI", "added": "2026-10-09"},
+            "client": [{"src": "Other", "dest": "addons", "name": "Other"}],
+        }
+    )
+    applier.install(renamed, folder=FolderSource(other, copy_folder), replacing=True)
+    report = applier.remove(renamed)
+
+    assert (own / "pfUI.lua").read_text() == MINE or any(
+        str(aside) in line for line in report.left_behind
+    ), report.left_behind
+    assert (own / "pfUI.lua").read_text() == MINE
+
+
+def test_with_the_other_servers_unreadable_the_aside_is_named_and_its_note_kept(
+    tmp_path: Path,
+) -> None:
+    """(B) The files stay (whose they are cannot be read), so the name is taken."""
+    applier, manifest, own, aside = _replaced(tmp_path)
+
+    def unreadable() -> tuple[Path, ...]:
+        raise OSError("nope")
+
+    applier.other_server_dirs = unreadable
+
+    report = applier.remove(manifest)
+
+    assert not applier.clone_dir(manifest).exists()
+    assert aside.is_dir() and (aside / "pfUI.lua").read_text() == MINE
+    assert any(str(aside) in line for line in report.left_behind), report.left_behind
+    assert [n["aside"] for n in _noted(applier.server_dir)] == [str(aside)]
+
+
+def test_with_no_client_folder_the_aside_is_named_and_its_note_kept(tmp_path: Path) -> None:
+    """(D) Removed from a record that has lost its client folder."""
+    applier, manifest, _own, aside = _replaced(tmp_path)
+    blind = Applier(applier.server_dir, client_dir=None)
+
+    report = blind.remove(manifest)
+
+    assert not blind.clone_dir(manifest).exists()
+    assert any(str(aside) in line for line in report.left_behind), report.left_behind
+    assert [n["aside"] for n in _noted(applier.server_dir)] == [str(aside)]
+
+
+def test_a_note_that_outlived_its_clone_is_acted_on_by_the_next_remove(tmp_path: Path) -> None:
+    """The note is the record once the clone is gone: the next Install and Remove use it."""
+    applier, manifest, own, aside = _replaced(tmp_path)
+    Applier(applier.server_dir, client_dir=None).remove(manifest)
+    for p in sorted(own.rglob("*"), reverse=True):
+        p.unlink() if p.is_file() else p.rmdir()
+    own.rmdir()
+
+    applier.install(manifest, folder=FolderSource(_source(tmp_path / "again"), copy_folder))
+    applier.remove(manifest)
+
+    assert (own / "pfUI.lua").read_text() == MINE
+    assert _noted(applier.server_dir) == []
+
+
+def test_the_refusal_without_a_yes_says_what_to_do_instead(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+
+    with pytest.raises(ApplyRefusal) as refused:
+        Applier(server, client_dir=client).install(
+            _manifest(), folder=FolderSource(_source(tmp_path), copy_folder)
+        )
+
+    assert str(refused.value) == (
+        "An add-on named pfUI is already in this game client, and Yu'lon did not put it there, "
+        "so it did not replace it. Move or rename your own pfUI folder in Interface/AddOns "
+        "first, then install again. Nothing was changed."
+    )
