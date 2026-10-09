@@ -90,6 +90,10 @@ class _Docker:
         self.execs = 0
         # The bound each of a look's two commands was given, in order.
         self.timeouts: list[float | None] = []
+        # T600: the bound each log read and each kill was given, and a Docker that never answers.
+        self.log_timeouts: list[float | None] = []
+        self.kill_timeouts: list[float | None] = []
+        self.logs_time_out = False
         self.events: list[str] = []
         self.running = {spec.db, spec.auth, spec.world}
         self.present = set(self.running)
@@ -132,6 +136,7 @@ class _Docker:
             self._stopped({self.spec.world})
             return _completed()
         if verb == ["kill", self.spec.world]:
+            self.kill_timeouts.append(timeout)
             # T600: the world's own SIGKILL, for a run stuck at a failed update.
             self.events.append("kill")
             self.running -= {self.spec.world}
@@ -175,6 +180,10 @@ class _Docker:
             mask = self._frame()[2]
             return _completed(returncode=1) if mask is None else _completed(_status(mask))
         if verb[:1] == ["logs"] and verb[-1] == self.spec.world:
+            self.log_timeouts.append(timeout)
+            if self.logs_time_out:
+                # What `_docker()` hands back for a Docker that never answered.
+                return _completed(returncode=124)
             return _completed(self._frame()[1])
         return _completed()
 
@@ -737,3 +746,32 @@ def test_a_world_the_restart_policy_replaced_since_the_look_is_not_killed(
     controller, _ = _controller(fake, tmp_path)
     assert controller.stop() is True
     assert "kill" not in fake.events
+
+
+def test_the_failed_update_look_and_the_kill_are_each_bounded_like_the_other_looks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wedged Docker must not hold a Stop: both calls get the look timeout (T600 review).
+
+    Mutation: call `_logs()` or `kill_container()` without the timeout and a stop's loop can
+    block in a docker call that "Stop now anyway" and `abandon` are never asked in.
+    """
+    fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
+    controller, _ = _controller(fake, tmp_path)
+    assert controller.stop() is True
+    assert fake.log_timeouts == [docker._LOAD_LOOK_TIMEOUT]
+    assert fake.kill_timeouts == [docker._LOAD_LOOK_TIMEOUT]
+
+
+def test_a_log_read_that_times_out_is_not_a_stuck_world_and_abandon_still_ends_the_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timed-out read is "not stuck": the wait goes on looking, and the person can still end it."""
+    fake = _install(monkeypatch, "wow-tortoise", [("running", FAILED_UPDATE, LOADING_MASK)])
+    fake.logs_time_out = True
+    controller, control = _controller(fake, tmp_path)
+    fake.on_look = lambda: control.abandon.set() if fake.looks >= 3 else None
+    with pytest.raises(docker.StopAbandoned):
+        controller.stop()
+    assert "kill" not in fake.events
+    assert fake.log_timeouts and all(t == docker._LOAD_LOOK_TIMEOUT for t in fake.log_timeouts)

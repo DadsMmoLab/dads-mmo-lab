@@ -4346,7 +4346,7 @@ def world_load_steps(
                         f"{world} is stuck at a failed update; killing it, then stopping"
                     )
                     try:
-                        kill_container(world, wsl_distro=wsl_distro)
+                        kill_container(world, wsl_distro=wsl_distro, timeout=_LOAD_LOOK_TIMEOUT)
                     except DockerCommandError as exc:
                         logger.warning(f"could not kill {world}: {exc}")
                     yield stuck + WORLD_STUCK_AT_UPDATE_TAIL
@@ -4366,7 +4366,14 @@ def _stuck_at_a_failed_update(world: str, run: str, wsl_distro: str | None) -> s
     Only the last non-empty line counts: the core goes quiet after `failed to apply.` (it waits in
     a read), while a world that went on printing is a world that is going on (T600).
     """
-    tail = _logs(world, this_run_only=True, since=run, tail=_UPDATE_LOG_TAIL, wsl_distro=wsl_distro)
+    tail = _logs(
+        world,
+        this_run_only=True,
+        since=run,
+        tail=_UPDATE_LOG_TAIL,
+        timeout=_LOAD_LOOK_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
     lines = [line for line in tail.splitlines() if line.strip()]
     if not lines:
         return ""
@@ -4423,15 +4430,18 @@ def stop_containers(
         _run_docker_stop(name, wsl_distro=wsl_distro, deadline=deadline)
 
 
-def kill_container(container: str, *, wsl_distro: str | None = None) -> None:
+def kill_container(
+    container: str, *, wsl_distro: str | None = None, timeout: float | None = None
+) -> None:
     """`docker kill <container>`: the last resort after a stop that failed (T162).
 
     Raises `DockerCommandError` on a non-zero exit, a container that is not
     running included: the caller reads the container's state afterwards
     rather than trusting any exit code, so the words of Docker's refusal need
-    not be matched here.
+    not be matched here. `timeout` bounds the call for a caller inside a loop the person must
+    be able to end (T600); a timeout is a non-zero answer, so it raises like a refusal.
     """
-    _run(["kill", container], wsl_distro=wsl_distro)
+    _run(["kill", container], timeout=timeout, wsl_distro=wsl_distro)
 
 
 @_a_lifecycle_command
@@ -4807,6 +4817,7 @@ def _logs(
     since: str = "",
     until: str = "",
     tail: int | None = None,
+    timeout: float | None = None,
     wsl_distro: str | None = None,
 ) -> str:
     """Return a container's logs, or `""` if they can't be read.
@@ -4825,7 +4836,8 @@ def _logs(
     `this_run_only` scopes the read to the current run by asking when that run
     started; `until` ends it there (`docker logs --until`). `--tail` is not an
     alternative: the marker is printed once, so a tail window either misses it or
-    slides past it. `tail` is for the opposite question, what a run's log ENDS on
+    slides past it. `timeout` bounds the call (a timeout is a non-zero answer, so `""`), for a
+    caller that polls inside a loop the person must be able to end. `tail` is for the opposite question, what a run's log ENDS on
     (T600: a world stuck at a failed update), which a window answers exactly.
     """
     argv = ["logs"]
@@ -4840,7 +4852,7 @@ def _logs(
         argv += ["--until", until]
     if tail is not None:
         argv += ["--tail", str(tail)]
-    proc = _docker([*argv, container], wsl_distro=wsl_distro)
+    proc = _docker([*argv, container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
         # mid-wait, or an unreadable log driver into eight minutes of "starting"
