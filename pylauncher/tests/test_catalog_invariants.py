@@ -1164,13 +1164,13 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 51, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 51; "
+    assert len(values) == 63, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 63; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
 
-def test_the_provenance_debts_are_exactly_these_four() -> None:
+def test_the_provenance_debts_are_exactly_these() -> None:
     """The exit line's own clause: the unmeasured set, by name, in the catalog test.
 
     Spelled out here rather than derived, because the derivation is what it is
@@ -1179,16 +1179,19 @@ def test_the_provenance_debts_are_exactly_these_four() -> None:
     the list reads as a statement of what Phase 8 still owes rather than as a
     floor somebody has stopped looking at.
 
-    All four are ceilings and citations rather than shapes, which is worth
-    saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Three are values a
+    All five are ceilings and citations rather than shapes, which is worth
+    saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Four are values a
     press read back without ever asking for the answer the tree would refuse,
-    and the fourth is a real measurement whose reading is not in this repo.
+    and the fifth is a real measurement whose reading is not in this repo.
     """
     assert set(catalog_provenance.OWED) == {
         "wow-wotlk:play.mail_item_cap",
         "wow-wotlk:accounts.level.max_level",
         "wow-tbc:accounts.level.max_level",
         "wow-tortoise:accounts.scheme",
+        # The Unbound live run set levels 2 and 3 only; "4 refused" is Yu'lon's own check
+        # (commands.py), whose highest level IS the catalog value, so it proves nothing.
+        "wow-unbound:accounts.level.max_level",
     }
     for key, reason in catalog_provenance.OWED.items():
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
@@ -1204,7 +1207,14 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     and date, and the README inside it -- not prose, not a bare folder, not a
     path that climbs out of the notes.
     """
-    shape = re.compile(r"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md")
+    # A step's gate is its README, and so is a live run's when it wrote one
+    # (`live-tNNN-<box>-<date>/README.md`); a live run without one cites the named
+    # logs its presses wrote.
+    date = r"\d{4}-\d{2}-\d{2}"
+    shape = re.compile(
+        rf"gates/(?:\d+\.\d+[a-z]?|live-t\d+)-[a-z0-9-]+-{date}/README\.md"
+        rf"|gates/live-t\d+-[a-z0-9]+-{date}/[a-z0-9-]+\.log"
+    )
     measured = {
         key: mark.cite
         for key, mark in catalog_provenance.PROVENANCE.items()
@@ -1213,7 +1223,7 @@ def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
     wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
 
     assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
-    assert len(measured) == 34, len(measured)
+    assert len(measured) == 45, len(measured)
     assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
     assert not shape.fullmatch(
         "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"

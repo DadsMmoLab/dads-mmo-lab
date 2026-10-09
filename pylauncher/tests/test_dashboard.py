@@ -1460,3 +1460,570 @@ def test_a_bots_table_missing_for_good_warns_once_on_the_real_tick_not_every_fiv
         for _ in range(2):
             dash.tick()
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+# ------------------------------------------- T555 T5: "Unbound loaded" on the Server tab
+
+UNBOUND = catalog_module.load_catalog().get("wow-unbound")
+UNBOUND_LOG = (
+    "[UNBOUND] free reagents: off\n"
+    "[UNBOUND] instant summons: off\n"
+    "[UNBOUND] Orphan sweep skipped: the characters table is empty, so every Unbound row "
+    "would look orphaned.\n"
+    "[UNBOUND] Prereq map built.\n"
+    "[dml_autobuff] off (Unbound.AutoBuff = 0)\n"
+    "AzerothCore rev. 1 ready...\n"
+)
+GOOD_LINE = "Unbound loaded: Mentor in 9 places; free reagents off, instant summons off, #buffs off"
+CONF_OFF = "Unbound.ReagentFree = 0\nUnbound.InstantSummons = 0\nUnbound.AutoBuff = 0\n"
+
+
+class _UnboundSql(_FakeSql):
+    """The population answer, the tables question and the counts of an Unbound world database."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        checks = UNBOUND.install.native.azerothcore.sql_checks  # type: ignore[union-attr]
+        self.counts = {c.table: c.at_least for c in checks}
+        self.tables_asked = 0
+        self.down: str | None = None
+
+    def query(self, db: str, statement: str) -> str:
+        if db == "characters":
+            return super().query(db, statement)
+        if self.down is not None:
+            raise RuntimeError(self.down)
+        if "information_schema.tables" in statement:
+            self.tables_asked += 1
+            return "".join(f"acore_world\t{table}\n" for table in self.counts)
+        for table, count in self.counts.items():
+            if f".`{table}`" in statement:
+                return f"{count}\n"
+        raise AssertionError(statement)
+
+
+def _unbound_watch(
+    tmp_path: Path,
+    sql: _UnboundSql,
+    *,
+    runs: list[str] | None = None,
+    log: str = UNBOUND_LOG,
+    conf: str | None = CONF_OFF,
+    age: timedelta = timedelta(minutes=3),
+    log_box: list[str] | None = None,
+    clock: list[datetime] | None = None,
+) -> dashboard.Dashboard:
+    """An Unbound dashboard on a run `age` old; each tick reads the next of `runs`.
+
+    `log_box[0]`, when given, is the log and can be changed between ticks; with more than one
+    entry each read of the log takes the next, the last one staying.
+    """
+    server = _install(tmp_path)
+    if conf is not None:
+        file = server / "env/dist/etc/modules/mod_unbound.conf"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(conf, encoding="utf-8")
+    stamps = list(runs or [_stamp(NOW - age)])
+    return dashboard.Dashboard(
+        UNBOUND.container_spec(),
+        UNBOUND,
+        server,
+        sql=sql,
+        state_of=lambda _c: _running(stamps[0] if len(stamps) == 1 else stamps.pop(0)),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: (
+            (log_box.pop(0) if len(log_box) > 1 else log_box[0]) if log_box else log
+        ),
+        now=lambda: clock[0] if clock else NOW,
+    )
+
+
+def test_an_unbound_server_that_loaded_says_so_after_its_up_line(tmp_path: Path) -> None:
+    verdict = _unbound_watch(tmp_path, _UnboundSql()).tick()
+
+    assert verdict.module_line == GOOD_LINE
+    assert dashboard.line(verdict).endswith(f" · {GOOD_LINE}")
+    assert dashboard.line(verdict).startswith("up — 3 players, 497 bots")
+
+
+def test_a_server_with_no_health_block_has_no_module_line_and_asks_nothing_more(
+    tmp_path: Path,
+) -> None:
+    sql = _FakeSql()
+
+    verdict = _watch(tmp_path, [_running()], sql).tick()
+
+    assert verdict.module_line == ""
+    assert all("information_schema" not in s for s in sql.statements)
+
+
+def test_the_module_is_asked_once_per_run_and_again_after_a_restart(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    first, second = _stamp(NOW - timedelta(minutes=3)), _stamp(NOW - timedelta(minutes=1))
+    watch = _unbound_watch(tmp_path, sql, runs=[first, first, first, second, second])
+
+    lines = [watch.tick().module_line for _ in range(5)]
+
+    assert lines == [GOOD_LINE] * 5
+    assert sql.tables_asked == 2, "once for each run"
+
+
+def test_a_read_that_failed_is_not_kept_so_the_next_tick_asks_again(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    watch = _unbound_watch(tmp_path, sql)
+    sql.down = "connection refused"
+
+    failed = watch.tick()
+    sql.down = None
+    healed = watch.tick()
+
+    assert failed.module_line.startswith("Unbound could not be checked:")
+    assert not any(ch.isdigit() for ch in failed.module_line), "a number from nowhere"
+    assert healed.module_line == GOOD_LINE
+
+
+def test_a_world_that_has_not_said_ready_is_not_asked_about_its_module(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    run = _stamp(NOW - timedelta(seconds=20))  # younger than the settle time, no ready line yet
+    watch = _unbound_watch(tmp_path, sql, runs=[run], log="[UNBOUND] Prereq map built.\n")
+
+    verdict = watch.tick()
+
+    assert verdict.ready is False and verdict.module_line == ""
+    assert sql.tables_asked == 0
+
+
+def test_a_switch_the_log_never_said_reads_not_said_and_a_changed_file_says_when(
+    tmp_path: Path,
+) -> None:
+    log = UNBOUND_LOG.replace("[dml_autobuff] off (Unbound.AutoBuff = 0)\n", "")
+    conf = CONF_OFF.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1")
+
+    line = _unbound_watch(tmp_path, _UnboundSql(), log=log, conf=conf).tick().module_line
+
+    assert "free reagents off (on at the next start)" in line
+    assert "#buffs not said" in line and "#buffs off" not in line
+
+
+def test_missing_tables_reach_the_line_with_no_traceback(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    del sql.counts["unbound_milestones"]
+
+    verdict = _unbound_watch(tmp_path, sql).tick()
+
+    assert verdict.module_line.startswith("Unbound tables missing: unbound_milestones.")
+    assert dashboard.line(verdict).count("Unbound") == 1
+
+
+def test_the_health_comes_from_the_catalog_block_not_from_the_entrys_id(tmp_path: Path) -> None:
+    """A second server that carries the module and the block gets the sentence under any id."""
+    scratch = UNBOUND.model_copy(update={"id": "wow-unbound-scratch"})
+    server = _install(tmp_path)
+    watch = dashboard.Dashboard(
+        scratch.container_spec(),
+        scratch,
+        server,
+        sql=_UnboundSql(),
+        state_of=lambda _c: _running(_stamp(NOW - timedelta(minutes=3))),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _since: UNBOUND_LOG,
+        now=lambda: NOW,
+    )
+
+    assert watch.tick().module_line.startswith("Unbound loaded: Mentor in 9 places")
+
+
+def test_a_switch_edited_while_the_world_runs_shows_at_once_without_asking_again(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the sentence was kept for the run, so a Tuning card edit never showed."""
+    sql = _UnboundSql()
+    watch = _unbound_watch(tmp_path, sql)
+    assert watch.tick().module_line == GOOD_LINE
+    conf = tmp_path / "env/dist/etc/modules/mod_unbound.conf"
+    conf.write_text(CONF_OFF.replace("Unbound.ReagentFree = 0", "Unbound.ReagentFree = 1"))
+
+    line = watch.tick().module_line
+
+    assert "free reagents off (on at the next start)" in line
+    assert sql.tables_asked == 1, "the database was asked again for a settings edit"
+
+
+def test_a_settings_file_that_cannot_be_read_is_not_a_switch_that_is_off(tmp_path: Path) -> None:
+    """Codex adversarial: an unreadable conf read as off, so a running `on` became 'off next'."""
+    log = UNBOUND_LOG.replace("free reagents: off", "free reagents: on (stripped 3)")
+    conf = tmp_path / "env/dist/etc/modules/mod_unbound.conf"
+    watch = _unbound_watch(tmp_path, _UnboundSql(), log=log)
+    conf.write_bytes(b"\xff\xfe not utf-8")
+
+    line = watch.tick().module_line
+
+    assert "free reagents on (the settings file could not be read)" in line
+    assert "off at the next start" not in line
+
+
+def test_a_log_that_stays_unreadable_never_asks_the_database(tmp_path: Path) -> None:
+    """Codex adversarial: the tables were asked at every tick of a run with an unreadable log."""
+    sql = _UnboundSql()
+    old_run = _stamp(NOW - dashboard.SETTLED_AFTER - timedelta(minutes=1))  # ready without a log
+    watch = _unbound_watch(tmp_path, sql, runs=[old_run], log="")
+
+    lines = [watch.tick().module_line for _ in range(3)]
+
+    assert all(line.startswith("Unbound could not be checked:") for line in lines)
+    assert "log" in lines[0] and sql.tables_asked == 0
+
+
+FIRST_LOG_LINES = UNBOUND_LOG.replace("AzerothCore rev. 1 ready...\n", "")
+
+
+def test_a_first_start_with_an_empty_characters_table_reads_loaded_on_the_server_tab(
+    tmp_path: Path,
+) -> None:
+    """Cold review: no 'Character cleanup covers' line is printed there, and it was required."""
+    assert "Character cleanup" not in UNBOUND_LOG
+    assert _unbound_watch(tmp_path, _UnboundSql()).tick().module_line == GOOD_LINE
+
+
+def test_a_bad_reading_is_not_kept_while_ready_came_from_uptime_alone(tmp_path: Path) -> None:
+    """Cold review: past SETTLED_AFTER the header says ready with no 'ready...' line yet.
+
+    The module's own lines can still be on their way, so such a read is not kept for the run:
+    asked again after `HEALTH_RETRY_EVERY`, and the sentence heals when the log catches up.
+    """
+    sql = _UnboundSql()
+    box = [FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")]
+    clock = [NOW]
+    watch = _unbound_watch(tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=box, clock=clock)
+
+    early = watch.tick()
+    box[0] = UNBOUND_LOG
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
+    healed = watch.tick()
+
+    assert early.ready and early.module_line.startswith("Unbound could not be checked:")
+    assert healed.module_line == GOOD_LINE
+
+
+def test_a_log_that_no_longer_shows_the_start_is_could_not_be_checked_and_not_asked_every_tick(
+    tmp_path: Path,
+) -> None:
+    """Cold review: ten minutes up, neither the ready line nor a module line in the log (it was
+    rotated by size): not 'did not load' (a guess), and not a log read plus SQL on every tick."""
+    sql = _UnboundSql()
+    clock = [NOW]
+    watch = _unbound_watch(
+        tmp_path,
+        sql,
+        age=dashboard.SETTLED_AFTER * 2,
+        log="2026-10-08 INFO player Abc logged in\n",
+        clock=clock,
+    )
+
+    lines = [watch.tick().module_line for _ in range(4)]
+
+    assert lines[0] == (
+        "Unbound could not be checked: this run's world log has neither its ready line nor "
+        "Unbound's start-up lines"
+    )
+    assert "did not load" not in lines[0] and not any(ch.isdigit() for ch in lines[0])
+    assert lines == [lines[0]] * 4
+    assert sql.tables_asked == 1, "asked again on every tick"
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
+    watch.tick()
+    assert sql.tables_asked == 2, "never asked again"
+
+
+def test_a_bad_reading_is_kept_once_the_world_has_said_ready(tmp_path: Path) -> None:
+    """The world's own ready line is in the log: the module's state is fixed, ask once.
+
+    The clock moves past the replay window, so this proves the reading is KEPT for the run and
+    not merely replayed for a minute.
+    """
+    sql = _UnboundSql()
+    del sql.counts["unbound_milestones"]
+    clock = [NOW]
+    watch = _unbound_watch(tmp_path, sql, clock=clock)
+
+    first = watch.tick()
+    clock[0] = NOW + 3 * dashboard.HEALTH_RETRY_EVERY
+    second = watch.tick()
+
+    assert first.module_line == second.module_line
+    assert first.module_line.startswith("Unbound tables missing:")
+    assert sql.tables_asked == 1
+
+
+def test_a_world_that_said_ready_without_the_prereq_line_did_not_load_and_stays_so(
+    tmp_path: Path,
+) -> None:
+    """A real 'did not load': the ready line is there and a module line is not. It is kept for
+    the run, so no later tick reads the log or asks the database again."""
+    sql = _UnboundSql()
+    clock = [NOW]
+    log = UNBOUND_LOG.replace("[UNBOUND] Prereq map built.\n", "")
+    watch = _unbound_watch(tmp_path, sql, log=log, clock=clock)
+
+    first = watch.tick()
+    clock[0] = NOW + 3 * dashboard.HEALTH_RETRY_EVERY
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound did not load:")
+    assert '"[UNBOUND] Prereq map built."' in first.module_line
+    assert second.module_line == first.module_line
+    assert sql.tables_asked == 1
+
+
+def test_readiness_is_judged_from_the_log_that_the_reading_was_made_from(tmp_path: Path) -> None:
+    """Codex: a second log read for readiness let a later snapshot vouch for an earlier one.
+
+    The first read has no module lines and no ready line; a read made right after has both.
+    The bad reading came from the first, which says nothing about readiness, so it is not kept.
+    """
+    sql = _UnboundSql()
+    early = FIRST_LOG_LINES.replace("[UNBOUND] Prereq map built.\n", "")
+    clock = [NOW]
+    watch = _unbound_watch(
+        tmp_path, sql, age=dashboard.SETTLED_AFTER * 2, log_box=[early, UNBOUND_LOG], clock=clock
+    )
+
+    first = watch.tick()
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound could not be checked:")
+    assert second.module_line == GOOD_LINE
+
+
+# --- T576: a client that is not 3.3.5a, seen in the world server's log ----------------------
+
+WRONG_CLIENT_LINE = (
+    "2026-10-08 04:29:18 WorldSocket::HandleAuthSession: Client 172.19.0.1 requested "
+    "connecting with realm id 2197369053 but this realm has id 1 set in config.\n"
+)
+
+
+def _client_watch(
+    tmp_path: Path,
+    run: str,
+    log: Callable[[str, str], str],
+    clock: list[datetime],
+    entry: catalog_module.CatalogEntry = WOTLK,
+) -> dashboard.Dashboard:
+    return dashboard.Dashboard(
+        entry.container_spec(),
+        entry,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=lambda _c: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: BANNER,
+        login_log_of=log,
+        now=lambda: clock[0],
+    )
+
+
+def test_a_world_log_that_refuses_a_foreign_realm_id_tells_the_player_the_client_is_not_3_3_5a(
+    tmp_path: Path,
+) -> None:
+    """The world server drops a non-3.3.5a client after the password; the tab says why."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: WRONG_CLIENT_LINE, [NOW])
+
+    verdict = watch.tick()
+
+    assert "3.3.5a" in verdict.warning and "12340" in verdict.warning
+    assert "not" in verdict.warning
+    assert verdict.warning in dashboard.line(verdict)
+
+
+def test_a_log_without_that_line_adds_no_warning(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: "ready...\nsome other line\n", [NOW])
+
+    assert watch.tick().warning == ""
+
+
+def test_a_server_that_names_no_client_build_never_reads_the_log_for_it(tmp_path: Path) -> None:
+    """Data-driven: the catalog's `required_build`, not a game id, decides."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"required_build": None})}
+    )
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, [NOW], entry
+    )
+
+    assert watch.tick().warning == ""
+    assert asked == []
+
+
+def test_the_log_is_read_for_it_once_a_minute_and_only_what_is_new(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", clock)
+
+    for seconds in (0, 10, 20, 59):
+        clock[0] = NOW + timedelta(seconds=seconds)
+        watch.tick()
+    assert asked == [run]
+    clock[0] = NOW + timedelta(seconds=61)
+    watch.tick()
+
+    assert len(asked) == 2
+    assert asked[1] != run
+    assert (
+        asked[1] == "72s"
+    ), "how long ago (61 s + the overlap, rounded up), not a wall-clock stamp"
+
+
+def test_a_clock_that_goes_backwards_reads_the_run_again_and_ages_the_sentence_from_then(
+    tmp_path: Path,
+) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    asked: list[str] = []
+    clock = [NOW]
+    watch = _client_watch(
+        tmp_path, run, lambda _c, since: asked.append(since) or WRONG_CLIENT_LINE, clock
+    )
+    assert watch.tick().warning
+
+    clock[0] = NOW - timedelta(seconds=5)  # the machine's clock is set back
+    assert watch.tick().warning
+    assert asked == [run, run], "carried on from a read that is now in the future"
+    clock[0] = NOW - timedelta(seconds=5) + dashboard.WRONG_CLIENT_STAYS * 2
+    watch._login_log_of = lambda _c, _s: ""
+    assert watch.tick().warning == ""
+
+
+def test_the_warning_stays_a_while_after_the_line_and_then_goes(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    lines = [WRONG_CLIENT_LINE]
+    clock = [NOW]
+    watch = _client_watch(tmp_path, run, lambda _c, _s: lines.pop(0) if lines else "", clock)
+
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS - timedelta(seconds=1)
+    assert watch.tick().warning
+    clock[0] = NOW + dashboard.WRONG_CLIENT_STAYS + timedelta(seconds=1)
+    assert watch.tick().warning == ""
+
+
+def _realm_line(asked: int, set_in_config: int = 1) -> str:
+    return (
+        "WorldSocket::HandleAuthSession: Client 172.19.0.1 requested connecting with realm id "
+        f"{asked} but this realm has id {set_in_config} set in config.\n"
+    )
+
+
+@pytest.mark.parametrize("asked", [1, 2, 255])
+def test_a_plausible_realm_id_in_that_line_does_not_blame_the_client(
+    tmp_path: Path, asked: int
+) -> None:
+    """A correct client sends the realm list's id; a realm row that differs from the config's
+    RealmID (a hand edit, a second row) must not read as a wrong client."""
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked, 7), [NOW])
+
+    assert watch.tick().warning == ""
+
+
+@pytest.mark.parametrize("asked", [256, 298563881, 2197369053])
+def test_a_realm_id_no_realm_list_would_hold_blames_the_client(tmp_path: Path, asked: int) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    watch = _client_watch(tmp_path, run, lambda _c, _s: _realm_line(asked), [NOW])
+
+    assert "3.3.5a" in watch.tick().warning
+
+
+def test_a_plausible_line_does_not_hide_a_later_random_one(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=3))
+    text = _realm_line(1, 7) + _realm_line(941848916)
+    watch = _client_watch(tmp_path, run, lambda _c, _s: text, [NOW])
+
+    assert watch.tick().warning
+
+
+def test_the_first_read_of_a_long_running_server_covers_only_the_sentences_lifetime(
+    tmp_path: Path,
+) -> None:
+    """An old refused login in a days-old log must not read as fresh, nor a huge log be read."""
+    run = _stamp(NOW - timedelta(days=3))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [f"{int(dashboard.WRONG_CLIENT_STAYS.total_seconds())}s"]
+
+
+def test_the_first_read_of_a_young_run_starts_at_the_run(tmp_path: Path) -> None:
+    run = _stamp(NOW - timedelta(minutes=14))
+    asked: list[str] = []
+    watch = _client_watch(tmp_path, run, lambda _c, since: asked.append(since) or "", [NOW])
+
+    watch.tick()
+
+    assert asked == [run]
+
+
+def test_unbound_says_both_the_wrong_client_and_whether_it_loaded(tmp_path: Path) -> None:
+    """T576 and T555 on one entry: the warning and the module line are both in the tab's line."""
+    server = _install(tmp_path)
+    conf = server / "env/dist/etc/modules/mod_unbound.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(CONF_OFF, encoding="utf-8")
+    watch = dashboard.Dashboard(
+        UNBOUND.container_spec(),
+        UNBOUND,
+        server,
+        sql=_UnboundSql(),
+        state_of=lambda _c: _running(_stamp(NOW - timedelta(minutes=3))),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _c, _s: UNBOUND_LOG,
+        login_log_of=lambda _c, _s: WRONG_CLIENT_LINE,
+        now=lambda: NOW,
+    )
+
+    verdict = watch.tick()
+    text = dashboard.line(verdict)
+
+    assert verdict.module_line == GOOD_LINE
+    assert "not 3.3.5a (build 12340)" in verdict.warning
+    assert verdict.warning in text and GOOD_LINE in text
+    assert text.index(verdict.warning) < text.index(GOOD_LINE), "the warning comes first"
+
+
+def test_a_replayed_reading_belongs_to_its_own_run(tmp_path: Path) -> None:
+    """A world that restarts inside the replay window is asked about afresh, not told the
+    sentence of the run before."""
+    sql = _UnboundSql()
+    old, new = _stamp(NOW - dashboard.SETTLED_AFTER * 2), _stamp(NOW - timedelta(minutes=3))
+    box = ["2026-10-08 INFO player Abc logged in\n", UNBOUND_LOG]
+    watch = _unbound_watch(tmp_path, sql, runs=[old, new], log_box=box)
+
+    first = watch.tick()
+    second = watch.tick()
+
+    assert first.module_line.startswith("Unbound could not be checked:")
+    assert second.module_line == GOOD_LINE
+
+
+def test_a_clock_that_goes_backwards_does_not_hold_a_replayed_reading(tmp_path: Path) -> None:
+    sql = _UnboundSql()
+    clock = [NOW]
+    watch = _unbound_watch(
+        tmp_path,
+        sql,
+        age=dashboard.SETTLED_AFTER * 2,
+        log="2026-10-08 INFO player Abc logged in\n",
+        clock=clock,
+    )
+
+    watch.tick()
+    clock[0] = NOW - timedelta(seconds=5)
+    watch.tick()
+
+    assert sql.tables_asked == 2, "a reading stamped in the future was replayed"

@@ -430,11 +430,68 @@ def _run(
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
             raise DockerRefusal(problem)
-        said = f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
+        refusal = _port_refusal(proc.stderr)
+        if refusal is not None:
+            # The sentence is Yu'lon's; the daemon's own text rides beside it as the detail,
+            # because the channel's rollback reads WHICH port from it (`blames_the_host_port`).
+            raise DockerRefusal(refusal, detail=proc.stderr.strip())
+        headline = _daemon_lines(proc.stderr) if argv[:1] == ["compose"] else ""
+        if headline:
+            # Compose's pull and create progress is dropped from the sentence, not
+            # from the record: whatever else it printed stays in the log.
+            logger.info(f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
+        said = (
+            f"docker {' '.join(argv)} exited {proc.returncode}: {headline or proc.stderr.strip()}"
+        )
         if timeout is not None and runner.timed_out(proc):
             raise DockerTimedOutError(said)
         raise DockerCommandError(said)
     return proc
+
+
+_DAEMON_LINE = re.compile(r"^[ \t]*(Error response from daemon:.*?)[ \t]*$", re.MULTILINE)
+_PORT_NOT_AVAILABLE = re.compile(
+    r"ports are not available: exposing port TCP \S*?:(\d+) -> \S+: listen tcp\d*"
+    r" \S+: bind: (?P<why>[^\r\n]*)"
+)
+
+
+def _daemon_lines(stderr: str) -> str:
+    """The daemon's own `Error response from daemon:` lines in compose's output, else "" (T574).
+
+    `docker compose up` prints its pull and create progress first and the reason
+    it failed last, so the head of stderr names an image layer, not the
+    failure. Several lines are joined; the same line twice is kept once. Only
+    a compose command's headline is cut down to these lines (see `_run()`).
+    """
+    found: list[str] = []
+    for match in _DAEMON_LINE.finditer(stderr):
+        if match.group(1) not in found:
+            found.append(match.group(1))
+    return " / ".join(found)
+
+
+def _port_refusal(stderr: str) -> str | None:
+    """The plain sentence for the daemon's `ports are not available` error, or None (T574).
+
+    The preflight bind check covers a port blocked when the install starts; this
+    covers one that became blocked afterwards (a range Windows reserved at the
+    next boot). Only the daemon's own wording is read, so no host is asked:
+    Windows' "forbidden by its access permissions" (WSAEACCES) and a Linux
+    "permission denied" are `reserved`, everything else the bind said is `in_use`.
+    A message without the port number in the shape Docker prints it is left alone.
+    """
+    for line in _daemon_lines(stderr).split(" / "):
+        match = _PORT_NOT_AVAILABLE.search(line)
+        if match is None:
+            continue
+        why = match.group("why").lower()
+        windows = "forbidden by its access permissions" in why
+        kind: Literal["reserved", "in_use"] = (
+            "reserved" if windows or "permission denied" in why else "in_use"
+        )
+        return blocked_port_sentence(int(match.group(1)), kind, windows=windows)
+    return None
 
 
 def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
@@ -3534,6 +3591,23 @@ The command saves every player on the world thread before it answers; the answer
 itself is not needed, only that it was typed. A window too short for it reads as
 an unprompted reply and changes nothing: the queue looks that follow see the saves."""
 
+_SAVE_COMMAND_STALLED_WINDOW_SECONDS = 30.0
+"""The ceiling for `saveall` on a console that says when it has answered (T561).
+
+Measured on Tortoise with 500 bots (2026-10-08): `saveall` answers in 0.07-0.33 s, but in the first
+minutes after a start the world thread stalls: answers took up to 18.3 s through Yu'lon's console
+(p95 10.95 s, max 14.14 s in the first probe) and a world-thread stall of 21.8 s was measured
+elsewhere, so 10 s missed the answer and the stop warned that characters might be missing. 30 s
+leaves room above the longest of those. Only for a console whose prompt follows its answer
+(`SaveFirst.prompt_precedes_answer` False): the wait then ends at the answer line and prompt, so
+this costs a normal stop nothing. A readline console (Centurion) sleeps its whole window, so it
+keeps the 10 s."""
+
+_SAVE_ANSWER = "All players saved."
+"""What `saveall` prints when it is done (`ObjectAccessor::SaveAllPlayers()`, read from a Tortoise
+world's log, 2026-10-08). A console that prompts after its answer ends the wait for `saveall` at
+this line followed by its prompt (T561); without the line the whole window is listened to."""
+
 _QUEUE_LOOK_WINDOW_SECONDS = 4.0
 """How long the console is listened to for one `server debug` answer (T410).
 
@@ -3800,7 +3874,11 @@ def _ask_the_channel(
 
 
 def _type_at_the_world(
-    spec: ContainerSpec, command: str, window: float, wsl_distro: str | None
+    spec: ContainerSpec,
+    command: str,
+    window: float,
+    wsl_distro: str | None,
+    answer_marker: str | None = None,
 ) -> Any | None:
     """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
 
@@ -3819,6 +3897,7 @@ def _type_at_the_world(
             window=window,
             prompt=save.prompt,
             prompt_precedes_answer=save.prompt_precedes_answer,
+            answer_marker=answer_marker,
         )
     except Exception as exc:  # noqa: BLE001 - every console failure means "not typed" here
         logger.warning(f"could not type {command!r} at {spec.world}'s console: {exc}")
@@ -3890,7 +3969,18 @@ def _save_everyone_first(
     for line in save.first:
         if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
             logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
-    reply = _type_at_the_world(spec, save.command, _SAVE_COMMAND_WINDOW_SECONDS, wsl_distro)
+    window = (
+        _SAVE_COMMAND_WINDOW_SECONDS
+        if save.prompt_precedes_answer
+        else _SAVE_COMMAND_STALLED_WINDOW_SECONDS
+    )
+    reply = _type_at_the_world(
+        spec,
+        save.command,
+        window,
+        wsl_distro,
+        answer_marker=None if save.prompt_precedes_answer else _SAVE_ANSWER,
+    )
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
         if not answered:
@@ -4663,7 +4753,12 @@ def started_at(container: str, *, wsl_distro: str | None = None) -> str:
 
 
 def _logs(
-    container: str, *, this_run_only: bool = False, since: str = "", wsl_distro: str | None = None
+    container: str,
+    *,
+    this_run_only: bool = False,
+    since: str = "",
+    until: str = "",
+    wsl_distro: str | None = None,
 ) -> str:
     """Return a container's logs, or `""` if they can't be read.
 
@@ -4679,8 +4774,9 @@ def _logs(
     it was mid-startup, and the stop that followed killed it there (exit 137).
 
     `this_run_only` scopes the read to the current run by asking when that run
-    started. `--tail` is not an alternative: the marker is printed once, so a
-    tail window either misses it or slides past it.
+    started; `until` ends it there (`docker logs --until`). `--tail` is not an
+    alternative: the marker is printed once, so a tail window either misses it or
+    slides past it.
     """
     argv = ["logs"]
     if this_run_only:
@@ -4689,6 +4785,9 @@ def _logs(
         since = since or started_at(container, wsl_distro=wsl_distro)
         if since:
             argv += ["--since", since]
+    if until:
+        # T581: a bounded read, for a marker printed early in a run that may be days long.
+        argv += ["--until", until]
     proc = _docker([*argv, container], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
@@ -5100,6 +5199,92 @@ def foreign_port_conflicts(
     if not conflicts:
         return []
     return [name for name in conflicts if container_project(name, wsl_distro=wsl_distro) != project]
+
+
+NETSH_RESERVED_RANGES = "netsh interface ipv4 show excludedportrange protocol=tcp"
+"""What shows the port ranges Windows has set aside (Hyper-V, WinNAT, Docker Desktop)."""
+
+
+def blocked_port_sentence(
+    port: int, kind: Literal["reserved", "in_use"], *, windows: bool, what: str = ""
+) -> str:
+    """Plain words for a host port that cannot be bound: the reason, then what to do (T574).
+
+    One sentence builder for the two places that learn it: the preflight bind
+    probe, before the build, and the daemon's own `ports are not available`
+    error from `up`, which covers a range reserved between the two (a reboot).
+    `kind` is a definite fact in both; a refused or timed-out connect is not.
+    """
+    named = f"port {port} ({what})" if what else f"port {port}"
+    if kind == "in_use":
+        return (
+            f"Another program on this computer already uses {named}, so the server cannot "
+            "start. Close that program or stop its service, then try again."
+        )
+    if windows:
+        return (
+            f"Windows has reserved {named}, so no program can use it and the server cannot "
+            f"start. To see the reserved ranges, run this in a Command Prompt: "
+            f"{NETSH_RESERVED_RANGES}. To free the port, open a Command Prompt as "
+            "administrator, run net stop winnat and then net start winnat, and try again. "
+            "A Windows service that holds the port for itself gives the same message; "
+            "stop that service if there is one."
+        )
+    return (
+        f"This computer will not let a program use {named} (permission denied), so the "
+        "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
+@dataclass(frozen=True)
+class PortHolders:
+    """Who publishes the host ports asked about, split by ownership (T574).
+
+    `ours`: ports published by a container of the asked-for compose project.
+    `foreign`: port -> the other containers publishing it (an unreadable owner
+    counts as foreign, for `foreign_port_conflicts()`'s reason).
+    """
+
+    ours: frozenset[int] = frozenset()
+    foreign: dict[int, tuple[str, ...]] = field(default_factory=dict)
+
+
+def port_holders(
+    ports: Sequence[int], project: str, *, wsl_distro: str | None = None
+) -> PortHolders:
+    """Which running containers publish any of `ports`, and which of them are `project`'s.
+
+    The bind probe's partner: a socket bind cannot tell a port our own database
+    holds (a resume, with `restart: unless-stopped` containers up) from a port a
+    stranger holds, so preflight asks this first and binds only the rest. Same
+    ownership proof as `foreign_port_conflicts()`: the compose project label.
+    Containers publishing none of `ports` are not asked about at all.
+    """
+    wanted = set(ports)
+    if not wanted:
+        return PortHolders()
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
+    ours: set[int] = set()
+    foreign: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_field = line.split("\t", 1)
+        published: set[int] = set()
+        for part in ports_field.split(","):
+            if "->" not in part:
+                continue
+            _, _, port_text = part.split("->", 1)[0].rpartition(":")
+            if port_text.strip().isdigit() and int(port_text) in wanted:
+                published.add(int(port_text))
+        if not published:
+            continue
+        if container_project(name, wsl_distro=wsl_distro) == project:
+            ours |= published
+        else:
+            for port in sorted(published):
+                foreign.setdefault(port, []).append(name)
+    return PortHolders(frozenset(ours), {port: tuple(names) for port, names in foreign.items()})
 
 
 def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:

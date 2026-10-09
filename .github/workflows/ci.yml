@@ -146,6 +146,34 @@ jobs:
       - name: pytest (tests)
         run: python -m pytest -q -m "not integration" -n auto
 
+  # The Discord notifier (.github/scripts) lives outside pylauncher/, so the job
+  # above never sees it. Linux only: it is a stdlib script run by GitHub Actions
+  # on ubuntu-latest. `anthropic` and `pyyaml` are what its tests import; the
+  # first is pinned to the version the discord-*.yml workflows install.
+  discord-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `defaults.run.working-directory` above is pylauncher; each step here
+      # names its own.
+      - run: pip install "pytest>=8.3" "black>=24.8" "ruff>=0.6" pyyaml anthropic==1.12.1
+        working-directory: .github/scripts
+
+      - run: python -m ruff check .
+        working-directory: .github/scripts
+
+      - run: python -m black --check .
+        working-directory: .github/scripts
+
+      - run: python -m pytest -q
+        working-directory: .github/scripts
+
   # The live-Docker suite, on its own runner so it blocks nothing else.
   integration:
     runs-on: ubuntu-latest

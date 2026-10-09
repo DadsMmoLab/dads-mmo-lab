@@ -22,6 +22,7 @@ import json
 import math
 import re
 import sys
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -597,6 +598,15 @@ class Manifest(_Strict):
     sql: tuple[SqlStep, ...] = ()
     conf: tuple[ConfFile, ...] = ()
     deploy: tuple[Deploy, ...] = ()
+    folders: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Empty folders, relative to the server dir, the install makes when they are not "
+            "there: a place the module reads that the player fills (mod-ale's lua_scripts). "
+            "Files already in one are never touched; a Remove takes back a folder that is "
+            "still empty and leaves one that holds anything, and says so."
+        ),
+    )
     patches: tuple[Patch, ...] = ()
     client: tuple[ClientFile, ...] = ()
     server_dbc: tuple[ServerDbc, ...] = ()
@@ -605,6 +615,29 @@ class Manifest(_Strict):
     notes: tuple[str, ...] = Field(
         default=(), description="Tacit knowledge worth showing a human; not machine-read."
     )
+
+    @field_validator("folders")
+    @classmethod
+    def _folders_stay_inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """A folder is a relative POSIX path below the server dir, nothing else.
+
+        The install `mkdir`s it and Remove `rmdir`s it, so a path that climbs out
+        (`..`), starts at a root (`/etc`, `C:/x`) or spells a Windows separator is
+        refused when the manifest loads, before either can run.
+        """
+        for folder in value:
+            path = PurePosixPath(folder)
+            if (
+                not path.parts
+                or "\\" in folder
+                or ":" in folder
+                or path.is_absolute()
+                or ".." in path.parts
+            ):
+                raise ValueError(
+                    f"folders: {folder!r} must be a relative POSIX path inside the server dir"
+                )
+        return value
 
     @property
     def _copied_from_a_folder(self) -> bool:

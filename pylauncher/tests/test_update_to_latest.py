@@ -172,14 +172,20 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 11, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 10
+    assert len(every) == 15, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 13
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
     }
     assert moving == {
         "wow-wotlk": ("mod-playerbots/azerothcore-wotlk", "mod-playerbots/mod-playerbots"),
+        "wow-unbound": (
+            "mod-playerbots/azerothcore-wotlk",
+            "mod-playerbots/mod-playerbots",
+            "azerothcore/mod-ale",
+            "DadsMmoLab/dads-mmo-lab",
+        ),
         "wow-tbc": ("cmangos/mangos-tbc", "cmangos/playerbots"),
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
@@ -232,7 +238,14 @@ def test_only_wotlk_has_a_server_source_inside_a_folder_the_modules_tab_lists() 
         for dest in native.server_update_dests(entry)
         if dest.parent in folders
     }
-    assert listed == {("wow-wotlk", "modules/mod-playerbots")}, listed
+    # WoW Unbound (T554) is WotLK's sources plus mod-ale and its own branch: the Modules tab
+    # shows both as part of the server, and never as a module to add or remove.
+    assert listed == {
+        ("wow-wotlk", "modules/mod-playerbots"),
+        ("wow-unbound", "modules/mod-playerbots"),
+        ("wow-unbound", "modules/mod-ale"),
+        ("wow-unbound", "modules/mod-unbound"),
+    }, listed
 
 
 def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id() -> None:
@@ -249,6 +262,7 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
 
     assert {entry.id: entry.install.native.update_to_latest for entry in load_catalog().games} == {
         "wow-wotlk": True,
+        "wow-unbound": True,
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
@@ -1705,6 +1719,69 @@ def test_a_source_that_was_updated_and_returned_is_still_updatable_over_two_graf
 
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
     assert [real.head_sha(dest) for dest in dests] == [pin, pin], "the way back was refused"
+
+
+def test_the_return_reaches_a_tested_pin_that_moved_past_the_install(tmp_path: Path) -> None:
+    """T588: "Return to the tested pin…" moves a checkout FORWARD onto a pin that moved.
+
+    The Discord install: cloned (depth 1) at the pin of its day, never updated;
+    the catalog's pin then moved to a commit upstream made later, with the tip
+    further on still. The guard (`_refuse_unless_updatable()`: origin, edits,
+    `no_local_commits()` after its own fetch) must let it through, and the
+    pinned move (`_update_lines()` with no reset, `_pin_lines()`) must land on
+    the new pin, not on the tip and not where it was. Real git on both sides.
+
+    A characterization, not a RED: it passed before T588's code, which changes
+    only the OFFER (`native.source_version()`), never the press. It is here to
+    prove the press T588 now offers can do what the offer says.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    origin = tmp_path / "origin" / "src" / "mangos-tbc"
+    origin.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main", "."], origin)
+    _git(["config", "user.email", "t@example.invalid"], origin)
+    _git(["config", "user.name", "T"], origin)
+    lay_patch_sources(TBC)(origin)
+
+    def commit(text: str) -> str:
+        (origin / "README").write_text(f"{text}\n", encoding="utf-8", newline="\n")
+        _git(["add", "-A"], origin)
+        _git(["commit", "-qm", text], origin)
+        return _sha(origin)
+
+    old_pin = commit("the pin the install was made at")
+    rec, server_dir, _ = _tbc(tmp_path)
+    installed, entry = _real_git_tbc(rec, server_dir, origin, old_pin)
+    moving = [source for source in entry.emulator.sources if not native.held_at_its_pin(source)]
+    dests = [server_dir / source.dest for source in moving]
+    for dest in dests:
+        if dest.exists():
+            rmtree.remove_tree(dest)
+    for source, dest in zip(moving, dests, strict=True):
+        installed._seams.clone(
+            git.CloneSpec(
+                url=source.url,
+                dest=dest,
+                branch=source.branch,
+                sparse_path=source.sparse_path,
+                depth=source.depth,
+                rev=source.rev,
+            )
+        )
+    real = git.RunnerGit()
+    assert [real.head_sha(dest) for dest in dests] == [old_pin, old_pin]
+    rec.clones.clear()
+
+    new_pin = commit("the pin this version of Yu'lon is tested with")
+    tip = commit("upstream moved on again")
+    moved, _ = _real_git_tbc(rec, server_dir, origin, new_pin)
+
+    list(moved.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+
+    assert [spec.rev for spec in rec.clones] == [new_pin, new_pin]
+    assert [real.head_sha(dest) for dest in dests] == [new_pin, new_pin], "not on the new pin"
+    assert tip not in (new_pin, old_pin)
 
 
 def test_the_two_transports_parse_one_status_the_same_way() -> None:

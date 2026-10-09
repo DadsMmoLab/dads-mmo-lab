@@ -349,6 +349,63 @@ def test_wotlk_conf_default_is_the_dist_sibling_byte_for_byte_and_asks_no_docker
     assert {file: text.encode("utf-8") for file, text in texts.items()} == defaults
 
 
+def _bytes_under(folder: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
+def _link_folder_out(server: Path, tmp_path: Path) -> Path:
+    """Move `env/dist/etc` outside the server folder and leave a link in its place."""
+    etc = server / "env/dist/etc"
+    outside = tmp_path / "somebody-elses-etc"
+    etc.rename(outside)
+    try:
+        etc.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    return outside
+
+
+def test_reset_to_default_will_not_back_up_or_write_through_a_linked_parent_folder(
+    tmp_path: Path,
+) -> None:
+    """T573 (Codex): `tuning.backup()` without a root trusted the file's own folder.
+
+    Mutation: drop the `check_inside` before the backup and the outside folder gets a `.bak`
+    and the reset text.
+    """
+    server = tmp_path / "server"
+    _dist_install(server)
+    outside = _link_folder_out(server, tmp_path)
+    before = _bytes_under(outside)
+
+    report = reset_defaults.reset(
+        WOTLK, server, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
+    )
+
+    assert _bytes_under(outside) == before
+    assert not any(item.outcome == "reset" for item in report.results)
+    assert "outside the server folder" in "\n".join(report.lines())
+
+
+def test_undo_will_not_back_up_or_write_through_a_linked_parent_folder(tmp_path: Path) -> None:
+    """T573 (Codex). Mutation: drop the `check_inside` in `undo` and it writes through the link."""
+    server = tmp_path / "server"
+    _dist_install(server)
+    report = reset_defaults.reset(
+        WOTLK, server, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
+    )
+    assert report.written
+    outside = _link_folder_out(server, tmp_path)
+    before = _bytes_under(outside)
+
+    undone = reset_defaults.undo(server, report.written)
+
+    assert _bytes_under(outside) == before
+    assert undone.results
+    assert all(item.outcome == "refused" for item in undone.results)
+    assert "outside the server folder" in "\n".join(undone.lines())
+
+
 def test_a_missing_dist_is_a_reason_naming_it(tmp_path: Path) -> None:
     _dist_install(tmp_path)
     (tmp_path / "env/dist/etc/authserver.conf.dist").unlink()

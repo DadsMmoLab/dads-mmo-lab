@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -1893,3 +1894,104 @@ def test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone(tmp_path: P
     # And a folder that exists is still not gone.
     (tmp_path / "real").mkdir()
     assert not platform.folder_is_gone(tmp_path / "real")
+
+
+# --- T574: bind_tcp tells a reserved port from a taken one --------------------------
+
+
+def _wsa(code: int) -> OSError:
+    """An OSError the way Windows raises one: errno set from, and winerror holding, the WSA code."""
+    error = OSError(code, "socket error")
+    error.winerror = code  # type: ignore[attr-defined]
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error", "windows", "want"),
+    [
+        (_wsa(10013), True, "reserved"),  # WSAEACCES: the excluded range / exclusive owner
+        (_wsa(10048), True, "in_use"),  # WSAEADDRINUSE
+        (OSError(errno.EADDRINUSE, "Address already in use"), False, "in_use"),
+        # A permission error off Windows says nothing about what the daemon will be allowed.
+        (OSError(13, "Permission denied"), False, "unknown"),
+        (OSError(99, "Cannot assign requested address"), False, "unknown"),
+        (_wsa(10049), True, "unknown"),
+    ],
+)
+def test_classify_bind_error(error: OSError, windows: bool, want: str) -> None:
+    assert platform.classify_bind_error(error, windows=windows) == want
+
+
+def test_bind_tcp_sees_a_free_port_and_a_taken_one() -> None:
+    import socket
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        taken = holder.getsockname()[1]
+        got = platform.bind_tcp("127.0.0.1", taken)
+        assert got.status == "in_use", got
+    finally:
+        holder.close()
+    # Free again once the holder closed (the probe must not itself leave it bound).
+    again = platform.bind_tcp("127.0.0.1", taken)
+    assert again.status == "free", again
+    assert platform.bind_tcp("127.0.0.1", taken).status == "free"
+
+
+def test_bind_tcp_reports_what_the_socket_raised() -> None:
+    class Refusing:
+        def setsockopt(self, *_a: object) -> None: ...
+
+        def bind(self, _addr: object) -> None:
+            raise _wsa(10013)
+
+        def close(self) -> None: ...
+
+    got = platform.bind_tcp("127.0.0.1", 3306, make_socket=lambda *_a: Refusing(), windows=True)
+    assert (got.host, got.port, got.status) == ("127.0.0.1", 3306, "reserved")
+    assert "10013" in got.detail
+
+
+@pytest.mark.parametrize(("windows", "sets_reuse"), [(True, False), (False, True)])
+def test_bind_tcp_asks_for_address_reuse_everywhere_but_windows(
+    windows: bool, sets_reuse: bool
+) -> None:
+    """On Windows SO_REUSEADDR means "share it with its owner", which hides a taken port."""
+    import socket
+
+    options: list[tuple[object, ...]] = []
+
+    class Quiet:
+        def setsockopt(self, *args: object) -> None:
+            options.append(args)
+
+        def bind(self, _addr: object) -> None: ...
+
+        def close(self) -> None: ...
+
+    got = platform.bind_tcp("127.0.0.1", 3306, make_socket=lambda *_a: Quiet(), windows=windows)
+    assert got.status == "free"
+    assert bool(options) is sets_reuse
+    if sets_reuse:
+        assert options == [(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_bind_tcp_always_lets_the_probe_socket_go(raises: bool) -> None:
+    """A probe that kept the port bound would be the next thing to hold it."""
+    closed: list[bool] = []
+
+    class Probe:
+        def setsockopt(self, *_a: object) -> None: ...
+
+        def bind(self, _addr: object) -> None:
+            if raises:
+                raise _wsa(10013)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    platform.bind_tcp("127.0.0.1", 3306, make_socket=lambda *_a: Probe(), windows=True)
+    assert closed == [True]

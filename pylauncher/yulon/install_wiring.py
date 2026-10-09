@@ -30,7 +30,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from yulon import docker, module_moves, platform, wsl
+from yulon import docker, module_moves, platform, server_build_presses, wsl
 from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import upstream
 
@@ -51,6 +51,7 @@ from yulon.catalog.installer import (
 )
 from yulon.catalog.native import (
     WSL_DISTRO_STOPPED_NOTE,
+    CatalogPin,
     ComposeRepairRoute,
     ConfCheck,
     ConfRepairRoute,
@@ -61,13 +62,18 @@ from yulon.catalog.native import (
     Seams,
     SourceVersion,
     StagedInstaller,
+    core_off_its_moved_pin_note,
     correction_phases,
+    module_order_note,
+    moved_pin_confirmation,
+    moved_pins,
     parked_build_note,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
     source_version,
     sources_still_off,
+    tested_pins,
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
@@ -437,6 +443,7 @@ def with_module_moves(
     cancel: threading.Event | None,
     put_back: ModulePutBack | None,
     kept_settles: bool = True,
+    note: ModuleNote | None = None,
 ) -> Iterator[str]:
     """A build press's lines, passed through, with the module-update record kept true (T557).
 
@@ -460,6 +467,10 @@ def with_module_moves(
     `put_back` None is the server's "Update to latest" route (T64): a module
     that fails there fails against a core that just moved, and that route puts
     the core back, so it only settles.
+
+    `note` (T586) is asked, after any put-back, for one more sentence about the
+    modules the errors named -- which press builds them, and in which order --
+    on the same failures the put-back runs on; nothing when no module was named.
     """
     scanner = module_moves.BuildErrorScanner()
     try:
@@ -472,21 +483,65 @@ def with_module_moves(
         raise
     except InstallerError as exc:
         stopped = isinstance(exc, StopSaid) or (cancel is not None and cancel.is_set())
-        if stopped or isinstance(exc, TrueAfterStop) or put_back is None:
+        if stopped or isinstance(exc, TrueAfterStop):
             raise
-        try:
-            said = put_back(scanner.named)
-        except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
-            logger.warning(f"could not put the named modules back after a failed build: {failure}")
-            said = ""
-        if said:
-            exc.args = (f"{exc} {said}",)
+        said = ""
+        if put_back is not None:
+            try:
+                said = put_back(scanner.named)
+            except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
+                logger.warning(
+                    f"could not put the named modules back after a failed build: {failure}"
+                )
+                said = ""
+        noted = ""
+        if note is not None and scanner.named:
+            try:
+                noted = note(scanner.named)
+            except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
+                logger.warning(f"could not say what the failed module needs: {failure}")
+        tail = " ".join(part for part in (said, noted) if part)
+        if tail:
+            exc.args = (f"{exc} {tail}",)
         raise
     finally:
         close = getattr(lines, "close", None)
         if close is not None:
             close()
     _settle(server_dir)
+
+
+ModuleNote = Callable[[tuple[str, ...]], str]
+"""What a failed build's named modules need next, as one sentence or `""` (T586)."""
+
+
+def _catalog_pins(
+    entry: CatalogEntry, server_dir: Path, wsl_distro: str | None
+) -> tuple[CatalogPin, ...]:
+    """The catalog's pins for the sources an update moves, with each checkout's HEAD (T588).
+
+    `()` where the entry has no "Update the server to latest…" (so no return
+    press either), or where reading the folder would boot a stopped distro.
+    """
+    block = entry.install.native
+    if block is None or not block.update_to_latest:
+        return ()
+    if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
+        return ()
+    return tested_pins(server_dir, installer_for(entry).sources_that_move())
+
+
+def _core_note(entry: CatalogEntry, server_dir: Path, wsl_distro: str | None) -> ModuleNote:
+    """A Rebuild's T586 note: the modules failed while the server is off a pin that moved."""
+
+    def note(named: tuple[str, ...]) -> str:
+        pins = _catalog_pins(entry, server_dir, wsl_distro)
+        if not pins:
+            return ""
+        moved = moved_pins(read_state(server_dir, valid=()), pins)
+        return core_off_its_moved_pin_note(moved, named) if moved else ""
+
+    return note
 
 
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]
@@ -541,6 +596,7 @@ def rebuild_for_app(
             server_dir,
             cancel=cancel,
             put_back=put_back,
+            note=_core_note(entry, server_dir, wsl_distro),
         )
 
     return rebuild
@@ -701,6 +757,7 @@ def update_to_latest_for_app(
                 cancel=cancel,
                 put_back=None,
                 kept_settles=False,
+                note=partial(module_order_note, press=server_build_presses.UPDATE_TO_LATEST),
             )
         except RewrittenHistory as exc:
             met[exc.repo] = exc.line
@@ -714,12 +771,29 @@ def update_to_latest_for_app(
             cancel=cancel,
             put_back=None,
             kept_settles=False,
+            note=partial(module_order_note, press=server_build_presses.RETURN_TO_PIN),
         )
+
+    def pins() -> tuple[CatalogPin, ...]:
+        # T588: `.git/HEAD` per moving source, no git run, from `moving` as read
+        # when the route was built. Only ever asked after the distro check.
+        return tested_pins(server_dir, moving)
 
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
-        return source_version(read_state(server_dir, valid=()), sources_still_off(server_dir))
+        return source_version(
+            read_state(server_dir, valid=()), sources_still_off(server_dir), pins()
+        )
+
+    def pin_confirmation() -> str:
+        # T588: the question names the move the version line offered, from the same
+        # two readings; a folder this must not read gets the question it always had.
+        if _in_the_distro(server_dir, wsl_distro) and not _distro_down(wsl_distro):
+            moved = moved_pins(read_state(server_dir, valid=()), pins())
+            if moved:
+                return moved_pin_confirmation(entry, server_dir, moved)
+        return return_to_pin_confirmation(entry, server_dir, repo)
 
     def news() -> upstream.UpstreamNews:
         # T124. Built per call like the presses: it is asked off the GUI thread
@@ -736,7 +810,7 @@ def update_to_latest_for_app(
     return LatestRoute(
         confirmation=confirmation,
         press=press,
-        pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
+        pin_confirmation=pin_confirmation,
         to_pin=to_pin,
         source_version=version,
         upstream_news=news,

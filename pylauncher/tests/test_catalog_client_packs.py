@@ -173,17 +173,29 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
     assert client.hosts() == frozenset()
 
 
-def test_the_shipped_catalog_uses_the_new_fields_on_centurion_alone() -> None:
+def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone() -> None:
     """Groundwork for T179: Centurion is the first entry with a ready-to-play client section,
-    and every other entry behaves exactly as before (its own tests: test_catalog_centurion)."""
+    WoW Unbound (T555) the second; every other entry behaves exactly as before (its own tests:
+    test_catalog_centurion, test_unbound_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
-        if entry["id"] != "wow-centurion":
-            assert set(entry["client"]) <= {"version", "build", "realmlist_file", "notes"}
+        if entry["id"] not in ("wow-centurion", "wow-unbound"):
+            assert set(entry["client"]) <= {
+                "version",
+                "build",
+                "required_build",
+                "realmlist_file",
+                "notes",
+            }
     for game in load_catalog().games:
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
             assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+            continue
+        if game.id == "wow-unbound":
+            assert game.client.packs and game.client.config_wtf
+            assert game.client.exe_patch is None
+            assert game.client.hosts() == frozenset()
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None

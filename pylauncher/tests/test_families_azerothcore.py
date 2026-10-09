@@ -295,6 +295,10 @@ def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
         bind_mount_ok=lambda server_dir: True,
         port_conflicts=lambda: [],
         compose_ready=lambda: True,
+        # T574: the same class of reach, twice more -- which containers hold the
+        # ports (`docker ps`) and a real bind of each port the entry publishes.
+        port_holders=lambda ports: docker.PortHolders(),
+        bind_port=lambda host, port: platform.PortBind(host, port, "free", ""),
     )
 
     # Both consumers, one patch, one answer each.

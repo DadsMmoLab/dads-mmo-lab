@@ -1,0 +1,32 @@
+diff --git a/src/server/game/Handlers/PetHandler.cpp b/src/server/game/Handlers/PetHandler.cpp
+--- a/src/server/game/Handlers/PetHandler.cpp
++++ b/src/server/game/Handlers/PetHandler.cpp
+@@ -108,6 +108,12 @@
+             // xinef: allow to dissmis dead pets
+             if ((*itr)->GetEntry() == pet->GetEntry() && ((*itr)->IsAlive() || (flag == ACT_COMMAND && spellId == COMMAND_ABANDON)))
+                 controlled.push_back(*itr);
++            // Unbound multiclass: follow/stay/attack and reaction changes drive EVERY
++            // controllable guardian (module side summons, spirit wolves), not only
++            // same-entry summons - one pet bar commands the whole menagerie.
++            else if ((*itr)->IsAlive() && (*itr)->HasUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN) &&
++                     (flag == ACT_REACTION || (flag == ACT_COMMAND && spellId != COMMAND_ABANDON)))
++                controlled.push_back(*itr);
+             // xinef: mirror image blizzard
+             else if ((*itr)->GetEntry() == NPC_MIRROR_IMAGE && flag == ACT_COMMAND && spellId == COMMAND_FOLLOW)
+             {
+@@ -145,6 +151,15 @@
+
+     pet->AttackStop();
+     pet->ClearInPetCombat();
++
++    // Unbound multiclass: the stop-attack button stops every controllable
++    // guardian along with the main pet.
++    for (Unit* minion : GetPlayer()->m_Controlled)
++        if (minion != pet && minion->IsAlive() && minion->HasUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN))
++        {
++            minion->AttackStop();
++            minion->ClearInPetCombat();
++        }
+ }
+
+ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spellId, uint16 flag, ObjectGuid guid2)

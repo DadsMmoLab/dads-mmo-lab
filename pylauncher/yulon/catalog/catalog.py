@@ -301,6 +301,36 @@ class SqlCheck(_Strict):
         return f"SELECT COUNT(*) FROM `{schema}`.`{self.table}`{where};"
 
 
+class ModuleHealth(_Strict):
+    """What the Server tab checks to say a module loaded, once per run (T555 T5).
+
+    Data, not a rule about one entry's id: the module's name for the sentence, the lines its
+    own code prints to the world log when it loads (`log_markers`), and which of the entry's
+    `sql_checks` counts the thing the player can see stand somewhere (`count_table`, said as
+    `<count_label> in N places`). The tables and counts are `AzerothCoreData.sql_checks`.
+    """
+
+    name: str = Field(min_length=1, description="The module as the sentence names it.")
+    log_markers: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Lines the module prints to the world's log at EVERY start (not only when some "
+            "table has rows), matched as text."
+        ),
+    )
+    count_label: str = Field(default="", description="What `count_table` counts: `Mentor`.")
+    count_table: str = Field(
+        default="",
+        description="The `sql_checks` table whose count is said as `<label> in N places`.",
+    )
+
+    @model_validator(mode="after")
+    def _a_count_has_both_halves(self) -> ModuleHealth:
+        if bool(self.count_label) != bool(self.count_table):
+            raise ValueError("health count_label and count_table are given together or not at all")
+        return self
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
@@ -322,6 +352,11 @@ class AzerothCoreData(_Strict):
         description="Read-only counts the databases must reach after the import (T553).",
     )
 
+    health: ModuleHealth | None = Field(
+        default=None,
+        description='The Server tab\'s "module loaded" sentence for this entry (T555 T5).',
+    )
+
     confs_from_dist: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -334,6 +369,17 @@ class AzerothCoreData(_Strict):
             "for such a module stay in `world_env`, which wins over the file."
         ),
     )
+
+    @model_validator(mode="after")
+    def _a_counted_table_is_a_checked_one(self) -> AzerothCoreData:
+        health = self.health
+        if health is not None and health.count_table:
+            if health.count_table not in {check.table for check in self.sql_checks}:
+                raise ValueError(
+                    f"health count_table {health.count_table!r} is not a table of this "
+                    "entry's sql_checks, so it could not be counted"
+                )
+        return self
 
     @field_validator("confs_from_dist")
     @classmethod
@@ -2029,6 +2075,16 @@ class Realmlist(_Strict):
         default="localAddress", description="None for cores whose realmlist has no LAN column."
     )
     realm_id: int = 1
+    offline_flag_column: str | None = Field(
+        default=None,
+        description=(
+            "The flags column whose bit 2 (REALM_FLAG_OFFLINE) makes the authserver list the "
+            "realm as offline. Set only for a core whose world server never sets that bit "
+            "itself while it loads: this app then sets it before the world starts and before "
+            "it stops, and the core clears it when the world listens (T577). None leaves the "
+            "realm row alone."
+        ),
+    )
 
 
 class AccountLevel(_Strict):
@@ -2060,6 +2116,15 @@ class AccountLevel(_Strict):
     )
     level_column: str = Field(
         default="gmlevel", min_length=1, description="The column holding the level itself."
+    )
+    world_caches_rank: bool = Field(
+        default=False,
+        description=(
+            "True when the running world server reads an account's rank once and keeps it, so "
+            "a level written to the account row is not live until the world is told through "
+            "its own command (or restarted). This app then sends that command after it "
+            "creates an account with a level (T579). Measured on the tortoise fork only."
+        ),
     )
     max_level: int = Field(
         default=3,
@@ -2779,6 +2844,17 @@ class Client(_Strict):
 
     version: str = Field(min_length=1)
     build: int = Field(gt=0)
+    required_build: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The build the PLAYER's own Wow.exe must report (its file version), when the "
+            "server drops every other one: AzerothCore's authserver accepts several WotLK "
+            "builds at the password and its world server then disconnects all but 12340. "
+            "Distinct from `build`, which is what the ready-to-play copy reports after an "
+            "`exe_patch` (Centurion: 12342). None: Yu'lon does not read the exe's build."
+        ),
+    )
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()
@@ -3132,8 +3208,10 @@ class CatalogEntry(_Strict):
     manifests_from: Slug | None = Field(
         default=None,
         description=(
-            "The entry whose manifests/<id>/ tree this one reads, when it shares another's "
-            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id."
+            "The entry whose SHIPPED manifests/<id>/ tree this one reads, when it shares another's "
+            "modules (T552: a second AzerothCore server reads wow-wotlk's). Absent: its own id. "
+            "Modules the user added from a link or a folder are never shared: they stay under "
+            "this entry's own id (T554)."
         ),
     )
     help_places: tuple[HelpPlace, ...] = Field(
@@ -3322,7 +3400,7 @@ class CatalogEntry(_Strict):
             )
         return self
 
-    def _published_host_ports(self) -> dict[int, str]:
+    def published_host_ports(self) -> dict[int, str]:
         """Every host port this entry binds, each with what it is for (T552)."""
         found: dict[int, str] = {}
         native = self.install.native
@@ -3339,7 +3417,10 @@ class CatalogEntry(_Strict):
         return found
 
     def manifest_game(self) -> str:
-        """The `manifests/<game>/` tree this entry's modules come from (T552)."""
+        """The shipped `manifests/<game>/` tree this entry's modules come from (T552).
+
+        The user layer is not covered: a module added on this server is kept under `self.id`.
+        """
         return self.manifests_from or self.id
 
     def schema_map(self) -> dict[Db, str]:
@@ -3439,8 +3520,8 @@ class Catalog(_Strict):
             for second in self.games[i + 1 :]:
                 if {first.ports.auth, first.ports.world} & {second.ports.auth, second.ports.world}:
                     continue
-                taken = first._published_host_ports()
-                for number, what in second._published_host_ports().items():
+                taken = first.published_host_ports()
+                for number, what in second.published_host_ports().items():
                     if number in taken:
                         raise ValueError(
                             f"{first.id} and {second.id} can run at the same time (their auth "

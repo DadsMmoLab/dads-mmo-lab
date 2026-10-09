@@ -22,6 +22,7 @@ that is the controller's call (call down / signal up, §5).
 from __future__ import annotations
 
 import decimal
+import errno
 import hashlib
 import json
 import os
@@ -104,6 +105,16 @@ CLONE_DIRS: dict[ManifestType, str] = {
     "keg": "ale_scripts",
     "mod": "sql_scripts/clones",
 }
+
+
+def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
+    """Whether this manifest's clone folder is one the server install itself clones into (T554).
+
+    `folders` is `native.server_source_folders(entry)`. The test is the folder and not the
+    game: WotLK's sources are `modules/mod-playerbots` alone, which no manifest names, so for
+    WotLK this is `False` for every manifest, and for Unbound it is `True` for `mod-ale`.
+    """
+    return PurePosixPath(CLONE_DIRS[manifest.type]) / manifest.id in folders
 
 
 def _default_git(server_dir: Path) -> Git:
@@ -2354,6 +2365,8 @@ class _Log:
     client_ran: bool = False
     """`_client()` reached a client folder: its receipts replace the claim's."""
     client_left_behind: list[str] = field(default_factory=list)
+    kept_folders: list[str] = field(default_factory=list)
+    """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -2968,6 +2981,12 @@ class Applier:
         # `client_origins` by `ControllerServices.for_entry()`; empty, nothing
         # is recorded.
         self.client_game = ""
+        # T554: the folders (server-dir relative) this entry's emulator sources clone into,
+        # and the entry's name. A manifest whose clone folder is one is part of the server
+        # build, so install, update and remove refuse it (`_refuse_a_server_source`). Set by
+        # `ControllerServices.for_entry()` from the catalog entry; empty, nothing is refused.
+        self.server_sources: frozenset[PurePosixPath] = frozenset()
+        self.server_name = ""
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -3109,6 +3128,20 @@ class Applier:
     def git(self, value: Git) -> None:
         self._git = value
 
+    def _refuse_a_server_source(self, manifest: Manifest) -> None:
+        """Refuse a manifest whose clone folder is one the server install itself cloned (T554).
+
+        WoW Unbound builds `modules/mod-ale` into its worldserver, and WotLK's `mod-ale`
+        manifest clones into the same folder; installing, updating or removing it here would
+        reset or delete a source the compile needs. Asked before anything is touched.
+        """
+        if is_server_source(manifest, self.server_sources):
+            raise ApplyRefusal(
+                f"{manifest.name} is part of the {self.server_name or 'this'} server: it is "
+                "built into the world server, so it is not added, updated or removed from the "
+                "Modules tab. Nothing was changed."
+            )
+
     def clone_dir(self, manifest: Manifest) -> Path:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
@@ -3156,6 +3189,7 @@ class Applier:
         (`_says_the_database_is_up()`). A finished install says it in its
         report's "started the database alone" line instead.
         """
+        self._refuse_a_server_source(manifest)
         log = _Log()
         with self._says_the_database_is_up(log):
             return self._install(
@@ -3428,6 +3462,7 @@ class Applier:
         self._refuse_a_clash(manifest, clone)
         self._refuse_links(manifest, clone)
         self._deploy(manifest, clone, log)
+        self._folders(manifest, log)
         self._patches(manifest, clone, vals, "install", log)
         # Both SQL passes are refused as one, BEFORE either runs: the guard's
         # own sentence says no rows were written, and after the install-time
@@ -3748,6 +3783,7 @@ class Applier:
         answer (`ReleaseDirectionUnknown`), and holds for that HEAD and that
         release only (`UncheckedApproval`).
         """
+        self._refuse_a_server_source(manifest)
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyRefusal(refusal)
@@ -4349,6 +4385,7 @@ class Applier:
         cannot say that. Values the caller hands in still win: the Modules tab
         asks only when there is no usable record, and then a person answered.
         """
+        self._refuse_a_server_source(manifest)
         vals = self._values(manifest, values)
         relative = reapplies_on_top(manifest)
         applied, _why = self.applied_record(manifest) if relative else (None, "")
@@ -4385,6 +4422,7 @@ class Applier:
                 )
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
+        self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
         # files are this app's own live in the clone's claim file.
         self._unclient(manifest, clone, log)
@@ -5132,6 +5170,54 @@ class Applier:
             for old, new in step.rename:
                 (target / old).replace(target / new)
                 log.done.append(f"rename {old} → {new}")
+
+    def _folders(self, manifest: Manifest, log: _Log) -> None:
+        """Make each `folders` entry, empty, where it is not already a folder (T587).
+
+        A place the module reads and the player fills: mod-ale loads `.lua` files
+        from `lua_scripts` and nothing else made it, so a Lua engine installed
+        alone started with nothing to load. Idempotent, and never a write into a
+        folder that is there -- what the player put in one stays. A file or a link
+        on the path is reported and left: `mkdir` through it would land somewhere
+        this app did not choose.
+        """
+        for rel in manifest.folders:
+            path = self.server_dir / rel
+            if path.is_symlink() or (os.path.lexists(path) and not path.is_dir()):
+                log.skipped.append(
+                    f"{rel}: something that is not a plain folder is there, so the folder for "
+                    f"{manifest.name}'s files was not made"
+                )
+            elif path.is_dir():
+                log.done.append(f"folder {rel} (already there)")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                log.done.append(f"mkdir {rel}")
+
+    def _unfolders(self, manifest: Manifest, log: _Log) -> None:
+        """Take back each `folders` entry that is still empty; leave one that holds anything.
+
+        The player's scripts are not this app's to delete, so a folder with
+        anything in it stays and the report names it (`left_behind`). Only the
+        folder itself goes -- never a parent, and never through `rmtree`.
+        """
+        # Deepest first, so a folder listed beside its own parent leaves neither behind.
+        for rel in sorted(
+            manifest.folders, key=lambda r: len(PurePosixPath(r).parts), reverse=True
+        ):
+            path = self.server_dir / rel
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                # `rmdir` itself is the emptiness test: one call that refuses a folder
+                # holding anything, so no listing and no gap between look and delete.
+                path.rmdir()
+                log.done.append(f"rmdir {rel}")
+            except OSError as exc:
+                if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                    log.kept_folders.append(f"{rel} (kept: it holds your files)")
+                else:
+                    log.skipped.append(f"{rel}: could not be taken back ({exc})")
 
     def _undeploy(self, step: Deploy, clone: Path, log: _Log) -> None:
         """Delete exactly what `_deploy()` put under `dest` — never the dest dir itself.
@@ -6680,7 +6766,9 @@ class Applier:
             ),
             pending_sql=tuple(log.pending_sql),
             left_behind=(
-                _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
+                _left_behind(manifest, (*log.client_left_behind, *log.kept_folders))
+                if action == "remove"
+                else ()
             ),
             world_stopped=self._world_read_stopped_for_a_conf_write(log),
         )

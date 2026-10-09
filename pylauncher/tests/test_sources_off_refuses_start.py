@@ -147,7 +147,19 @@ def test_the_modules_tab_offers_return_to_the_tested_pin_and_says_the_folders_re
     (server_dir / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
     _off(server_dir)
     services = _services(ps, tmp_path, [])
-    services.update_to_latest = install_wiring.update_to_latest_for_app(WOTLK, server_dir)
+    # The record's pin is the catalog's (T588 reads the record against the catalog).
+    at_old = WOTLK.model_copy(
+        update={
+            "emulator": WOTLK.emulator.model_copy(
+                update={
+                    "sources": tuple(
+                        s.model_copy(update={"rev": OLD}) for s in WOTLK.emulator.sources
+                    )
+                }
+            )
+        }
+    )
+    services.update_to_latest = install_wiring.update_to_latest_for_app(at_old, server_dir)
     asked: list[str] = []
 
     def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:

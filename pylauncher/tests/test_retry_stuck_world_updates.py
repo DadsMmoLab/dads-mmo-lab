@@ -48,6 +48,8 @@ class _Db(_Mariadb):
     @staticmethod
     def _default(text: str, schema: str | None) -> str:
         text = re.sub(r"\)\s*ENGINE=InnoDB DEFAULT CHARSET=utf8mb4", ")", text)
+        # sqlite spells MariaDB's ROW_COUNT() `changes()` and has no DUAL
+        text = text.replace("ROW_COUNT()", "changes()").replace(" FROM DUAL", "")
         return _Mariadb._default(text, schema)
 
     def exec_stdin(

@@ -141,6 +141,10 @@ class Recorder:
     ended_one_shots: list[str] = field(default_factory=list)
     """Every service `end_one_shot()` was asked to end, in order. Not in `calls`, so the
     recorded call lists every other test pins stay as they were."""
+    realm_marks: list[str] = field(default_factory=list)
+    """The entries whose realm row the engine marked offline (T577), apart from `calls`."""
+    realm_clears: list[str] = field(default_factory=list)
+    """The entries whose offline bit it took off again after a replace gave up (T577)."""
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
     reset_error: Exception | None = None
@@ -865,6 +869,11 @@ class Recorder:
             start_db=self.start_db,
             start=self.start,
             recreate=self.recreate,
+            # T577: bound like T64's six -- the default sets the realm flag through docker.
+            mark_realm_offline=lambda entry, spec, server_dir, **_k: self.realm_marks.append(
+                entry.id
+            ),
+            clear_realm_offline=lambda entry, spec, server_dir: self.realm_clears.append(entry.id),
             # T158: the rollback's stop of the failed build. Bound like T64's six:
             # its default asks `docker exec`, and a world that loads on a script is
             # `test_stop_waits_for_the_world.py`'s.

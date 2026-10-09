@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from yulon import realm_flag, wsl
 from yulon.catalog import native
 from yulon.controller import Controller
 from yulon.controller_wow_tortoise import botdash, docker_ctl, game
@@ -45,17 +46,77 @@ class TortoiseController(Controller):
     ) -> None:
         super().__init__(docker_ctl.SPEC, server_dir, wsl_distro=wsl_distro, pre_stop=pre_stop)
 
-    def _before_the_servers_start(self) -> None:
-        """Bring the bot dashboard up first when it is switched on (T127).
+    def _mark_the_realm_offline(
+        self, *, start_database: bool, unless_world_up: bool = False
+    ) -> None:
+        """Set the realm row's offline bit, so the realm list says Offline while the world is down.
 
-        First, because the bots module resolves the dashboard's service name
-        once, when it loads: a world that starts before the dashboard sends
-        nowhere until its next start. Called by the base `start()` only once
+        T577: this core's world server never sets the bit, only clears it when it starts
+        listening, so without this the realm shows online for the whole load and a client
+        that logs in then goes back to the realm list with no word. Best effort and never
+        raising: `realm_flag.mark_offline()` logs what it could not do.
+        """
+        try:
+            entry = game.entry()
+        except game.CatalogFactsError as exc:
+            logger.warning(f"the realm was not marked offline: {exc}")
+            return
+        realm_flag.mark_offline(
+            entry,
+            self.spec,
+            self.server_dir,
+            wsl_distro=self.wsl_distro,
+            start_database=start_database,
+            unless_world_up=unless_world_up,
+        )
+
+    def _put_the_realm_back(self) -> None:
+        """Take the offline bit off a realm whose world is still running; never raises."""
+        try:
+            entry = game.entry()
+        except game.CatalogFactsError:
+            return
+        realm_flag.clear_offline_if_world_up(
+            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro
+        )
+
+    def stop(self) -> bool:
+        """Mark the realm offline while the database is still up, then stop (T577).
+
+        Only when the database is already running: a Stop must not start one to say the
+        realm is closing, and the Start that follows marks it again before its world starts.
+        """
+        if self.wsl_distro is not None and wsl.known_stopped(self.wsl_distro):
+            return super().stop()
+        # T581: held offline on purpose for the whole Stop, so the dashboard tick does not
+        # put a realm back online while its world saves on the way down.
+        with realm_flag.deliberately_offline(self.spec):
+            self._mark_the_realm_offline(start_database=False)
+            try:
+                return super().stop()
+            except Exception:
+                # A Stop given up (a Cancel while the world loads or saves) or refused leaves
+                # the world running, and only a start clears the bit: take it off again. If
+                # that fails, the dashboard tick takes it off once the hold is over (T581).
+                self._put_the_realm_back()
+                raise
+
+    def _before_the_servers_start(self) -> None:
+        """Mark the realm offline (T577), then bring the bot dashboard up when it is on (T127).
+
+        The offline mark goes first and needs the database, which it starts if it is not up
+        (compose would start it for the world a moment later); the world clears the mark
+        itself once it listens.
+
+        The dashboard goes first among the servers, because the bots module resolves the
+        dashboard's service name once, when it loads: a world that starts before the
+        dashboard sends nowhere until its next start. Called by the base `start()` only once
         every refusal has passed -- its folder and guard, the ports, the
         database (T377) -- so a refused start does not leave the dashboard
         running on its own. `botdash.start_if_on()` never raises: the dashboard
         is never the reason a server does not start.
         """
+        self._mark_the_realm_offline(start_database=True, unless_world_up=True)
         try:
             entry = game.entry()
         except game.CatalogFactsError as exc:

@@ -22,6 +22,7 @@ from typing import Any, NoReturn, cast
 import pytest
 from PySide6.QtCore import QObject, Signal
 
+from tests import pe_fixture
 from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import (
     HANG_BOUND,
@@ -2310,6 +2311,10 @@ def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
     assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
     for entry in _every_game():
         game = entry.id
+        if game == "wow-unbound":  # T554: it runs the WotLK importer, on its own containers
+            assert entry.container_spec().import_service == "ub-db-import"
+            assert ControllerServices.for_entry(entry, tmp_path).module_sql is not None
+            continue
         if game == "wow-wotlk":
             continue
         assert entry.container_spec().import_service == "", f"{game} now names an importer"
@@ -2530,6 +2535,26 @@ def _with_custom_route(
     services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
+
+
+def _with_the_card_buttons(services: ControllerServices) -> None:
+    """Give the custom-module card its two presses and nothing else (T596).
+
+    A game with no install seam draws a sentence in that card instead of the
+    buttons, so a layout test about the card WotLK really has must wire the seams
+    -- but not `_with_custom_route`'s layered store, whose rows those tests count.
+    """
+    route = _FakeCustomRoute(cast(Any, services.store))
+    services.module_from_link = route.derive_link
+    services.module_from_folder = route.derive_folder
+    services.module_install_custom = route.install
+
+
+def _services_with_the_card_buttons(ps: _Ps, tmp_path: Path) -> ControllerServices:
+    """`_services` for WotLK's layout tests: the card has its two presses, as the game's does."""
+    services = _services(ps, tmp_path, [])
+    _with_the_card_buttons(services)
+    return services
 
 
 def _listed(view: ControllerView) -> list[str]:
@@ -4634,6 +4659,7 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
     """
     prints = {
         "wow-wotlk": "ready...",
+        "wow-unbound": "ready...",
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
@@ -4799,7 +4825,7 @@ def test_a_tab_gets_a_manifest_store_exactly_when_the_catalog_says_it_has_one(
             continue
         assert services.store is not None and services.applier is not None, entry.id
         assert (
-            services.store.game == entry.id
+            services.store.game == entry.manifest_game()
         ), f"{entry.id}'s tab was handed {services.store.game}'s manifests"
         assert services.store.game_dir.is_dir(), f"{entry.id} has no manifests/<game>/ on disk"
 
@@ -5533,6 +5559,33 @@ def test_a_start_that_fails_on_the_channel_port_rolls_the_channel_back(
             "Bind for 127.0.0.1:7878 failed: port is already allocated"
         )
     )
+
+    assert stub.rollbacks == 1
+    said = view.problem_label.text()
+    assert "7878" in said
+    assert "command channel" in said.lower()
+
+
+def test_a_start_that_fails_on_the_channel_port_in_docker_desktops_words_rolls_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T574: `docker._run` says that failure in a plain sentence; the rollback must still see it.
+
+    Docker Desktop's own text (measured on yulon-win11, 2026-10-08) names the port
+    on a `listen tcp4 ...: bind:` line. The sentence Yu'lon shows has no such line,
+    so the raw daemon text has to reach the predicate beside it, as the error's detail.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    daemon = (
+        "Error response from daemon: ports are not available: exposing port TCP "
+        "127.0.0.1:7878 -> 127.0.0.1:0: listen tcp4 127.0.0.1:7878: bind: Only one usage "
+        "of each socket address (protocol/network address/port) is normally permitted."
+    )
+
+    view._start_failed(_compose_up_said(" Container ac-database Started\n" + daemon + "\n"))
 
     assert stub.rollbacks == 1
     said = view.problem_label.text()
@@ -6696,6 +6749,8 @@ BOT_SQL_BY_GAME = {
     "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
     # T179: the shipped entry's names (`catalog.json`, T179 Task 7).
     "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
+    # T554: the same schema names as WotLK, in the database container of its own.
+    "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
 }
 """Written out per game rather than read back out of the entry.
 
@@ -12640,6 +12695,118 @@ def test_saving_a_card_writes_what_changed_and_names_the_backup(
     assert not redrawn.changed
 
 
+def _link_out(path: Path, tmp_path: Path) -> Path:
+    """Replace `path` with a symlink to a same-text file outside `tmp_path`'s server folder."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.conf"
+    outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    return outside
+
+
+def test_a_card_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning` and the outside file is rewritten."""
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
+
+
+def test_a_raw_save_on_a_conf_that_links_out_of_the_server_folder_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `save_tuning_file` and `open(path, "w")` writes through."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out(tmp_path / file, tmp_path)
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert outside.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+    # No copy beside the outside file, none in the server folder (not the whole pytest base
+    # directory: under xdist it holds other tests' backups).
+    assert not list(outside.parent.glob(f"{outside.name}*.bak"))
+    assert not list(tmp_path.glob("**/*.bak"))
+
+
+def _card_key(view: ControllerView, module_id: str) -> tuple[str, str]:
+    card = view.tuning_panel.card(module_id).card
+    return (card.family, card.module_id)
+
+
+def _link_out_with_a_backup(path: Path, tmp_path: Path) -> Path:
+    """`_link_out`, plus a `.bak` of the old text beside the link (what an upgrader has)."""
+    outside = _link_out(path, tmp_path)
+    old = path.with_name(path.name + ".20260101-000000-000000.bak")
+    old.write_text("Key = OLD\n", encoding="utf-8")
+    return outside
+
+
+def test_a_card_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. `tuning.restore` is `shutil.copy2` onto the target and follows a link.
+
+    Mutation: drop the `check_inside` in `_put_back` and "Key = OLD" lands in the outside file.
+    """
+    view = _tuned_view(ps, tmp_path)
+    outside = _link_out_with_a_backup(tmp_path / TRANSMOG_CONF, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+
+    view.revert_tuning(*_card_key(view, "mod-transmog"))
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_revert_will_not_write_through_a_link_out_of_the_server_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573 review. Same defect on the raw editor's Revert. Mutation: as the card's."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    outside = _link_out_with_a_backup(tmp_path / file, tmp_path)
+    before = outside.read_text(encoding="utf-8")
+    view.open_tuning_file(file)
+
+    view.revert_tuning_file()
+
+    assert outside.read_text(encoding="utf-8") == before
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_the_raw_editor_opens_a_conf_that_links_out_read_only_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the check in `open_tuning_file` and another file's text is on offer."""
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    _link_out(tmp_path / file, tmp_path)
+
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+
+
 def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -12928,6 +13095,78 @@ def test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad(
     assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
     assert tuning.backups_of(tmp_path / own) == ()
     assert tuning.backups_of(tmp_path / core) == ()
+
+
+def test_a_multi_file_card_writes_nothing_when_the_second_file_links_out_of_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: drop the path pre-check in `save_tuning` and the first file lands alone."""
+    own = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    core = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, own, "[worldserver]\nBeastMaster.Enable = 1\n")
+    _deploy(tmp_path, core, '[worldserver]\nCreatures.CustomIDs = "1,2"\n')
+    outside = _link_out(tmp_path / core, tmp_path)
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-npc-beastmaster"}))
+    before = (tmp_path / own).read_bytes()
+    card = view.tuning_panel.card("mod-npc-beastmaster")
+    card.editors["BeastMaster.Enable"].control.setChecked(False)
+    card.editors["Creatures.CustomIDs"].control.setText("3")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
+    assert tuning.backups_of(tmp_path / own) == ()
+    assert outside.read_text(encoding="utf-8") == '[worldserver]\nCreatures.CustomIDs = "1,2"\n'
+    assert "outside the server folder" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The boundary is the SERVER folder, not the file's own folder.
+
+    Mutation: leave `root=server_dir` off the save's backup and a link into a sibling folder is
+    refused as if it had left the install.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    real = tmp_path / "shared" / "beast.conf"
+    real.parent.mkdir()
+    real.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    (tmp_path / file).unlink()
+    try:
+        (tmp_path / file).symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.open_tuning_file(file)
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+
+    assert real.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+
+
+def test_a_card_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. Mutation: leave `root=server_dir` off the card's `tuning.write` and this is refused."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    real = tmp_path / "shared" / "transmog.conf"
+    real.parent.mkdir()
+    real.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    try:
+        path.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    view.reload_tuning()
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert "Transmogrification.Enable = 0" in path.read_text(encoding="utf-8")
+    assert "outside the server folder" not in view.tuning_report.toPlainText()
 
 
 def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
@@ -13521,6 +13760,150 @@ def test_the_raw_revert_restores_from_the_backup_and_says_which(
 
     assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
     assert ".bak" in view.tuning_report.toPlainText()
+
+
+def test_a_raw_save_keeps_the_bom_and_every_untouched_lines_own_ending(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T573. The real editor's text goes through `save_tuning_file`, as the Save press does.
+
+    Mutation: write `text.replace("\\n", newline)` again and the BOM goes, the LF line becomes
+    CRLF and the lone CR becomes a line ending of the file's usual kind.
+    """
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_bytes("\ufeffA = 1\r\nBeastMaster.Enable = 1\nC = 3\rD = 4\r\n".encode())
+    view.open_tuning_file(file)
+    editor = view.tuning_panel.editor
+    assert "\ufeff" not in editor.toPlainText()
+    editor.setPlainText(
+        editor.toPlainText().replace("BeastMaster.Enable = 1", "BeastMaster.Enable = 0")
+    )
+
+    view.save_tuning_file(editor.toPlainText())
+
+    assert path.read_bytes() == "\ufeffA = 1\r\nBeastMaster.Enable = 0\nC = 3\rD = 4\r\n".encode()
+
+
+def test_a_second_spelling_of_a_core_conf_is_read_only_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. On macOS `Worldserver.conf` IS `worldserver.conf`: a Save writes the core's.
+
+    Mutation: compare `file in core` exactly again and the second spelling is saved.
+    """
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    # On this (case-sensitive) test disk it is a file of its own; on the Mac it is the core's.
+    other = "env/dist/etc/Worldserver.conf"
+    core = _deploy(tmp_path, other, "[worldserver]\n")
+    view.tuning_panel.set_files((other,), read_only=())
+    view.open_tuning_file(other)
+    assert view.tuning_panel.editor.isReadOnly()
+
+    view.save_tuning_file("[worldserver]\nMotd = hi\n")
+
+    assert core.read_text(encoding="utf-8") == "[worldserver]\n"
+
+
+def test_revert_leaves_a_second_spelling_of_a_core_conf_alone_on_a_case_blind_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: compare `file in core` exactly in Revert and it restores over it."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    other = "env/dist/etc/Worldserver.conf"
+    path = _deploy(tmp_path, other, "[worldserver]\nMotd = old\n")
+    tuning.backup(path)
+    path.write_text("[worldserver]\nMotd = new\n", encoding="utf-8")
+    view.tuning_panel.set_files((other,), read_only=())
+
+    view.revert_tuning_file()
+
+    assert path.read_text(encoding="utf-8") == "[worldserver]\nMotd = new\n"
+
+
+def test_the_picker_lists_a_core_conf_once_whatever_the_case_of_a_module_rows_spelling(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 3. Mutation: test `name not in found` exactly and the Mac gets two buttons."""
+    monkeypatch.setattr(tuning, "_disk_ignores_case", lambda: True)
+    view = _tuning_view(ps, tmp_path)
+    core = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\n")
+    assert core.is_file()
+    row = tuning.TuningRow(
+        module_id="m",
+        module_name="M",
+        family="module",
+        file="env/dist/etc/Worldserver.conf",
+        key="K",
+        label="K",
+        explain=None,
+        type=None,
+        min=None,
+        max=None,
+        default=None,
+        current=None,
+        installed=True,
+        backend="conf",
+        read_only_reason=None,
+    )
+    view._tuning_rows = (row,)
+    # The folder holds one file, spelled as the module spells it.
+    monkeypatch.setattr(Path, "is_file", lambda self: self.name.lower() == "worldserver.conf")
+
+    files = view._tuning_files()
+
+    # The folder's other confs (the view lists every module .conf since T569) are not the point.
+    assert [f.lower() for f in files if f.lower().endswith("/worldserver.conf")] == [
+        "env/dist/etc/worldserver.conf"
+    ], files
+
+
+def test_a_conf_over_the_editors_size_cap_opens_empty_and_read_only_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 4. Mutation: read the whole file again and a huge file stalls the window.
+
+    The cap is lowered so the test does not write megabytes; the read is also asserted to stop
+    one character past it, which is what keeps the GUI thread's read bounded.
+    """
+    monkeypatch.setattr(tuning, "MAX_EDIT_BYTES", 100)
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_text("BeastMaster.Enable = 1\n" * 50, encoding="utf-8")
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_save_button.isEnabled() is False
+    assert "too big" in view.tuning_panel.file_note.text()
+    path.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    view.open_tuning_file(file)
+    assert view.tuning_panel.editor.toPlainText() == "BeastMaster.Enable = 1\n"
+
+
+def test_the_size_cap_counts_bytes_not_characters(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T573 item 4, Codex P2: 40 three-byte characters are 120 bytes, over a 100-byte cap.
+
+    Mutation: read `MAX_EDIT_BYTES + 1` characters again and the 120-byte file opens editable.
+    """
+    monkeypatch.setattr(tuning, "MAX_EDIT_BYTES", 100)
+    view = _tuning_view(ps, tmp_path)
+    file = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    path = tmp_path / file
+    path.write_text("\u20ac" * 40, encoding="utf-8")
+    assert path.stat().st_size == 120
+
+    view.open_tuning_file(file)
+
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert "too big" in view.tuning_panel.file_note.text()
 
 
 def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -15996,6 +16379,11 @@ def _at(window: Any, size: tuple[int, int]) -> None:
     # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
     # every height measured here -- a function of the window's width.
     apply_dadcraft_theme(window, width=window.width())
+    _settle(window, f"the window to settle at {size}")
+
+
+def _settle(window: Any, what: str) -> None:
+    """Pump until no widget in `window` has moved for `_SETTLED_ROUNDS` pumps in a row."""
     seen: list[object] = [None]
     same = [0]
 
@@ -16006,7 +16394,7 @@ def _at(window: Any, size: tuple[int, int]) -> None:
         seen[0] = now
         return same[0] >= _SETTLED_ROUNDS
 
-    pump_until(settled, f"the window to settle at {size}")
+    pump_until(settled, what)
 
 
 _SETTLE_PUMP_MS = 10
@@ -18312,7 +18700,12 @@ def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
     pump_until(lambda: not view.rebuild_log.running, "the failed job finished")
     process_events()
     view.rebuild_log.set_collapsed(True)
-    process_events()
+    # Folding asks for a layout, and the panel's height follows it a pass later.
+    # A fixed 50 ms pump measured it before that (T582): 68 px against the 102
+    # it needs, on py3.11 CI and in 11 of 150 local runs under CPU load. Wait
+    # for the layout to stop moving instead -- a panel that is really clipped
+    # still reads clipped once it has.
+    _settle(window, "the folded strip to settle")
 
     field = view.rebuild_log._status
     assert (
@@ -20012,7 +20405,7 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -20259,6 +20652,8 @@ def _past_its_pin(
     services, spy = _latest(ps, tmp_path)
     if custom_route:
         _with_custom_route(services)
+    else:
+        _with_the_card_buttons(services)
     view = ControllerView(WOTLK, services, status_poll_ms=0, **kwargs)
     spy.revs = (
         native.SourceRev("mod-playerbots/azerothcore-wotlk", "7f12e89 · 2026-09-20", pin=_PIN),
@@ -20499,6 +20894,99 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view.module_folder_button.setEnabled(True)
     process_events()
     assert folder.isEnabled(), "the line did not follow its card's button back"
+
+
+def test_a_game_with_no_outside_module_route_says_so_instead_of_two_dead_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Tortoise's box offered two greyed buttons and never said why.
+
+    A game with no custom-module route at all (no install seam: every game but
+    WotLK) draws no "Install from link…" / "Install from folder…" in the box,
+    card or line; it says in one sentence that the server cannot take modules
+    from outside yet and that the list above is what it can take. The busy lock
+    finishing must not hand the hidden buttons back.
+    """
+    services = _services(ps, tmp_path, [])
+    assert services.module_install_custom is None
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert TORTOISE.name in said and "from outside" in said and "listed above" in said
+    assert said != controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for dead in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert dead.isHidden(), f"{dead.text()!r} is still offered with no route behind it"
+    assert not view.custom_module_card.isHidden()
+    assert not view.custom_module_line_note.isHidden()
+    assert view.custom_module_line_note.toolTip() == said
+
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_no_add_on_modules_does_not_promise_a_list_above(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: Centurion's list is empty on purpose; the box must not point at it."""
+    centurion = load_catalog().get("wow-centurion")
+    services = _services(ps, tmp_path, [])
+    services.no_modules_note = controller_view_module.NO_ADDON_MODULES.format(game=centurion.name)
+    view = ControllerView(centurion, services, status_poll_ms=0)
+
+    said = view.custom_module_note.text()
+    assert centurion.name in said and "no add-on modules" in said
+    assert "listed above" not in said
+    assert view.module_link_button.isHidden() and view.module_folder_button.isHidden()
+
+
+def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T596: WotLK's box is not touched by the explanation."""
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+    for live in (
+        view.module_link_button,
+        view.module_folder_button,
+        view.module_link_line_button,
+        view.module_folder_line_button,
+    ):
+        assert not live.isHidden() and live.isEnabled()
+    assert view.custom_module_line_note.isHidden()
+
+
+def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T596: the shipped games split cleanly; WotLK and Unbound (its sibling) take outside modules.
+
+    Unbound is built by WotLK's factory, so its box must keep both presses and
+    the card's own sentence; every other game must show the "can't take" sentence.
+    """
+    takes = {"wow-wotlk", "wow-unbound"}
+    for entry in load_catalog().games:
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
+        view = ControllerView(entry, services, status_poll_ms=0)
+        if entry.id in takes:
+            assert services.module_install_custom is not None, entry.id
+            assert not view.module_link_button.isHidden(), entry.id
+            assert view.custom_module_note.text() == controller_view_module.CUSTOM_MODULE_CARD_NOTE
+        else:
+            assert services.module_install_custom is None, entry.id
+            assert view.module_link_button.isHidden(), entry.id
+            assert view.module_folder_button.isHidden(), entry.id
+            assert "outside" in view.custom_module_note.text() or "no add-on" in (
+                view.custom_module_note.text()
+            ), entry.id
 
 
 THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))
@@ -21778,7 +22266,9 @@ def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
     import main
 
     for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
-        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        view = ControllerView(
+            WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0
+        )
         window, _tab = _controller_in_the_real_window(view, "Modules")
         _at(window, DESKTOP_1080P)
         _ran_a_job(view)
@@ -21837,7 +22327,7 @@ def test_folding_the_log_by_hand_gives_the_report_its_height_back(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -21887,7 +22377,7 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     """
     from yulon.ui.theme import apply_dadcraft_theme
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -21963,7 +22453,7 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     """
     import main
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -25941,15 +26431,17 @@ FOLDER_ADDONS = {
 }
 
 
-def _lay_folder_module(server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS) -> None:
+def _lay_folder_module(
+    server_dir: Path, files: Mapping[str, bytes] = FOLDER_ADDONS, module: str = FOLDER_MODULE
+) -> None:
     """The module's addon folder in the server's checkout, and its sha256sum list."""
     lines = []
     for name, data in sorted(files.items()):
-        path = server_dir / FOLDER_PATH / name
+        path = server_dir / module / "client/Interface/AddOns" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         lines.append(f"{hashlib.sha256(data).hexdigest()}  client/Interface/AddOns/{name}\n")
-    (server_dir / FOLDER_MODULE / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
+    (server_dir / module / "MANIFEST.sha256").write_text("".join(lines), encoding="utf-8")
 
 
 FOLDER_PACK = ClientPack.model_validate(
@@ -26091,6 +26583,150 @@ def test_a_missing_folder_or_list_is_named_before_a_ready_to_play_client_is_made
     missing_folder = refusal(FOLDER_PACK, tmp_path)
     assert missing_folder is not None and FOLDER_PATH in missing_folder
     assert controller_view_module.server_build_presses.UPDATE_TO_LATEST in missing_folder
+
+
+# -- WoW Unbound's own entry (T555 T2) ------------------------------------------------
+
+UNBOUND = load_catalog().get("wow-unbound")
+UNBOUND_MODULE = "modules/mod-unbound"
+CHECK_ADDONS = 'SET checkAddonVersion "0"'
+
+
+def _unbound_client(tmp_path: Path) -> tuple[Path, Path]:
+    """The player's own client and Unbound's ready-to-play copy, the module laid in the checkout."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    target = play_client.default_target(original, UNBOUND.name, tmp_path)
+    play_client.create(
+        original,
+        target,
+        game=UNBOUND.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    return original, target
+
+
+def _config(play: Path) -> str:
+    return (play / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+
+
+def test_play_puts_unbounds_addons_in_its_client_and_leaves_the_players_own_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    original, play = _unbound_client(tmp_path)
+    own = play / "Interface" / "AddOns" / "Questie" / "Questie.toc"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"## Title: Questie\n")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == [] and steps == ["install unbound-addons", "config", "launch"]
+    for name, data in FOLDER_ADDONS.items():
+        assert (play / "Interface" / "AddOns" / name).read_bytes() == data, name
+    assert own.read_bytes() == b"## Title: Questie\n"
+    assert not (original / "Interface" / "AddOns" / "multiclass-resources").exists()
+    assert CHECK_ADDONS in _config(play)
+
+
+def test_the_realmlist_keeps_unbounds_own_login_port(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Config.wtf in the entry makes the Play pipeline write the realmlist, not `_launch`; it
+    must still say :3725 so the client does not reach WotLK's login on 3724."""
+    original, play = _unbound_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith("set realmlist 127.0.0.1:3725\n")
+    assert ":3724" not in _realmlist(play)
+
+
+def test_a_client_that_pressed_play_before_the_addons_still_gets_the_out_of_date_switch(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """A `seed` is written once; a client made and played before the addons shipped has used it
+    up, so the key must be an `always`."""
+    original, play = _unbound_client(tmp_path)
+    old = UNBOUND.model_copy(update={"client": UNBOUND.client.model_copy(update={"packs": ()})})
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=old)
+    ps.names = WORLD_UP
+    first.play()
+    assert client_packs.read_record(play).config_seeded
+    config = play / "WTF" / "Config.wtf"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(CHECK_ADDONS, 'SET checkAddonVersion "1"')
+        + 'SET gxWindow "1"\n',
+        encoding="utf-8",
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+
+    view.play()
+
+    text = _config(play)
+    assert CHECK_ADDONS in text and 'checkAddonVersion "1"' not in text
+    assert 'SET gxWindow "1"' in text, "a line of the player's own was touched"
+
+
+def test_an_update_replaces_what_the_new_addons_ship_and_drops_only_what_they_dropped(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed: list[dict[str, Any]] = []
+    real_install = client_packs.install  # the `steps` spy, which calls the real one
+    monkeypatch.setattr(
+        client_packs,
+        "install",
+        lambda *a, **k: installed.append(real_install(*a, **k)) or installed[-1],
+    )
+    original, play = _unbound_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+    view.play()
+    addons = play / "Interface" / "AddOns"
+    old_res = addons / "multiclass-resources" / "multiclass-resources.lua"
+    old_art = addons / "multiclass-talents-ui" / "Art" / "UI-Frame.blp"
+    old_art.write_bytes(b"BLP2 the player's edit")  # a dropped file the player changed
+    old_res.write_bytes(b"return 'mine'\r\n")  # a file the new pack still ships, edited (§1.3.5)
+    old_toc = addons / "multiclass-resources" / "multiclass-resources.toc"  # dropped, untouched
+    own = addons / "Questie" / "Questie.toc"
+    own.parent.mkdir()
+    own.write_bytes(b"## Title: Questie\n")
+    shutil.rmtree(tmp_path / UNBOUND_MODULE)  # the module moves: one file changed, one dropped
+    newer = dict(FOLDER_ADDONS)
+    del newer["multiclass-talents-ui/Art/UI-Frame.blp"]
+    del newer["multiclass-resources/multiclass-resources.toc"]
+    newer["multiclass-resources/multiclass-resources.lua"] = b"return 2\r\n"
+    _lay_folder_module(tmp_path, newer, module=UNBOUND_MODULE)
+    steps.clear()
+
+    view.play()
+
+    assert steps == ["install unbound-addons", "config", "launch"]
+    assert old_res.read_bytes() == b"return 2\r\n", "the edited file the pack still ships stays"
+    assert not old_toc.exists(), "a dropped file the player never touched was kept"
+    assert old_art.read_bytes() == b"BLP2 the player's edit", "an edited file was removed"
+    assert own.read_bytes() == b"## Title: Questie\n"
+    assert installed[-1]["left_behind"] == [
+        "Interface/AddOns/multiclass-talents-ui/Art/UI-Frame.blp"
+    ]
+    # The player is told, in the note Play ends with: only the edited dropped file is named.
+    said = view.play_label.text()
+    assert (
+        "Unbound addons: left alone because you changed them: "
+        "Interface/AddOns/multiclass-talents-ui/Art/UI-Frame.blp." in said
+    )
+    assert "multiclass-resources.toc" not in said, "a file that was removed is not 'left alone'"
 
 
 def test_a_folder_pack_is_no_download_in_the_make_dialog(
@@ -29253,3 +29889,184 @@ def test_rebuild_stays_refused_until_the_last_of_two_overlapping_modules_jobs_en
     view._module_job_ended()
     assert view._module_jobs == 0, "the count went below zero"
     assert not view._module_job_running()
+
+
+class _AdminWithCreateNote(_StubAccounts):
+    """A stub whose `after_create` records what the view asked and answers a sentence."""
+
+    def __init__(self) -> None:
+        super().__init__(useraccounts.Listing(accounts=[]))
+        self.after: list[tuple[str, int]] = []
+
+    def after_create(self, account: str, level: int) -> str:
+        self.after.append((account, level))
+        return "GM level 3 is live now."
+
+
+def test_creating_an_account_with_a_level_asks_the_world_and_says_what_it_answered(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T579: the report carries the live-level sentence after the creation line."""
+    admin = _AdminWithCreateNote()
+    made = _FakeMaintenance()
+    services = replace(_services(ps, tmp_path, [], made), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.account_gm.setValue(3)
+    view.create_account()
+
+    assert admin.after == [("dad", 3)]
+    assert "GM level 3 is live now." in view.account_report.text()
+    assert "created" in view.account_report.text()
+
+
+def test_creating_an_account_with_no_level_does_not_ask_the_world(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    admin = _AdminWithCreateNote()
+    services = replace(_services(ps, tmp_path, [], _FakeMaintenance()), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.create_account()
+
+    assert admin.after == []
+
+
+def test_creating_with_no_level_over_an_account_held_at_gm_3_does_not_claim_a_level_change(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The result carries the floor-held level; this press asked for none (T579 review)."""
+    admin = _AdminWithCreateNote()
+    made = _FakeMaintenance()
+    made.create = lambda name, password, gm: AccountResult(  # type: ignore[method-assign]
+        username=name, account_id=9, created=False, gm_level=3
+    )
+    services = replace(_services(ps, tmp_path, [], made), accounts=admin)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.account_name.setText("dad")
+    view.account_password.setText("s3cret")
+    view.account_gm.setValue(0)
+    view.create_account()
+
+    assert admin.after == []
+    assert "live now" not in view.account_report.text()
+
+
+# -- T576: a client that is not 3.3.5a --------------------------------------------------
+
+
+def _client_build(folder: Path, *parts: int) -> Path:
+    """`_game_client()` whose Wow.exe reports `parts` (major, minor, patch, build)."""
+    client = _game_client(folder)
+    exe = client / "Wow.exe"
+    exe.write_bytes(pe_fixture.pe(pe_fixture.resource_section(pe_fixture.version_info(*parts))))
+    return client
+
+
+def test_picking_a_client_folder_whose_wow_exe_is_not_12340_is_refused_naming_both_builds(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    warned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **k: warned.append(a)
+    )
+    old = _client_build(tmp_path / "old", 3, 3, 3, 11723)
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: old)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a 3.3.3 client was recorded"
+    assert failures and "3.3.3 (11723)" in failures[0] and "12340" in failures[0]
+    assert warned and "3.3.3 (11723)" in warned[0][2]
+
+
+def test_picking_a_stock_3_3_5a_client_folder_is_accepted(qapp: object, tmp_path: Path) -> None:
+    stock = _client_build(tmp_path / "stock", 3, 3, 5, 12340)
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: stock)
+
+    view.change_client_dir()
+
+    assert fake.written == [stock]
+
+
+def test_picking_an_exe_with_no_version_resource_is_accepted(qapp: object, tmp_path: Path) -> None:
+    unknown = _game_client(tmp_path / "unknown")  # a Wow.exe that is not a PE file
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: unknown)
+
+    view.change_client_dir()
+
+    assert fake.written == [unknown]
+
+
+def test_making_a_ready_to_play_client_from_a_non_12340_client_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 3, 11723)
+    asker = _Asked()
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=asker)
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+
+    view.make_play_client()
+
+    assert asker.offers == [], "the dialog was offered for a client the server drops"
+    assert not target.exists() and recorder.written == []
+    assert "3.3.3 (11723)" in view.play_label.text() and "12340" in view.play_label.text()
+
+
+def test_making_a_ready_to_play_client_from_a_12340_client_still_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 5, 12340)
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked())
+
+    view.make_play_client()
+
+    assert recorder.written == [play_client.default_target(original, WOTLK.name, tmp_path)]
+
+
+def test_the_build_a_pick_must_report_comes_from_the_catalog_entry(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Data-driven: an entry that asks for another build refuses a client that is 12340."""
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", lambda *a, **k: None)
+    stock = _client_build(tmp_path / "stock", 3, 3, 5, 12340)
+    other = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"required_build": 11723})}
+    )
+    view, fake = _client_dir_view(other, tmp_path / "server", pick_client_dir=lambda *_: stock)
+
+    view.change_client_dir()
+
+    assert fake.written == []
+
+
+def test_play_with_a_client_picked_before_the_check_is_refused_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 3, 11723)
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert launched == []
+    assert "3.3.3 (11723)" in view.play_label.text() and "12340" in view.play_label.text()
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+    assert view._play_pending is False
+
+
+def test_play_with_a_12340_client_starts_the_game(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _client_build(tmp_path / "clients" / "WoW", 3, 3, 5, 12340)
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1

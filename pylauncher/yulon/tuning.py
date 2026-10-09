@@ -25,17 +25,22 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import math
 import os
 import re
 import shutil
 import stat
+import sys
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from yulon import links
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest
 from yulon.manifest_store import FAMILY_FILES
@@ -374,6 +379,36 @@ def rows_for(
     return tuple(rows)
 
 
+MODULE_CONF_DIR = "env/dist/etc/modules"
+"""Where an AzerothCore install keeps its modules' `.conf` files, under the server folder."""
+
+
+def module_conf_files(server_dir: Path) -> tuple[str, ...]:
+    """Every `.conf` in the server's modules folder, by name, relative to `server_dir`.
+
+    The raw editor's list used to come from `rows_for()` alone, so a module the
+    catalog does not describe -- or whose only declared key is a wildcard such as
+    `AutoBalance.Enable.*` -- had no button (T569: 16 of a player's 52). This
+    reads the folder itself. Plain files ending in `.conf` only: a `.conf.dist`
+    default, a sub-folder and a dangling link are not something to edit, and a
+    folder that is missing or cannot be listed answers nothing rather than
+    failing the tab. Sorted by lower-cased name so the order does not depend on
+    the file system's.
+    """
+    try:
+        with os.scandir(server_dir / MODULE_CONF_DIR) as entries:
+            names = [
+                entry.name
+                for entry in entries
+                if entry.name.lower().endswith(CONF_SUFFIX) and entry.is_file()
+            ]
+    except OSError as exc:
+        logger.debug(f"tuning: could not list {server_dir / MODULE_CONF_DIR}: {exc}")
+        return ()
+    names.sort(key=lambda name: (name.lower(), name))
+    return tuple(f"{MODULE_CONF_DIR}/{name}" for name in names)
+
+
 # -- the writer -------------------------------------------------------------
 
 
@@ -555,6 +590,22 @@ def _check_decimal(key: ConfKey, value: str) -> None:
         raise RateRefused(f"{row}: {text} is above the largest allowed value {key.max}.")
 
 
+def core_bool(value: str) -> bool | None:
+    """What AzerothCore's `GetOption<bool>` makes of `value`, or `None`.
+
+    `StringTo<bool>` non-strict (`StringConvert.h:94-122` at 7f12e89e): `1`,
+    `y`, `on`, `yes`, `true` are on and `0`, `n`, `off`, `no`, `false` are off,
+    letters in any case. `None` is a bad value, for which the core logs and
+    uses the option's compiled default.
+    """
+    word = value.strip()
+    if word == "1" or word.lower() in ("y", "on", "yes", "true"):
+        return True
+    if word == "0" or word.lower() in ("n", "off", "no", "false"):
+        return False
+    return None
+
+
 _BOOL_WORDS = frozenset({"0", "1", "true", "false"})
 """What a `bool` key accepts, and nothing wider.
 
@@ -575,6 +626,537 @@ def _newline_of(raw: str) -> str:
     user may also edit with a Windows editor.
     """
     return "\r\n" if "\r\n" in raw else "\n"
+
+
+def _disk_ignores_case() -> bool:
+    """Whether this platform's usual disk treats `Foo.conf` and `foo.conf` as one file.
+
+    Windows (NTFS) and macOS (APFS, by default) do; Linux does not. A seam for
+    tests, which cannot run another platform's disk.
+    """
+    return sys.platform in ("win32", "darwin")
+
+
+def file_key(name: str) -> str:
+    """`name` spelled as this platform's disk compares file names (T573 item 3).
+
+    `os.path.normcase` is the identity on POSIX, so on a case-insensitive macOS
+    volume it called the server's `playerbots.conf` and a folder file
+    `Playerbots.conf` two files: an editable second button beside the read-only
+    one, and a Save that wrote the server's own file. Compare names by this key.
+    """
+    return name.replace("\\", "/").casefold() if _disk_ignores_case() else name
+
+
+def is_one_of(name: str, names: Iterable[str], root: Path | None = None) -> bool:
+    """Whether `name` is one of `names`, by `file_key`.
+
+    `file_key` assumes the platform's usual disk, and a Mac volume can be
+    case-sensitive (Codex review). So when `root` (the server folder) is given and
+    two spellings differ only in case, both files existing there and not being the
+    same file (`os.path.samefile`) settles it: they are two files. A spelling that
+    does not exist on disk falls back to the key, the safe side (read-only).
+    """
+    key = file_key(name)
+    for other in names:
+        if other == name:
+            return True
+        if file_key(other) != key:
+            continue
+        if root is not None:
+            try:
+                if not os.path.samefile(root / name, root / other):
+                    continue
+            except OSError:
+                pass
+        return True
+    return False
+
+
+MAX_EDIT_BYTES = 1024 * 1024
+"""The largest conf the raw editor opens: 1 MB (T573 item 4).
+
+The shipped `worldserver.conf` is about 150 KB. The editor reads on the window's
+own thread, so a file of hundreds of megabytes (a log renamed to `.conf`, say)
+would freeze the app and fill the editor; past this size the file opens empty and
+read-only with `TOO_BIG` instead.
+"""
+
+TOO_BIG = (
+    "{file} is too big to edit here: this editor opens files up to {limit} MB. "
+    "Open it in a text editor, or keep it under that size."
+)
+
+
+BOM = "\ufeff"
+_TERMINATOR = re.compile(r"\r\n|\n|\r")
+
+
+def editor_view(raw: str) -> str:
+    """The text the raw editor is given for a file whose exact text is `raw` (T573).
+
+    Without a leading byte-order mark, and with every line ending, `\\r\\n`,
+    `\\n` and a lone `\\r` alike, as the `\\n` the editor hands back anyway.
+    `save_text()` puts the originals back.
+    """
+    return _TERMINATOR.sub("\n", raw.removeprefix(BOM))
+
+
+def save_text(raw: str, edited: str) -> str:
+    """The file's new text after an edit in the raw editor, every untouched line as it was.
+
+    `raw` is the file as it was read (`newline=""`, so nothing is translated) and
+    `edited` is what the editor now holds. The editor cannot carry a byte-order
+    mark or tell `\\r\\n` from `\\n` from a lone `\\r`, so writing its text back
+    converted the whole file (T573 item 2). Here the two are lined up by line
+    (`_matched_runs`), and a line the player did not change is written with its own
+    bytes: its text and its own ending. A line they changed or added takes the ending
+    of the line it replaced, or else of the one above it, or else the file's usual one
+    (`_newline_of`). A leading BOM is kept.
+    """
+    bom = BOM if raw.startswith(BOM) else ""
+    body = raw.removeprefix(BOM)
+    # The file's usual ending (`_newline_of`), or a lone CR if every line ends in one.
+    default = "\r" if "\r" in body and "\n" not in body else _newline_of(body)
+    old_lines, old_ends = _lines_of(body)
+    # The old last line has no ending: one that takes its place takes the usual one.
+    old_ends.append(default)
+    new_lines = (_TERMINATOR.sub("\n", edited) if "\r" in edited else edited).split("\n")
+    ends = [default] * len(new_lines)
+    # Between two matched runs (or a file's start or end) the old and new lines left over
+    # were replaced: the first new one takes the first old one's ending, and so on; a new
+    # line with no old one left takes the ending of the line above it.
+    was = now = 0
+    for i, j, size in [*_matched_runs(old_lines, new_lines), (len(old_lines), len(new_lines), 0)]:
+        if j > now:
+            paired = min(i - was, j - now)
+            if paired:
+                ends[now : now + paired] = old_ends[was : was + paired]
+            if now + paired < j and now + paired > 0:
+                ends[now + paired : j] = [ends[now + paired - 1]] * (j - now - paired)
+        if size == 1:
+            ends[j] = old_ends[i]
+        else:
+            ends[j : j + size] = old_ends[i : i + size]
+        was, now = i + size, j + size
+    ends[-1] = ""
+    # A lone-CR line followed by an empty line that ends in a bare LF would read back as ONE
+    # CRLF: the blank line gone. Such an empty line takes a lone CR as well.
+    if body.count("\r") > body.count("\r\n"):
+        for k in range(len(new_lines) - 1):
+            if ends[k] == "\r" and new_lines[k + 1] == "" and ends[k + 1] == "\n":
+                ends[k + 1] = "\r"
+    text = [""] * (2 * len(new_lines))
+    text[0::2] = new_lines
+    text[1::2] = ends
+    return bom + "".join(text)
+
+
+def _lines_of(body: str) -> tuple[list[str], list[str]]:
+    """`body`'s lines and the ending of each but the last, which has none."""
+    if "\r" not in body:
+        lines = body.split("\n")
+        return lines, ["\n"] * (len(lines) - 1)
+    if body.count("\r") == body.count("\n") == body.count("\r\n"):
+        lines = body.split("\r\n")
+        return lines, ["\r\n"] * (len(lines) - 1)
+    parts = _SPLIT_LINES.split(body)
+    return parts[0::2], parts[1::2]
+
+
+_SPLIT_LINES = re.compile(r"(\r\n|\n|\r)")
+"""`_TERMINATOR` kept in the split: a file's lines and their endings, taken turn about."""
+
+
+def _matched_runs(old: Sequence[str], new: Sequence[str]) -> list[tuple[int, int, int]]:
+    """Which old lines the unchanged new lines are: (old index, new index, how many) runs.
+
+    The runs rise on both sides and only equal lines are ever in one. A line diff of a
+    whole big file took seconds on the window's thread (7.7 s for 2 MB of alike
+    sections), and matching the lines by their place alone gave hundreds of untouched
+    lines a neighbour's ending once an edit added or removed a line. So: the lines both
+    sides start and end with match first. What is left, if it has at most
+    `MAX_DIFF_LINES` lines a side, is lined up exactly (`_line_up`). A bigger gap is
+    cut, patience style, at its anchors: the longest run, in the same order on both sides,
+    of lines whose text occurs exactly once in the old part and once in the new (n log n);
+    each piece between two anchors is lined up the same way again. A big gap with no
+    anchor (every line in it occurs twice or more, or on one side only) goes to
+    `_in_order`. Exact line-ups cost a cell per pair of lines, and all of them together,
+    `_in_order`'s included, stop at `_EXACT_CELLS` a save.
+    """
+    runs: list[tuple[int, int, int]] = []
+    # Each search for anchors costs a pass over its gap. A file built to make every pass
+    # find one anchor only would make that quadratic, so past a few passes over the
+    # file's size no more anchors are looked for.
+    passes = 8 * (len(old) + len(new)) + 10_000
+    cells = [_EXACT_CELLS]
+    todo = [(0, len(old), 0, len(new))]
+    while todo:
+        a1, a2, b1, b2 = todo.pop()
+        same = _same_ahead(old, a1, new, b1, min(a2 - a1, b2 - b1))
+        if same:
+            runs.append((a1, b1, same))
+            a1, b1 = a1 + same, b1 + same
+        same = _same_behind(old, a2, new, b2, min(a2 - a1, b2 - b1))
+        if same:
+            a2, b2 = a2 - same, b2 - same
+            runs.append((a2, b2, same))
+        if a1 == a2 or b1 == b2:
+            continue
+        area = (a2 - a1) * (b2 - b1)
+        if a2 - a1 <= MAX_DIFF_LINES and b2 - b1 <= MAX_DIFF_LINES and area <= cells[0]:
+            cells[0] -= area
+            texts = (set(old[a1:a2]), set(new[b1:b2]))
+            found = _line_up(old[a1:a2], new[b1:b2], texts)
+            runs.extend((a1 + i, b1 + j, 1) for i, j in found)
+            continue
+        passes -= (a2 - a1) + (b2 - b1)
+        anchors = _anchors(old, a1, a2, new, b1, b2) if passes > 0 else []
+        if not anchors:
+            runs.extend(_in_order(old, a1, a2, new, b1, b2, cells))
+            continue
+        for i, j in anchors:
+            runs.append((i, j, 1))
+            todo.append((a1, i, b1, j))
+            a1, b1 = i + 1, j + 1
+        todo.append((a1, a2, b1, b2))
+    runs.sort()
+    return runs
+
+
+def _same_ahead(old: Sequence[str], i: int, new: Sequence[str], j: int, most: int) -> int:
+    """How many lines old[i:] and new[j:] start with alike, at most `most`.
+
+    Compared a slice at a time, the slices doubling while they agree and halving once one
+    does not, so a long run costs a few comparisons and not one Python step a line.
+    """
+    same, step = 0, 1
+    while same < most:
+        size = min(step, most - same)
+        if old[i + same : i + same + size] == new[j + same : j + same + size]:
+            same += size
+            step *= 2
+        elif size == 1:
+            break
+        else:
+            step = size // 2
+    return same
+
+
+def _same_behind(old: Sequence[str], i: int, new: Sequence[str], j: int, most: int) -> int:
+    """How many lines old[:i] and new[:j] end with alike, at most `most` (`_same_ahead`)."""
+    same, step = 0, 1
+    while same < most:
+        size = min(step, most - same)
+        if old[i - same - size : i - same] == new[j - same - size : j - same]:
+            same += size
+            step *= 2
+        elif size == 1:
+            break
+        else:
+            step = size // 2
+    return same
+
+
+def _anchors(
+    old: Sequence[str], a1: int, a2: int, new: Sequence[str], b1: int, b2: int
+) -> list[tuple[int, int]]:
+    """The longest same-order run of lines that occur once in old[a1:a2] and once in new[b1:b2]."""
+    in_old, in_new = Counter(old[a1:a2]), Counter(new[b1:b2])
+    unique = {text for text, count in in_old.items() if count == 1 and in_new[text] == 1}
+    if not unique:
+        return []
+    once = {
+        old[i]: i for i in itertools.compress(range(a1, a2), map(unique.__contains__, old[a1:a2]))
+    }
+    found = [
+        (j, once[new[j]])
+        for j in itertools.compress(range(b1, b2), map(unique.__contains__, new[b1:b2]))
+    ]
+    # Longest increasing run of old indexes, in new order (patience sorting).
+    tops: list[int] = []
+    top_at: list[int] = []
+    back = [-1] * len(found)
+    for k, (_, i) in enumerate(found):
+        pile = bisect.bisect_left(tops, i)
+        if pile == len(tops):
+            tops.append(i)
+            top_at.append(k)
+        else:
+            tops[pile] = i
+            top_at[pile] = k
+        back[k] = top_at[pile - 1] if pile else -1
+    run: list[tuple[int, int]] = []
+    k = top_at[-1] if top_at else -1
+    while k >= 0:
+        run.append((found[k][1], found[k][0]))
+        k = back[k]
+    run.reverse()
+    return run
+
+
+def _in_order(
+    old: Sequence[str],
+    a1: int,
+    a2: int,
+    new: Sequence[str],
+    b1: int,
+    b2: int,
+    cells: list[int],
+) -> list[tuple[int, int, int]]:
+    """Equal lines of old[a1:a2] and new[b1:b2] matched in order, as `_matched_runs` runs."""
+    texts = (set(old[a1:a2]), set(new[b1:b2]))
+    # After each side's lines, a few no line equals (a line holds no newline), so `_walk`
+    # can look a few lines past either end without a check of its own.
+    mine, yours = [*old[a1:a2], *_PAST_OLD], [*new[b1:b2], *_PAST_NEW]
+    runs = _walk(mine, a2 - a1, yours, b2 - b1, texts, cells)
+    return [(a1 + p, b1 + q, size) for p, q, size in runs]
+
+
+def _walk(
+    old: list[str],
+    n: int,
+    new: list[str],
+    m: int,
+    texts: tuple[set[str], set[str]],
+    cells: list[int],
+) -> list[tuple[int, int, int]]:
+    """Equal lines of old[:n] and new[:m] matched in order; `texts` is each side's texts.
+
+    Both lists go on past `n` and `m` with lines no line equals (`_in_order`). Where the two
+    differ, the next `_WINDOW` lines of each side are lined up exactly (`_line_up`)
+    and the matches in the window's first half are kept: a few lines changed, added or
+    deleted among alike ones resync at once. A window with no line in common means a big
+    block was added or deleted: the side whose line turns up again sooner on the other
+    side skips ahead to it, and a line that turns up on neither side again was replaced,
+    so both move on. Each window is charged to `cells`; once they are spent, the rest
+    goes to `_walk_on`, which takes linear time whatever the lines are.
+    """
+    runs: list[tuple[int, int, int]] = []
+    where_old: dict[str, list[int]] | None = None
+    where_new: dict[str, list[int]] = {}
+    # How many lines whose text the other side has each side has up to a place.
+    kept_old: list[int] = []
+    kept_new: list[int] = []
+    i = j = 0
+    while i < n and j < m:
+        if old[i] == new[j]:
+            same = _same_from(old, i, n, new, j, m)
+            runs.append((i, j, same))
+            i, j = i + same, j + same
+            continue
+        tall, wide = min(_WINDOW, n - i), min(_WINDOW, m - j)
+        if tall * wide + tall + wide > cells[0]:
+            cells[0] = 0
+            runs.extend(_walk_on(old, i, n, new, j, m))
+            break
+        cells[0] -= tall * wide + tall + wide
+        here, there = old[i : i + tall], new[j : j + wide]
+        whole = i + _WINDOW >= n and j + _WINDOW >= m
+        found: list[tuple[int, int]] = []
+        if not set(here).isdisjoint(there):
+            if not kept_old:
+                kept_old = [0, *itertools.accumulate(map(texts[1].__contains__, old[:n]))]
+                kept_new = [0, *itertools.accumulate(map(texts[0].__contains__, new[:m]))]
+            surplus = kept_old[n] - kept_old[i] - kept_new[m] + kept_new[j]
+            found = _line_up(here, there, texts, whole, surplus)
+        if found:
+            if not whole:
+                half = _WINDOW // 2
+                found = [p for p in found if p[0] < half and p[1] < half] or found[:1]
+            runs.extend((i + di, j + dj, 1) for di, dj in found)
+            i, j = i + found[-1][0] + 1, j + found[-1][1] + 1
+            continue
+        if where_old is None:
+            where_old = {}
+            for k in range(n):
+                where_old.setdefault(old[k], []).append(k)
+            for k in range(m):
+                where_new.setdefault(new[k], []).append(k)
+        in_old = _next_at(where_old.get(new[j], []), i)
+        in_new = _next_at(where_new.get(old[i], []), j)
+        if in_old is not None and (in_new is None or in_old - i <= in_new - j):
+            i = in_old
+        elif in_new is not None:
+            j = in_new
+        else:
+            i, j = i + 1, j + 1
+    return runs
+
+
+def _same_from(old: list[str], i: int, n: int, new: list[str], j: int, m: int) -> int:
+    """How many lines from old[i] == new[j] on are alike: a step a line for a short run."""
+    same = 1
+    while same < 8 and old[i + same] == new[j + same]:
+        same += 1
+    return _same_ahead(old, i, new, j, min(n - i, m - j)) if same == 8 else same
+
+
+def _next_at(places: list[int], start: int) -> int | None:
+    """The first of `places` (rising) at or after `start`, if any."""
+    k = bisect.bisect_left(places, start)
+    return places[k] if k < len(places) else None
+
+
+def _walk_on(
+    old: list[str], i: int, n: int, new: list[str], j: int, m: int
+) -> list[tuple[int, int, int]]:
+    """Equal lines of old[i:n] and new[j:m] in order, in linear time: `_walk` once spent.
+
+    Where the two differ, the nearer of old's next line equal to new[j] and new's next
+    line equal to old[i], within `_LOOK` lines, is skipped to; else both lines count as
+    replaced. Every step moves on at least one line and looks at no more than
+    2 * `_LOOK` + 1 of them.
+    """
+    runs: list[tuple[int, int, int]] = []
+    while i < n and j < m:
+        mine, yours = old[i], new[j]
+        if mine == yours:
+            same = 1 if old[i + 1] != new[j + 1] else _same_from(old, i, n, new, j, m)
+            runs.append((i, j, same))
+            i, j = i + same, j + same
+            continue
+        for skip in _SKIPS:
+            if old[i + skip] == yours:
+                i += skip
+                break
+            if new[j + skip] == mine:
+                j += skip
+                break
+        else:
+            i, j = i + 1, j + 1
+    return runs
+
+
+def _may_change(lose: list[int]) -> list[bool]:
+    """Which lines `_line_up` may take for a changed line (`lose` is each one's cost).
+
+    Lines whose text the other side has nowhere, in a run of at most `_CHANGE_RUN` of
+    them; a longer run reads as lines added or deleted.
+    """
+    may = [False] * len(lose)
+    start = 0
+    for end, left_out in enumerate([*lose, 1]):
+        if left_out:
+            if end - start <= _CHANGE_RUN:
+                may[start:end] = [True] * (end - start)
+            start = end + 1
+    return may
+
+
+def _line_up(
+    old: Sequence[str],
+    new: Sequence[str],
+    texts: tuple[set[str], set[str]],
+    closed: bool = True,
+    surplus: int = 0,
+) -> list[tuple[int, int]]:
+    """The equal lines of two short line lists, as (old, new) index pairs, both rising.
+
+    The cheapest line-up wins. Leaving out a line costs `_LEFT_OUT`, unless the other side
+    has its text nowhere (`texts` holds each side's texts): such a line can never match,
+    so it costs nothing. Pairing an old line with a new one where one of them is such a
+    line (a changed line) costs `_CHANGED`, less than leaving the other out, so a changed
+    line among twins (`E = 1`, `E = 1` to `C`, `E = 1`) keeps the twin after it in place.
+    Not `closed`, the two are the first lines of longer lists (`_walk`'s window): the
+    lines past one side's end may still match the other's, so the line-up runs to the
+    cheapest place on the far edge, of equal ones the one with the smaller offset
+    between the sides. Counting matches alone let a block of added lines (fresh ones,
+    or three `E = 1` lines among `#`, blank, `E = 1` sections) pull everything after it
+    onto a twin a section on, since the true line-up's last lines fall past the
+    window's edge. Where the line-up ends is also charged `_BEHIND` a line for how far
+    it leaves the two sides from evening out: `surplus` is how many more lines whose
+    text the other side has the old side has than the new from the window on, which
+    edits further on must still leave out. Among twins, a fresh line added and an old
+    line changed into it read the same in a window; the line count of the whole tells
+    them apart.
+    """
+    ours, theirs = texts
+    lose_old = [_LEFT_OUT if text in theirs else 0 for text in old]
+    lose_new = [_LEFT_OUT if text in ours else 0 for text in new]
+    cost = [[0, *itertools.accumulate(lose_new)]]
+    cost += [[0] * (len(new) + 1) for _ in old]
+    may_old, may_new = _may_change(lose_old), _may_change(lose_new)
+    columns = list(zip(range(1, len(new) + 1), new, lose_new, may_new, strict=True))
+    for x, (text, lose, may) in enumerate(zip(old, lose_old, may_old, strict=True), 1):
+        above, row = cost[x - 1], cost[x]
+        left = row[0] = above[0] + lose
+        for y, other, extra, can in columns:
+            if text == other:
+                left = above[y - 1]
+            else:
+                left += extra
+                if above[y] + lose < left:
+                    left = above[y] + lose
+                if (may or can) and above[y - 1] + _CHANGED < left:
+                    left = above[y - 1] + _CHANGED
+            row[y] = left
+    x, y = len(old), len(new)
+    if not closed:
+        # The cheapest place on the far edge, of equal ones the nearest the diagonal.
+        kept_old = [0, *itertools.accumulate(map(bool, lose_old))]
+        kept_new = [0, *itertools.accumulate(map(bool, lose_new))]
+
+        def price(x: int, y: int) -> tuple[int, int, int, int]:
+            behind = abs(surplus - kept_old[x] + kept_new[y])
+            return (cost[x][y] + _BEHIND * behind, abs(x - y), x, y)
+
+        far = [price(len(old), y) for y in range(len(new) + 1)]
+        far += [price(x, len(new)) for x in range(len(old))]
+        x, y = min(far)[2:]
+    found: list[tuple[int, int]] = []
+    while x and y:
+        here = cost[x][y]
+        if old[x - 1] == new[y - 1]:
+            found.append((x - 1, y - 1))
+            x, y = x - 1, y - 1
+        elif (may_old[x - 1] or may_new[y - 1]) and cost[x - 1][y - 1] + _CHANGED == here:
+            x, y = x - 1, y - 1
+        elif cost[x - 1][y] + lose_old[x - 1] == here:
+            x -= 1
+        else:
+            y -= 1
+    found.reverse()
+    return found
+
+
+_WINDOW = 32
+"""How many lines a side `_walk` lines up exactly where the two texts differ."""
+
+_LEFT_OUT = 5
+_CHANGED = 2
+_BEHIND = 3
+_CHANGE_RUN = 6
+"""What `_line_up` charges for a line left out, for an old line paired with a new one where
+either text is not on the other side at all (a changed line), and a line for each line a
+window's line-up leaves the two sides from evening out; and the longest run of such lines
+it takes for changed lines. A change costs less than leaving its old line out, so changed
+lines among twins stay paired with the lines they replaced; but not nothing, or added
+lines that the old text has nowhere could be paired with old lines just as cheaply as
+added, moving every line after them a section on (two-thirds of 600 lines in a measured
+case). A pasted block longer than `_CHANGE_RUN` is added lines: let it absorb changes made
+further down and the lines between moved a section on (397 of 600)."""
+
+_LOOK = 4
+"""How many lines a side `_walk_on` looks ahead once the exact line-ups are spent."""
+
+_SKIPS = range(1, _LOOK + 1)
+_PAST_OLD = ["\n<"] * _LOOK
+_PAST_NEW = ["\n>"] * _LOOK
+"""What `_in_order` puts after each side's lines: no line equals them, nor one the other."""
+
+
+MAX_DIFF_LINES = 200
+"""The most lines a side of a gap that `save_text` lines up exactly.
+
+About 1.5 ms for 200 alike lines a side; a bigger one is cut at its unique lines first. A
+line diff of a whole big file of alike lines took seconds (`_matched_runs`)."""
+
+_EXACT_CELLS = 1_000_000
+"""How many line pairs one save lines up exactly in all (`_line_up`), about 60 ms.
+
+Gaps and `_walk`'s windows alike; past it the rest is matched in linear time, so a 1 MB
+file of one-letter lines with a difference every few lines saves in about 0.3 s."""
 
 
 PRIVATE_MODE = 0o600
@@ -601,7 +1183,55 @@ def private_copy(src: Path, dst: Path) -> None:
     shutil.copystat(src, dst)
 
 
-def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
+OUTSIDE_THE_SERVER = (
+    "{file} is a link that leads outside the server folder (to {where}), so Yu'lon will not "
+    "read it, back it up or change it. Replace the link with the file itself to edit it here."
+)
+"""A conf that is a link out of the install is somebody else's file (T573).
+
+Reading it shows that file's text, a save writes to it, and a backup copies it
+into the server folder. All three are refused, in one sentence.
+"""
+
+
+def _real(path: Path) -> Path:
+    """Where `path` really is, every link on the way followed (a seam: tests stand in Windows')."""
+    return Path(os.path.realpath(path))
+
+
+def check_inside(path: Path, root: Path | None = None) -> None:
+    """Refuse when `path` is, or sits under, a link that leads outside `root`.
+
+    `root` is the server folder, `path.parent` when a caller has none. Each step
+    from `root` down to `path` is asked `links.is_link()` -- a symlink, or on
+    Windows a junction, which Python 3.11 reports as a plain folder -- and only
+    a link is followed (`_real`), so a tree with no links costs no resolving. A
+    link that leads to somewhere still inside `root` is the player's own tidy
+    layout and is allowed.
+
+    Raises:
+        TuningError: in a sentence for the player, before anything is read or written.
+        OSError: a step could not be looked at (`links.is_link`'s own rule).
+    """
+    base = path.parent if root is None else root
+    try:
+        parts = path.relative_to(base).parts
+        steps = [base.joinpath(*parts[: i + 1]) for i in range(len(parts))]
+    except ValueError:
+        steps = [path]
+    for step in steps:
+        if not links.is_link(step):
+            continue
+        inside = os.path.normcase(str(_real(base)))
+        where = _real(step)
+        target = os.path.normcase(str(where))
+        if target != inside and not target.startswith(inside.rstrip("\\/") + os.sep):
+            raise TuningError(OUTSIDE_THE_SERVER.format(file=path.name, where=where))
+
+
+def backup(
+    path: Path, *, now: datetime | None = None, tag: str = "", root: Path | None = None
+) -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
 
     `tag`, when given, goes between the stamp and `.bak` (T94: a Reset to
@@ -624,6 +1254,7 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     and a Reset to default's Undo reads a tagged one as a record. A failure
     removes the sibling and raises; nothing named `.bak` is left.
     """
+    check_inside(path, root)
     when = now or datetime.now()
     for _ in range(_BACKUP_TRIES):
         # Microseconds, in a FIXED-WIDTH field, so a name sort is a time sort
@@ -671,6 +1302,7 @@ def write(
     *,
     spec: Mapping[str, ConfKey] | None = None,
     now: datetime | None = None,
+    root: Path | None = None,
 ) -> Path:
     """Set these keys in this conf, change nothing else, and return the backup's path.
 
@@ -693,6 +1325,8 @@ def write(
     """
     for key, value in edits.items():
         check(None if spec is None else spec.get(key), value)
+    # Before the file is opened: a link out of `root` is not read either (T573).
+    check_inside(path, root)
     # `newline=""` on the way IN as well as out. The default translates every
     # "\r\n" to "\n" while reading, so a CRLF conf arrives looking like an LF
     # one, is detected as LF, and is written back converted -- a whole-file diff
@@ -721,7 +1355,7 @@ def write(
             appended.append(f"{key} = {value}{carriage}")
             continue
         lines[index] = _rewrite(lines[index], key, value)
-    made = backup(path, now=now)
+    made = backup(path, now=now, root=root)
     if appended:
         if lines and lines[-1].strip() == "":
             lines.pop()  # write under the trailing newline, not after a blank line

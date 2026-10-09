@@ -38,6 +38,8 @@ class InstallKind(enum.Enum):
     """How this copy of Yu'lon was delivered."""
 
     APPIMAGE = "appimage"
+    APPIMAGE_LOST = "appimage_lost"
+    """Running from an AppImage's temporary mount, with no verified AppImage file to name."""
     TARBALL = "tarball"
     WINDOWS_ZIP = "windows_zip"
     MACOS_APP = "macos_app"
@@ -115,6 +117,77 @@ def _probe(directory: Path) -> bool:
     return True
 
 
+_MOUNT_PREFIXES = (".mount_", "appimage_extracted_")
+"""What the AppImage runtime names the folder it runs the payload from.
+
+`.mount_XXXXXX` is the FUSE mount; `appimage_extracted_XXXXXX` is what
+`--appimage-extract-and-run` unpacks to. Both have a random name and are gone
+when the app exits.
+"""
+
+_FIXED_RUNTIME_ROOTS = (Path("/run/firejail/appimage"),)
+"""Runtime folders with a fixed name: `firejail --appimage` loop-mounts there."""
+
+_PAYLOAD = Path("usr") / "bin" / "yulon"
+"""Where `release.yml` puts the program inside the AppImage (`$APPDIR/usr/bin/yulon`)."""
+
+_DESKTOP = "yulon.desktop"
+"""The desktop file `release.yml` writes at the root of the AppImage."""
+
+
+def _real(path: str | os.PathLike[str]) -> Path:
+    """`path` with symlinks followed, whether or not it exists (a test's paths do not)."""
+    return Path(os.path.realpath(path))
+
+
+def in_appimage_mount(executable: str | os.PathLike[str] | None = None) -> bool:
+    """Whether `executable` sits inside a folder the AppImage runtime made for this run."""
+    exe = _real(sys.executable if executable is None else executable)
+    return any(part.startswith(_MOUNT_PREFIXES) for part in exe.parts) or any(
+        exe.is_relative_to(root) for root in _FIXED_RUNTIME_ROOTS
+    )
+
+
+def appimage_file(
+    environ: Mapping[str, str] | None = None,
+    *,
+    executable: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """The AppImage FILE this process was started from, or None.
+
+    `$APPIMAGE` is the runtime's own statement of where the file is, but the
+    environment is inherited: an AppImage terminal or file manager exports
+    `APPIMAGE` and `APPDIR` to everything it starts, and a tarball launched
+    from one is not that app (T578). So it is believed only when this process
+    is Yu'lon's own payload in that AppImage: `$APPDIR` is set, the running
+    binary (`sys.executable`) is exactly `$APPDIR/usr/bin/yulon`, the folder
+    holds the `yulon.desktop` `release.yml` writes, and `$APPIMAGE` names a file
+    that exists. The runtime sets both variables together, so a real AppImage
+    always passes.
+
+    **The layout, not the folder's name, is the proof**, because runtimes name
+    the folder differently: `.mount_XXXXXX` (type 2), `appimage_extracted_*`
+    (extract-and-run) and `/run/firejail/appimage` (`firejail --appimage`).
+    A broad `$APPDIR` (`/opt/apps`) does not hold a tarball's binary at that
+    spot, and an unrelated app's folder holds no `yulon`.
+
+    The running binary is NOT the AppImage file; it is a path inside the
+    runtime's temporary mount, gone when the app exits. Anything that must
+    still work after Yu'lon closes (an autostart entry, a Steam shortcut) has
+    to name the file instead.
+    """
+    env = os.environ if environ is None else environ
+    appimage = env.get("APPIMAGE")
+    appdir = env.get("APPDIR")
+    if not appimage or not appdir or not Path(appimage).is_file():
+        return None
+    root = _real(appdir)
+    exe = _real(sys.executable if executable is None else executable)
+    if exe != _real(root / _PAYLOAD) or not (root / _DESKTOP).is_file():
+        return None
+    return Path(appimage)
+
+
 def detect_install(
     *,
     frozen: bool | None = None,
@@ -130,9 +203,9 @@ def detect_install(
     variable of ours: where an update comes from, and what it replaces, are
     facts about the running process. `$APPIMAGE` is read because it is the
     AppImage runtime's own way of telling a payload where its file is — and it
-    is believed only when it names a file that exists, since an unrelated
-    AppImage earlier in the session leaves it set in the environment a child
-    inherits.
+    is believed only when `appimage_file` can show it is this process's own
+    (T578), since an unrelated AppImage earlier in the session leaves it, and
+    its `$APPDIR`, set in the environment a child inherits.
     """
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if not frozen:
@@ -155,9 +228,13 @@ def detect_install(
     # `layout.shipped_entries()`, never by this function.
     if which == "windows":
         return Install(InstallKind.WINDOWS_ZIP, exe.parent, exe.name, probe_writable(exe.parent))
-    appimage = env.get("APPIMAGE")
-    if appimage and Path(appimage).is_file():
-        target = Path(appimage)
+    target = appimage_file(env, executable=exe)
+    if target is None and in_appimage_mount(exe):
+        # Inside an AppImage's mount but with nothing that proves which file:
+        # the environment was stripped, or names another app. Neither a
+        # tarball (the folder vanishes on exit) nor an install to replace.
+        return Install(InstallKind.APPIMAGE_LOST, None, "", False)
+    if target is not None:
         # A file install stages beside itself, so the PARENT is what has to
         # take a new file; a folder install stages inside itself.
         return Install(InstallKind.APPIMAGE, target, "", probe_writable(target.parent))

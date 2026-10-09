@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker
+from yulon import dbreads, docker, module_health, realm_flag, unbound_settings
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
@@ -135,6 +135,46 @@ until `SETTLED_AFTER`, as after any loop.
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+READY_READ_SPAN = timedelta(minutes=30)
+"""How much of a run the realm keeper reads for its ready marker (T581, cold review).
+
+The marker comes at the end of the load (1-3 min measured on Tortoise with 500 bots); a run
+that did not print it in its first half hour is not called ready, the safe direction."""
+
+HEALTH_RETRY_EVERY = timedelta(seconds=60)
+"""How long a module's health reading made without the world's ready line is replayed.
+
+Such a reading is not kept for the run (the log may yet catch up), and it is not remade every
+tick either: each remake reads the world's log and asks the database. T555."""
+WRONG_CLIENT_EVERY = timedelta(seconds=60)
+"""How often the world log is read for a client that was turned away (T576)."""
+
+WRONG_CLIENT_OVERLAP = timedelta(seconds=10)
+"""Each read starts this far before the last one: the two reads' edges are not exact."""
+
+WRONG_CLIENT_STAYS = timedelta(minutes=15)
+"""How long the sentence stays after the last such line: the line only comes with an attempt."""
+
+WRONG_CLIENT_LINE = re.compile(
+    r"requested connecting with realm id (\d+) but this realm has id \d+ set in config"
+)
+"""The world server's refusal of a client whose login packet is not 3.3.5a's (T576).
+
+AzerothCore reads the realm id out of CMSG_AUTH_SESSION at a fixed place; an older build
+puts other bytes there, so the number differs on every attempt. The authserver had
+already accepted the password, so the player sees a login that loads and drops.
+"""
+
+WRONG_CLIENT_MAX_REALM_ID = 255
+"""The largest realm id a real realm list holds (the realm id is one byte in the list).
+
+A correct client sends its realm list's id, so a line asking for a small id means the realm
+row and the world server's `RealmID` disagree (a hand edit, a second row), not a wrong client.
+Only an id above this, the random value of a packet that is not 3.3.5a's, blames the client.
+"""
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -178,6 +218,10 @@ class Verdict:
     says the run is up and not yet ready: the line says "starting" and the
     badge follows it. True when the install has no marker to look for, since
     nothing could ever say otherwise.
+    """
+    module_line: str = ""
+    """A module's own health sentence (`module_health`), once this run is ready; empty before
+    that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
     """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
@@ -260,6 +304,8 @@ def line(verdict: Verdict) -> str:
         parts.append(verdict.warning)
     if verdict.problem and verdict.players is not None:
         parts.append(verdict.problem)
+    if verdict.module_line:
+        parts.append(verdict.module_line)
     return " · ".join(parts)
 
 
@@ -306,7 +352,10 @@ class Dashboard:
         state_of: Callable[[str], docker.ContainerState] | None = None,
         daemon_of: Callable[[], str] | None = None,
         log_of: Callable[[str, str], str] | None = None,
+        login_log_of: Callable[[str, str], str] | None = None,
+        ready_log_of: Callable[[str, str, str], str] | None = None,
         now: Callable[[], datetime] | None = None,
+        realm: realm_flag.Keeper | None = None,
     ) -> None:
         self.spec = spec
         self.entry = entry
@@ -321,6 +370,20 @@ class Dashboard:
                 container, this_run_only=True, since=since, wsl_distro=wsl_distro
             )
         )
+        # T576: the log read for a refused client. An injected `log_of` stands in for Docker,
+        # so a test that gave only that one asked nothing of this read; it names its own.
+        self._login_log_of: Callable[[str, str], str] | None
+        if login_log_of is not None:
+            self._login_log_of = login_log_of
+        elif log_of is None:
+            self._login_log_of = lambda container, since: docker._logs(
+                container, this_run_only=True, since=since, wsl_distro=wsl_distro
+            )
+        else:
+            self._login_log_of = None
+        self._login_run: str | None = None
+        self._login_read_at: datetime | None = None
+        self._wrong_client_at: datetime | None = None
         self._banner = _ready_banner(entry)
         self._now = now or (lambda: datetime.now(UTC))
         self._missing_table_said = dbreads.MissingTableSaid()
@@ -337,10 +400,84 @@ class Dashboard:
         self._restarting_run: str | None = None
         self._ready_run: str | None = None
         self._ready_seen_at: datetime | None = None
+        # T555 T5: the module's health sentence for the run it was last read for.
+        self._health_run: str | None = None
+        self._health_got: module_health.HealthReading | None = None
+        self._health_running: dict[str, bool | None] | None = None
+        self._health_waiting: tuple[str, datetime, str] | None = None
+        """`(run, when, sentence)` of the last reading that was not kept: replayed for
+        `HEALTH_RETRY_EVERY`, then asked again."""
+        # T581: the realm row's offline bit, kept in step with what this tick reads. Built
+        # here only over real Docker, for the reason `login_log_of` is: a test that injects
+        # the container state hands its own keeper or asks nothing of this.
+        # T581: the keeper's own read for the ready marker, bounded to the run's first
+        # `READY_READ_SPAN`: it may be asked of a run that has lasted days. An injected
+        # `log_of` stands in for Docker, so a test that gave only that one is read through it.
+        self._ready_log_of: Callable[[str, str, str], str]
+        if ready_log_of is not None:
+            self._ready_log_of = ready_log_of
+        elif log_of is None:
+            self._ready_log_of = lambda container, since, until: docker._logs(
+                container, this_run_only=True, since=since, until=until, wsl_distro=wsl_distro
+            )
+        else:
+            injected = log_of
+            self._ready_log_of = lambda container, since, _until: injected(container, since)
+        self._realm: realm_flag.Keeper | None
+        if realm is not None:
+            self._realm = realm
+        elif state_of is None:
+            self._realm = realm_flag.keeper_for(entry, spec, server_dir, sql, wsl_distro=wsl_distro)
+        else:
+            self._realm = None
+        if self._realm is not None:
+            self._realm.said_ready = self._world_said_ready
+        self._seen = docker.ContainerState()
+
+    def _world_said_ready(self, run: str) -> bool:
+        """Whether the world still runs run `run` and its log shows the ready marker (T581).
+
+        Positive evidence only, for the realm keeper's clear: no marker to look for, a world
+        that is not running that run any more, or a log without the marker all say no.
+        """
+        if self._banner is None:
+            return False
+        state = self._state_of(self.spec.world)
+        if state.status != "running" or state.started_at != run:
+            return False
+        if self._ready_run == run:
+            return True
+        started = _run_start(run)
+        until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
+        if not self._banner.search(self._ready_log_of(self.spec.world, run, until)):
+            return False
+        self._ready_run, self._ready_seen_at = run, self._now()
+        return True
 
     def tick(self) -> Verdict:
-        """Ask once, and answer with everything that was learned."""
+        """Ask once, and answer with everything that was learned.
+
+        T581: then hands what it read to the realm keeper, when this entry has one: the hold
+        epoch is taken before the container is read, so a deliberate Stop that began or
+        ended during this tick is seen by the keeper's clear.
+        """
+        realm = self._realm
+        begun = realm.begin() if realm is not None else 0
+        verdict = self._tick()
+        if realm is not None:
+            state = self._seen
+            uptime = self._uptime(state.started_at)
+            ready = state.status == "running" and (
+                self._banner is None
+                or (uptime is not None and uptime >= SETTLED_AFTER)
+                or self._ready_run == state.started_at
+            )
+            realm.after_tick(state.status, state.started_at, ready, begun)
+        return verdict
+
+    def _tick(self) -> Verdict:
         state = self._state_of(self.spec.world)
+        self._seen = state
         uptime = self._uptime(state.started_at)
         if state.status == "":
             # A read that failed said nothing about the count, and `0` is what
@@ -406,7 +543,138 @@ class Dashboard:
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
-        return verdict
+        if verdict.ready:
+            line = self._module_line(state.started_at)
+            if line:
+                verdict = replace(verdict, module_line=line)
+        return self._with_wrong_client(verdict, state.started_at)
+
+    def _first_since(self, run: str) -> str:
+        """Where a run's first read starts: the run, but not further back than the sentence lives.
+
+        A server up for days has old refused logins in its log; read whole they would show as
+        fresh for `WRONG_CLIENT_STAYS`, and a large log would be read in one go.
+        """
+        uptime = self._uptime(run)
+        if uptime is None or uptime <= WRONG_CLIENT_STAYS:
+            return run
+        return f"{int(WRONG_CLIENT_STAYS.total_seconds())}s"
+
+    def _with_wrong_client(self, verdict: Verdict, run: str) -> Verdict:
+        """`verdict`, saying so when the world log shows a client turned away (T576).
+
+        Only for a server whose catalog names the build its players' clients must be
+        (`client.required_build`). The log is read once a minute and only from the last
+        read on, never every tick; the sentence stays `WRONG_CLIENT_STAYS` after the
+        last such line and goes with the run.
+        """
+        required = self.entry.client.required_build
+        if required is None or self._login_log_of is None:
+            return verdict
+        now = self._now()
+        if self._login_run != run:
+            self._login_run, self._login_read_at, self._wrong_client_at = run, None, None
+        elapsed = None if self._login_read_at is None else now - self._login_read_at
+        if elapsed is not None and elapsed < timedelta(0):
+            # This watcher's clock went backwards: what was read and seen is on a timeline
+            # that no longer exists, so read the run again and let the sentence age from now.
+            self._login_read_at, elapsed = None, None
+            if self._wrong_client_at is not None:
+                self._wrong_client_at = now
+        if elapsed is None or elapsed >= WRONG_CLIENT_EVERY:
+            # `--since` is told how long ago, not when: Docker works that out on ITS clock, which
+            # a Docker Desktop VM lets drift from this machine's, and an absolute stamp from
+            # here would then skip lines or repeat them.
+            since = (
+                self._first_since(run)
+                if elapsed is None
+                else f"{int((elapsed + WRONG_CLIENT_OVERLAP).total_seconds()) + 1}s"
+            )
+            self._login_read_at = now
+            if any(
+                int(asked) > WRONG_CLIENT_MAX_REALM_ID
+                for asked in WRONG_CLIENT_LINE.findall(self._login_log_of(self.spec.world, since))
+            ):
+                self._wrong_client_at = now
+        if self._wrong_client_at is None or now - self._wrong_client_at > WRONG_CLIENT_STAYS:
+            return verdict
+        version = self.entry.client.version
+        sentence = (
+            f"a game client that is not {version} (build {required}) logged in and was "
+            "dropped by the world server: every player must use a stock "
+            f"{version} client"
+        )
+        return replace(verdict, warning=" · ".join(w for w in (verdict.warning, sentence) if w))
+
+    def _module_line(self, run: str) -> str:
+        """The module's health sentence for run `run` (T555 T5).
+
+        Empty for an entry without a `health` block. Asked only after the world said ready, so
+        the module has printed its lines and made its tables. What the database and the log
+        said is kept by `run` and asked once; one that could not be read is not kept, so the next
+        tick asks again. The switches are laid beside it afresh at every tick: the settings file
+        can change under a running world (the Tuning card), and "(on at the next start)" is
+        about the file as it is now.
+        """
+        native_block = self.entry.install.native
+        block = native_block.azerothcore if native_block is not None else None
+        health = block.health if block is not None else None
+        if block is None or health is None:
+            return ""
+        if self._health_run != run or self._health_got is None:
+            waiting = self._health_waiting
+            if (
+                waiting is not None
+                and waiting[0] == run
+                and timedelta(0) <= self._now() - waiting[1] < HEALTH_RETRY_EVERY
+            ):
+                return waiting[2]
+            try:
+                log = self._log_of(self.spec.world, run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for its health: {exc}")
+                log = ""
+            got = module_health.reading(
+                health, block.sql_checks, self.entry.databases.schema_map(), self.sql, log, ()
+            )
+            if got.unreadable:
+                return module_health.sentence(got)
+            running = (
+                unbound_settings.running_state(log)
+                if unbound_settings.shown_for(self.entry)
+                else None
+            )
+            # A bad reading is kept only once the world's own ready line is in this run's log.
+            # "Ready" can come from uptime alone (SETTLED_AFTER), before the module's lines or
+            # tables are all there, and a verdict kept from then would never heal. A good one
+            # holds the module's own lines, so it cannot be early. No ready marker to look for
+            # at all (`_banner is None`) leaves nothing to wait for. Readiness is judged from the
+            # very log the reading was made from, never from a second read of it.
+            if got.good or self._banner is None or self._banner.search(log):
+                self._health_run, self._health_got, self._health_running = run, got, running
+            else:
+                if got.absent_marker:
+                    # Neither the world's ready line nor any of the module's own is in this
+                    # run's log. That says what was seen, not why: the world may still be
+                    # loading or hung, or the log may have been cut. "Did not load" would be a
+                    # guess, so the line says only what was not there.
+                    got = module_health.HealthReading(
+                        got.name,
+                        unreadable=(
+                            "this run's world log has neither its ready line nor "
+                            f"{got.name}'s start-up lines"
+                        ),
+                    )
+                line = module_health.sentence(got)  # a bad one never says a switch
+                self._health_waiting = (run, self._now(), line)
+                return line
+            self._health_waiting = None
+        got = self._health_got
+        if self._health_running is not None:
+            got = replace(
+                got, switches=unbound_settings.switches_for(self.server_dir, self._health_running)
+            )
+        return module_health.sentence(got)
 
     def _said_ready_and_stayed_up(self, run: str) -> bool:
         """Whether run `run` printed its ready marker and is still up `RECOVERED_AFTER` on (T390).
@@ -550,6 +818,12 @@ def _ready_banner(entry: CatalogEntry) -> re.Pattern[str] | None:
     except InstallerError as exc:
         logger.warning(f"the dashboard cannot read {entry.id}'s ready marker: {exc}")
         return None
+
+
+def _run_start(started_at: str) -> datetime | None:
+    """When a run that docker says started at `started_at` began, or `None` (see `run_length`)."""
+    length = run_length(started_at, _EPOCH)
+    return None if length is None else _EPOCH - length
 
 
 def run_length(started_at: str, now: datetime) -> timedelta | None:

@@ -743,3 +743,58 @@ def test_the_refusal_does_not_claim_an_account_this_tree_never_had() -> None:
     assert "this app made" not in outcome.problem, outcome.problem
     assert "reserves" in outcome.problem, outcome.problem
     assert "command channel" in outcome.problem
+
+
+# -- T579: a level given at Create must reach the running world --------------
+
+TORTOISE = load_catalog().get("wow-tortoise")
+
+
+def _tortoise_install(tmp_path, *, channel=None):
+    return useraccounts.InstallAccounts(
+        TORTOISE,
+        tmp_path,
+        sql=_Reader(),
+        channel_for_saved=lambda: channel,
+        app_account="YULON_AB12CD34",
+    )
+
+
+def test_an_account_created_with_a_level_is_told_to_the_running_world() -> None:
+    """The world keeps each rank it read at start, so the row alone is not live (T579)."""
+    channel = _Channel("yes")
+
+    said = _tortoise_install(None, channel=channel).after_create("BOB", 3)
+
+    assert channel.sent == ["account set gmlevel BOB 3"]
+    assert "live" in said, said
+
+
+def test_without_a_command_channel_the_level_is_said_to_wait_for_the_next_start() -> None:
+    said = _tortoise_install(None, channel=None).after_create("BOB", 3)
+
+    assert "next starts" in said and "GM level 3" in said, said
+
+
+def test_a_channel_that_cannot_reach_the_world_says_the_same() -> None:
+    channel = _Channel("unknown")
+
+    said = _tortoise_install(None, channel=channel).after_create("BOB", 3)
+
+    assert channel.sent == ["account set gmlevel BOB 3"]
+    assert "next starts" in said, said
+    assert "live" not in said, said
+
+
+def test_a_new_account_with_no_level_sends_nothing() -> None:
+    channel = _Channel("yes")
+
+    assert _tortoise_install(None, channel=channel).after_create("BOB", 0) == ""
+    assert channel.sent == []
+
+
+def test_a_core_that_reads_the_level_per_login_is_not_sent_the_command() -> None:
+    channel = _Channel("yes")
+
+    assert _install(None, sql=_Reader(), channel=channel).after_create("BOB", 3) == ""
+    assert channel.sent == []

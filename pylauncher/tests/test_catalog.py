@@ -26,20 +26,29 @@ from yulon.catalog.catalog import (
 )
 from yulon.controller_wow_wotlk import docker_ctl
 
-V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+V1_GAMES = (
+    "wow-wotlk",
+    "wow-tbc",
+    "wow-vanilla",
+    "wow-tortoise",
+    "wow-centurion",
+    "wow-unbound",
+)
 """README §1's four v1 servers, and Centurion after them (T179 Task 7)."""
 
 
-def test_bundled_catalog_describes_exactly_the_five_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_six_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
-    Plus Centurion (T179), the first server that is not one of the four.
+    Plus Centurion (T179), the first server that is not one of the four, and WoW Unbound
+    (T554), a WotLK of its own that runs beside the first and so has ports of its own.
     """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
     for game in catalog.games:
         assert "Dadcraft" not in game.name and "Dadcraft" not in game.id
-        assert game.ports.auth == 3724  # shared by every v1 server (README §12)
+        # shared by every v1 server (README §12), except the one built to run beside WotLK
+        assert game.ports.auth == (3725 if game.id == "wow-unbound" else 3724)
         assert game.client.build > 0
 
 
@@ -223,8 +232,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
-        "mod-playerbots/mod-playerbots": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
+        "mod-playerbots/azerothcore-wotlk": "f19a18799a35f7c24bdcdc9ea399c601f166259b",
+        "mod-playerbots/mod-playerbots": "037c01418b5d01506917a3db9b44fd56ac5f965c",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
@@ -240,15 +249,15 @@ GATE_PINS = {
 """The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26 and 2026-10-08:
 
-* `wow-wotlk`: T134's fresh install on `yulon-fedora-gate` (SELinux enforcing)
-  2026-09-26, whose press read core `7f12e89e` and module `7bae1b5c` out of the
-  install's own checkouts and whose world printed `AzerothCore rev. 7f12e89ee5f4+`.
-  The two are one pair: the core's f15ad9494 moved the playerbots database out of
-  the core and the module's af078829 took it in, so neither builds with the
-  other's older commit. Until then it was `413bea61`/`b949b50b`, gate 7.1's clean
-  2026-09-04 run on `yulon-ubuntu`.
+* `wow-wotlk`: T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
+  and module `037c0141`, the two `test-staging` merges of 2026-10-02 (core #258, module
+  #2873). The core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
+  (AzerothCore #27533), which mod-ale's master calls since its #408; and the module's
+  b0cd0ea7 takes the core's async module database (ff8d11773), so the two are one pair.
+  Before that, T134's `7f12e89e`/`7bae1b5c` (2026-09-26, the same box), and until then
+  `413bea61`/`b949b50b`, gate 7.1's clean 2026-09-04 run on `yulon-ubuntu`.
 * `wow-tbc`: `/home/user/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
   2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
@@ -355,6 +364,7 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
     offered = {game.id: game.install.native.update_to_latest for game in load_catalog().games}
     assert offered == {
         "wow-wotlk": True,
+        "wow-unbound": True,
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
@@ -365,8 +375,10 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
-    ports = {g.ports.auth for g in load_catalog().games}
+    ports = {g.ports.auth for g in load_catalog().games if g.id != "wow-unbound"}
     assert ports == {3724}
+    # ... and the one entry made to run BESIDE another has ports of its own (T552).
+    assert load_catalog().get("wow-unbound").ports.auth == 3725
 
 
 def test_unknown_game_and_bad_entries_are_rejected() -> None:
@@ -1252,3 +1264,15 @@ def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:
     tbc["install"]["native"]["cmangos"]["patches"][0]["source"] = "src/somewhere-else"
     with pytest.raises(ValidationError, match="src/somewhere-else"):
         parse_catalog(data)
+
+
+def test_the_catalog_names_the_build_a_players_own_client_must_report_t576() -> None:
+    """3.3.5a servers say 12340 (Centurion's own copy reports 12342, the player's is stock)."""
+    cat = load_catalog()
+
+    assert cat.get("wow-wotlk").client.required_build == 12340
+    assert cat.get("wow-centurion").client.required_build == 12340
+    assert cat.get("wow-unbound").client.required_build == 12340
+    assert cat.get("wow-centurion").client.build == 12342
+    assert cat.get("wow-tbc").client.required_build is None
+    assert cat.get("wow-vanilla").client.required_build is None

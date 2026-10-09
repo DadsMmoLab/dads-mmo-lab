@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import functools
 import math
 import os
 import re
@@ -72,6 +73,7 @@ from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
+    client_build,
     client_config,
     client_exe,
     client_names,
@@ -97,6 +99,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     tuning,
+    unbound_settings,
     useraccounts,
     wsl,
 )
@@ -427,6 +430,8 @@ class AccountAdmin(Protocol):
 
     def set_gm_level(self, account: str, level: int) -> object: ...
 
+    def after_create(self, account: str, level: int) -> str: ...
+
     def delete_plan(self, account: str) -> object: ...
 
     def delete_account(self, confirmed: useraccounts.DeletePlan) -> object: ...
@@ -603,6 +608,13 @@ the moment they arrive, and only the LIST is scheduled.
 
 _LEVEL_ROLE = Qt.ItemDataRole.UserRole + 2
 """Where a character row keeps its level, for the Level box to start from (T188 A6)."""
+
+
+class _CreatedAccount(NamedTuple):
+    """A Create's result, with the sentence about the running world's level (T579)."""
+
+    result: object
+    note: str
 
 
 class _CharacterAnswer(NamedTuple):
@@ -2279,9 +2291,16 @@ class ControllerServices:
             )
         if play_client_dir is None:
             return _with_the_ready_wait(
-                _with_take_back(factory(entry, server_dir, client_dir, wsl_distro)), entry
+                _with_take_back(
+                    _knowing_its_server_sources(
+                        factory(entry, server_dir, client_dir, wsl_distro), entry
+                    )
+                ),
+                entry,
             )
-        services = factory(entry, server_dir, play_client_dir, wsl_distro)
+        services = _knowing_its_server_sources(
+            factory(entry, server_dir, play_client_dir, wsl_distro), entry
+        )
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
@@ -3099,8 +3118,12 @@ def _for_wotlk(
             "Nothing was opened."
         )
     spec = entry.container_spec()
-    record_backed = _record_backed_keys(wotlk_modules.store())
-    settings_mods = _settings_mods(wotlk_modules.store())
+    # The shipped manifests are WotLK's for every server here; the modules the
+    # user ADDED are this server's own, under its game id (T554: a Remove on
+    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    user_game = entry.id
+    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
+    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3335,7 +3358,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store() if entry.has_manifests else None,
+        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -3352,7 +3375,12 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, spec=spec, output=output, wsl_distro=wsl_distro, ledger=sql
+                    server_dir,
+                    spec=spec,
+                    output=output,
+                    wsl_distro=wsl_distro,
+                    ledger=sql,
+                    user_game=user_game,
                 )
             )
             if spec.import_service
@@ -3365,7 +3393,9 @@ def _for_wotlk(
         # this to `import_service` would make that coincidence load-bearing for
         # a future core that compiles modules and imports differently.
         module_updates=(
-            (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
+            (lambda: wotlk_modules.module_updates(server_dir, user_game=user_game))
+            if entry.has_manifests
+            else None
         ),
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
@@ -3405,8 +3435,16 @@ def _for_wotlk(
         # against a second one. `store()` already carries lane A's user layer
         # by default, which is what puts a derived manifest into the list on
         # the next start.
-        module_from_link=wotlk_modules.derive_link if module_applier is not None else None,
-        module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
+        module_from_link=(
+            functools.partial(wotlk_modules.derive_link, game=user_game)
+            if module_applier is not None
+            else None
+        ),
+        module_from_folder=(
+            functools.partial(wotlk_modules.derive_folder, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
         ),
@@ -3415,7 +3453,11 @@ def _for_wotlk(
             if module_applier is not None
             else None
         ),
-        module_forget=wotlk_modules.forget if module_applier is not None else None,
+        module_forget=(
+            functools.partial(wotlk_modules.forget, game=user_game)
+            if module_applier is not None
+            else None
+        ),
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
         # containers with `docker ps` — a second question, to the same daemon,
@@ -4273,8 +4315,25 @@ def _for_tortoise(
 
 _Factory = Callable[[CatalogEntry, Path, Path | None, str | None], ControllerServices]
 
+
+def _knowing_its_server_sources(
+    services: ControllerServices, entry: CatalogEntry
+) -> ControllerServices:
+    """Tell the applier which folders the server install itself cloned (T554).
+
+    Done once here, for every game, so no factory has to remember: the applier then refuses
+    to install, update or remove a module whose clone folder is one of them.
+    """
+    if services.applier is not None:
+        services.applier.server_sources = native.server_source_folders(entry)
+        services.applier.server_name = entry.name
+    return services
+
+
 _FACTORIES: dict[str, _Factory] = {
     "wow-wotlk": _for_wotlk,
+    # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
+    "wow-unbound": _for_wotlk,
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
@@ -7006,6 +7065,24 @@ CUSTOM_MODULE_CARD_NOTE = (
 """The card's sentence: drawn in the card whole, and the line's tooltip (T153)."""
 
 
+CUSTOM_MODULE_NO_ROUTE_NOTE = (
+    "{game} can't take a module from outside yet, whether from a link or from a folder. "
+    "It works with the ones listed above."
+)
+"""The card's sentence on a game with no custom-module route at all (T596).
+
+Said instead of two buttons that are greyed with no reason on them. Only the
+WotLK-built games (WoW WotLK and WoW Unbound) have the install seam behind them;
+the sentence is true of every other game because it claims nothing but "not yet"
+and "the list above is what works".
+"""
+
+CUSTOM_MODULE_NO_ROUTE_LINE = "not available on this server yet"
+"""The one-line form's version of `CUSTOM_MODULE_NO_ROUTE_NOTE`; the note is its tooltip (T596)."""
+
+CUSTOM_MODULE_NO_ADDONS_LINE = "this server has no add-on modules"
+"""As `CUSTOM_MODULE_NO_ROUTE_LINE` for a game whose Modules tab is empty on purpose (T596)."""
+
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
     "Its name must start with mod-. The module is cloned into this server's modules folder; "
@@ -7029,14 +7106,13 @@ MODULE_FOLDER_TIP = (
 the user points at is read, never moved and never written into."""
 
 MODULE_CUSTOM_NO_ROUTE = (
-    "Only WoW WotLK takes modules you add yourself. On this game a module is a setting or a "
-    "database change, and the ones that work here are listed above."
+    "This game cannot take a module of this kind from outside yet. The modules that work "
+    "here are the ones listed above."
 )
-"""Why the two buttons are dead on the three CMaNGOS games.
+"""Why one of the card's two buttons is greyed on a game that has a route for the other.
 
-Measured per tree, not inherited: 8.7b and 8.7c gated that on those cores a
-module is a conf activation or a SQL mod and never a directory, so there is no
-`modules/` folder for a clone or a copy to land in.
+Only reachable with a partly wired route: a game with none at all shows the
+card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 """
 
 MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
@@ -10095,7 +10171,10 @@ class ControllerView(QWidget):
             # log command -- under Details rather than on the line.
             why = _detail_of(exc)
         # Asked of the raw text: Docker's port-in-use words are what it reads.
-        rolled = self._roll_the_channel_back_if_it_took_the_port(raw)
+        # T574: and of the detail beside a sentence of ours, which keeps the daemon's text.
+        rolled = self._roll_the_channel_back_if_it_took_the_port(
+            f"{raw}\n{_detail_of(exc)}" if _detail_of(exc) else raw
+        )
         self.problem_label.setText(rolled or msg)
         self.problem_details.set_text("" if rolled else why)
         self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
@@ -10775,6 +10854,19 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
         show_warning(self, f"{self.entry.name}", message)
 
+    def _wrong_build_refusal(self, client_dir: Path) -> str | None:
+        """Why this client folder's Wow.exe may not be used for this server, or None (T576).
+
+        Asked of the catalog entry's `client.required_build` and never of a game id; an
+        exe with no readable version is accepted. Cached per exe by size and mtime.
+        """
+        client = self.entry.client
+        return client_build.refusal(
+            steam_module.client_executable(client_dir),
+            version=client.version,
+            build=client.required_build,
+        )
+
     def _client_dir_busy(self) -> bool:
         """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
 
@@ -10848,6 +10940,10 @@ class ControllerView(QWidget):
                 f"The client folder cannot be the server folder or inside it ({server_dir}): "
                 "Uninstall removes that whole tree."
             )
+            return
+        wrong = self._wrong_build_refusal(chosen)
+        if wrong is not None:
+            self._client_dir_refused(wrong)
             return
         spec = preflight.client_spec_for(self.entry)
         if spec is not None:
@@ -11260,6 +11356,9 @@ class ControllerView(QWidget):
                 )
                 if missing is not None:
                     raise play_client.PlayClientError(missing)
+        wrong = self._wrong_build_refusal(original)
+        if wrong is not None:
+            raise play_client.PlayClientError(wrong)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
@@ -11496,7 +11595,8 @@ class ControllerView(QWidget):
         """Start the game from this server's ready-to-play client (T181 §2).
 
         In order: the folder must still be this server's (else the offer to
-        make it again); the server must run (else "Start it first?"); a patched
+        make it again); the client it was made from must be the build the server
+        needs (T576); the server must run (else "Start it first?"); a patched
         original offers Refresh; then the realmlist is written again and the
         game is started, detached.
 
@@ -11511,7 +11611,14 @@ class ControllerView(QWidget):
             return
         if self._play_client_blocked():
             return
-        if self._usable_play_client() is None:
+        marker = self._usable_play_client()
+        if marker is None:
+            return
+        # T576: a client picked before the build check existed. Read once per exe (cached
+        # by size and mtime), so it costs nothing on the presses after the first.
+        wrong = self._wrong_build_refusal(marker.source_client_dir)
+        if wrong is not None:
+            self._play_refused(f"{wrong} Nothing was started.")
             return
         self._play_pending = True
         self._say_play("Checking that the server is running…")
@@ -13544,7 +13651,7 @@ class ControllerView(QWidget):
             return
         self._character_action(
             "Setting the level of",
-            lambda: play.set_level(name, level),  # type: ignore[attr-defined]
+            lambda: play.set_level_and_save(name, level),  # type: ignore[attr-defined]
             level=level,
         )
 
@@ -13793,21 +13900,35 @@ class ControllerView(QWidget):
         # The password is passed straight into the call and the field cleared; it
         # is never stored on the view, so no later repr or traceback frame of
         # this widget can carry it.
-        self._run(
-            lambda: self.services.create_account(name, password, gm_level),
-            self._account_done,
-            self._account_failed,
-        )
+        admin = self.services.accounts
+
+        def create() -> _CreatedAccount:
+            made = self.services.create_account(name, password, gm_level)
+            # T579: the row is written, but a running world that caches ranks still treats the
+            # account as rank 0. Told here, on the worker, and only after the row is there.
+            told = getattr(admin, "after_create", None)
+            # Only for a level the person asked for: an existing account held at a higher
+            # level by the floor rule is not something this press changed.
+            note = ""
+            if told is not None and gm_level > 0 and made.gm_level:
+                note = told(made.username, made.gm_level)
+            return _CreatedAccount(made, note)
+
+        self._run(create, self._account_done, self._account_failed)
         self.account_password.clear()
 
     @Slot(object)
-    def _account_done(self, result: object) -> None:
+    def _account_done(self, answer: object) -> None:
         self.create_account_button.setEnabled(True)
+        result = answer.result if isinstance(answer, _CreatedAccount) else answer
         if not isinstance(result, wotlk_accounts.AccountResult):
             return
         made = "created" if result.created else "already existed"
         gm = f", GM level {result.gm_level}" if result.gm_level else ""
-        self.account_report.setText(f"{result.username}: {made} (id {result.account_id}){gm}.")
+        said = f"{result.username}: {made} (id {result.account_id}){gm}."
+        if isinstance(answer, _CreatedAccount) and answer.note:
+            said = f"{said} {answer.note}"
+        self.account_report.setText(said)
 
     @Slot(object)
     def _account_failed(self, exc: object) -> None:
@@ -15888,6 +16009,7 @@ class ControllerView(QWidget):
         custom_box = QVBoxLayout(custom)
         custom_note = QLabel(CUSTOM_MODULE_CARD_NOTE, custom)
         custom_note.setWordWrap(True)
+        self.custom_module_note = custom_note
         custom_box.addWidget(custom_note)
         custom_row = QHBoxLayout()
         custom_row.addWidget(self.module_link_button)
@@ -15908,6 +16030,11 @@ class ControllerView(QWidget):
         # The sentence the line leaves out, for a pointer that asks. Not the only
         # place it is: the card whole says it wherever the window has the room.
         line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+        self.custom_module_line_title = line_title
+        # T596: in place of the two presses on a game that has no route for them.
+        self.custom_module_line_note = QLabel("", self.custom_module_line)
+        self.custom_module_line_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.custom_module_line_note.setVisible(False)
         self.module_link_line_button = _RelayButton(
             self.module_link_button, self.custom_module_line
         )
@@ -15915,6 +16042,7 @@ class ControllerView(QWidget):
             self.module_folder_button, self.custom_module_line
         )
         line_box.addWidget(line_title)
+        line_box.addWidget(self.custom_module_line_note)
         line_box.addWidget(self.module_link_line_button)
         line_box.addWidget(self.module_folder_line_button)
         line_box.addStretch(1)
@@ -16154,6 +16282,12 @@ class ControllerView(QWidget):
                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
             broken += skipped
+            # T554: a manifest whose clone folder the server install itself cloned (WoW
+            # Unbound's `modules/mod-ale`) is part of the server, so it is not offered as a
+            # module; its folder is listed as part of the server instead.
+            items = [
+                m for m in items if not apply_module.is_server_source(m, self._server_sources())
+            ]
             manifests += items
             for manifest in items:
                 # T42 round 2's key shape, threaded through T43's extraction of
@@ -16408,6 +16542,10 @@ class ControllerView(QWidget):
             # that moves it is the T64 one, and this is that button's own slot
             # -- its dialog, backup offer, busy gates and refusals included.
             self.update_to_latest()
+
+    def _server_sources(self) -> frozenset[PurePosixPath]:
+        """The folders this entry's install clones its own sources into (T554)."""
+        return native.server_source_folders(self.entry)
 
     def _server_updated(self) -> frozenset[PurePosixPath]:
         """Where "Update the server to latest…" moves a checkout here; empty with no route (T146).
@@ -16690,6 +16828,7 @@ class ControllerView(QWidget):
         beats one that is pressed and then explains itself (roadmap 6.1).
         """
         route = self._custom_route()
+        self._say_where_the_custom_route_is_absent(route is None)
         link = route is not None and self.services.module_from_link is not None
         folder = route is not None and self.services.module_from_folder is not None
         self.module_link_button.setEnabled(link)
@@ -16698,6 +16837,40 @@ class ControllerView(QWidget):
         self.module_folder_button.setToolTip(
             MODULE_FOLDER_TIP if folder else MODULE_CUSTOM_NO_ROUTE
         )
+
+    def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
+        """T596: a game with no route has a sentence in the box and no presses in it.
+
+        Two greyed buttons with nothing beside them read as a broken app (a player
+        asked on Discord why they were grey). Where there is no install seam at all
+        the buttons, in the card and on its one-line form, are taken off and the box
+        says what is true of the game. Where there IS a route the card is as it was
+        built, WotLK's included, so a route that comes later needs no change here.
+        """
+        presses = (
+            self.module_link_button,
+            self.module_folder_button,
+            self.module_link_line_button,
+            self.module_folder_line_button,
+        )
+        for press in presses:
+            press.setVisible(not absent)
+        self.custom_module_line_note.setVisible(absent)
+        if not absent:
+            self.custom_module_note.setText(CUSTOM_MODULE_CARD_NOTE)
+            self.custom_module_line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+            return
+        # Centurion's list is empty on purpose; "the ones listed above" would point at nothing.
+        if self.services.no_modules_note:
+            said = self.services.no_modules_note
+            line = CUSTOM_MODULE_NO_ADDONS_LINE
+        else:
+            said = CUSTOM_MODULE_NO_ROUTE_NOTE.format(game=self.entry.name)
+            line = CUSTOM_MODULE_NO_ROUTE_LINE
+        self.custom_module_note.setText(said)
+        self.custom_module_line_note.setText(line)
+        self.custom_module_line_note.setToolTip(said)
+        self.custom_module_line_title.setToolTip(said)
 
     @Slot()
     def install_module_from_link(self) -> None:
@@ -16885,7 +17058,14 @@ class ControllerView(QWidget):
         acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
-        self.module_report.setPlainText(_format_report(result))
+        self.module_report.setPlainText(
+            _format_report(
+                result,
+                **self._module_report_options(
+                    getattr(self, "_last_source_version", None), self.services.update_to_latest
+                ),
+            )
+        )
         self._note_session_facts(result, acted_on)
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
@@ -17456,6 +17636,16 @@ class ControllerView(QWidget):
             any(a.isEnabled() for a in self.server_build_menu.actions())
         )
 
+    @staticmethod
+    def _module_report_options(
+        said: native.SourceVersion | None, route: native.LatestRoute | None
+    ) -> dict[str, bool]:
+        """What the module report may name (T586): the server presses, from the last reading."""
+        return {
+            "server_moves": route is not None,
+            "pin_moved": route is not None and said is not None and said.pin_moved,
+        }
+
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
@@ -17484,6 +17674,7 @@ class ControllerView(QWidget):
         offering nothing.
         """
         route = self.services.update_to_latest
+        self._last_source_version: native.SourceVersion | None = None
         if route is None:
             self.source_version_label.setVisible(False)
             self.return_to_pin_action.setVisible(False)
@@ -17495,6 +17686,7 @@ class ControllerView(QWidget):
         except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
             said = native.SourceVersion(line="", past_the_pin=False)
+        self._last_source_version = said
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
         self.return_to_pin_action.setVisible(said.past_the_pin)
@@ -17757,7 +17949,7 @@ class ControllerView(QWidget):
             return False
         if not ask_yes_no(
             self,
-            f"Put {self.entry.name} back on the tested commit?",
+            f"Move {self.entry.name} onto the tested commit?",
             route.pin_confirmation(),
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
@@ -17910,11 +18102,16 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             show_warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not ask_yes_no(
-            self,
-            f"Apply database corrections to {self.entry.name}?",
-            text,
-        ):
+        title = f"Apply database corrections to {self.entry.name}?"
+        if any(one.missing for one in check.stuck):
+            # A stuck update whose file is gone cannot be run: the one way on is to skip it
+            # (T566), so that is the Yes, and Cancel the default. A press that is not asked
+            # this way carries no skip, and stops at the file as before.
+            if _ask_with(self, title, text, native.SKIP_STUCK_LABEL) != "yes":
+                logger.info(f"database corrections for {self.entry.id} declined at the skip")
+                return False
+            check = replace(check, skip_missing=True)
+        elif not ask_yes_no(self, title, text):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
         # The panel's Cancel, with its "Stop now anyway" riding on it: the press
@@ -18374,7 +18571,9 @@ class ControllerView(QWidget):
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         # T302: the built-in Server rates card's rows, read with the modules'.
         self._rate_rows: tuple[tuning.TuningRow, ...] = ()
-        self._tuning_newline = "\n"
+        # The raw editor's file exactly as read (T573 item 2); see `tuning.save_text`.
+        self._tuning_raw = ""
+        self._unbound_rows: tuple[tuning.TuningRow, ...] = ()
         # What this session has written that the running server has not picked
         # up, by the job it owes. Session state exactly like `_rebuild_owed`,
         # and forgotten on restart for the same reason: a persisted marker is
@@ -18415,6 +18614,8 @@ class ControllerView(QWidget):
         self._tuning_rows = rows
         # T302: the world conf's rates, read in the same pass -- one file, no job.
         self._rate_rows = server_rates.rows(self.entry, self.services.controller.server_dir)
+        # T554: WoW Unbound's three switches, from the same pass over its own conf.
+        self._unbound_rows = self._read_unbound_rows()
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
@@ -18446,7 +18647,18 @@ class ControllerView(QWidget):
         """
         modules = server_rates.yield_to_card(self._tuning_rows, self._rate_rows)
         rates = server_rates.shared_with(self._rate_rows, self._tuning_rows)
-        return rates + modules + self._bot_rows
+        return rates + self._unbound_rows + modules + self._bot_rows
+
+    def _read_unbound_rows(self) -> tuple[tuning.TuningRow, ...]:
+        """The Unbound card's rows: only for an entry that makes `mod_unbound.conf`, and only
+        once the install has laid it (a Save must never create the module's conf)."""
+        server_dir = self.services.controller.server_dir
+        if (
+            not unbound_settings.shown_for(self.entry)
+            or not (server_dir / unbound_settings.FILE).is_file()
+        ):
+            return ()
+        return unbound_settings.rows(server_dir)
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -19386,19 +19598,35 @@ class ControllerView(QWidget):
             self.open_tuning_file(current)
 
     def _tuning_files(self) -> tuple[str, ...]:
-        """What the raw editor offers: this install's module confs, then its own.
+        """What the raw editor offers: the modules' confs, then the server's own.
+
+        The modules Yu'lon has cards for come first, in the cards' order; every
+        other `.conf` in the modules folder follows by name (T569: the list was
+        the cards' files alone, so a module the catalog does not describe, or
+        one with only a wildcard key, could not be opened at all).
 
         Only files that are ON DISK. A conf a manifest names but nothing has
         deployed would open as an empty editor, and saving that empty editor
         would create the file -- which is an install step, not a tuning one.
         """
         server_dir = self.services.controller.server_dir
+        core = self._tuning_core_files()
         found: list[str] = []
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
-        for name in self._tuning_core_files():
-            if name not in found and (server_dir / name).is_file():
+        # Spelled as the disk would compare them (`tuning.is_one_of`): on Windows
+        # and a case-blind Mac volume a conf the manifest calls `Solocraft.conf` and
+        # the folder calls `solocraft.conf` is ONE file, and so is the server's own
+        # `playerbots.conf` however the folder cases it -- one button, and read-only
+        # for the server's own. On a case-sensitive disk they stay two files.
+        taken = [*found, *core]
+        for name in tuning.module_conf_files(server_dir):
+            if not tuning.is_one_of(name, taken, server_dir):
+                taken.append(name)
+                found.append(name)
+        for name in core:
+            if not tuning.is_one_of(name, found, server_dir) and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
 
@@ -19426,6 +19654,8 @@ class ControllerView(QWidget):
             return botpop.conf_keys(self.entry)
         if (family, module_id) == server_rates.CARD and file == server_rates.card_file(self.entry):
             return server_rates.conf_keys(self.entry)
+        if (family, module_id) == unbound_settings.CARD and file == unbound_settings.FILE:
+            return unbound_settings.conf_keys()
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -19484,9 +19714,28 @@ class ControllerView(QWidget):
                     )
                     self.action_failed.emit(str(exc))
                     return
+        # And every file's PATH, for the same reason: a link out of the server
+        # folder on the card's second file must not be found after the first was
+        # written (T573).
+        for file in per_file:
+            try:
+                tuning.check_inside(server_dir / file, server_dir)
+            except (tuning.TuningError, OSError) as exc:
+                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
+                self.action_failed.emit(str(exc))
+                return
         for file, values in per_file.items():
             try:
-                made = tuning.write(server_dir / file, values, spec=specs[file])
+                if (family, module_id) == unbound_settings.CARD:
+                    # Only `0` and `1` reach the file: a switch flipped from a hand-edited
+                    # `true`/`false` is written back as the module's own 1/0
+                    # (`unbound_settings.write`). Its file's path was checked above, with
+                    # every other card's (T573).
+                    made = unbound_settings.write(server_dir, values)
+                else:
+                    made = tuning.write(
+                        server_dir / file, values, spec=specs[file], root=server_dir
+                    )
             except tuning.TuningError as exc:
                 # Unreachable through the loop above, which has already checked
                 # every value on the card. Kept because `tuning.write()` is a
@@ -19535,7 +19784,7 @@ class ControllerView(QWidget):
                 continue
             try:
                 note = self._put_back(backups[-1], path)
-            except OSError as exc:
+            except (OSError, tuning.TuningError) as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
             self._note_tuning_owed(file)
@@ -19579,6 +19828,10 @@ class ControllerView(QWidget):
         bots. `put_back_file` keeps the file's own key lines whenever the backup
         asks for a rebuild anywhere; the sentence it returns goes in the report.
         """
+        # `tuning.restore` is a plain copy onto `target` and follows a link: a conf that
+        # was linked out of the install before an upgrade still has its `.bak` beside
+        # the link, and Revert would write the old text into the other file (T573).
+        tuning.check_inside(target, self.services.controller.server_dir)
         seam = self.services.bot_pool_rebuild
         if seam is None:
             tuning.restore(backup, target)
@@ -19596,11 +19849,32 @@ class ControllerView(QWidget):
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
         """Show one conf in the raw editor, read-only when it is the server's own."""
-        path = self.services.controller.server_dir / file
-        core = file in self._tuning_core_files()
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
+        core = tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        )
         try:
-            with open(path, encoding="utf-8", newline="") as handle:
-                raw = handle.read()
+            # A conf that is a link out of the install is another file's text
+            # and another file's Save (T573): shown empty and read-only.
+            tuning.check_inside(path, server_dir)
+            with open(path, "rb") as handle:
+                # One BYTE past the cap, so a file over it is seen without being read whole
+                # (a text-mode read counts characters: 2 M three-byte ones are 6 MB).
+                blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(blob) > tuning.MAX_EDIT_BYTES:
+                self.tuning_panel.set_file_text(
+                    "",
+                    read_only=True,
+                    note=tuning.TOO_BIG.format(
+                        file=file, limit=tuning.MAX_EDIT_BYTES // (1024 * 1024)
+                    ),
+                )
+                return
+            raw = blob.decode("utf-8")
+        except tuning.TuningError as exc:
+            self.tuning_panel.set_file_text("", read_only=True, note=str(exc))
+            return
         except OSError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
             return
@@ -19613,13 +19887,15 @@ class ControllerView(QWidget):
                 "", read_only=True, note=tuning.NOT_UTF8.format(file=file, why=exc)
             )
             return
-        # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
-        # "\n" whatever it was given, so a raw save of a CRLF conf would convert
-        # the whole file -- the same defect `tuning.write()` reads around.
-        self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
+        # Remembered at load and merged at save: `QPlainTextEdit` hands back "\n"
+        # whatever it was given and has no byte-order mark, so a raw save of the
+        # editor's text would convert the whole file -- the same defect
+        # `tuning.write()` reads around. `tuning.save_text()` keeps every line
+        # the player did not edit as it was (T573).
+        self._tuning_raw = raw
         note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
         self.tuning_panel.set_file_text(
-            raw.replace("\r\n", "\n"),
+            tuning.editor_view(raw),
             read_only=core,
             note=note,
             # Which of THIS file's keys the running containers override (T44
@@ -19652,7 +19928,9 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -19665,6 +19943,10 @@ class ControllerView(QWidget):
             return
         try:
             note = self._put_back(backups[-1], path)
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))
@@ -19688,7 +19970,9 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or file in self._tuning_core_files():
+        if not file or tuning.is_one_of(
+            file, self._tuning_core_files(), self.services.controller.server_dir
+        ):
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is None:
@@ -19707,11 +19991,17 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        path = self.services.controller.server_dir / file
+        server_dir = self.services.controller.server_dir
+        path = server_dir / file
         try:
-            made = tuning.backup(path)
+            # Refuses a link out of the server folder, before any byte moves (T573).
+            made = tuning.backup(path, root=server_dir)
             with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text.replace("\n", self._tuning_newline))
+                handle.write(tuning.save_text(self._tuning_raw, text))
+        except tuning.TuningError as exc:
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))
@@ -20120,7 +20410,9 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     return lines
 
 
-def _format_report(report: ApplyReport) -> str:
+def _format_report(
+    report: ApplyReport, *, server_moves: bool = False, pin_moved: bool = False
+) -> str:
     """The run, drawn so that every tick is something that happened.
 
     Two things were wrong with this function on 2026-09-07 and they are the same
@@ -20159,6 +20451,14 @@ def _format_report(report: ApplyReport) -> str:
     installed minutes earlier and never built, and a draft saying "its code was
     compiled into the worldserver" was false of both -- so it says which case
     would be bad rather than which case this is.
+
+    `server_moves` (T586) says the install has "Update the server to latest…".
+    A module's new commit can need newer server code than the server has --
+    mod-ale after #408 calls a core function the older WotLK core lacks -- and
+    the report cannot know that before the build, so it names the route and the
+    order, once, as a condition. "Return to the tested pin…" is named as well
+    only when `pin_moved` (`SourceVersion.pin_moved`): off a pin that did not
+    move it is the way BACK off an update, to older code (Codex adversarial).
 
     Nothing here is asserted about the machine. Every claim is about this app's
     own code, which is the same code on Windows as on the Linux box the
@@ -20199,6 +20499,17 @@ def _format_report(report: ApplyReport) -> str:
                 f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
                 "inert."
             )
+            if server_moves:
+                lines.append(
+                    f"  ⚠ If that build stops on an error in {item}'s code, {item} may need newer "
+                    "server code than this server has: press "
+                    f'"{server_build_presses.UPDATE_TO_LATEST}"'
+                    + (f' or "{server_build_presses.RETURN_TO_PIN}"' if pin_moved else "")
+                    + f' under "{SERVER_BUILD_LABEL}" instead, which '
+                    f"{'build' if pin_moved else 'builds'} the server code with {item}. If "
+                    f"Yu'lon put {item} back after that build, update it here again first, without "
+                    f'pressing "{REBUILD_BUTTON_LABEL}" in between.'
+                )
     elif report.restart_recommended and report.world_stopped:
         # T130: this run read the world as stopped (before its SQL, or at the report),
         # so Start is the one press owed. "Stop and then Start" worked -- Stop

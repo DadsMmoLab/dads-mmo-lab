@@ -352,7 +352,9 @@ def test_update_to_latest_failure_never_puts_a_module_back(
     with pytest.raises(InstallerError) as failed:
         list(route.press(None))
 
-    assert str(failed.value) == FAILED
+    # T586 adds the module-order note after the failure's own words; nothing is put back.
+    assert str(failed.value).startswith(FAILED)
+    assert "put mod-x back" not in str(failed.value)
     assert two.head("mod-x") == tips["mod-x"]
     assert "module/mod-x" in two.ledger().moves
 

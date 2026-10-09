@@ -14,16 +14,43 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
+- WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
+- The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.
+- WoW Unbound's Mentor stands in every capital and in Dalaran, and the install checks that all nine are there.
 - **Restart** on the Server tab and in the tray menu stops a server, saving every character, and starts it again.
 - Closing Yu'lon keeps it in the system tray: see which servers are up, **Start** them or **Play**, from the tray icon.
+- Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
+- A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
+- A module build that fails because it needs newer server code now says which server press builds it, and in what order.
+- My Party reads a hand-edited conf as the server does: indented settings count, the first copy wins.
+- The bot counts see an indented setting in a hand-edited conf.
+- A server setting file over 1 MB is no longer loaded into the Tuning tab's editor, which could freeze Yu'lon.
+- On macOS the Tuning tab no longer lets you edit the server's own conf under a different spelling of its name.
+- **Save file** on the Tuning tab keeps the file's line endings and byte-order mark.
+- The Tuning tab no longer opens, saves, backs up or reverts a setting file that is a link out of the server folder.
+- **Reset to default** and its undo leave a setting file alone when its folder is a link to somewhere outside the server folder.
+- **Add to Steam** and self-update no longer mistake another AppImage for Yu'lon when it is started from inside one.
+- **Set level** on a character in the world now saves it, so the Characters list shows the new level.
+- **My Party** no longer says the Lua engine is switched off when its settings file says true.
+- Installing the Lua engine (ALE) now makes the folder for your own Lua scripts, and its row says where it is.
+- Stopping a Tortoise server just after it starts now waits for its save, instead of warning that characters may be missing.
+- A Tortoise server shows as offline in the realm list while it loads, so logging in no longer bounces back to it with no word.
+- An account created with a GM level on a running Tortoise server is GM at once, with no restart.
+- While Yu'lon is open, a Tortoise realm shows offline while it reloads after a crash, and not over a running server.
+- A new WotLK server with the Lua engine (ALE) builds again: WotLK now installs the AzerothCore and bots of 2 October.
+- **Add to Steam** on Steam Deck now makes a Server entry that starts from Gaming Mode; press it again to mend an old one.
+- The **Tuning** tab lists every module config file in the server's modules folder, with a scroll bar when there are many.
 - A file of a server's client pack deleted from the ready-to-play client is put back at the next **Play**.
 - On Centurion, **Revive** works again after a server update, and pathfinding data no longer crashes while made.
 - A world update the database refused can be run again from **Apply database corrections…**, after it asks first.
+- A world update whose file is gone can be skipped from **Apply database corrections…**; a renamed one is retried.
 - A module update that breaks the build is now put back automatically; **Put back the last update…** undoes one by hand.
 - Removing NPC Teleporter on WotLK now takes its teleporters out of the world again.
 - Removing NPC Teleporter on WotLK also clears its menus and scripts, and restores the gate menus it replaced.
+- Installing NPC Teleporter on WotLK no longer breaks Mountaineer Pebblebitty's and Maggran Earthbinder's menus; Install again to mend.
 - Updating a TBC or Vanilla server now brings in its new world content fixes once, and names any it could not apply.
 - Updating a TBC or Vanilla server stops before building when the new code needs database changes it cannot apply.
 - Updating a TBC or Vanilla server reloads changed bot tables, replacing what the bots had generated in them.
@@ -46,6 +73,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Stop** during a database import ends the importer too; **Install** again never clears databases it still writes.
 - **Stop** asks Docker once to end a build, instead of again every tenth of a second until it has.
 - **Re-extract map data** stops, and says why, if its reservation of the folder ends part way.
+- Install now checks every port the server needs before the build, and says if Windows has reserved the database port.
+- A port the server cannot use is said in plain words, and a failed start shows Docker's error first.
+- A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
+- The **A module this app does not ship** box says when a game cannot take your own modules, instead of two dead buttons.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
