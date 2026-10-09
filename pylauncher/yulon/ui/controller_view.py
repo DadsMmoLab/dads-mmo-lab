@@ -2810,6 +2810,9 @@ def _move_services(
             take_down=alone.take_down,
             channel_account=channel_setup.account_name(composegen.install_id(server_dir)),
             marker=bot_marker,
+            # The cross-process hold for the move's database stretch (lead's decision, 2026-10-09).
+            spec=entry.container_spec(),
+            wsl_distro=wsl_distro,
         ),
         whole=whole,
     )

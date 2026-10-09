@@ -1189,6 +1189,7 @@ def load_the_data(
     from yulon.controller_wow_wotlk import maintenance
     from yulon.move_flows import (
         ENGINE_COPY_LABEL,
+        PRESS_BRING_IN,
         SERVER_ROLES,
         _checked_plans,
         _database_session,
@@ -1200,7 +1201,9 @@ def load_the_data(
 
     manifest = package.manifest
     undone = "Nothing was put in yet."
-    with _database_session(world, because="the databases are put in", undone=undone):
+    with _database_session(
+        world, because="the databases are put in", undone=undone, press=PRESS_BRING_IN
+    ):
         roles = _present_roles(world, SERVER_ROLES)
         here = _read_versions(world, roles)
         said = core_version_difference(manifest.schema_evidence, here)

@@ -898,6 +898,85 @@ def test_the_lease_refuses_an_import_beside_a_backup(tmp_path: Path) -> None:
     assert not [e for e in box.events if e.startswith("load:")]
 
 
+@pytest.fixture
+def reservations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The fake docker CLI with the cross-process reservation on, as test_controller_reservation."""
+    from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+    from yulon import platform
+
+    cli, state = lay_fake_docker(tmp_path / "docker")
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    (state / "images-listed").write_text("yulon.local/wotlk-server:native\n", encoding="utf-8")
+    yield state
+    end_fake_containers(state)
+
+
+def _reserving(box: Box) -> MoveWorld:
+    """`box.world` as the app wires it since the lead's 2026-10-09 decision: with its spec."""
+    from dataclasses import replace
+
+    return replace(box.world, spec=box.entry.container_spec(), wsl_distro=None)
+
+
+def test_a_bring_in_while_another_yulon_holds_the_server_loads_nothing(
+    tmp_path: Path, reservations: Path
+) -> None:
+    """B's bring-in is refused while A holds the server; nothing is dumped, loaded or started.
+
+    Mutation this catches: `_database_session()` taking the hold without `spec=` again
+    (this process only), which lets the load run under the other Yu'lon's job.
+    """
+    from tests.test_controller_reservation import _holds
+
+    box, _package, plan = ready(tmp_path)
+    theirs = _holds(reservations, box.server_dir, press="Update the server to latest…")
+    try:
+        with pytest.raises(MaintenanceError, match="Another Yu'lon is working on"):
+            move_flows.run_import(
+                _reserving(box), plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+            )
+    finally:
+        theirs.kill()
+    assert not [e for e in box.events if e.startswith(("load:", "dump:", "db-up"))]
+
+
+def test_a_pack_while_another_yulon_holds_the_server_packs_nothing(
+    tmp_path: Path, reservations: Path
+) -> None:
+    from tests.test_controller_reservation import _holds
+
+    box = target(tmp_path)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    theirs = _holds(reservations, box.server_dir, press="Rebuild the server…")
+    try:
+        with pytest.raises(MaintenanceError, match="Another Yu'lon is working on"):
+            move_flows.export_package(_reserving(box), folder, stop_allowed=False)
+    finally:
+        theirs.kill()
+    assert list(folder.iterdir()) == []
+    assert not [e for e in box.events if e.startswith(("dump:", "db-up"))]
+
+
+def test_a_move_names_its_press_to_another_yulon(tmp_path: Path, reservations: Path) -> None:
+    """While B brings a move in, A's refusal quotes "Bring in a move"."""
+    box, _package, plan = ready(tmp_path)
+    seen: list[str | None] = []
+    real = box.world.restore
+
+    def restore(*a: object, **k: object):
+        holder = docker.reservation_holder(box.server_dir)
+        seen.append(None if holder is None else holder.press)
+        return real(*a, **k)  # type: ignore[arg-type]
+
+    from dataclasses import replace
+
+    world = replace(_reserving(box), restore=restore)
+    move_flows.run_import(world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False)
+    assert seen and set(seen) == {move_flows.PRESS_BRING_IN}
+
+
 def test_a_dump_without_a_record_is_refused_at_the_load_even_if_the_plan_let_it_through(
     tmp_path: Path,
 ) -> None:

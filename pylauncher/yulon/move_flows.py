@@ -167,6 +167,10 @@ class MoveWorld:
     """This install's command-channel account name, for the record in a package."""
     marker: Callable[[], BotMarker | None]
     now: Callable[[], datetime] = datetime.now
+    spec: docker.ContainerSpec | None = None
+    """This server's containers. Given, a move reserves the server across processes (T568) for
+    its whole database stretch, as the other writes do; None (a harness) holds in this process."""
+    wsl_distro: str | None = None
 
 
 def engine_for(
@@ -414,13 +418,21 @@ def _read_realm_name(world: MoveWorld, auth: str) -> str | None:
 # --------------------------------------------------------------- the database session
 
 
+PRESS_PACK = "Pack for a move"
+PRESS_BRING_IN = "Bring in a move"
+"""The press names another Yu'lon's refusal quotes while a move holds the server (T568)."""
+
+
 @contextlib.contextmanager
-def _database_session(world: MoveWorld, *, because: str, undone: str) -> Iterator[None]:
+def _database_session(world: MoveWorld, *, because: str, undone: str, press: str) -> Iterator[None]:
     """The leased, held, database-up stretch a move works in. `undone` names what did not happen.
 
     The same four steps the Maintenance tab's Backup and Restore take, in the same order: the
     lease (one Backup, Restore or move of a server at a time), the hold (no Start, Stop or
     recreate under it), the database started on its own if it is down, and put back after.
+    The hold is also the cross-process reservation under `press` when the world names its
+    `spec`: a move rewrites the server's databases, so it refuses while another Yu'lon works on
+    the server, and another Yu'lon's presses refuse while it runs (lead's decision, 2026-10-09).
     """
     with contextlib.ExitStack() as stack:
         try:
@@ -431,7 +443,13 @@ def _database_session(world: MoveWorld, *, because: str, undone: str) -> Iterato
             raise MoveError(f"{exc} {undone}") from exc
         try:
             stack.enter_context(
-                docker.hold_the_server(world.server_dir, forgetting.MOVE_HOLDS_THE_SERVER)
+                docker.hold_the_server(
+                    world.server_dir,
+                    forgetting.MOVE_HOLDS_THE_SERVER,
+                    press=press,
+                    spec=world.spec,
+                    wsl_distro=world.wsl_distro,
+                )
             )
         except docker.ServerHeldError as exc:
             raise MoveError(f"{undone} {exc}") from exc
@@ -573,7 +591,7 @@ def _export_locked(
     world: MoveWorld, folder: Path, facts: move.ServerFacts | None = None
 ) -> ExportResult:
     undone = "Nothing was packed."
-    with _database_session(world, because="nothing was packed", undone=undone):
+    with _database_session(world, because="nothing was packed", undone=undone, press=PRESS_PACK):
         roles = _present_roles(world, SERVER_ROLES if facts is not None else ROLES)
         schemas = world.entry.schema_map()
         for needed in EVIDENCE_ROLES:
@@ -816,7 +834,9 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
     schemas = tuple(sorted((m.schema_name for m in manifest.databases), key=_load_order(world)))
     try:
         running = _server_is_up(world)
-        with _database_session(world, because="nothing was brought in", undone=_NOT_IN):
+        with _database_session(
+            world, because="nothing was brought in", undone=_NOT_IN, press=PRESS_BRING_IN
+        ):
             roles = _present_roles(world)
             here = _read_versions(world, roles)
             counts = _survey_counts(world, roles)
@@ -1025,7 +1045,9 @@ def run_import(
         raise MoveError(RUNNING_NEEDS_A_YES_IMPORT)
     if running:
         world.stop_server()
-    with _database_session(world, because="nothing was brought in", undone=_NOT_IN):
+    with _database_session(
+        world, because="nothing was brought in", undone=_NOT_IN, press=PRESS_BRING_IN
+    ):
         return _import_locked(world, plan, package, use_old_realm_name, stopped=running)
 
 

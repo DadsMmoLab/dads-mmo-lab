@@ -536,9 +536,8 @@ SEAMS: dict[str, tuple[str, str]] = {
     ),
     "module_refresh": ("reads", "the same counts as module_updates, in the background"),
     "move": (
-        "open",
-        "T601: packs and brings in under this process's Maintenance lease and hold, as Backup "
-        "and Restore do",
+        "held",
+        "tests.test_move_flows.test_a_bring_in_while_another_yulon_holds_the_server_loads_nothing",
     ),
     "shelf": (
         "held",
@@ -546,7 +545,7 @@ SEAMS: dict[str, tuple[str, str]] = {
     ),
 }
 
-OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding", "move"}
+OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone", "pathfinding"}
 """Pinned: closing one of these is an edit here, and a new one is a decision, not a drift."""
 
 

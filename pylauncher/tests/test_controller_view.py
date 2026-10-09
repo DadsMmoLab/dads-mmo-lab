@@ -30540,6 +30540,10 @@ def test_every_game_gets_the_move_group_from_its_real_factory(game_id: str, tmp_
 
     services = ControllerServices.for_entry(load_catalog().get(game_id), tmp_path)
     assert services.move is not None, game_id
+    # Lead's decision, 2026-10-09: a move takes the cross-process hold, so the factory names
+    # the server's containers (and its distro) for it.
+    assert services.move.world is not None
+    assert services.move.world.spec == load_catalog().get(game_id).container_spec(), game_id
 
 
 def test_the_maintenance_tab_draws_the_move_group_only_where_it_is_wired(
