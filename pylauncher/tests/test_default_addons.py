@@ -139,7 +139,9 @@ def test_installing_one_by_hand_lifts_its_decline(tmp_path: Path) -> None:
 def test_another_modules_report_changes_nothing(tmp_path: Path) -> None:
     box = _Box(tmp_path)
     default_addons.remember(box.server, ApplyReport("remove", "mod-arac", family="module"), IDS)
-    default_addons.remember(box.server, ApplyReport("update", "tortoise-gm-manager", family="mod"), IDS)
+    default_addons.remember(
+        box.server, ApplyReport("update", "tortoise-gm-manager", family="mod"), IDS
+    )
     assert default_addons.declined(box.server) == frozenset()
 
 

@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - **WoW Unbound**, a multi-class WotLK server of its own that runs beside your WotLK one, is in the Catalog.
 - WoW Unbound's ready-to-play client gets its three addons, kept in step with the server at every **Play**.
 - The Server tab says whether Unbound loaded and which of its switches are on, or what is missing.

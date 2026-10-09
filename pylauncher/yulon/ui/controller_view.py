@@ -12094,9 +12094,10 @@ class ControllerView(QWidget):
             return
         if self._busy or self._module_job_running() or self._play_pending:
             return
-        if self.services.play_client_dir is not None and self._usable_play_client(
-            offer_remake=False
-        ) is None:
+        if (
+            self.services.play_client_dir is not None
+            and self._usable_play_client(offer_remake=False) is None
+        ):
             return
         self._module_pending = "put in the client addons"
         self.module_report.setPlainText("Putting the client addons in…")

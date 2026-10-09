@@ -34,6 +34,11 @@
     "`.git` and this app's `.yulon-clone.json` are the two exceptions, left behind since T65:",
     "git's 0444 pack files cannot be overwritten, so copying them made the second install of",
     "either Tortoise addon fail. See the sibling manifest.",
-    "WRITTEN AT INSTALL, not at Play, for the reason spelled in the sibling manifest."
+    "PUT IN BY THE APP (T612). A new install and every Play put this addon into the game client",
+    "(the ready-to-play client, or the set client folder) through the Modules tab's own Install and",
+    "Update, so this row reads installed and its Remove works as ever. A Remove is remembered per",
+    "server and Play never puts the addon back; installing it by hand lifts that. Nothing is",
+    "written to the server and nothing is restarted. The Modules tab's Install press still works",
+    "the same, and still needs a client dir for the step to run at all."
   ]
 }

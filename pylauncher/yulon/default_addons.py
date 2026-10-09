@@ -1,4 +1,4 @@
-"""A server's default client add-ons: put in the game client by themselves, once removed never again (T612).
+"""A server's default client add-ons: put in by themselves, never again once removed (T612).
 
 Tortoise's two Sagiroth add-ons (TortoiseBots Manager, Tortoise GM Manager) are Modules-tab
 items whose whole content is one `client` step. This module is the part that runs them without
