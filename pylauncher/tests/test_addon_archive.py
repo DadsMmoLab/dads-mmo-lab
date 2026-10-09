@@ -111,7 +111,7 @@ def test_a_file_that_is_not_a_zip_is_refused(tmp_path: Path, _cache: Path) -> No
 
 @pytest.mark.parametrize(
     "bad",
-    ["../x.lua", "/abs.lua", "C:x.lua", "a/../../b.lua", "a/b.lua.", "a/b .lua/c"],
+    ["../x.lua", "/abs.lua", "C:x.lua", "a/../../b.lua", "a/b.lua.", "a /c.lua"],
 )
 def test_a_member_that_would_land_outside_is_refused_and_nothing_is_left(
     tmp_path: Path, _cache: Path, bad: str
@@ -182,22 +182,27 @@ def test_a_file_where_another_member_needs_a_folder_is_refused(
 
     said = _refusal(lambda: stage_zip(path))
 
-    assert "differ only in case" in said
+    assert (
+        "'pfUI-master/libs' in the zip is a file where 'pfUI-master/Libs/a' needs a folder" in said
+    )
     assert _left(_cache) == []
 
 
 def test_a_member_deeper_than_the_cap_is_refused(tmp_path: Path, _cache: Path) -> None:
-    deep = "/".join(["d"] * addon_archive.MAX_DEPTH) + "/x.lua"
+    deep = "/".join(["d"] * (addon_archive.MAX_DEPTH + 1)) + "/x.lua"
     path = _zip(tmp_path / "a.zip", {**GOOD, deep: "x"})
 
     said = _refusal(lambda: stage_zip(path))
 
-    assert f"folders deep; Yu'lon takes add-ons up to {addon_archive.MAX_DEPTH}" in said
+    assert (
+        f"is {addon_archive.MAX_DEPTH + 1} folders deep; Yu'lon takes add-ons up to "
+        f"{addon_archive.MAX_DEPTH} folders deep." in said
+    )
     assert _left(_cache) == []
 
 
 def test_a_member_exactly_at_the_depth_cap_is_taken(tmp_path: Path) -> None:
-    deep = "/".join(["d"] * (addon_archive.MAX_DEPTH - 1)) + "/x.lua"
+    deep = "/".join(["d"] * addon_archive.MAX_DEPTH) + "/x.lua"
 
     staged = stage_zip(_zip(tmp_path / "a.zip", {**GOOD, deep: "x"}))
 

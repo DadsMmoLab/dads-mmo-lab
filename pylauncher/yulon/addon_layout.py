@@ -1,6 +1,6 @@
-"""Which client add-ons a folder holds, under which names, and whether this client takes them (T613).
+"""Which client add-ons a folder holds, under which names, and whether this client takes them.
 
-A pure read with no Qt and no writes, shared by every game and every source: a
+A pure read (T613) with no Qt and no writes, shared by every game and every source: a
 zip staged by `addon_archive`, a folder the player chose, or a clone. It answers
 the same before a folder is copied and after a clone lands, so every route
 refuses at the same point and for the same reason.
