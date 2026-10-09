@@ -57,6 +57,7 @@ gets, and answering it with "nothing outstanding" would be the same defect
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -637,9 +638,9 @@ class GuardedApplier(Applier):
             manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
         )
         if core is not None:
-            raise ApplyRefusal(
-                f"{core_modules.sentence(manifest.id, core, CORE_MODULES_DIR)} Nothing was changed."
-            )
+            installed = os.path.lexists(self.clone_dir(manifest))
+            said = core_modules.sentence(manifest.id, core, CORE_MODULES_DIR, installed=installed)
+            raise ApplyRefusal(f"{said} Nothing was changed." if installed else said)
 
     def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:
         """Where an outside add-on or database package's clone is, before its Update (T611)."""

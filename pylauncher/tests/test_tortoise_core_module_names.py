@@ -80,7 +80,9 @@ def test_a_link_named_like_a_core_module_is_refused_before_anything_is_cloned(
     said = str(refused.value)
     assert said.count("mod-pb") >= 2, "names the player's module and the core's"
     assert "src/tortoise-wow/modules/mod-pb" in said
-    assert "Nothing was changed" in said
+    assert "overwrite" in said, "an exact name: the player's files land on the core module's"
+    assert "Nothing was installed" in said
+    assert "Remove" not in said, "nothing is installed yet, so there is nothing to remove"
     assert git.specs == [], "refused before git was asked for anything"
     assert not (server / "modules").exists()
     assert list(tortoise_modules.store().load_all("module")) == []
@@ -97,6 +99,8 @@ def test_the_core_may_spell_the_name_in_another_case_and_both_are_named(tmp_path
 
     said = str(refused.value)
     assert "mod-pb" in said and "Mod-PB" in said
+    assert "two copies of one module side by side" in said
+    assert "overwrite" not in said, "two folders of two names: nothing is laid over anything"
 
 
 @needs_git
@@ -140,7 +144,8 @@ def test_a_core_that_gains_the_name_later_refuses_the_update_and_changes_nothing
 
     said = str(refused.value)
     assert said.count("mod-pb") >= 2 and "src/tortoise-wow/modules/mod-pb" in said
-    assert "Remove" in said
+    assert "overwrite" in said
+    assert "Remove mod-pb" in said, "it is installed, so the way out is Remove"
     assert len(git.specs) == calls, "nothing was fetched"
     assert _git(server / "modules" / "mod-pb", "rev-parse", "HEAD") == first
     ledger = module_moves.read(server)
@@ -176,7 +181,21 @@ def test_the_rebuild_refuses_a_module_the_core_has_since_gained_naming_both(
     said = str(refused.value)
     assert "mod-pb" in said and "Mod-PB" in said
     assert "src/tortoise-wow/modules/Mod-PB" in said
+    assert "two copies of one module side by side" in said
+    assert "Remove mod-pb" in said
+    assert "two copies of one module side by side" in said
+    assert "Remove mod-pb" in said
     assert not (server / "Dockerfile").exists(), "refused before the recipe was written"
+
+
+def test_the_rebuild_says_an_exact_name_is_laid_over_the_cores_module(tmp_path: Path) -> None:
+    server = tmp_path / "srv"
+    (server / "modules" / "mod-pb").mkdir(parents=True)
+    _core_has(server, "mod-pb")
+    with pytest.raises(InstallerError) as refused:
+        list(_installer()._write_dockerfile(context(server)))
+    assert "overwrite" in str(refused.value)
+    assert "two copies" not in str(refused.value)
 
 
 def test_the_rebuild_goes_on_when_no_module_shares_a_name(tmp_path: Path) -> None:
