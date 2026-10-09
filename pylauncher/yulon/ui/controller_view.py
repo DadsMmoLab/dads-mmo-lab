@@ -73,6 +73,7 @@ from yulon import (
     backup_shelf,
     botlist,
     channel_setup,
+    client_addons,
     client_build,
     client_config,
     client_exe,
@@ -2306,6 +2307,16 @@ class ControllerServices:
     Empty keeps the panel's own sentence (`modules_panel.NO_MODULES_NOTE`).
     """
 
+    client_addons: client_addons.ClientAddons | None = None
+    """This server's route for client add-ons from a link, a folder or a zip (T613 PR-2).
+
+    Set by `for_entry()` for every game whose client takes add-ons
+    (`catalog.Client.addon_interface`), over the tab's own `applier`, or over an
+    add-on-only one where the game has none (Centurion), into the client Play
+    uses. None: a hand-built services object, or a client with no add-ons. The
+    box that presses it is PR-3's.
+    """
+
     custom_module_tips: tuple[str, str] | None = None
     """This game's tooltips for "Install from link…" and "Install from folder…" (T596).
 
@@ -2355,22 +2366,47 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return _with_the_ready_wait(
-                _with_take_back(
-                    _knowing_its_server_sources(
-                        factory(entry, server_dir, client_dir, wsl_distro), entry
-                    )
+            return _with_client_addons(
+                _with_the_ready_wait(
+                    _with_take_back(
+                        _knowing_its_server_sources(
+                            factory(entry, server_dir, client_dir, wsl_distro), entry
+                        )
+                    ),
+                    entry,
                 ),
                 entry,
+                server_dir,
+                client_dir,
             )
         services = _knowing_its_server_sources(
             factory(entry, server_dir, play_client_dir, wsl_distro), entry
         )
+        origins = _originals_of(play_client_dir, client_dir)
         if services.applier is not None:
-            services.applier.client_origins = _originals_of(play_client_dir, client_dir)
+            services.applier.client_origins = origins
             services.applier.client_game = entry.id
         services = _with_the_ready_wait(_with_take_back(services), entry)
+        services = _with_client_addons(services, entry, server_dir, play_client_dir, origins)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
+
+    def bind_other_server_dirs(self, other_server_dirs: Callable[[], tuple[Path, ...]]) -> None:
+        """Bind the other installs' server folders here and on every applier this tab holds.
+
+        `main.py`'s one call (T181, T613 PR-2): Make...'s "Also remove them" reads it,
+        and so does an outside add-on's Remove, which leaves a file another server's
+        receipt names in a set client the two share.
+        """
+        self.other_server_dirs = other_server_dirs
+        for applier in {
+            id(a): a
+            for a in (
+                self.applier,
+                self.client_addons.applier if self.client_addons is not None else None,
+            )
+            if a is not None
+        }.values():
+            applier.other_server_dirs = other_server_dirs
 
     @classmethod
     def for_wotlk(
@@ -2453,6 +2489,81 @@ def _waited_for_the_world(
         return number, job, exc
 
 
+def _with_client_addons(
+    services: ControllerServices,
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    origins: tuple[Path, ...] = (),
+) -> ControllerServices:
+    """`services` with the add-on route over its own applier, for every game (T613 PR-2).
+
+    In `for_entry()` rather than in each factory, so no game is left without it.
+    The tab's `applier` when it has one, so Install, Update and Remove are the
+    same presses the Modules tab's rows make; an `AddonOnlyApplier` into the same
+    client otherwise (Centurion), which also takes the add-ons back at Uninstall.
+    The shipped add-on names are read off the bundled `mod` manifests (the items
+    with no `origin`). A game with no record seam gets the route's, so a Remove
+    from the list drops the record of an outside add-on.
+    """
+    interface = entry.client.addon_interface
+    if interface is None:
+        return services
+    applier = services.applier
+    own = applier is None
+    if applier is None:
+        # T30's rule, as on Tortoise: only a folder that holds the game's own
+        # `Interface/` is a client an add-on may be written into.
+        # The two 8.7a seams every applier carries (T7), over this install's own
+        # world: this one runs no SQL (its guard refuses a manifest with any), and
+        # the audit that every applier the app builds has them holds for it too.
+        spec = entry.container_spec()
+        distro = services.controller.wsl_distro
+        applier = client_addons.AddonOnlyApplier(
+            server_dir,
+            client_dir=_client_dir_for_addons(client_dir),
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=distro),
+            start_database=lambda: docker.start_database(
+                spec, server_dir, because="no SQL was run", wsl_distro=distro
+            ),
+            # The add-on writes, and the per-server note of a player's folder set aside, under
+            # this server's cross-process hold, as every other applier the app builds (T568).
+            hold_server=lambda press: docker.server_claim(
+                server_dir, press=press, spec=spec, wsl_distro=distro, label=entry.name
+            ),
+        )
+        applier.client_origins = origins
+        applier.client_game = entry.id if origins else ""
+    shipped: list[Manifest] = []
+    unreadable = ""
+    if services.store is not None:
+        try:
+            shipped = [m for m in services.store.load_all("mod") if m.origin is None]
+        except Exception as exc:  # noqa: BLE001 - the route refuses; the log says why
+            logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
+            unreadable = " ".join(str(exc).split()) or type(exc).__name__
+    route = client_addons.ClientAddons(
+        applier=applier,
+        game=entry.id,
+        interface=interface,
+        shipped=client_addons.shipped_addons(shipped),
+        shipped_ids=tuple(m.id for m in shipped),
+        shipped_unreadable=unreadable,
+    )
+    # T613 review round 1: a route item is read again by the route's reader alone, on
+    # every game; Tortoise's own hook (`recomplete`) is for the items its box brings.
+    applier.addon_recomplete = route.completer
+    if own and isinstance(services.uninstall, purge.Uninstaller):
+        services.uninstall.take_back_client_files = applier.take_back_everything
+    return replace(
+        services,
+        client_addons=route,
+        module_forget=(
+            services.module_forget if services.module_forget is not None else route.forget
+        ),
+    )
+
+
 def _with_take_back(services: ControllerServices) -> ControllerServices:
     """Uninstall takes the module client files back through the module applier (T262).
 
@@ -2498,6 +2609,8 @@ def module_kept_files(
     origins = _originals_of(play_client_dir, client_dir)
     found: set[Path] = set()
     for copy in apply_module.client_receipts(server_dir):
+        if copy.folder:
+            continue  # the player's add-on folder set aside: no file to keep
         path = apply_module.rebased(Path(copy.path), play_client_dir, origins)
         if path.is_relative_to(play_client_dir):
             found.add(path.relative_to(play_client_dir))
@@ -12046,7 +12159,8 @@ class ControllerView(QWidget):
         }
         copies = tuple(
             copy
-            for copy in apply_module.client_receipts(server_dir)
+            # T613 review round 1: `Data/` files only; an add-on's are not offered.
+            for copy in apply_module.data_receipts(server_dir)
             if Path(copy.path).is_relative_to(original)
             and Path(copy.path).is_file()
             and os.path.normcase(copy.path) not in shared

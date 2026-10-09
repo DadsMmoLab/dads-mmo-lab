@@ -69,7 +69,7 @@ def test_a_refused_update_of_an_addon_is_put_back_and_not_offered_again(tmp_path
         applier.update(_installed(applier))  # type: ignore[arg-type]
 
     said = str(refused.value)
-    assert "made for another game version" in said
+    assert "is made for The Burning Crusade (Interface 20400)" in said
     assert "put it back on the version it was on" in said
     assert _git(clone, "rev-parse", "HEAD") == first, "the clone agrees with its record again"
     ledger = module_moves.read(server)
@@ -101,7 +101,7 @@ def test_a_put_back_that_cannot_be_made_says_what_the_clone_is_on(tmp_path: Path
         applier.update(_installed(applier))  # type: ignore[arg-type]
 
     said = str(refused.value)
-    assert "made for another game version" in said
+    assert "is made for The Burning Crusade (Interface 20400)" in said
     assert "could not put it back on the version it was on (disk full)" in said
     assert _git(server / "sql_scripts" / "clones" / "mobstats", "rev-parse", "HEAD") == second
 
@@ -169,3 +169,53 @@ def test_a_clone_edited_in_the_meantime_is_not_forced_back(tmp_path: Path) -> No
     assert "did not put it back" in str(refused.value)
     assert (clone / "MobStats.lua").read_text(encoding="utf-8") == "-- my own work\n"
     assert _git(clone, "rev-parse", "HEAD") == second
+
+
+def test_a_route_add_on_on_tortoise_that_gains_sql_runs_none_of_it(tmp_path: Path) -> None:
+    """Review round 1: completed by Tortoise's reader, the Update turned it into SQL steps.
+
+    Completed by the route's own reader it stays an add-on: the SQL file is never run, and
+    a completer that made more of it anyway is refused with the clone put back.
+    """
+    from yulon.client_addons import ClientAddons
+
+    applier, origin, server = _rig(tmp_path)
+    sent = applier.sql
+    route = ClientAddons(
+        applier=applier,
+        game="wow-tortoise",
+        interface=11200,
+        shipped={},
+        stage_clone=applier.git.clone,
+    )
+    applier.addon_recomplete = route.completer
+    first = _publish(origin, "11200", "v1")
+    route.install(route.from_link(URL))
+    (manifest,) = route.installed()
+    (origin / "data" / "sql" / "world").mkdir(parents=True)
+    (origin / "data" / "sql" / "world" / "x.sql").write_text("DELETE FROM creature;\n")
+    second = _publish(origin, "11200", "v2")
+
+    route.update(manifest)
+
+    clone = server / "sql_scripts" / "clones" / "mobstats"
+    assert _git(clone, "rev-parse", "HEAD") == second
+    (again,) = route.installed()
+    assert again.sql == () and sent.sent == []  # type: ignore[attr-defined]
+
+    def into_sql(m: object, c: Path) -> object:
+        from yulon.manifest import parse_manifest
+
+        return parse_manifest(
+            {**m.model_dump(), "sql": [{"db": "world", "path": "data/sql/world/x.sql"}]}  # type: ignore[attr-defined]
+        )
+
+    applier.addon_recomplete = into_sql  # type: ignore[assignment]
+    third = _publish(origin, "11200", "v3")
+
+    with pytest.raises(CompletionRefused, match="it carries database changes"):
+        route.update(again)
+
+    assert _git(clone, "rev-parse", "HEAD") == second, "put back on the version it was on"
+    assert sent.sent == []  # type: ignore[attr-defined]
+    assert first != third

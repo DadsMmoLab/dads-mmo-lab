@@ -5273,7 +5273,8 @@ def test_no_applier_the_app_builds_is_left_without_the_world_running_seam() -> N
 
     assert [f"{f}:{n}" for f, n, kw in sites if "world_running" not in kw] == []
     assert [f"{f}:{n}" for f, n, kw in sites if "start_database" not in kw] == []
-    assert len(sites) == 13, where
+    # 14 since T613 PR-2: Centurion's add-on-only applier (`for_entry()`).
+    assert len(sites) == 14, where
 
 
 def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> None:
@@ -5309,7 +5310,8 @@ def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> No
     # a line number here would go stale on the next edit above it and be
     # "corrected" by whoever hit it, which is how an audit stops auditing.
     real = [w for w, s in _seam_bindings("world_running") if s == "docker.world_running"]
-    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 4, real
+    # Five since T613 PR-2: the four games' module appliers and Centurion's add-on one.
+    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 5, real
 
 
 def test_the_audit_reads_a_differently_named_pass_through_as_a_stranger() -> None:

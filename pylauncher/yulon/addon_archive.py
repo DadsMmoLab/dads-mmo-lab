@@ -38,6 +38,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import zipfile
@@ -165,8 +166,45 @@ def downloads_dir() -> Path:
     return client_packs.cache_dir() / "addons" / "downloads"
 
 
+STALE_SECONDS = 60 * 60
+"""How old a staging or download folder must be before the start-up sweep removes it.
+
+An hour: no unpack or download of an add-on within the caps takes that long, so a
+folder this old was left by a Yu'lon that stopped (a crash, a power cut) and not
+by one still writing into it."""
+
+
 def _never() -> bool:
     return False
+
+
+def sweep_stale(*, now: float | None = None) -> list[Path]:
+    """Remove the staging and download folders a stopped Yu'lon left; the folders removed.
+
+    T613 PR-2: every press removes its own folder whatever happens, but a crash or a
+    power cut between the unpack and that removal leaves one under
+    `<cache>/addons/`, up to 500 MB, that nothing would ever remove. Run once at
+    start, off the GUI thread. A folder younger than `STALE_SECONDS` is left: it may
+    belong to a press still running. Never raises; what could not be removed is logged.
+    """
+    when = time.time() if now is None else now
+    removed: list[Path] = []
+    for parent in (staging_dir(), downloads_dir()):
+        try:
+            children = sorted(parent.iterdir()) if parent.is_dir() else []
+        except OSError:
+            logger.warning("addon staging: could not list %s", parent, exc_info=True)
+            continue
+        for child in children:
+            try:
+                if when - child.lstat().st_mtime < STALE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            _remove(child)
+            if not os.path.lexists(child):
+                removed.append(child)
+    return removed
 
 
 # ------------------------------------------------------------------ a local zip
@@ -308,18 +346,30 @@ def _unpack(
             raise AddonCancelled(f"Unpacking {label} was cancelled. {NOTHING_CHANGED}")
         target = staging.joinpath(*member.rel.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        written = _write_member(archive, member, target, written, label=label)
+        written = _write_member(archive, member, target, written, label=label, cancelled=cancelled)
 
 
 def _write_member(
-    archive: zipfile.ZipFile, member: _Member, target: Path, written: int, *, label: str
+    archive: zipfile.ZipFile,
+    member: _Member,
+    target: Path,
+    written: int,
+    *,
+    label: str,
+    cancelled: Callable[[], bool] = _never,
 ) -> int:
-    """Unpack one member NEW onto `target`, counting its bytes; the running total after it."""
+    """Unpack one member NEW onto `target`, counting its bytes; the running total after it.
+
+    Cancel is asked before every chunk as well as before every member (T613 PR-2):
+    one 400 MB member is otherwise a wait the player cannot stop.
+    """
     own = 0
     with archive.open(member.info) as source, target.open("xb") as out:
         head = b""
         judged = False
         while chunk := source.read(client_packs.CHUNK_BYTES):
+            if cancelled():
+                raise AddonCancelled(f"Unpacking {label} was cancelled. {NOTHING_CHANGED}")
             if not judged:
                 head += chunk[: HEAD_BYTES - len(head)]
                 if len(head) >= HEAD_BYTES:

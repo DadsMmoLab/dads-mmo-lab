@@ -424,8 +424,16 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverN
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
-    from yulon import play_client, ui_settings
+    from yulon import addon_archive, play_client, ui_settings
     from yulon.catalog.families import trinitycore
+
+    # T613 PR-2: the add-on staging and download folders a stopped Yu'lon left,
+    # up to 500 MB each, that no press will ever come back for. Logged, never said.
+    try:
+        for folder in addon_archive.sweep_stale():
+            logger.info(f"removed the add-on staging folder {folder}, left by an earlier run")
+    except Exception as exc:  # noqa: BLE001 - one sweep must not stop the other
+        logger.warning(f"could not sweep the add-on staging folders: {exc}")
 
     lost: list[play_client.LostFlag] = []
     for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir, flags_lost=lost):
@@ -1484,7 +1492,8 @@ def build_window() -> object:
         services.set_client_dir = _remember_client_live(game, server_dir)
         # T181: the ready-to-play client's record, over the same live state.
         services.set_play_client_dir = _remember_play_client_live(game, server_dir)
-        services.other_server_dirs = _other_server_dirs(game, server_dir)
+        # T181, T613 PR-2: on the tab and on every applier it holds, in one call.
+        services.bind_other_server_dirs(_other_server_dirs(game, server_dir))
         if services.uninstall is not None:
             # 8.9a. The record is the LAST thing an uninstall forgets, and in a
             # running window "the record" is this closure's live `AppState` -

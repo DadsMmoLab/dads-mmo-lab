@@ -450,6 +450,94 @@ def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> N
             )
 
 
+_SHA = "ab" * 32
+
+
+def _addon_with(origin: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": "pfui",
+        "name": "pfUI",
+        "type": "mod",
+        "game": "wow-vanilla",
+        "origin": origin,
+        "client": [{"src": "pfUI-master", "dest": "addons", "name": "pfUI"}],
+    }
+
+
+def test_an_archive_origin_records_its_zip_by_path_or_by_link_with_its_sha256() -> None:
+    """T613 PR-2: an add-on from a zip says which zip, and which bytes it was."""
+    local = parse_manifest(
+        _addon_with(
+            {
+                "kind": "archive",
+                "path": "C:/Downloads/pfUI-master.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            }
+        )
+    )
+    assert local.origin is not None and local.origin.sha256 == _SHA and local.origin.url is None
+    linked = parse_manifest(
+        _addon_with(
+            {
+                "kind": "archive",
+                "url": "https://github.com/shagu/pfUI/archive/refs/heads/master.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            }
+        )
+    )
+    assert linked.origin is not None and linked.origin.path is None
+
+
+@pytest.mark.parametrize(
+    "origin, said",
+    [
+        ({"kind": "archive", "path": "/a.zip", "added": "2026-10-09"}, "needs the zip's sha256"),
+        (
+            {"kind": "archive", "sha256": _SHA, "added": "2026-10-09"},
+            "names its zip by a path or a url",
+        ),
+        (
+            {
+                "kind": "archive",
+                "path": "/a.zip",
+                "url": "https://github.com/a/b.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            },
+            "names its zip by a path or a url",
+        ),
+        (
+            {
+                "kind": "archive",
+                "url": "http://github.com/a/b.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            },
+            "url must be https",
+        ),
+        (
+            {"kind": "archive", "path": "/a.zip", "sha256": "AB" * 32, "added": "2026-10-09"},
+            "should match pattern",
+        ),
+        (
+            {"kind": "folder", "path": "/x", "sha256": _SHA, "added": "2026-10-09"},
+            "are only an archive origin",
+        ),
+        (
+            {"kind": "link", "url": "https://github.com/a/b.zip", "added": "2026-10-09"},
+            "are only an archive origin",
+        ),
+    ],
+)
+def test_an_origin_that_says_too_little_or_too_much_is_refused(
+    origin: dict[str, object], said: str
+) -> None:
+    with pytest.raises(ValidationError, match=said):
+        parse_manifest(_addon_with(origin))
+
+
 def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
     """`origin` says "this app derived me"; a manifest the project ships never did.
 

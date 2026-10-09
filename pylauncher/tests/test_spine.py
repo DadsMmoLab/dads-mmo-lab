@@ -2820,15 +2820,6 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "through the applier's running-world guard, ledger read and backup - and an empty "
         "answer only means the package brings no database changes"
     ),
-    ("controller_wow_tortoise/custom.py", "_addons"): (
-        "T596. Lists a package's top for .toc files and its add-on folders for `<X>/<X>.toc` to "
-        "name the client steps; decides no write by itself (the applier's `_client()` copies "
-        "and receipts) and a refusal (several top .toc files, a later client's Interface)"
-    ),
-    ("controller_wow_tortoise/custom.py", "_addon_parents"): (
-        "T596. Finds `addon/`, `addons/` and `Interface/AddOns/` in a package case-blind, for "
-        "`_addons()`; decides nothing on its own"
-    ),
     ("controller_wow_tortoise/custom.py", "_unused"): (
         "T596. Walks a package for .sql files it does not run, to NAME them in the report's "
         "skipped lines; decides no write"
@@ -2911,6 +2902,38 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "too deep, too many files or too many bytes refuses the whole folder. It decides a "
         "REFUSAL and never a write. A folder that cannot be listed is passed over, as "
         "`links.walk` does, and the copy that follows then fails on it with its own sentence"
+    ),
+    ("apply.py", "_take_back_one_addon"): (
+        "T613 PR-2. Lists the client's `Interface/AddOns` to find an OUTSIDE add-on's folder "
+        "in the case it has on disk, for its Remove by receipt. It decides no write itself: "
+        "each file is deleted only by `take_back_file()` when its bytes are the receipt's, "
+        "and only inside that one add-on's folder; an unreadable listing takes the "
+        "receipt's own spelling"
+    ),
+    ("apply.py", "_put_the_players_folder_back"): (
+        "T613 re-review. Lists the client's `Interface/AddOns` to find the add-on's name in the "
+        "case it has on disk, before putting the player's own folder back from its recorded "
+        "aside. It decides only whether that name is free; the rename is only from an aside "
+        "beside it with Yu'lon's aside name, never a link, and only ONTO `Interface/AddOns/"
+        "<one folder name>`: a note or claim naming the add-on `/elsewhere/x` or `../x` is "
+        "refused, and both ends' real parents must be that AddOns folder (round 3)"
+    ),
+    ("apply.py", "_holds_more_than"): (
+        "T613 PR-2. Walks an outside add-on's folder after its Remove (`links.walk`, never "
+        "into a link) only to SAY whether it still holds files Yu'lon did not put there; "
+        "decides no write"
+    ),
+    ("client_addons.py", "_installed_names"): (
+        "T613 PR-2. Lists the client's `Interface/AddOns` for the add-ons already there, read "
+        "only to word the reader's dependency notes ('needs X, which Yu'lon did not find'); "
+        "decides no write and no refusal"
+    ),
+    ("addon_archive.py", "sweep_stale"): (
+        "T613 PR-2. Lists Yu'lon's own `<cache>/addons/staging/` and `/downloads/` once at "
+        "start for the folders a stopped run left, and removes each one older than "
+        "`STALE_SECONDS` through `_remove()` (`rmtree.remove_tree`, which refuses a link). It "
+        "decides a removal only inside Yu'lon's cache, never in a game client or a server "
+        "folder; a folder that cannot be listed is passed over and logged"
     ),
     ("client_packs.py", "_numbered_parts"): (
         "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "

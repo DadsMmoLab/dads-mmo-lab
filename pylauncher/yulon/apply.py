@@ -954,15 +954,37 @@ class ClientCopy:
     Kept as a receipt rather than dropped (the module's own file is still known),
     and Remove names the gap and looks beside the file for an aside of its name.
     """
+    addon: str = ""
+    """The add-on folder this file was copied into, for an OUTSIDE add-on (T613 PR-2).
+
+    Empty for a `Data/` file. Set, the file is taken back by
+    `Applier._take_back_addon_files()`'s rule and only inside
+    `Interface/AddOns/<addon>/`. Written to the claim only when set; a claim
+    entry whose `addon` is not one folder name is no receipt at all
+    (`read_client_copies()`), so it is never read as a `Data/` file.
+    """
+
+    shipped: bool = False
+    """A SHIPPED add-on's file (T613 review round 1): recorded so no other item takes it for
+    its own, and never taken back, by Remove, Update or Uninstall."""
+    folder: bool = False
+    """Not a file: the player's own add-on folder of this name, set aside whole at `aside`
+    when they said to replace it (T613 review round 1); put back when the name is free."""
 
     def as_json(self) -> dict[str, object]:
         out: dict[str, object] = {"step": self.step, "path": self.path, "sha256": self.sha256}
+        if self.shipped:
+            out["shipped"] = True
+        if self.folder:
+            out["folder"] = True
         if self.aside:
             out["aside"] = self.aside
         if self.kept:
             out["kept"] = list(self.kept)
         if self.aside_unknown:
             out["aside_unknown"] = True
+        if self.addon:
+            out["addon"] = self.addon
         return out
 
 
@@ -1020,6 +1042,11 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
             aside, unknown = "", True
         if not isinstance(kept, list) or not all(isinstance(k, str) for k in kept):
             kept, unknown = [], True
+        addon = entry.get("addon", "")
+        if "addon" in entry and not _one_folder_name(addon):
+            # T613 PR-2: read as a `Data/` receipt it would be taken back by that
+            # rule, wherever it points; an add-on receipt nobody can place is none.
+            continue
         out.append(
             ClientCopy(
                 step=step,
@@ -1028,9 +1055,212 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
                 aside=aside,
                 kept=tuple(kept),
                 aside_unknown=unknown,
+                addon=addon,
+                shipped=entry.get("shipped") is True,
+                folder=entry.get("folder") is True and bool(addon),
             )
         )
     return tuple(out)
+
+
+def data_receipts(server_dir: Path) -> tuple[ClientCopy, ...]:
+    """`client_receipts()` without the add-on ones: the files in the client's `Data/` (T613).
+
+    What Make…'s "Also remove them from your original client" may offer: an add-on's
+    files are not carried into a ready-to-play client by being removed from the original.
+    """
+    return tuple(copy for copy in client_receipts(server_dir) if not copy.addon)
+
+
+FOLDER_ASIDE_SUFFIX = ".yulon-addon-old"
+"""Appended to the player's own add-on folder an outside add-on of that name replaced.
+
+No `.toc` inside it carries that name, so the game loads nothing from it.
+"""
+
+
+ADDON_ASIDES_FILE = ".yulon-addon-asides.json"
+"""`<server>/` + this: every player's add-on folder an outside add-on set aside (re-review).
+
+The clone's claim holds the same receipt, and Remove deletes the clone; a folder that
+could not be put back then (its name taken, no client folder, other servers unreadable)
+would have no record left. This file outlives the clone: a later Remove of the item puts
+it back or names it again. A list of `{"item", "addon", "target", "aside"}`, atomic.
+"""
+
+
+PUT_FOLDERS_BACK_PRESS = "Put your add-on folders back"
+"""The press another Yu'lon's refusal names while this one writes the asides note (T568)."""
+
+_ADDON_ASIDES_LOCK = threading.RLock()
+"""Serialises every read-change-write of `ADDON_ASIDES_FILE` in this process (round 3).
+
+Two presses of one server in two processes are not covered here: that is T568's
+server hold, which this branch does not carry yet (T613 ticket, combined-branch
+follow-up)."""
+
+
+def read_addon_asides(server_dir: Path) -> list[dict[str, str]]:
+    """The noted asides of `server_dir`; `[]` for no file or one that will not read."""
+    return _read_addon_asides_checked(server_dir)[0]
+
+
+def _read_addon_asides_checked(server_dir: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """The noted asides, and one sentence per entry left out because it is not Yu'lon's shape.
+
+    An entry's `addon` must be one folder name (`_one_folder_name`): the put-back
+    renames onto `Interface/AddOns/<addon>`, and `/elsewhere/pfUI` or `../../pfUI`
+    there is a path out of the client (round 3).
+    """
+    try:
+        raw = json.loads((server_dir / ADDON_ASIDES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    keys = ("item", "addon", "target", "aside")
+    if not isinstance(raw, list):
+        return [], []
+    good: list[dict[str, str]] = []
+    bad: list[str] = []
+    for entry in raw:
+        if not (isinstance(entry, dict) and all(isinstance(entry.get(k), str) for k in keys)):
+            continue
+        if not _one_folder_name(entry["addon"]):
+            bad.append(
+                f"{entry['aside']} (Yu'lon's note beside the server names the add-on folder "
+                f"{entry['addon']!r} for it, which is not one folder in Interface/AddOns, so "
+                "Yu'lon left it alone)"
+            )
+            continue
+        good.append({k: entry[k] for k in keys})
+    return good, bad
+
+
+def unchecked_addon_aside_paths(server_dir: Path) -> list[str]:
+    """Aside paths the note lists in entries the checked reader leaves out (round 4).
+
+    For Uninstall's last words before the note is deleted with the server folder: a
+    damaged entry's folder is still the player's. Only a path Yu'lon could have made
+    is returned -- absolute and plain, in an `Interface/AddOns` folder, with Yu'lon's
+    aside name -- so a damaged note cannot make the warning point anywhere else.
+    """
+    try:
+        raw = json.loads((server_dir / ADDON_ASIDES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    checked = {_path_key(Path(e["aside"])) for e in read_addon_asides(server_dir)}
+    found: list[str] = []
+    for entry in raw:
+        aside = entry.get("aside") if isinstance(entry, dict) else None
+        if (
+            isinstance(aside, str)
+            and aside_path_could_be_ours(aside)
+            and _path_key(Path(aside)) not in checked
+            and aside not in found
+        ):
+            found.append(aside)
+    return found
+
+
+def aside_path_could_be_ours(aside: str) -> bool:
+    """Whether `aside` is a place Yu'lon puts a player's folder: `<...>/Interface/AddOns/
+    <name>.yulon-addon-old[.n]`, absolute and plain. What a warning may name (round 4)."""
+    if not _plain_absolute(aside):
+        return False
+    path = Path(aside)
+    return (
+        path.parent.name.casefold() == "addons"
+        and path.parent.parent.name.casefold() == "interface"
+        and FOLDER_ASIDE_SUFFIX in path.name.casefold()
+    )
+
+
+def _add_addon_aside(server_dir: Path, entry: Mapping[str, str]) -> list[dict[str, str]]:
+    """Note one more aside, under the lock; the entries as they were before, to undo with."""
+    with _ADDON_ASIDES_LOCK:
+        noted = read_addon_asides(server_dir)
+        _write_addon_asides(server_dir, [*noted, dict(entry)])
+        return noted
+
+
+def _write_addon_asides(server_dir: Path, entries: Sequence[Mapping[str, str]]) -> None:
+    """Write the noted asides whole, beside the real name and renamed over it; none: no file."""
+    target = server_dir / ADDON_ASIDES_FILE
+    if not entries:
+        target.unlink(missing_ok=True)
+        return
+    fd, name = tempfile.mkstemp(dir=server_dir, prefix=ADDON_ASIDES_FILE + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_text(json.dumps(list(entries), indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def addon_only_problems(manifest: Manifest) -> list[str]:
+    """What `manifest` carries besides client add-ons, in the player's words; empty: nothing."""
+    carried: list[str] = []
+    if manifest.type != "mod":
+        carried.append(f"a {manifest.type} for the server")
+    if manifest.sql:
+        carried.append("database changes")
+    if manifest.conf:
+        carried.append("settings files")
+    if manifest.deploy:
+        carried.append("files for the server")
+    if manifest.patches:
+        carried.append("patches")
+    if manifest.server_dbc:
+        carried.append("server DBC files")
+    if manifest.build.rebuild:
+        carried.append("a rebuild")
+    if manifest.folders:
+        carried.append("server folders")
+    if any(step.dest != "addons" for step in manifest.client):
+        carried.append("game client files outside Interface/AddOns")
+    return carried
+
+
+def addon_only_refusal(manifest: Manifest) -> str:
+    """Why the add-on route will not apply `manifest`, as a closed refusal; empty: it may."""
+    carried = addon_only_problems(manifest)
+    if not carried:
+        return ""
+    return (
+        f"{manifest.name} is not only a client add-on: it carries {', '.join(carried)}, and "
+        "Yu'lon's add-on route installs add-ons alone. Nothing was changed."
+    )
+
+
+def is_route_item(manifest: Manifest) -> bool:
+    """Whether the add-on route made `manifest` (`Origin.addon`, T613 review round 1)."""
+    return manifest.origin is not None and manifest.origin.addon
+
+
+_NOT_IN_A_FOLDER_NAME = frozenset('<>:"/\\|?*')
+"""What Windows refuses in a file or folder name; `:` also makes `D:x` drive-relative."""
+
+
+def _one_folder_name(value: object) -> bool:
+    """Whether `value` is one folder's name a game client on Windows can hold (T613 round 4).
+
+    Non-empty, not `.`/`..`, no separator, no character Windows refuses (`D:pfUI` is a
+    path relative to drive D, outside Interface/AddOns), no control character, not
+    ending in a dot or a space, and no device name (`CON`, `COM1.x`).
+    """
+    from yulon.addon_layout import is_windows_device
+
+    return (
+        isinstance(value, str)
+        and value not in ("", ".", "..")
+        and not any(ch in _NOT_IN_A_FOLDER_NAME or ord(ch) < 0x20 for ch in value)
+        and not value.endswith((".", " "))
+        and not is_windows_device(value)
+    )
 
 
 def rebased(path: Path, client_dir: Path, origins: Sequence[Path]) -> Path:
@@ -2440,6 +2670,8 @@ class _Log:
     """`_client()` reached a client folder: its receipts replace the claim's."""
     client_left_behind: list[str] = field(default_factory=list)
     kept_folders: list[str] = field(default_factory=list)
+    players_addons: set[str] = field(default_factory=set)
+    """The player's own add-on folders (keys) they said to replace: set aside before the copy."""
     """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
     kept_database: list[str] = field(default_factory=list)
     """A Remove's line naming the backup taken before the database changes it kept (T596)."""
@@ -2459,6 +2691,10 @@ class _Log:
     sql_attempted: bool = False
 
 
+TakenBack = Literal["taken", "gone", "kept"]
+"""What `take_back_file()` did with the file: deleted it, found it gone, or left it."""
+
+
 def take_back_file(
     path: Path,
     sha256: str,
@@ -2467,7 +2703,10 @@ def take_back_file(
     *,
     kept: Sequence[Path] = (),
     aside_unknown: bool = False,
-) -> None:
+    label: str | None = None,
+    where: str = "your game client's Data folder",
+    quiet: bool = False,
+) -> TakenBack:
     """Delete `path` if it still holds the bytes a receipt recorded; else say why not (T67).
 
     The one place a client file this app copied is deleted, for a module's
@@ -2480,6 +2719,10 @@ def take_back_file(
     rename fails, it stays where it is and is named; it is never deleted. `kept`
     (a changed copy kept by a reinstall) is named, never moved; `aside_unknown`
     (a record of an aside that could not be read) looks beside `path` for one.
+
+    `label` and `where` name the file in a kept line (T613 PR-2: an add-on's file by
+    its path in the add-on's folder); `quiet` leaves out the per-file "took back" and
+    "already gone" lines, which the caller then counts. Answers what it did.
     """
     for other in kept:
         if os.path.lexists(other):
@@ -2492,37 +2735,122 @@ def take_back_file(
             f"Yu'lon's record of where it set your own {path.name} aside could not be read; "
             f"look beside it in {path.parent} for {path.name}{ASIDE_SUFFIX}"
         )
+    named = f"{label or path.name} in {where}"
     if not os.path.lexists(path):
-        log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+        if not quiet:
+            log.skipped.append(f"client {path.name}: already gone from {path.parent}")
         _put_back(aside, path, log)
-        return
+        return "gone"
     try:
         same = sha256_of(path) == sha256
     except OSError as exc:
         log.client_left_behind.append(
-            f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
+            f"{named} (Yu'lon could not read it to "
             f"check whether it is still the file it copied: {exc})"
         )
         _aside_kept(aside, path, "that name still holds the file above", log)
-        return
+        return "kept"
     if not same:
         log.client_left_behind.append(
-            f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
-            f"copied it, so it left it alone)"
+            f"{named} (it has changed since Yu'lon copied it, so it left it alone)"
         )
         _aside_kept(aside, path, "that name still holds the changed file above", log)
-        return
+        return "kept"
     try:
         path.unlink()
     except OSError as exc:
         log.client_left_behind.append(
-            f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
+            f"{named} (Yu'lon could not delete it: "
             f"{exc} — close the game and delete it by hand)"
         )
         _aside_kept(aside, path, "that name still holds the file above", log)
-        return
-    log.done.append(f"took back {path.name} from {path.parent}")
+        return "kept"
+    if not quiet:
+        log.done.append(f"took back {path.name} from {path.parent}")
     _put_back(aside, path, log)
+    return "taken"
+
+
+def _holds_these_bytes(dest: Path, sha256: str) -> bool:
+    """Whether `dest` is a plain file, not a link, already holding the bytes `sha256` names."""
+    try:
+        st = os.lstat(dest)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and not links.stat_is_link(st) and _same_hash(dest, sha256)
+
+
+def _path_key(path: Path) -> str:
+    """A path as two receipts naming the same file agree on it: normalised, case as the OS does."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _strictly_inside(path: Path, folder: Path) -> bool:
+    """Whether `path`, `..` collapsed, is somewhere under `folder` and not `folder` itself."""
+    inner, outer = Path(_path_key(path)), Path(_path_key(folder))
+    return inner != outer and inner.is_relative_to(outer)
+
+
+def _plain_absolute(raw: str) -> bool:
+    """A receipt's path as Yu'lon writes one: absolute, no `..`, already in its plain form."""
+    return os.path.isabs(raw) and ".." not in Path(raw).parts and os.path.normpath(raw) == raw
+
+
+def _really_inside(path: Path, folder: Path) -> bool:
+    """Whether `path`'s real place (links on the way followed) is under `folder`'s real one.
+
+    The file itself is not followed: removing a link removes the link.
+    """
+    top = Path(os.path.realpath(folder))
+    real = Path(os.path.realpath(path.parent)) / path.name
+    return real != top and real.is_relative_to(top)
+
+
+def _beside(other: str, path: Path, suffix: str) -> bool:
+    """Whether a recorded aside or kept copy is where Yu'lon puts one: next to `path`, its name.
+
+    `<name><suffix>` or a numbered one, in the same folder; anything else is not
+    Yu'lon's aside, and a put-back would rename it, from wherever, into the client.
+    """
+    if not _plain_absolute(other):
+        return False
+    there = Path(other)
+    return _path_key(there.parent) == _path_key(path.parent) and there.name.casefold().startswith(
+        (path.name + suffix).casefold()
+    )
+
+
+def _remove_emptied_folders(folder: Path, taken: Sequence[Path]) -> None:
+    """Remove each folder `taken` left empty, deepest first, up to and including `folder`.
+
+    Only folders a taken-back file was in, and their parents inside `folder`; a
+    folder holding anything stays (`os.rmdir` refuses it), and a link is never one.
+    """
+    top = Path(os.path.normpath(folder))
+    places: set[Path] = set()
+    for path in taken:
+        here = Path(os.path.normpath(path)).parent
+        while here.is_relative_to(top):
+            places.add(here)
+            if here == top:
+                break
+            here = here.parent
+    for place in sorted(places, key=lambda p: len(p.parts), reverse=True):
+        if links.is_link(place):
+            continue
+        try:
+            os.rmdir(place)
+        except OSError:
+            continue
+
+
+def _holds_more_than(folder: Path, named: set[str]) -> bool:
+    """Whether `folder` holds a file (or a link) other than the ones `named` already said."""
+    for here, _dirs, files, linked in links.walk(folder):
+        for name in (*files, *linked):
+            if _path_key(Path(here) / name) not in named:
+                return True
+    return False
 
 
 def _same_hash(path: Path, sha256: str) -> bool:
@@ -3072,6 +3400,21 @@ class Applier:
         # `ControllerServices.for_entry()` from the catalog entry; empty, nothing is refused.
         self.server_sources: frozenset[PurePosixPath] = frozenset()
         self.server_name = ""
+        # T613 PR-2: the server folders of every OTHER install on this host, for a
+        # set game client two servers share: a file another server's receipt names
+        # is left for that server on an outside add-on's Remove. Bound by `main.py`
+        # beside `ControllerServices.other_server_dirs`; None, no other is known.
+        self.other_server_dirs: Callable[[], Sequence[Path]] | None = None
+        # T596 (Tortoise) and T613 PR-2 (every game): reads an outside item's clone
+        # again when an Install or Update puts it on new code, handed no completion
+        # of its own (`update()` reinstalls with none). Set by `modules.applier()` on
+        # Tortoise and by `for_entry()` from the add-on route elsewhere; None, no item
+        # is read again. Asked only for an item with an `origin` and a `source`.
+        self.recomplete: Completer | None = None
+        # T613 review round 1: the add-on route's own completion, for its items alone
+        # (`Origin.addon`). Never `recomplete`: Tortoise's reads a package's SQL,
+        # settings and server code, which a route item must never become.
+        self.addon_recomplete: Completer | None = None
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -3238,6 +3581,49 @@ class Applier:
                 "Modules tab. Nothing was changed."
             )
 
+    def _recompleter_for(self, manifest: Manifest) -> Completer | None:
+        """The hook that reads an outside item's clone again; None for any other item.
+
+        A route item (`Origin.addon`) is read by `addon_recomplete` only, whatever
+        else this applier carries; any other item from a link by `recomplete`.
+        """
+        if is_route_item(manifest):
+            return self.addon_recomplete
+        if manifest.origin is not None and manifest.source is not None:
+            return self.recomplete
+        return None
+
+    def players_addons(self, manifest: Manifest) -> list[str]:
+        """The add-on folders `manifest` would write that are the PLAYER's (T613 review round 1).
+
+        A folder at the name that no receipt names a file in -- not this item's,
+        not another item's of this server, not another server's -- is one the
+        player put there. An outside add-on replaces it only on their yes
+        (`install(replace_addons=True)`), which sets it aside whole. A shipped
+        item is not asked about: it never was. Other servers that cannot be read
+        count as no proof, so the folder is the player's.
+        """
+        if self.client_dir is None or manifest.origin is None:
+            return []
+        known = [_path_key(self._here(c.path)) for c in self._own_receipts(manifest)]
+        others = self._other_receipts(manifest.id)
+        known.extend(others or {})
+        found: list[str] = []
+        for step in manifest.client:
+            if step.dest != "addons":
+                continue
+            target = self._client_target(step, Path(step.src))
+            if not os.path.lexists(target):
+                continue
+            inside = _path_key(target) + os.sep
+            if not any(key.startswith(inside) for key in known):
+                found.append(target.name)
+        return found
+
+    def _own_receipts(self, manifest: Manifest) -> tuple[ClientCopy, ...]:
+        clone = self.clone_dir(manifest)
+        return read_client_copies(clone, item_id=manifest.id) if clone.is_dir() else ()
+
     def clone_dir(self, manifest: Manifest) -> Path:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
@@ -3276,6 +3662,7 @@ class Applier:
         release: upstream.Release | None = None,
         expect_head: str | None = None,
         record_move: bool = False,
+        replace_addons: bool = False,
     ) -> ApplyReport:
         """`_install()`, saying so when it stops with a database it started still up (T476).
 
@@ -3284,9 +3671,15 @@ class Applier:
         the database alone says the database is still running
         (`_says_the_database_is_up()`). A finished install says it in its
         report's "started the database alone" line instead.
+
+        `replace_addons` is the player's yes to replacing an add-on folder of theirs
+        at an outside add-on's name (`players_addons()`, T613 review round 1).
         """
         self._refuse_a_server_source(manifest)
+        self._refuse_a_route_item_that_is_more(manifest)
         log = _Log()
+        if complete is None:
+            complete = self._recompleter_for(manifest)
         with self._held(f"Install {manifest.name}"), self._says_the_database_is_up(log):
             return self._install(
                 manifest,
@@ -3299,7 +3692,33 @@ class Applier:
                 release=release,
                 expect_head=expect_head,
                 record_move=record_move,
+                replace_addons=replace_addons,
             )
+
+    def _refuse_a_route_item_that_is_more(self, manifest: Manifest) -> None:
+        """A route item that carries anything but add-ons is refused before anything is touched."""
+        if is_route_item(manifest):
+            said = addon_only_refusal(manifest)
+            if said:
+                raise ApplyRefusal(said)
+
+    def _refuse_a_players_addon(self, manifest: Manifest, consent: bool, log: _Log) -> None:
+        """Refuse to write over the player's own add-on folder unless they said so (T613 r1).
+
+        With their yes, the folders are noted and `_client()` sets each aside whole
+        before it copies, recording where, so Remove puts it back.
+        """
+        names = self.players_addons(manifest)
+        if not names:
+            return
+        if not consent:
+            raise ApplyRefusal(
+                f"An add-on named {' and '.join(names)} is already in this game client, and "
+                "Yu'lon did not put it there, so it did not replace it. Move or rename your own "
+                f"{' and '.join(names)} folder in Interface/AddOns first, then install again. "
+                "Nothing was changed."
+            )
+        log.players_addons.update(_path_key(self._addons_dir() / name) for name in names)
 
     def _install(
         self,
@@ -3315,6 +3734,7 @@ class Applier:
         expect_head: str | None = None,
         record_move: bool = False,
         restore: LastUpdate | None = None,
+        replace_addons: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -3375,6 +3795,9 @@ class Applier:
         missing = self._requires_refusal(manifest)
         if missing:
             raise ApplyRefusal(missing)
+        # T613 review round 1: before the clone, for the add-ons the manifest already
+        # names; once more after a completion that named them only then.
+        self._refuse_a_players_addon(manifest, replace_addons, log)
         clone = self.clone_dir(manifest)
         self._settle_a_stopped_swap(clone)
         # Whether a claim of OURS is at `clone`, so the completion mark at the
@@ -3566,6 +3989,8 @@ class Applier:
         try:
             self._refuse_checkout_links(manifest, clone, "install", vals)
             self._refuse_a_clash(manifest, clone)
+            if complete is not None:
+                self._refuse_a_players_addon(manifest, replace_addons, log)
             self._refuse_links(manifest, clone)
             self._check_hold()
             self._deploy(manifest, clone, log)
@@ -3631,9 +4056,25 @@ class Applier:
             # An update that no longer ships a file takes it back, with the player's
             # own file put back, before its receipts replace the old ones.
             now = {self._here(copy.path) for copy in log.client_copies}
-            for copy in previous_copies:
-                if self._here(copy.path) not in now:
+            dropped = [
+                copy
+                for copy in previous_copies
+                if self._here(copy.path) not in now and not copy.folder
+            ]
+            for copy in dropped:
+                if not copy.addon:
                     self._take_back(copy, log)
+            if any(copy.addon for copy in dropped):
+                self._take_back_addon_files([c for c in dropped if c.addon], log, manifest.id)
+            # Re-review: a player's folder whose add-on this item no longer writes goes back
+            # now (by add-on name); one it still writes stays aside, recorded.
+            writing = {c.addon for c in log.client_copies if c.addon and not c.folder}
+            asides = [c for c in previous_copies if c.folder and c.addon not in writing]
+            if asides:
+                self._put_players_folders_back(asides, log, item_id=manifest.id, keep=writing)
+                log.client_copies = [
+                    c for c in log.client_copies if not (c.folder and c.addon not in writing)
+                ]
             log.skipped.extend(log.client_left_behind)  # an install's report has no left_behind
             log.client_left_behind.clear()
         # No check here: every file is written by now, and stopping would only leave a complete
@@ -4520,6 +4961,7 @@ class Applier:
         asks only when there is no usable record, and then a person answered.
         """
         self._refuse_a_server_source(manifest)
+        self._refuse_a_route_item_that_is_more(manifest)
         with self._held(f"Remove {manifest.name}"):
             return self._remove(manifest, values)
 
@@ -4687,6 +5129,17 @@ class Applier:
                 f"{_rel(self.server_dir, clone)} changed {', '.join(changed)}, so it is no longer "
                 f"the item that was installed there. Nothing further was changed."
             )
+        if is_route_item(manifest):
+            # T613 review round 1: whichever completer ran, on Install, Update or a
+            # put-back, a route item comes out of it holding add-ons alone.
+            carried = addon_only_problems(finished)
+            if not is_route_item(finished):
+                carried.append("no mark of the add-on route")
+            if carried:
+                raise CompletionRefused(
+                    f"{manifest.name} is not only a client add-on now: it carries "
+                    f"{', '.join(carried)}, and Yu'lon's add-on route installs add-ons alone."
+                )
         return finished
 
     def _take_back_a_first_install(
@@ -6350,6 +6803,13 @@ class Applier:
                 )
 
         claimed = self._claimed_asides(log)
+        # T613 review round 1: bytes already at a name are "already ours" only where
+        # another item of this server or another server has a receipt for them.
+        others = self._other_receipts(manifest.id) or {}
+        for copy in log.previous_copies:
+            if copy.folder:
+                # The player's own folder set aside by an earlier install stays recorded.
+                log.current_copies.setdefault(copy.path, copy)
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -6357,7 +6817,21 @@ class Applier:
             src = clone / step.src
             _look_again(clone, step.src)  # on the way; `_plan_onto()` never enters one under it
             target = self._client_target(step, src)
-            place = self._placer(step.src, log, claimed) if step.dest == "data" else _copy_unshared
+            place: Callable[[Path, Path], object]
+            if step.dest == "data":
+                place = self._placer(step.src, log, claimed)
+            elif step.dest == "addons" and manifest.origin is not None:
+                # T613 PR-2: an OUTSIDE add-on's files get receipts, so its Remove
+                # can take them back; a shipped add-on's folder is never deleted.
+                if _path_key(target) in log.players_addons:
+                    self._set_addon_folder_aside(step, target, log, manifest.id)
+                place = self._placer(step.src, log, claimed, addon=target.name, shared=others)
+            elif step.dest == "addons":
+                # T613 review round 1: a shipped add-on's files are recorded too, so no
+                # outside add-on takes them for its own; they are never taken back.
+                place = self._recorder(step.src, target.name, log)
+            else:
+                place = _copy_unshared
             if src.is_dir():
                 _copy_onto(src, target, place, check)
             elif src.is_file():
@@ -6427,6 +6901,67 @@ class Applier:
             _copy_unshared(source, dest)
             put.append(dest)
         return tuple(put)
+
+    def _set_addon_folder_aside(
+        self, step: ClientFile, target: Path, log: _Log, item_id: str
+    ) -> None:
+        """Move the player's own add-on folder at `target` aside whole, recorded first (r1).
+
+        Recorded twice before the rename: in the claim, and in `ADDON_ASIDES_FILE` beside
+        the server, which outlives the clone (re-review).
+        """
+        aside = target.with_name(target.name + FOLDER_ASIDE_SUFFIX)
+        number = 0
+        while os.path.lexists(aside):
+            number += 1
+            aside = target.with_name(f"{target.name}{FOLDER_ASIDE_SUFFIX}.{number}")
+        if log.persist is None:
+            raise ApplyError(
+                f"{target} is an add-on of yours, and Yu'lon has no record of this install to "
+                "note where it would move it, so it was not moved and nothing was copied over it."
+            )
+        key = str(target)
+        # The note is this server's shared state: written under the server's cross-process hold
+        # (T568), which an Install already holds (`_held()` is shared with an outer one).
+        with self._held(f"Set your {target.name} add-on aside"):
+            log.current_copies[key] = ClientCopy(
+                step=step.src,
+                path=key,
+                sha256="",
+                aside=str(aside),
+                addon=target.name,
+                folder=True,
+            )
+            note = {"item": item_id, "addon": target.name, "target": key, "aside": str(aside)}
+            noted: list[dict[str, str]] | None = None
+            try:
+                log.persist(self._claim_copies(log))
+                noted = _add_addon_aside(self.server_dir, note)
+                os.rename(target, aside)
+            except BaseException:
+                self._unplan(log, key, None)
+                if noted is not None:
+                    self._forget_addon_aside(note["aside"])
+                raise
+        log.new_asides[key] = str(aside)
+        log.done.append(
+            f"set your own {target.name} add-on aside as {aside.name} in {target.parent}"
+        )
+
+    def _recorder(self, step: str, addon: str, log: _Log) -> Callable[[Path, Path], None]:
+        """`_copy_unshared()` for a SHIPPED add-on, with a receipt marked `shipped` (r1)."""
+
+        def place(src: Path, dest: Path) -> None:
+            _copy_unshared(src, dest)
+            try:
+                digest = sha256_of(dest)
+            except OSError:
+                return
+            log.current_copies[str(dest)] = ClientCopy(
+                step=step, path=str(dest), sha256=digest, addon=addon, shipped=True
+            )
+
+        return place
 
     def _client_target(self, step: ClientFile, src: Path) -> Path:
         """The client folder a `client` step copies into, under the names already on disk."""
@@ -6642,7 +7177,15 @@ class Applier:
             f"{manifest.id}. Nothing of {manifest.id} was put into your game client or deployed."
         )
 
-    def _placer(self, step: str, log: _Log, claimed: set[Path]) -> Callable[[Path, Path], None]:
+    def _placer(
+        self,
+        step: str,
+        log: _Log,
+        claimed: set[Path],
+        *,
+        addon: str = "",
+        shared: Mapping[str, object] | None = None,
+    ) -> Callable[[Path, Path], None]:
         """`_copy_unshared()`, after setting aside a file of the player's at the name.
 
         The owner's decision on the cold review of T262 ("set aside, put back"):
@@ -6667,6 +7210,11 @@ class Applier:
         `log.current_copies`; one whose player's file is about to be moved is
         written to the claim BEFORE the rename (`_set_aside()`), so a failure or a
         crash after it never leaves the player's file moved and unrecorded.
+
+        `addon` (T613 PR-2) is an outside add-on's folder name, carried on each
+        receipt. For such a file the same bytes already at the name -- the same
+        add-on installed into a set client by another server -- are recorded and
+        not copied again.
         """
         ours = {self._here(copy.path): copy for copy in log.previous_copies}
         fresh: set[Path] = set()
@@ -6682,10 +7230,22 @@ class Applier:
                     aside=previous.aside if previous is not None else "",
                     kept=previous.kept if previous is not None else (),
                     aside_unknown=previous.aside_unknown if previous is not None else False,
+                    addon=addon,
                 )
                 before = self._adopt_orphans(before, dest, claimed, log)
+            if (
+                addon
+                and dest not in fresh
+                and _path_key(dest) in (shared or {})
+                and _holds_these_bytes(dest, before.sha256)
+            ):
+                fresh.add(dest)
+                log.current_copies[str(dest)] = before
+                return
             if dest not in fresh:
-                before = self._set_aside(src, dest, previous, before, log)
+                before = self._set_aside(
+                    src, dest, previous, before, log, same_bytes_too=bool(addon)
+                )
             fresh.add(dest)
             log.current_copies[str(dest)] = before
             _copy_unshared(src, dest)
@@ -6744,8 +7304,14 @@ class Applier:
         previous: ClientCopy | None,
         copy: ClientCopy,
         log: _Log,
+        *,
+        same_bytes_too: bool = False,
     ) -> ClientCopy:
         """Move the player's `dest` to a free aside name when `_placer()`'s rule says so.
+
+        `same_bytes_too` (an outside add-on's file, T613 review round 1): a file of the
+        player's with the add-on's own bytes is set aside as well, so Remove puts
+        theirs back rather than deleting a file Yu'lon did not put there.
 
         The receipt naming the aside is written to the claim FIRST (`log.persist`),
         then the file is renamed: a crash between the two leaves a record of an
@@ -6760,7 +7326,7 @@ class Applier:
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             return copy
         here = sha256_of(dest)
-        if here == sha256_of(src):
+        if here == sha256_of(src) and not same_bytes_too:
             return copy
         if previous is not None and here == previous.sha256:
             return copy  # this item's own copy from an earlier install
@@ -6837,6 +7403,21 @@ class Applier:
             copy = log.current_copies.get(path)
             if copy is None:
                 continue
+            if copy.folder:
+                # The player's add-on folder: this run's files there go, then it comes back.
+                undo = _Log()
+                ours = [
+                    c for c in log.current_copies.values() if c.addon == copy.addon and not c.folder
+                ]
+                self._take_back_one_addon(copy.addon, ours, {}, undo)
+                self._put_players_folders_back([copy], undo, item_id="", keep=())
+                if os.path.lexists(moved):
+                    left.extend(undo.client_left_behind)
+                    continue
+                for c in ours:
+                    log.current_copies.pop(c.path, None)
+                del log.current_copies[path]
+                continue
             undo = _Log()
             take_back_file(Path(path), copy.sha256, undo, Path(moved))
             if os.path.lexists(moved):
@@ -6888,6 +7469,19 @@ class Applier:
                 continue
             if step.dest == "addons":
                 name = step.name or Path(step.src).name
+                if manifest.origin is not None:
+                    # T613 PR-2 (owner, 2026-10-09 Q1): an OUTSIDE add-on's own files
+                    # are taken back by receipt; a shipped one keeps the rule below.
+                    mine = [c for c in copies if c.step == step.src and c.addon and not c.folder]
+                    if mine:
+                        self._take_back_addon_files(mine, log, manifest.id)
+                    else:
+                        log.client_left_behind.append(
+                            f"the {name} add-on folder in {self._addons_dir()} (Yu'lon has no "
+                            "record of the files it copied there, so it left them alone; "
+                            "disable it in the game's AddOns menu)"
+                        )
+                    continue
                 log.client_left_behind.append(
                     f"the {name} addon folder in your game client's Interface/AddOns "
                     f"(Yu'lon does not delete addons — disable it in the game's AddOns menu)"
@@ -6899,7 +7493,7 @@ class Applier:
                     f"Yu'lon cannot tell its own files from the game's)"
                 )
                 continue
-            mine = [c for c in copies if c.step == step.src]
+            mine = [c for c in copies if c.step == step.src and not c.addon]
             if not mine:
                 log.client_left_behind.append(
                     f"{step.src} (in your game client's Data folder — Yu'lon has no record of "
@@ -6908,8 +7502,11 @@ class Applier:
                 continue
             for copy in mine:
                 self._take_back(copy, log)
+        if manifest.origin is not None:
+            # Re-review: after every step's files, by add-on name, whatever the steps are now.
+            self._put_players_folders_back(copies, log, item_id=manifest.id)
         if self.client_dir is not None:
-            dests = {self._here(copy.path) for copy in copies}
+            dests = {self._here(copy.path) for copy in copies if not copy.folder}
             if clone.is_dir():
                 dests.update(dest for _step, dest in self._data_destinations(manifest, clone))
             self._orphans_back(dests, log)
@@ -6942,14 +7539,36 @@ class Applier:
         """
         log = _Log()
         dests: set[Path] = set()
+        addons: list[ClientCopy] = []
         for _item, copy in self._receipts_by_item():
+            if not copy.folder:
+                dests.add(self._here(copy.path))
+            if copy.addon:
+                addons.append(copy)  # counted per add-on, not said per file
+                continue
             self._take_back(copy, log)
-            dests.add(self._here(copy.path))
+        if addons:
+            # Every item goes, so only another server's receipt keeps a file.
+            self._take_back_addon_files(addons, log, None)
+        # The server folder and its note go right after: name the paths, promise no note.
+        self._put_players_folders_back(addons, log, item_id=None, noting=False)
         if self.client_dir is not None or dests:
             self._orphans_back(dests, log)
         return log.done, [*log.skipped, *log.client_left_behind]
 
     def _take_back(self, copy: ClientCopy, log: _Log) -> None:
+        """One recorded `Data/` file (an add-on's go through `_take_back_addon_files()`)."""
+        self._take_back_copy(copy, log)
+
+    def _take_back_copy(
+        self,
+        copy: ClientCopy,
+        log: _Log,
+        *,
+        label: str | None = None,
+        where: str = "your game client's Data folder",
+        quiet: bool = False,
+    ) -> TakenBack:
         """One recorded file: delete it if it is still ours byte-for-byte, else say why not.
 
         Looked for in the client this applier writes to: a receipt from before
@@ -6972,14 +7591,339 @@ class Applier:
                     game=self.client_game,
                     server_dir=self.server_dir,
                 )
-        take_back_file(
+        return take_back_file(
             path,
             copy.sha256,
             log,
             aside,
             kept=[self._here(k) for k in copy.kept],
             aside_unknown=copy.aside_unknown,
+            label=label,
+            where=where,
+            quiet=quiet,
         )
+
+    def _addons_dir(self) -> Path:
+        """This client's `Interface/AddOns`, in the case it has on disk."""
+        assert self.client_dir is not None
+        return self.client_dir.joinpath(
+            *client_names.on_disk(self.client_dir, "Interface/AddOns").parts
+        )
+
+    def _other_receipts(self, item_id: str | None) -> dict[str, str] | None:
+        """Every file another item's receipt names (normalised) → who; None: not all readable.
+
+        Another item of THIS server (any but `item_id`; None, for an Uninstall where
+        all go, counts none of them), shipped add-ons included (T613 review round 1),
+        and every item of another server (`other_server_dirs`). The answer is the
+        sentence's subject: "<item> on this server" or "the server in <folder>".
+        """
+        found: dict[str, str] = {}
+        if item_id is not None:
+            for item, copy in self._receipts_by_item():
+                if item != item_id and not copy.folder:
+                    found.setdefault(_path_key(self._here(copy.path)), f"{item} on this server")
+        if self.other_server_dirs is None:
+            return found
+        try:
+            others = tuple(self.other_server_dirs())
+            for server in others:
+                if server == self.server_dir:
+                    continue
+                for copy in client_receipts(server):
+                    if not copy.folder:
+                        found.setdefault(_path_key(Path(copy.path)), f"the server in {server}")
+        except Exception as exc:  # noqa: BLE001 - kept whole and said, never guessed
+            logger.warning(f"could not read the other servers' client-file records: {exc}")
+            return None
+        return found
+
+    def _take_back_addon_files(
+        self, copies: Sequence[ClientCopy], log: _Log, item_id: str | None
+    ) -> None:
+        """An OUTSIDE add-on's files taken back by receipt, then its emptied folders (T613 PR-2).
+
+        The owner's rule (2026-10-09, Q1): each file whose bytes are still the ones
+        Yu'lon copied is deleted (`take_back_file()`), an edited one is kept and
+        named, and a folder left empty goes, up to and including the add-on's own.
+        A receipt is acted on only inside `Interface/AddOns/<its add-on>/` and never
+        through a link there, so `WTF/` (beside `Interface/`) and another add-on's
+        folder are never reached, whatever a claim says. A file another server's
+        receipt names (a set game client two servers share), or another item's of
+        this one (`item_id`'s are its own), is left for that one. Counted per
+        add-on: an add-on is hundreds of files.
+
+        A receipt's path must be absolute and plain (no `..`) and really (links
+        followed) inside the add-on's folder; an aside or kept copy must be beside
+        its file; the player's folder set aside must be beside the add-on's
+        (T613 review round 1). Anything else is named and left.
+        """
+        groups: dict[str, list[ClientCopy]] = {}
+        for copy in copies:
+            if not copy.shipped:  # a shipped add-on's files stay, by Remove, Update, Uninstall
+                groups.setdefault(copy.addon, []).append(copy)
+        others = self._other_receipts(item_id)
+        for addon, mine in groups.items():
+            self._take_back_one_addon(addon, mine, others, log)
+
+    def _take_back_one_addon(
+        self,
+        addon: str,
+        copies: Sequence[ClientCopy],
+        others: Mapping[str, str] | None,
+        log: _Log,
+    ) -> None:
+        if self.client_dir is None:
+            log.client_left_behind.append(
+                f"the {addon} add-on folder (in whatever game client you installed it into — "
+                "no game client folder is set here now, so Yu'lon could not reach it)"
+            )
+            return
+        addons = self._addons_dir()
+        try:
+            names = os.listdir(addons)
+        except OSError:
+            names = []
+        folder = addons / (client_names.match(names, addon) or addon)
+        if links.is_link(folder):
+            log.client_left_behind.append(
+                f"the {addon} add-on folder in {addons} (it is a link to another place now, so "
+                "Yu'lon took nothing back through it)"
+            )
+            return
+        if others is None:
+            log.client_left_behind.append(
+                f"the {addon} add-on folder in {addons} (Yu'lon could not read whether another "
+                "server also installed it into this game client, so it left it alone)"
+            )
+            return
+        quiet = _Log()
+        taken: list[Path] = []
+        gone = 0
+        shared: dict[str, int] = {}
+        named: set[str] = set()
+        for copy in copies:
+            if copy.folder:
+                continue  # `_put_players_folders_back()`, by add-on name
+            path = self._here(copy.path)
+            if (
+                not _plain_absolute(copy.path)
+                or not _strictly_inside(path, folder)
+                or not _really_inside(path, folder)
+            ):
+                log.client_left_behind.append(
+                    f"{copy.path} (Yu'lon's record names it outside the {addon} add-on folder, "
+                    "so it left it alone)"
+                )
+                continue
+            who = others.get(_path_key(path))
+            if who is not None:
+                shared[who] = shared.get(who, 0) + 1
+                named.add(_path_key(path))
+                continue
+            copy = self._confined(copy, path, quiet)
+            rel = Path(os.path.normpath(path)).relative_to(os.path.normpath(folder)).as_posix()
+            did = self._take_back_copy(
+                copy, quiet, label=rel, where=f"the {addon} add-on folder", quiet=True
+            )
+            if did == "taken":
+                taken.append(path)
+            elif did == "gone":
+                gone += 1
+            else:
+                named.add(_path_key(path))
+            for other in (copy.aside, *copy.kept):
+                if other:
+                    named.add(_path_key(self._here(other)))
+        _remove_emptied_folders(folder, taken)
+        if taken:
+            files = "file" if len(taken) == 1 else "files"
+            log.done.append(f"took back {len(taken)} {files} of the {addon} add-on from {folder}")
+        if gone:
+            files = "file was" if gone == 1 else "files were"
+            log.skipped.append(f"{gone} {files} of the {addon} add-on already gone from {folder}")
+        log.done.extend(quiet.done)
+        log.skipped.extend(quiet.skipped)
+        log.client_left_behind.extend(quiet.client_left_behind)
+        for who, count in sorted(shared.items()):
+            files = "file" if count == 1 else "files"
+            until = (
+                "it removes them too" if who.startswith("the server in ") else "it is removed too"
+            )
+            log.client_left_behind.append(
+                f"{count} {files} of the {addon} add-on, which {who} also installed into this "
+                f"game client: they stay until {until}"
+            )
+        if os.path.isdir(folder) and _holds_more_than(folder, named):
+            log.client_left_behind.append(
+                f"the {addon} add-on folder in {addons} stays: it still holds files Yu'lon did "
+                "not put there"
+            )
+
+    def _confined(self, copy: ClientCopy, path: Path, log: _Log) -> ClientCopy:
+        """`copy` with only the aside and kept copies that are beside its file (r1); named."""
+        aside = copy.aside
+        if aside and not _beside(self._here_str(aside), path, ASIDE_SUFFIX):
+            log.client_left_behind.append(
+                f"{aside} (Yu'lon's record names it as where your own {path.name} was set aside, "
+                "and it is not beside it, so Yu'lon left it alone)"
+            )
+            aside = ""
+        kept = tuple(k for k in copy.kept if _beside(self._here_str(k), path, ASIDE_SUFFIX))
+        return replace(copy, aside=aside, kept=kept)
+
+    def _here_str(self, raw: str) -> str:
+        return str(self._here(raw)) if _plain_absolute(raw) else raw
+
+    def _put_players_folders_back(
+        self,
+        copies: Iterable[ClientCopy],
+        log: _Log,
+        *,
+        item_id: str | None,
+        keep: Iterable[str] = (),
+        noting: bool = True,
+    ) -> None:
+        """Every player's add-on folder set aside for this item: put back, or named and noted.
+
+        Re-review: matched by ADD-ON NAME, never by the step that wrote it, so an Update
+        that moved the add-on in its source (`pfUI` to `sub/pfUI`), renamed or dropped it
+        still finds the aside. The asides are the claim's folder receipts in `copies` and
+        the server's note (`ADDON_ASIDES_FILE`) of `item_id`'s (every item's when None),
+        which outlives the clone. An add-on name in `keep` is still being written by this
+        item and is left aside. One put back, or one gone, leaves the note; one that
+        cannot be (no client folder, its name taken) is named with its full path and its
+        note stays, so a later Remove can do it. `noting=False` (Uninstall, which deletes
+        the server folder and the note with it) names the path and promises no note.
+        """
+        # The server's note and the player's folders: under the server's cross-process hold
+        # (T568) as well as this process's lock. Shared with an Install's or Remove's own hold.
+        with self._held(PUT_FOLDERS_BACK_PRESS), _ADDON_ASIDES_LOCK:
+            self._put_players_folders_back_locked(
+                copies, log, item_id=item_id, keep=keep, noting=noting
+            )
+
+    def _forget_addon_aside(self, aside: str) -> None:
+        """Drop one aside's note, under the server hold and the lock; logged when it cannot be."""
+        with self._held(PUT_FOLDERS_BACK_PRESS), _ADDON_ASIDES_LOCK:
+            noted = read_addon_asides(self.server_dir)
+            left = [e for e in noted if _path_key(Path(e["aside"])) != _path_key(Path(aside))]
+            try:
+                _write_addon_asides(self.server_dir, left)
+            except OSError as exc:
+                logger.warning(f"could not take back the note of {aside}: {exc}")
+
+    def _put_players_folders_back_locked(
+        self,
+        copies: Iterable[ClientCopy],
+        log: _Log,
+        *,
+        item_id: str | None,
+        keep: Iterable[str],
+        noting: bool,
+    ) -> None:
+        noted, untrusted = _read_addon_asides_checked(self.server_dir)
+        log.client_left_behind.extend(untrusted)
+        wanted: dict[str, tuple[str, str, str]] = {}
+        for copy in copies:
+            if copy.folder:
+                wanted.setdefault(_path_key(Path(copy.aside)), (copy.addon, copy.aside, ""))
+        for entry in noted:
+            if item_id is None or entry["item"] == item_id:
+                wanted.setdefault(
+                    _path_key(Path(entry["aside"])), (entry["addon"], entry["aside"], entry["item"])
+                )
+        keep_keys = {name.casefold() for name in keep}
+        done: set[str] = set()
+        for key, (addon, aside, _item) in wanted.items():
+            if addon.casefold() in keep_keys:
+                continue
+            if self._put_the_players_folder_back(addon, aside, log, noting=noting):
+                done.add(key)
+        left = [e for e in noted if _path_key(Path(e["aside"])) not in done]
+        known = {_path_key(Path(e["aside"])) for e in noted}
+        for key, (addon, aside, item) in wanted.items():
+            if key not in done and key not in known and addon.casefold() not in keep_keys:
+                left.append(
+                    {"item": item or (item_id or ""), "addon": addon, "target": "", "aside": aside}
+                )
+        if left != noted:
+            try:
+                _write_addon_asides(self.server_dir, left)
+            except OSError as exc:
+                logger.warning(f"could not rewrite {ADDON_ASIDES_FILE}: {exc}")
+
+    def _put_the_players_folder_back(
+        self, addon: str, aside_raw: str, log: _Log, *, noting: bool = True
+    ) -> bool:
+        """One aside back under its name, or named; True when nothing is left to note."""
+        aside = self._here_str(aside_raw)
+        moved = Path(aside)
+        note = (
+            f"; Yu'lon keeps a note of it in {self.server_dir / ADDON_ASIDES_FILE}"
+            if noting
+            else ""
+        )
+        if self.client_dir is None:
+            log.client_left_behind.append(
+                f"your own {addon} add-on, which Yu'lon set aside as {aside_raw} when it "
+                "installed this (no game client folder is set here now, so Yu'lon could not "
+                f"reach it){note}; rename it back to {addon} when you want it again"
+            )
+            return False
+        addons = self._addons_dir()
+        try:
+            names = os.listdir(addons)
+        except OSError:
+            names = []
+        folder = addons / (client_names.match(names, addon) or addon)
+        if (
+            not _plain_absolute(aside)
+            or _path_key(moved.parent) != _path_key(addons)
+            or not moved.name.casefold().startswith((folder.name + FOLDER_ASIDE_SUFFIX).casefold())
+        ):
+            log.client_left_behind.append(
+                f"{aside_raw} (Yu'lon's record names it as where your own {folder.name} add-on "
+                "was set aside, and it is not beside it, so Yu'lon left it alone)"
+            )
+            return True
+        if links.is_link(moved) or not moved.is_dir():
+            log.client_left_behind.append(
+                f"your own {folder.name} add-on, which Yu'lon set aside as {moved} when it "
+                "installed this, is no longer there, so it could not be put back"
+            )
+            return True
+        if os.path.lexists(folder):
+            log.client_left_behind.append(
+                f"your own {folder.name} add-on, which Yu'lon set aside as {moved} when it "
+                f"installed this ({folder.name} is there again){note}; rename it back to "
+                f"{folder.name} when you want it again"
+            )
+            return False
+        real_addons = _path_key(Path(os.path.realpath(addons)))
+        if (
+            _path_key(Path(os.path.realpath(folder.parent))) != real_addons
+            or _path_key(Path(os.path.realpath(moved.parent))) != real_addons
+        ):
+            # The last guard (round 4): the note's name rule keeps both ends in AddOns, and
+            # this is what holds when a name slips past it (a rule this platform's paths
+            # read otherwise); `test_the_real_parent_check_is_the_last_guard...` pins it.
+            log.client_left_behind.append(
+                f"{moved} (it or its add-on's name is not in {addons} itself, so Yu'lon did "
+                "not move it)"
+            )
+            return True
+        try:
+            os.rename(moved, folder)
+        except OSError as exc:
+            log.client_left_behind.append(
+                f"your own {folder.name} add-on, which Yu'lon set aside as {moved} when it "
+                f"installed this (it could not be put back: {exc}){note}; rename it back to "
+                f"{folder.name} when you want it again"
+            )
+            return False
+        log.done.append(f"put your own {folder.name} add-on back in {addons}")
+        return True
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:

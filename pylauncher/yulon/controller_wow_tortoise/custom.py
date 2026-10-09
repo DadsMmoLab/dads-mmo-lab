@@ -3,12 +3,15 @@
 The per-game layout `module_source` is handed for this core, kept beside the
 binding because every fact in it is this core's. Three kinds:
 
-* **A client add-on.** A folder whose `.toc` has the folder's name, the way the
-  1.12 client loads one: at the top of the repository (`MobStats.toc`, the
-  repository IS the add-on, like the two shipped ones), or one level down
-  under `addon/`, `addons/`, `AddOns/`, `Interface/AddOns/` or a top folder of
-  its own name. Copied into the ready-to-play client by the shipped `client`
-  step, exactly as TortoiseBots Manager is.
+* **A client add-on.** A folder holding a `.toc`, read by the shared add-on
+  reader every game uses (`addon_layout`, T613 PR-2): at the top of the
+  repository (`MobStats.toc`, the repository IS the add-on, like the two shipped
+  ones), inside one wrapping folder (`pfUI-master/`), or one level down under
+  `addon/`, `addons/`, `AddOns/` or `Interface/AddOns/`. It is installed under
+  its `.toc`'s name, because the 1.12 client loads `AddOns/<X>/<X>.toc` and
+  nothing else, and only for Interface 10000-11200. Copied into the
+  ready-to-play client by the shipped `client` step, exactly as TortoiseBots
+  Manager is, with a receipt per file so its Remove can take them back.
 * **A database package.** `.sql` files directly inside `data/sql/auth`,
   `data/sql/character` (or `char`) or `data/sql/world` -- the core's own module
   layout (`modules/README.md`), and the files its updater would read there,
@@ -42,6 +45,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import TypeAdapter, ValidationError
 
+from yulon import addon_archive, addon_layout
 from yulon.apply import CompletionRefused
 from yulon.manifest import (
     Build,
@@ -90,19 +94,14 @@ SQL_DIRS: Mapping[str, Db] = {
 """`data/sql/<dir>` → database: this fork's shipped updater folder names, and the `char`
 spelling module authors also use. Read in this order, as the updater reads them."""
 
-ADDON_FOLDERS = ("addon", "addons", "interface/addons")
-"""Folders (compared case-blind) whose children are add-ons, besides the repository's top."""
+CLIENT_INTERFACE = 11200
+"""The Tortoise client's `## Interface:` number: 1.12, as `catalog.Client.addon_interface` says.
 
-_INTERFACE = re.compile(r"^##\s*Interface:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
-_CLIENT_INTERFACE_CEILING = 20000
-"""An add-on whose every `## Interface` is at or above this was written for a later client.
+Read by the shared add-on reader (`addon_layout`, T613 PR-2), which takes
+10000-11200: a Classic Era add-on (115xx) is refused like a TBC one."""
 
-The Tortoise client is 1.12 (Interface 11200); 2xxxx is TBC and up."""
-
-_VARIANT = re.compile(
-    r"^(?P<base>.+?)[-_](tbc|bcc|wotlk|wrath|classic|vanilla|mainline|cata)$", re.I
-)
-"""`pfUI-tbc.toc` beside `pfUI.toc`: the same add-on's file for another game version."""
+ADDON_NOTE_PREFIX = "Add-on: "
+"""How a completed manifest's notes mark what the add-on reader said (an older patch, ...)."""
 
 UNUSED_PREFIX = "Not used: "
 """How a completed manifest's notes mark what it holds that Yu'lon does not install."""
@@ -113,7 +112,7 @@ FOLDER_DESCRIPTION = "Custom mod (copied from a folder you provided)."
 WHAT_IS_READ = (
     "Yu'lon installs three things on Tortoise: a server module (a repository named mod-<name> "
     "or tw-mod-<name>, with C++ in src/ and its settings file in conf/), an add-on (a folder "
-    "whose .toc file has the folder's name, at the top or under addons/ or Interface/AddOns/) "
+    "holding a .toc file, which names it, at the top or under addons/ or Interface/AddOns/) "
     "and database changes (.sql files directly inside data/sql/auth, data/sql/character or "
     "data/sql/world)."
 )
@@ -193,6 +192,8 @@ class Package:
     conf: tuple[ConfFile, ...] = ()
     cpp: bool = False
     """C/C++ source under `src/`: the core will compile this folder into the server."""
+    notes: tuple[str, ...] = ()
+    """What the add-on reader said about the add-ons (an older patch, a missing library)."""
 
 
 def read_package(
@@ -223,17 +224,10 @@ def read_package(
                 "would be left out of the server without a word."
             )
     sql = _sql_files(root)
-    client = _addons(root, name)
-    if isinstance(client, str):
-        return client
-    for step in client:
-        assert step.name is not None
-        shipped = shipped_addons.get(step.name.lower())
-        if shipped is not None:
-            return (
-                f"{name} carries the add-on {step.name}, which Yu'lon already ships as "
-                f"{shipped}: install that one from its row in the list."
-            )
+    found = _addons(root, name, shipped_addons)
+    if isinstance(found, str):
+        return found
+    client, notes = found
     conf = _conf_steps(root, name) if cpp_in_src else ()
     if isinstance(conf, str):
         return conf
@@ -241,7 +235,7 @@ def read_package(
     if not sql and not client and not cpp_in_src:
         also = f" It holds: {'; '.join(unused)}." if unused else ""
         return f"Yu'lon found nothing in {name} it can install on Tortoise. {WHAT_IS_READ}{also}"
-    return Package(sql=sql, client=client, unused=unused, conf=conf, cpp=cpp_in_src)
+    return Package(sql=sql, client=client, unused=unused, conf=conf, cpp=cpp_in_src, notes=notes)
 
 
 def complete(manifest: Manifest, clone: Path, *, shipped_addons: Mapping[str, str]) -> Manifest:
@@ -250,6 +244,13 @@ def complete(manifest: Manifest, clone: Path, *, shipped_addons: Mapping[str, st
     Re-validated. Raises `CompletionRefused` with the sentence of what it is not;
     the applier takes a first install's folder back and closes the sentence.
     """
+    if manifest.origin is not None and manifest.origin.addon:
+        # T613 review round 1: read as a package here, a route add-on whose repository
+        # holds data/sql/ became database changes. Only the route reads its own items.
+        raise CompletionRefused(
+            f"{manifest.name} came from Yu'lon's add-on route, which reads it as add-ons "
+            "alone; Tortoise's package reader does not read it."
+        )
     found = read_package(clone, manifest.name, shipped_addons, manifest.type)
     if isinstance(found, str):
         raise CompletionRefused(found)
@@ -262,8 +263,25 @@ def complete(manifest: Manifest, clone: Path, *, shipped_addons: Mapping[str, st
             "sql": [
                 {"db": db, "path": path, "migration_module": manifest.id} for db, path in found.sql
             ],
-            "notes": [*manifest.notes, *(UNUSED_PREFIX + line for line in found.unused)],
+            "notes": [
+                *(
+                    note
+                    for note in manifest.notes
+                    if not note.startswith((UNUSED_PREFIX, ADDON_NOTE_PREFIX))
+                ),
+                *(UNUSED_PREFIX + line for line in found.unused),
+                *(ADDON_NOTE_PREFIX + line for line in found.notes),
+            ],
         }
+    )
+
+
+def addon_notes(manifest: Manifest) -> tuple[str, ...]:
+    """What the add-on reader said when `complete()` read the item (T613 PR-2), one per line."""
+    return tuple(
+        note[len(ADDON_NOTE_PREFIX) :]
+        for note in manifest.notes
+        if note.startswith(ADDON_NOTE_PREFIX)
     )
 
 
@@ -328,83 +346,38 @@ def _sql_files(root: Path) -> tuple[tuple[Db, str], ...]:
     )
 
 
-def _addons(root: Path, name: str) -> tuple[ClientFile, ...] | str:
-    """The add-ons in `root`: the top itself, else the folders under the add-on folders."""
-    top = sorted(p for p in root.glob("*.toc") if p.is_file())
-    if top:
-        main = _main_toc(top, name)
-        if main is None:
-            listed = ", ".join(p.name for p in top)
-            return (
-                f"{name} has several .toc files at its top ({listed}), and Yu'lon cannot tell "
-                "which one is the add-on."
-            )
-        refusal = _interface_refusal(name, main)
-        if refusal:
-            return refusal
-        return (ClientFile(src=".", dest="addons", name=main.stem),)
-    found: list[ClientFile] = []
-    for folder in _addon_parents(root):
-        for child in sorted(p for p in folder.iterdir() if p.is_dir()):
-            toc = child / f"{child.name}.toc"
-            if not toc.is_file():
-                continue
-            refusal = _interface_refusal(name, toc)
-            if refusal:
-                return refusal
-            rel = child.relative_to(root).as_posix()
-            found.append(ClientFile(src=rel, dest="addons", name=child.name))
-    return tuple(found)
+def _addons(
+    root: Path, name: str, shipped_addons: Mapping[str, str]
+) -> tuple[tuple[ClientFile, ...], tuple[str, ...]] | str:
+    """The add-ons in `root` and the reader's notes, read by the shared engine (T613 PR-2).
+
+    `addon_layout.find_addons()`: the name is the `.toc`'s stem (`pfUI-master/pfUI.toc`
+    is `pfUI`), the Interface band is 1.12's (10000-11200, so Classic Era is refused),
+    only the first number counts, a byte-order mark hides nothing, and a shipped
+    add-on's name is refused. Each add-on folder is then held to the zip route's rules
+    (`addon_archive.check_folder()`: no links, no program files, the size caps), as it
+    is copied into the player's game client. None at all is no refusal here: the
+    package may be database changes or a server module alone. A refusal is returned
+    without its closing clause, which is the caller's to say.
+    """
+    found = addon_layout.find_addons(
+        root, interface=CLIENT_INTERFACE, shipped=shipped_addons, label=name, required=False
+    )
+    if isinstance(found, addon_layout.Refusal):
+        return _unclosed(found.sentence)
+    for addon in found.addons:
+        folder = root if addon.src == "." else root / addon.src
+        try:
+            addon_archive.check_folder(folder, label=addon.name)
+        except addon_archive.AddonRefusal as refused:
+            return _unclosed(str(refused))
+    client = tuple(ClientFile(src=a.src, dest="addons", name=a.name) for a in found.addons)
+    return client, found.notes
 
 
-def _addon_parents(root: Path) -> list[Path]:
-    """The top folder, then each add-on folder (`addons/`, `Interface/AddOns/`, …) present."""
-    parents = [root]
-    for wanted in ADDON_FOLDERS:
-        here = root
-        for part in wanted.split("/"):
-            match = (
-                next(
-                    (p for p in sorted(here.iterdir()) if p.is_dir() and p.name.lower() == part),
-                    None,
-                )
-                if here.is_dir()
-                else None
-            )
-            if match is None:
-                break
-            here = match
-        else:
-            parents.append(here)
-    return parents
-
-
-def _main_toc(tocs: list[Path], name: str) -> Path | None:
-    stems = {p.stem for p in tocs}
-    main = [p for p in tocs if not _is_variant(p.stem, stems)]
-    if len(main) == 1:
-        return main[0]
-    named = [p for p in main if p.stem.lower() == name.lower()]
-    return named[0] if len(named) == 1 else None
-
-
-def _is_variant(stem: str, stems: set[str]) -> bool:
-    found = _VARIANT.match(stem)
-    return found is not None and found["base"] in stems
-
-
-def _interface_refusal(name: str, toc: Path) -> str:
-    text = toc.read_text(encoding="utf-8", errors="replace")
-    said = _INTERFACE.search(text)
-    if said is None:
-        return ""
-    numbers = [int(n) for n in re.findall(r"\d+", said[1])]
-    if numbers and min(numbers) >= _CLIENT_INTERFACE_CEILING:
-        return (
-            f"{name}'s add-on {toc.stem} is made for another game version (Interface "
-            f"{', '.join(map(str, numbers))}); the Tortoise client is 1.12 (Interface 11200)."
-        )
-    return ""
+def _unclosed(sentence: str) -> str:
+    """A reader's refusal without its closing clause: `read_package()`'s callers close it."""
+    return sentence.removesuffix(" " + addon_layout.NOTHING_CHANGED)
 
 
 def _conf_steps(root: Path, name: str) -> tuple[ConfFile, ...] | str:

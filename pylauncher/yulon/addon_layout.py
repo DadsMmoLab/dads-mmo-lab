@@ -147,17 +147,27 @@ def find_addons(
     shipped: Mapping[str, str],
     installed: Collection[str] = (),
     label: str | None = None,
+    required: bool = True,
 ) -> Found | Refusal:
     """The add-ons `root` holds for a client of `interface`, or the one reason it is refused.
 
     `shipped` maps the add-on folder names Yu'lon already installs for this server
     (any case) to the item that installs them; `installed` names add-ons already in
     the client, read only to word the dependency notes. `label` names the source in
-    a sentence (default: the folder's name).
+    a sentence (default: the folder's name). `required=False` answers a source
+    holding no add-on with no add-ons rather than a refusal: Tortoise's package
+    may be database changes or a server module alone (T613 PR-2).
     """
     label = label or root.name
     try:
-        return _find(root, interface=interface, shipped=shipped, installed=installed, label=label)
+        return _find(
+            root,
+            interface=interface,
+            shipped=shipped,
+            installed=installed,
+            label=label,
+            required=required,
+        )
     except OSError as exc:
         where = exc.filename or root
         return Refusal(
@@ -173,6 +183,7 @@ def _find(
     shipped: Mapping[str, str],
     installed: Collection[str],
     label: str,
+    required: bool = True,
 ) -> Found | Refusal:
     base = unwrap(root)
     picked: list[tuple[Addon, Path]] = []
@@ -186,7 +197,7 @@ def _find(
         if note:
             notes.append(note)
     if not picked:
-        return Refusal(_nothing_found(base, label))
+        return Refusal(_nothing_found(base, label)) if required else Found(addons=())
     seen: dict[str, Addon] = {}
     for addon, _folder in picked:
         refusal = _name_refusal(addon.name, shipped)

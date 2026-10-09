@@ -756,13 +756,37 @@ class Uninstaller:
         # BEFORE the folder: every module's receipts live in its clone in it. Each
         # module's client file goes, and each file of the player's a module set
         # aside is put back; what cannot be is named, never deleted (T262).
+        # T613 round 3: the note of the player's add-on folders set aside lives in the
+        # server folder, which goes below; read before the take-back, which may break.
+        from yulon.apply import (
+            aside_path_could_be_ours,
+            read_addon_asides,
+            unchecked_addon_aside_paths,
+        )
+
+        asides = [
+            entry
+            for entry in read_addon_asides(self.server_dir)
+            if aside_path_could_be_ours(entry["aside"])
+        ]
+        unchecked = unchecked_addon_aside_paths(self.server_dir)
         try:
             took, kept_back = self.take_back_client_files()
         except (OSError, ValueError) as exc:
             took, kept_back = [], [
                 f"the files modules put into your game client could not be checked ({exc}); "
                 f"any file of yours a module set aside is still beside it, named "
-                f"<name>.yulon-module-old"
+                f"<name>.yulon-module-old",
+                *(
+                    f"your own {entry['addon']} add-on folder that Yu'lon set aside is still at "
+                    f"{entry['aside']}; rename it back to {entry['addon']} when you want it again"
+                    for entry in asides
+                ),
+                *(
+                    f"an add-on folder of yours that Yu'lon set aside may still be at {path} "
+                    "(its note could not be checked)"
+                    for path in unchecked
+                ),
             ]
         for line in took:
             logger.info(f"uninstall: {line}")

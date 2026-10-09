@@ -23,6 +23,7 @@ from tests.test_controller_view import _Ps
 from tests.test_more_writes_hold import CATALOG_WOTLK, HELD, _Hold, _Nothing
 from yulon import bot_population as botpop
 from yulon import docker, networking, platform, purge, reset_defaults, server_time_zone
+from yulon.catalog.catalog import load_catalog
 from yulon.ui import controller_view as controller_view_module
 
 
@@ -543,6 +544,10 @@ SEAMS: dict[str, tuple[str, str]] = {
         "held",
         "tests.test_move_flows.test_a_bring_in_while_another_yulon_holds_the_server_loads_nothing",
     ),
+    "client_addons": (
+        "lower",
+        "an Applier install/remove: the tab's applier, or Centurion's add-on-only one, holds",
+    ),
     "shelf": (
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
@@ -719,3 +724,19 @@ def test_the_world_update_and_the_map_extraction_are_presses_of_the_engine_that_
 
     for name in ("reextract", "finish_world_reimport"):
         assert hasattr(getattr(TrinityCoreInstaller, name), "__wrapped__"), f"{name} is unreserved"
+
+
+@pytest.mark.parametrize(
+    "game_id", [e.id for e in load_catalog().games if e.client.addon_interface is not None]
+)
+def test_every_client_addon_route_writes_under_a_server_hold(game_id: str, tmp_path: Path) -> None:
+    """The add-on route's applier carries the hold seam on every game, Centurion's own included.
+
+    Mutation this catches: `_with_client_addons()` building the add-on-only applier without
+    `hold_server=` (its writes, and the per-server asides note, then run unheld).
+    """
+    services = controller_view_module.ControllerServices.for_entry(
+        load_catalog().get(game_id), tmp_path
+    )
+    assert services.client_addons is not None
+    assert services.client_addons.applier._hold_server is not None, game_id
