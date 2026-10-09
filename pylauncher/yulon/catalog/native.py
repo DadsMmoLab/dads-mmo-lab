@@ -6950,7 +6950,7 @@ class StagedInstaller:
                     self._check_cancel(ctx.cancel)
                     if stage.name == "start-db" and not reserved:
                         reserved = True
-                        reservation.enter_context(
+                        held = reservation.enter_context(
                             self._reservation(
                                 ctx.server_dir,
                                 INSTALL_PRESS,
@@ -6958,6 +6958,10 @@ class StagedInstaller:
                                 images=self.image_refs_at(ctx.server_dir),
                             )
                         )
+                        if held is not None:
+                            # Codex review: a reservation another Yu'lon's "Stop anyway"
+                            # removed ends the install at its next check, as a Stop does.
+                            ctx = replace(ctx, cancel=PressCancel(ctx.cancel, held.lost))
                     # WHERE THE USER IS, on its own line and never folded into
                     # the `--- <name>` marker. A format everything greps is not
                     # a place to add fields.

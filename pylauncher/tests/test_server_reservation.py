@@ -793,3 +793,23 @@ def test_a_relative_sql_text_is_not_sent_once_the_hold_is_lost(tmp_path: Path) -
     assert "no more SQL was sent" in str(refused.value)
     assert db.texts == [], "a relative statement went out under a lost hold"
     assert not (tmp_path / module_answers.ANSWERS_FILE).exists(), "the record was marked pending"
+
+
+def test_an_install_whose_reservation_is_lost_stops_before_the_import(tmp_path: Path) -> None:
+    """Codex review: the install discarded its claim, so a lost reservation changed nothing.
+
+    Mutation this catches: the install's context cancel not reading the reservation's loss.
+    """
+    from tests.support_native import install
+
+    rec = Recorder()
+    lost = threading.Event()
+
+    @contextmanager
+    def claim(server_dir: Path, *, press: str, **_kw: Any) -> Iterator[docker.ClaimHeld]:
+        lost.set()  # another Yu'lon's Stop anyway took it at once
+        yield docker.ClaimHeld("yulon-busy-x", lost)
+
+    with pytest.raises(InstallerError):
+        install(rec, tmp_path / "wow", server_claim=claim)
+    assert "one-shot:ac-db-import" not in rec.calls, rec.calls
