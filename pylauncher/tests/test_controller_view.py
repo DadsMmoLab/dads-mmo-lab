@@ -23960,10 +23960,16 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
     assert after.steam.client_dir == before.steam.client_dir == original
     # T382: `for_entry()` adds the world wait for every game; no factory does.
     assert after.ready_after_start is not None and before.ready_after_start is None
+    # T613 PR-2: and the add-on route, with its record seam where a factory left none.
+    assert after.client_addons is not None and before.client_addons is None
+    if before.module_forget is None:
+        assert after.module_forget == after.client_addons.forget
     for name in ControllerServices.__dataclass_fields__:
-        if name == "ready_after_start":
+        if name in ("ready_after_start", "client_addons"):
             continue
         a, b = getattr(after, name), getattr(before, name)
+        if name == "module_forget" and b is None:
+            continue
         assert (a is None) == (b is None), f"{name} is wired differently"
         assert type(a) is type(b), f"{name} is a different kind of seam"
 
