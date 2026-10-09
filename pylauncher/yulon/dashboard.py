@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker, module_health, unbound_settings
+from yulon import dbreads, docker, module_health, realm_flag, unbound_settings
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
@@ -134,6 +134,14 @@ until `SETTLED_AFTER`, as after any loop.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+READY_READ_SPAN = timedelta(minutes=30)
+"""How much of a run the realm keeper reads for its ready marker (T581, cold review).
+
+The marker comes at the end of the load (1-3 min measured on Tortoise with 500 bots); a run
+that did not print it in its first half hour is not called ready, the safe direction."""
 
 HEALTH_RETRY_EVERY = timedelta(seconds=60)
 """How long a module's health reading made without the world's ready line is replayed.
@@ -345,7 +353,9 @@ class Dashboard:
         daemon_of: Callable[[], str] | None = None,
         log_of: Callable[[str, str], str] | None = None,
         login_log_of: Callable[[str, str], str] | None = None,
+        ready_log_of: Callable[[str, str, str], str] | None = None,
         now: Callable[[], datetime] | None = None,
+        realm: realm_flag.Keeper | None = None,
     ) -> None:
         self.spec = spec
         self.entry = entry
@@ -399,10 +409,77 @@ class Dashboard:
         self._health_waiting: tuple[str, datetime, str] | None = None
         """`(run, when, sentence)` of the last reading that was not kept: replayed for
         `HEALTH_RETRY_EVERY`, then asked again."""
+        # T581: the realm row's offline bit, kept in step with what this tick reads. Built
+        # here only over real Docker, for the reason `login_log_of` is: a test that injects
+        # the container state hands its own keeper or asks nothing of this.
+        # T581: the keeper's own read for the ready marker, bounded to the run's first
+        # `READY_READ_SPAN`: it may be asked of a run that has lasted days. An injected
+        # `log_of` stands in for Docker, so a test that gave only that one is read through it.
+        self._ready_log_of: Callable[[str, str, str], str]
+        if ready_log_of is not None:
+            self._ready_log_of = ready_log_of
+        elif log_of is None:
+            self._ready_log_of = lambda container, since, until: docker._logs(
+                container, this_run_only=True, since=since, until=until, wsl_distro=wsl_distro
+            )
+        else:
+            injected = log_of
+            self._ready_log_of = lambda container, since, _until: injected(container, since)
+        self._realm: realm_flag.Keeper | None
+        if realm is not None:
+            self._realm = realm
+        elif state_of is None:
+            self._realm = realm_flag.keeper_for(entry, spec, server_dir, sql, wsl_distro=wsl_distro)
+        else:
+            self._realm = None
+        if self._realm is not None:
+            self._realm.said_ready = self._world_said_ready
+        self._seen = docker.ContainerState()
+
+    def _world_said_ready(self, run: str) -> bool:
+        """Whether the world still runs run `run` and its log shows the ready marker (T581).
+
+        Positive evidence only, for the realm keeper's clear: no marker to look for, a world
+        that is not running that run any more, or a log without the marker all say no.
+        """
+        if self._banner is None:
+            return False
+        state = self._state_of(self.spec.world)
+        if state.status != "running" or state.started_at != run:
+            return False
+        if self._ready_run == run:
+            return True
+        started = _run_start(run)
+        until = (started + READY_READ_SPAN).isoformat() if started is not None else ""
+        if not self._banner.search(self._ready_log_of(self.spec.world, run, until)):
+            return False
+        self._ready_run, self._ready_seen_at = run, self._now()
+        return True
 
     def tick(self) -> Verdict:
-        """Ask once, and answer with everything that was learned."""
+        """Ask once, and answer with everything that was learned.
+
+        T581: then hands what it read to the realm keeper, when this entry has one: the hold
+        epoch is taken before the container is read, so a deliberate Stop that began or
+        ended during this tick is seen by the keeper's clear.
+        """
+        realm = self._realm
+        begun = realm.begin() if realm is not None else 0
+        verdict = self._tick()
+        if realm is not None:
+            state = self._seen
+            uptime = self._uptime(state.started_at)
+            ready = state.status == "running" and (
+                self._banner is None
+                or (uptime is not None and uptime >= SETTLED_AFTER)
+                or self._ready_run == state.started_at
+            )
+            realm.after_tick(state.status, state.started_at, ready, begun)
+        return verdict
+
+    def _tick(self) -> Verdict:
         state = self._state_of(self.spec.world)
+        self._seen = state
         uptime = self._uptime(state.started_at)
         if state.status == "":
             # A read that failed said nothing about the count, and `0` is what
@@ -789,6 +866,12 @@ def _ready_banner(entry: CatalogEntry) -> re.Pattern[str] | None:
     except InstallerError as exc:
         logger.warning(f"the dashboard cannot read {entry.id}'s ready marker: {exc}")
         return None
+
+
+def _run_start(started_at: str) -> datetime | None:
+    """When a run that docker says started at `started_at` began, or `None` (see `run_length`)."""
+    length = run_length(started_at, _EPOCH)
+    return None if length is None else _EPOCH - length
 
 
 def run_length(started_at: str, now: datetime) -> timedelta | None:
