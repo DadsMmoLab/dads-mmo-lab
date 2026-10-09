@@ -6162,3 +6162,65 @@ def test_a_tab_from_state_json_asks_for_its_default_addons_later(
     finally:
         main._stop_background_threads(window)
         QApplication.processEvents()
+
+
+def test_a_server_installed_or_pointed_at_this_session_also_gets_its_update_refresh(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T621: not only the tabs of `state.json`; a tab that opens later refreshes too."""
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "refresh_updates_later",
+        lambda self, milliseconds=20_000: asked.append(self.services.controller.server_dir),
+    )
+    server_dir = tmp_path / "refresh-please"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    assert asked == [server_dir], asked
+
+
+def test_a_tab_from_state_json_asks_for_its_update_refresh(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t621-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "refresh_updates_later",
+        lambda self, milliseconds=20_000: asked.append(self.services.controller.server_dir),
+    )
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+    window = main.build_window()
+    try:
+        assert asked == [server_dir]
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()

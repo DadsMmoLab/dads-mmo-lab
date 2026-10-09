@@ -495,6 +495,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             if cloned
             else {
                 "module_updates",
+                "module_refresh",  # T621: the same count in the background
                 "unfinished_modules",
                 "unknown_modules",
                 "module_version",

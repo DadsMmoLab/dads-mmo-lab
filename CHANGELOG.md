@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.
 - **Pack for another computer…** moves accounts and characters into a server of the same game on another computer.
 - **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
+- Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
 
 ### Fixed
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.

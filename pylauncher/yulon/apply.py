@@ -73,6 +73,7 @@ from yulon.git import (
     HistoryReader,
     ReflogEntry,
     ReflogReader,
+    RefreshGit,
     RemoteReader,
     RevRestorer,
     RunnerGit,
@@ -7918,6 +7919,8 @@ def cached_module_updates(
     newest_release: Callable[[str], upstream.Release | None] | None = None,
     compare_commits: CompareCommits | None = None,
     now: int | None = None,
+    cancel: threading.Event | None = None,
+    keep_count_on_failure: bool = False,
 ) -> tuple[ModuleUpdate, ...]:
     """`module_updates()`, with each row kept for a day -- T124's rule, for modules (T126).
 
@@ -7932,10 +7935,25 @@ def cached_module_updates(
 
     A clone whose HEAD cannot be read is counted every time and never cached:
     there is nothing to say what a cached row would be valid for.
+
+    **The background refresh (T621) asks with two more arguments.** `cancel`, once set,
+    stops the walk before the next clone is asked, and the clone being asked when it was set
+    is not cached at all (neither as a count nor as a failure): its answer is a cut-off
+    fetch's. `keep_count_on_failure` makes a clone that could not be asked keep the count
+    it had, while it is still the same commit, and be asked again after `RETRY_SECONDS`
+    (the hour an unanswered row has always waited): a dead line at breakfast must not
+    blank the chip the player saw yesterday. The Check press passes neither and still shows
+    a failure as a failure.
     """
     reader: CountingGit = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     clock = upstream.now_unix() if now is None else now
     resolve = newest_release if newest_release is not None else _github_newest_release
+    if cancel is not None:
+        resolve = _abandoned_on_cancel(resolve, cancel)
+        compare_commits = _abandoned_on_cancel(
+            compare_commits if compare_commits is not None else _github_compare_or_refused,
+            cancel,
+        )
     kept = _read_module_updates(server_dir, clock)
     root = server_dir / CLONE_DIRS[kind]
     try:
@@ -7946,13 +7964,15 @@ def cached_module_updates(
     github = _github_counts(server_dir, compare_commits, clock)
     rows: list[ModuleUpdate] = []
     asked = False
+    stale = _read_module_updates_any_age(server_dir) if keep_count_on_failure else {}
     for path in entries:
         head = reader.head_sha(path) if (path / ".git").is_dir() else None
         old = kept.get((kind, path.name))
         if head is not None and old is not None and old.head == head:
             rows.append(replace(old, path=path))
             continue
-        asked = True
+        if cancel is not None and cancel.is_set():
+            break
         row = _module_update(
             path,
             kind,
@@ -7962,11 +7982,115 @@ def cached_module_updates(
             resolve,
             github,
         )
-        rows.append(replace(row, head=head or "", checked_unix=clock))
-    rows = github.settle(rows)
+        if cancel is not None and cancel.is_set():
+            break
+        asked = True
+        counted = replace(row, head=head or "", checked_unix=clock)
+        before = stale.get((kind, path.name))
+        if (
+            counted.behind is None
+            and counted.is_checkout
+            and head is not None
+            and before is not None
+            and before.head == head
+            and before.behind is not None
+        ):
+            # Expires after `RETRY_SECONDS`, by the day's own freshness rule.
+            counted = replace(
+                before,
+                path=path,
+                checked_unix=clock - upstream.MAX_AGE_SECONDS + upstream.RETRY_SECONDS,
+            )
+        rows.append(counted)
+    if cancel is not None and cancel.is_set():
+        # No more GitHub asks, and a row that still owes GitHub its question (a number a
+        # shallow checkout cannot prove) is left out of the cache, not kept as answered.
+        rows = [row for row in rows if not isinstance(row.behind, Behind)]
+    else:
+        rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(_without_put_back_tips(server_dir, rows))
+
+
+_CANCEL_POLL_SECONDS = 0.2
+"""How often `_abandoned_on_cancel()` looks at its `cancel` while a call is out."""
+
+
+def _abandoned_on_cancel(call: Callable[..., Any], cancel: threading.Event) -> Callable[..., Any]:
+    """`call`, which a cancel stops waiting for within `_CANCEL_POLL_SECONDS` (T621).
+
+    GitHub's two lookups are bounded only by their own ten-second timeout, and a Quit must
+    not wait on that. The call runs on a daemon thread; once `cancel` is set the caller gets
+    `None` ("no answer") at once and the thread finishes its one GET and ends by itself.
+    """
+
+    def ask(*args: Any) -> Any:
+        if cancel.is_set():
+            return None
+        answer: list[Any] = []
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                answer.append(call(*args))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                answer.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="update-refresh-lookup", daemon=True).start()
+        while not done.wait(_CANCEL_POLL_SECONDS):
+            if cancel.is_set():
+                return None
+        if isinstance(answer[0], BaseException):
+            raise answer[0]
+        return answer[0]
+
+    return ask
+
+
+def refresh_module_updates(
+    server_dir: Path,
+    *,
+    kind: ManifestType,
+    cancel: threading.Event,
+    git: CountingGit | None = None,
+    branches: Mapping[str, str | None] | None = None,
+    releases: Mapping[str, str] | None = None,
+    newest_release: Callable[[str], upstream.Release | None] | None = None,
+    compare_commits: CompareCommits | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """The Modules tab's counts, kept up to date in the background (T621).
+
+    `cached_module_updates()` with a leash: every fetch is bounded and ends when `cancel` is
+    set (`RefreshGit`), a clone that cannot be asked keeps its last count, and a clone
+    counted within the day is not asked at all -- so this may be called as often as a timer
+    likes and goes to the network once per clone per day. The rows land in the same file the
+    Check press and the Tortoise addon note read.
+
+    Host git only: where the host has none, the Check press falls back to a container, and a
+    `docker run` is not something to start unasked, so nothing is counted. Returns `()` for
+    that and for a run that was cancelled; the caller keeps what it had.
+    """
+    if git is None:
+        if not git_available():
+            return ()
+        git = RefreshGit(cancel)
+    rows = cached_module_updates(
+        server_dir,
+        kind=kind,
+        git=git,
+        branches=branches,
+        releases=releases,
+        newest_release=newest_release,
+        compare_commits=compare_commits,
+        now=now,
+        cancel=cancel,
+        keep_count_on_failure=True,
+    )
+    return () if cancel.is_set() else rows
 
 
 def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:
