@@ -678,3 +678,17 @@ def test_a_completion_that_drops_the_routes_mark_is_refused(tmp_path: Path) -> N
         route.applier.install(manifest)
 
     assert list(addons.iterdir()) == []
+
+
+def test_remove_still_works_for_an_add_on_whose_copy_was_deleted_by_hand(tmp_path: Path) -> None:
+    """The orphan row points the player at Remove; Remove has to forget the record then."""
+    import shutil
+
+    route, _addons = _route(tmp_path)
+    route.install(route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC})))
+    (manifest,) = route.installed()
+    shutil.rmtree(route.applier.clone_dir(manifest))
+
+    route.remove(manifest)
+
+    assert route.installed() == []

@@ -722,6 +722,24 @@ def conflict_reason(blocked_by: str) -> str:
     )
 
 
+def _copy_gone(manifest: Manifest) -> str | None:
+    """Why Install has nothing to copy for an add-on the player brought, or None (T613).
+
+    A folder or a zip the player added is kept as a copy under this server's `modules/`; with
+    that copy gone (deleted by hand) Install would have nothing to put in the client. A link
+    is cloned again, so its Install stays open.
+    """
+    origin = manifest.origin
+    if origin is None or not origin.addon or origin.kind == "link":
+        return None
+    where = origin.url or origin.path or "where you added it from"
+    return (
+        f"{manifest.name} was added from {where}, and Yu'lon no longer holds its copy, so there "
+        "is nothing to install. Use Remove under \u201cGame add-ons you bring\u201d to forget "
+        "it, then add it again."
+    )
+
+
 def build_module_rows(
     manifests: Iterable[Manifest],
     installed: Mapping[str, frozenset[str]],
@@ -871,6 +889,8 @@ def build_module_rows(
                 apply_module.requirement_refusal(manifest.id, needs) if needs is not None else None
             )
         )
+        if lock_reason is None and not here:
+            lock_reason = _copy_gone(manifest)
         return ModuleRow(
             id=manifest.id,
             family=manifest.type,

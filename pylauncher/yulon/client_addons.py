@@ -41,7 +41,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 
@@ -69,6 +69,9 @@ from yulon.manifest import (
     parse_manifest,
 )
 from yulon.manifest_store import ManifestStore
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import ClientPack
 
 logger = get_logger(__name__)
 
@@ -210,6 +213,12 @@ class ClientAddons:
     opener: client_packs.Opener = client_packs._open
     stage_clone: StageClone | None = None
     """How a git link is cloned for its first read; the applier's own git when None."""
+    pack_addons: Callable[[], Mapping[str, str]] = lambda: {}
+    """The add-on folders this game's client packs put in the client, read when a source is.
+
+    Not in `shipped` because they are not mod manifests and their names are only known from
+    the checkout or the pack's record (`pack_addon_names()`); asked at every read.
+    """
     shipped_unreadable: str = ""
     """Why this game's shipped add-ons could not be read (`for_entry()`); set, the route refuses.
 
@@ -261,7 +270,7 @@ class ClientAddons:
         found = addon_layout.find_addons(
             root,
             interface=self.interface,
-            shipped=self.shipped,
+            shipped={**self.pack_addons(), **self.shipped},
             installed=self._installed_names(),
             label=label,
         )
@@ -613,6 +622,40 @@ def shipped_addons(manifests: Iterable[Manifest]) -> dict[str, str]:
     return names
 
 
+def pack_addon_names(
+    packs: Iterable[ClientPack], server_dir: Path, client_dir: Path | None
+) -> dict[str, str]:
+    """The add-on folders a game's client packs install → the pack that installs them.
+
+    Two readings, either may be missing: the folders of a checkout-folder pack's source (the
+    server's own checkout, Unbound's three add-ons) and the Interface/AddOns folders the
+    packs' record says were written into the client. A folder or file that cannot be read
+    adds nothing; the route then relies on the other reading.
+    """
+    names: dict[str, str] = {}
+    labels = {pack.id: pack.label for pack in packs}
+    for pack in packs:
+        source = pack.source
+        if source.kind != "checkout_folder" or source.path is None:
+            continue
+        try:
+            for child in (server_dir / source.path).iterdir():
+                if child.is_dir():
+                    names.setdefault(child.name, pack.label)
+        except OSError:
+            continue
+    if client_dir is not None:
+        try:
+            recorded = client_packs.pack_files(client_dir)
+        except Exception:  # noqa: BLE001 - an unreadable record adds nothing
+            recorded = frozenset()
+        for path in recorded:
+            parts = path.parts
+            if len(parts) > 3 and [p.casefold() for p in parts[:2]] == ["interface", "addons"]:
+                names.setdefault(parts[2], next(iter(labels.values()), "a client pack"))
+    return names
+
+
 def _step(addon: Addon) -> ClientFile:
     return ClientFile(src=addon.src, dest="addons", name=addon.name)
 
@@ -631,6 +674,7 @@ __all__ = [
     "is_client_addon",
     "item_id_for",
     "item_name",
+    "pack_addon_names",
     "repository_source",
     "shipped_addons",
 ]

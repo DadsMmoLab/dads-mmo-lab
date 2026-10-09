@@ -2567,6 +2567,9 @@ def _with_client_addons(
         shipped_ids=tuple(m.id for m in shipped),
         shipped_unreadable=unreadable,
     )
+    route.pack_addons = lambda: client_addons.pack_addon_names(
+        entry.client.packs, server_dir, route.applier.client_dir
+    )
     # T613 review round 1: a route item is read again by the route's reader alone, on
     # every game; Tortoise's own hook (`recomplete`) is for the items its box brings.
     applier.addon_recomplete = route.completer
