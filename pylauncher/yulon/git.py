@@ -29,11 +29,14 @@ Two traps are baked in here rather than left for each caller to remember:
 from __future__ import annotations
 
 import enum
+import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import uuid
 from collections import deque
@@ -924,6 +927,39 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
+def sql_files_args(rev: str, folder: str) -> list[str]:
+    """`git archive --format=tar <rev> -- <folder>`: a folder's files at a commit, as bytes."""
+    return ["archive", "--format=tar", rev, "--", folder]
+
+
+def parse_sql_files(raw: bytes, folder: str) -> dict[str, str] | None:
+    """`{name: SHA-1 of the bytes, upper-case hex}` of the `*.sql` DIRECTLY in `folder`, or None.
+
+    Tortoise's AutoUpdater hashes each regular `*.sql` file straight inside an update
+    folder (not below it, `directory_iterator`) and records the hash in upper-case hex
+    (`ByteArrayToHexStr`, `%02X`). A tar that does not read is "could not ask".
+    """
+    found: dict[str, str] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for member in archive:
+                parent, _, name = member.name.rstrip("/").rpartition("/")
+                if not member.isreg() or parent != folder.rstrip("/") or not name.endswith(".sql"):
+                    continue
+                handle = archive.extractfile(member)
+                if handle is None:
+                    return None
+                found[name] = hashlib.sha1(handle.read()).hexdigest().upper()  # noqa: S324
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    return found
+
+
+def folder_is_absent(listing: str) -> bool:
+    """`git ls-tree -z --name-only` printed nothing: the folder is not in that commit."""
+    return not listing.strip("\0")
+
+
 def changed_lines_args(old: str, new: str, path: str) -> list[str]:
     """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
     return [*_DIFF_ARGS, "-U0", old, new, "--", path]
@@ -1581,6 +1617,27 @@ class RunnerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
+        """`{name: SHA-1}` of the `*.sql` straight inside `folder` at `rev`, read from git (T632).
+
+        From the commit's own tree, never from the working tree: an untracked or edited
+        copy on disk is not what that commit ships. A folder the commit does not have is
+        a real answer, `{}`; git that cannot say is None.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run_bytes(
+                ["git", *sql_files_args(rev, folder)], cwd=dest, env=_no_prompt_env()
+            )
+            if proc.returncode == 0:
+                return parse_sql_files(proc.stdout, folder)
+            tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", folder], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {folder} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
@@ -2489,6 +2546,23 @@ class ContainerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
+        """`RunnerGit.sql_files()`, containerised: the read-only container, no network (T632)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            argv = self._argv(self._launcher(), dest, sql_files_args(rev, folder), writes=False)
+            proc = runner.run_bytes(argv, env=_no_prompt_env())
+            if proc.returncode == 0:
+                return parse_sql_files(proc.stdout, folder)
+            tree = self._capture(
+                dest, ["ls-tree", "-z", "--name-only", rev, "--", folder], writes=False
+            )
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {folder} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""

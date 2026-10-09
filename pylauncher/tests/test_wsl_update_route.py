@@ -263,6 +263,8 @@ _GIT_FIELDS = {
     # T179 Task 6: the TrinityCore update route's two diff questions.
     "changed_files",
     "changed_lines",
+    # T632: Tortoise's Return reads the migration files of both commits.
+    "sql_files",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 

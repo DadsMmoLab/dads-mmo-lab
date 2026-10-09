@@ -23,7 +23,7 @@ updates the tested commit does not ship (`copy_from_before()`, T630).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -60,6 +60,8 @@ DUMP_TRAILER = b"-- Dump completed"
 """What mysqldump writes last; a dump without it was cut short (`maintenance._DUMP_TRAILER`)."""
 
 UPDATES_TABLE = b"CREATE TABLE `updates`"
+MIGRATIONS_TABLE = b"CREATE TABLE `migrations`"
+"""Tortoise's ledger table in a mysqldump (T632); AzerothCore's is `UPDATES_TABLE`."""
 """What a dump of an AzerothCore database holds for its update ledger (T630)."""
 
 DUMP_READ_BYTES = 4 * 1024 * 1024
@@ -228,7 +230,34 @@ def copy_from_before(directory: Path, database: str, updates: Sequence[str]) -> 
     return None
 
 
-def _holds_none_of(path: Path, updates: Sequence[str]) -> bool:
+def copy_from_before_migrations(
+    directory: Path,
+    database: str,
+    hashes: Sequence[str],
+    accept: Callable[[Path], bool] = lambda _path: True,
+) -> Path | None:
+    """`copy_from_before()` for Tortoise's `migrations` table, keyed by hash (T632); never raises.
+
+    The newest complete dump of `database` with a `migrations` table whose rows hold none
+    of `hashes` (upper-case SHA-1 of the files the tested commit does not ship) and that
+    `accept` passes (the caller's game check, T603: a copy of another game is never named).
+    None when there is no such dump or the folder cannot be read.
+    """
+    try:
+        found = sorted(
+            path
+            for path in directory.iterdir()
+            if _STAMPED.match(path.name) and path.name.endswith(f"_{database}.sql")
+        )
+    except OSError:
+        return None
+    for path in reversed(found):
+        if _holds_none_of(path, hashes, table=MIGRATIONS_TABLE) and accept(path):
+            return path
+    return None
+
+
+def _holds_none_of(path: Path, updates: Sequence[str], table: bytes = UPDATES_TABLE) -> bool:
     """A complete dump with an `updates` table whose rows name none of `updates`. Never raises.
 
     mysqldump quotes each row's name (`'2026_09_21_00_playerbots_speech.sql'`), so the
@@ -239,7 +268,7 @@ def _holds_none_of(path: Path, updates: Sequence[str]) -> bool:
     # at the end (`maintenance._EDGE_BYTES`'s 8 KiB).
     keep = max([_EDGE_BYTES, *(len(needle) for needle in needles)])
     carry = b""
-    table = False
+    has_table = False
     try:
         with path.open("rb") as dump:
             while True:
@@ -249,9 +278,9 @@ def _holds_none_of(path: Path, updates: Sequence[str]) -> bool:
                 window = carry + piece
                 if any(needle in window for needle in needles):
                     return False
-                table = table or UPDATES_TABLE in window
+                has_table = has_table or table in window
                 carry = window[-keep:]
     except OSError as exc:
         logger.warning(f"could not read {path} to see which updates it holds: {exc}")
         return False
-    return table and DUMP_TRAILER in carry
+    return has_table and DUMP_TRAILER in carry

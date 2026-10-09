@@ -2433,6 +2433,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "read, and only their names and contents choose which one the sentence names. An "
         "OSError listing it names none, and the sentence then says no copy was found"
     ),
+    ("catalog/snapshot.py", "copy_from_before_migrations"): (
+        "T632. `copy_from_before()` for Tortoise: lists this server's own "
+        "`sql_scripts/backups/` to NAME the newest complete dump of a database whose "
+        "`migrations` table holds none of the hashes the tested commit lacks, and that "
+        "records this game or none. It decides no write: the files are only read. An "
+        "OSError listing it names none, and the sentence then says no copy was found"
+    ),
     ("catalog/families/azerothcore.py", "_sql_names"): (
         "T630. Lists the `.sql` files under a source checkout's `data/sql` (the target commit, "
         "just checked out by the update route) to tell an update the tested commit no longer "

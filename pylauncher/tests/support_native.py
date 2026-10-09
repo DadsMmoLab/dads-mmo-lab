@@ -20,6 +20,7 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -395,6 +396,21 @@ class Recorder:
     route ask about the files it found and not the whole ledger.
     """
 
+    trees: dict[tuple[Path, str, str], dict[str, bytes] | None] = field(default_factory=dict)
+    """T632: git's tree per `(checkout, commit, folder)`: `{name: bytes}`; None = git cannot say.
+
+    The route's `sql_files()` seam hashes these bytes, as the real one hashes git's. A
+    folder not named is a folder that commit does not have.
+    """
+
+    db_up: bool = False
+    """T632: whether the database container is up when the route asks (`db_running`)."""
+
+    migrations: dict[str, str] = field(default_factory=dict)
+    """T632: a Tortoise schema's `migrations` ledger, `<module>:<HASH>` per line, answered verbatim.
+
+    A schema not named has no `migrations` table (the table question answers nothing)."""
+
     updates_error: str = ""
     """T630: non-empty and every `updates` question fails with it (a database that cannot say)."""
 
@@ -573,6 +589,13 @@ class Recorder:
             for status, path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def sql_files(self, dest: Path, rev: str, folder: str) -> dict[str, str] | None:
+        self.calls.append(f"sql-files:{dest.name}:{rev[:7]}:{folder}")
+        files = self.trees.get((dest, rev, folder), {})
+        if files is None:
+            return None
+        return {name: hashlib.sha1(data).hexdigest().upper() for name, data in files.items()}
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
@@ -774,6 +797,17 @@ class Recorder:
             return self.realm_row
         if "yulon_install_file" in statement:
             return self.file_ledger
+        if statement == "SHOW TABLES LIKE 'migrations'":
+            return "migrations\n" if schema in self.migrations else ""
+        if "FROM `migrations` WHERE" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([0-9A-F]+)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.migrations.get(schema or "", "").splitlines()
+                if line.partition(":")[2] in asked
+            )
         if "FROM updates WHERE name IN" in statement:
             if self.updates_error:
                 raise docker.DockerCommandError(self.updates_error)
@@ -878,6 +912,9 @@ class Recorder:
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
+            sql_files=self.sql_files,
+            db_running=lambda container: self.db_up,
+            stop_db=lambda containers: self.calls.append(f"stop-db:{','.join(containers)}"),
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
