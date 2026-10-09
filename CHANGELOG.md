@@ -22,6 +22,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
 - Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
+- A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
 
 ### Changed
 

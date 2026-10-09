@@ -49,7 +49,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon import docker, server_build_presses
 from yulon.catalog.catalog import LUA_SCRIPTS_DIR, LuaScripts, SqlCheck
-from yulon.catalog.installer import InstallerError, SelfExplainedError
+from yulon.catalog.installer import InstallerError, ScriptsPartlyLaid, SelfExplainedError
 from yulon.log import get_logger
 from yulon.manifest import Db
 
@@ -398,6 +398,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     kept_record = dict(record)
     renamed = _renamed_in_place(server_dir, record, planned)
     wrote = current = 0
+    changed = 0
+    """Scripts written or removed so far: a failure after the first leaves a mixed set (T602)."""
     finished = False
     pending_written = False
     try:
@@ -435,6 +437,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             _publish(item.target, data)
             kept_record[item.rel] = new
             wrote += 1
+            changed += 1
             yield f"{'Updated' if old is not None else 'Laid'} {item.rel}."
         shipped = {item.rel for item in planned}
         for rel, digest in sorted(record.items()):
@@ -458,12 +461,19 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 continue
             if same:
                 path.unlink()
+                changed += 1
                 yield f"Removed {rel}: this server no longer ships it."
             else:
                 yield f"{rel} is no longer shipped and was changed on this machine; left as it is."
         finished = True
+    except SelfExplainedError as exc:
+        # A link that appeared between the plan and the write, after some were written.
+        if changed and not isinstance(exc, ScriptsPartlyLaid):
+            raise ScriptsPartlyLaid(str(exc)) from exc
+        raise
     except OSError as exc:
-        raise SelfExplainedError(
+        failure = ScriptsPartlyLaid if changed else SelfExplainedError
+        raise failure(
             f"The Lua scripts could not be laid ({exc}). Once the reason is fixed, press "
             f"{remedy}: it lays them again."
         ) from exc
@@ -474,7 +484,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             except OSError as exc:
                 logger.warning(f"could not write {record_path(server_dir)}: {exc}")
                 if finished:
-                    raise SelfExplainedError(
+                    failure = ScriptsPartlyLaid if changed else SelfExplainedError
+                    raise failure(
                         "The Lua scripts were copied, but Yu'lon could not save its list of "
                         f"them, {LUA_SCRIPTS_DIR}/{RECORD_FILE} ({exc}), so it stopped here and "
                         f"started nothing new. Once that is fixed, delete {to_delete}, "
