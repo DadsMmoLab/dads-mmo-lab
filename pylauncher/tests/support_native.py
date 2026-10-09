@@ -395,18 +395,15 @@ class Recorder:
     route ask about the files it found and not the whole ledger.
     """
 
-    trees: dict[tuple[Path, str, str], dict[str, bytes] | None] = field(default_factory=dict)
+    byte_trees: dict[tuple[Path, str, str], dict[str, bytes] | None] = field(default_factory=dict)
     """T632: git's tree per `(checkout, commit, folder)`: `{name: bytes}`; None = git cannot say.
 
-    The route's `sql_files()` seam hashes these bytes, as the real one hashes git's. A
-    folder not named is a folder that commit does not have.
+    The route's `tree_bytes()` seam answers from these (and `blobs`), as `git archive` would.
+    A folder not named is a folder that commit does not have.
     """
 
     blobs: dict[tuple[Path, str, str], bytes] = field(default_factory=dict)
-    """T632: a single file at `(checkout, commit, path)` for `tree_files()`: its bytes."""
-
-    db_up: bool = False
-    """T632: whether the database container is up when the route asks (`db_running`)."""
+    """T632: a single file at `(checkout, commit, path)` for `tree_bytes()`: its bytes."""
 
     migrations: dict[str, str] = field(default_factory=dict)
     """T632: a Tortoise schema's `migrations` ledger, `<module>:<HASH>` per line, answered verbatim.
@@ -513,6 +510,23 @@ class Recorder:
     about the folders it reads and not the whole tree.
     """
 
+    trees: dict[tuple[Path, str], tuple[str, ...] | None] = field(default_factory=dict)
+    """T630: `tree_files()`'s answer per `(checkout, commit)`: the paths that commit tracks.
+
+    Absent is a commit tracking nothing under the asked folders; `None` is git that
+    could not say. Filtered by the pathspecs asked, as `git ls-tree` filters. Read
+    from here and never from the disk, as the real seam reads the commit's tree.
+    """
+
+    lines: dict[tuple[Path, str, str], tuple[str, ...]] = field(default_factory=dict)
+    """T630: `file_lines()`'s answer per `(checkout, commit, path)`; absent is a file with none."""
+
+    lines_unreadable: bool = False
+    """T630: `file_lines()` answers None (git could not read the files)."""
+
+    db_was_up: bool | None = True
+    """What `db_running()` answers for the database container (T630): up, by default."""
+
     diff_lines: dict[tuple[Path, str, str, str], tuple[str, ...] | None] = field(
         default_factory=dict
     )
@@ -592,10 +606,21 @@ class Recorder:
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
 
-    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
-        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}:{path}")
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
+        said = self.trees.get((dest, rev), ())
+        if said is None:
+            return None
+        return tuple(
+            path
+            for path in said
+            if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
+        )
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        self.calls.append(f"tree-bytes:{dest.name}:{rev[:7]}:{path}")
         found: dict[str, bytes] = {}
-        for (where, at, folder), files in {**self.trees, **self.blobs}.items():
+        for (where, at, folder), files in {**self.byte_trees, **self.blobs}.items():
             if where != dest or at != rev:
                 continue
             inside = (
@@ -613,6 +638,23 @@ class Recorder:
                 if full == path or full.startswith(f"{path}/"):
                     found[full] = data
         return found
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        self.calls.append(f"file-lines:{dest.name}:{rev[:7]}:{len(paths)}")
+        if self.lines_unreadable:
+            return None
+        return {
+            path: self.lines[(dest, rev, path)] for path in paths if (dest, rev, path) in self.lines
+        }
+
+    def db_running(self, container: str) -> bool | None:
+        self.calls.append(f"db-running?:{container}")
+        return self.db_was_up
+
+    def stop_db(self, containers: list[str]) -> None:
+        self.calls.append(f"stop-db:{','.join(containers)}")
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
@@ -930,8 +972,10 @@ class Recorder:
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
             tree_files=self.tree_files,
-            db_running=lambda container: self.db_up,
-            stop_db=lambda containers: self.calls.append(f"stop-db:{','.join(containers)}"),
+            file_lines=self.file_lines,
+            tree_bytes=self.tree_bytes,
+            db_running=self.db_running,
+            stop_db=self.stop_db,
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
@@ -1178,8 +1222,9 @@ class FakeSnapshot:
         return snapshot.PutBack(restored=copy.databases, safety=safety)
 
     def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        """The real forgetting (`snapshot.prune_older()`), on the files a test laid (T633)."""
         self.rec.calls.append("prune")
-        return ()
+        return snapshot.prune_older(copy.directory, copy.files)
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

@@ -703,6 +703,13 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_changed_lines(dest, "a" * 40, "b" * 40, "centurion/sql/auth/auth_data.sql")
     assert len(seen) == ran + 1, "the changed-lines route reached a container"
+    # T630's: the files the commit a Return moved to tracks.
+    ran = len(seen)
+    native._git_tree_files(dest, "b" * 40, ["data/sql"])
+    assert len(seen) == ran + 1, "the tree-files route reached a container"
+    ran = len(seen)
+    native._git_file_lines(dest, "b" * 40, ["data/sql/x.sql"])
+    assert len(seen) == ran + 1, "the file-lines route reached a container"
     # T632: the migration listing reads bytes, so it goes through `runner.run_bytes`.
     monkeypatch.setattr(
         git.runner,
@@ -710,11 +717,11 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
         lambda argv, **_kw: seen.append(argv) or subprocess.CompletedProcess(argv, 0, b"", b""),
     )
     ran = len(seen)
-    native._git_tree_files(dest, "a" * 40, "sql/database_updates/world")
-    assert len(seen) == ran + 1, "the tree-files route reached a container"
+    native._git_tree_bytes(dest, "a" * 40, "sql/database_updates/world")
+    assert len(seen) == ran + 1, "the tree-bytes route reached a container"
     native.Seams()
 
-    assert made == [{}] * 12, "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 14, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [

@@ -20,6 +20,7 @@ answered at the `sql_query` seam the route asks.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -48,11 +49,17 @@ AFTER = "20261009_205101_before-new-build_acore_playerbots.sql"
 CUT_SHORT = "20261009_210000_acore_playerbots.sql"
 
 
-def _dump(path: Path, names: tuple[str, ...], *, complete: bool = True) -> None:
-    """A mysqldump of an AzerothCore database whose `updates` table holds `names`."""
+def _dump(
+    path: Path, names: tuple[str, ...], *, complete: bool = True, game: str | None = "wow-wotlk"
+) -> None:
+    """A mysqldump of an AzerothCore database whose `updates` table holds `names`.
+
+    With the game record Yu'lon writes above the banner (T603), unless `game` is None.
+    """
     rows = ",".join(f"('{name}','0a1b','RELEASED','2026-10-01 00:00:00',0)" for name in names)
+    record = f"-- yulon-backup: game={game}\n" if game else ""
     body = (
-        "-- MySQL dump 10.13\n"
+        f"{record}-- MySQL dump 10.13\n"
         "CREATE TABLE `updates` (\n  `name` varchar(200) NOT NULL\n);\n"
         f"INSERT INTO `updates` VALUES {rows};\n"
     )
@@ -66,9 +73,22 @@ def _backups(server_dir: Path) -> Path:
     return server_dir / snapshot.BACKUPS_FOLDER
 
 
-def _target_ships(server_dir: Path, folder: str, *names: str) -> None:
-    """The files the target commit has in `folder`, on disk (the fake clone moves only heads)."""
-    where = server_dir / BOTS.dest / folder
+def _target_ships(
+    rec: Recorder,
+    server_dir: Path,
+    folder: str,
+    *names: str,
+    dest: str = BOTS.dest,
+    rev: str = BOTS_PIN,
+) -> None:
+    """The files the target commit tracks in `folder`: in its tree, and on disk as checked out.
+
+    The route must read the tree (`git ls-tree`); the disk copy is there so a route that
+    read the disk instead would see the same files and pass or fail for the same reason.
+    """
+    key = (server_dir / dest, rev)
+    rec.trees[key] = (*(rec.trees.get(key) or ()), *(f"{folder}/{name}" for name in names))
+    where = server_dir / dest / folder
     where.mkdir(parents=True, exist_ok=True)
     for name in names:
         (where / name).write_text("-- an update\n", encoding="utf-8")
@@ -81,7 +101,7 @@ def _newer_bots_update(rec: Recorder, server_dir: Path, *, applied: bool = True)
         ("D", f"{BOTS_UPDATES}/{SPEECH}"),
         ("M", "src/PlayerbotAI.cpp"),
     )
-    _target_ships(server_dir, BOTS_UPDATES, TARGET_NEWEST)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
     if applied:
         rec.applied_updates["acore_playerbots"] = f"{TARGET_NEWEST}\n{REQUESTER}\n{SPEECH}\n"
 
@@ -127,7 +147,8 @@ def test_a_return_over_a_newer_playerbots_update_refuses_before_anything_is_buil
     assert "acore_playerbots has 2 updates the tested commit does not have" in message, message
     assert SPEECH in message and REQUESTER in message
     assert "Database updates only go forward" in message
-    assert "the older server would meet acore_playerbots as those updates left it" in message
+    assert "that commit's server would meet acore_playerbots as those updates left it" in message
+    assert not re.search(r"\bolder\b|Going back", message), message
     assert "Nothing was built, stopped or changed" in message
     assert f"backups/{CLEAN}" in message
     assert server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN) in message
@@ -147,8 +168,7 @@ def test_the_core_worlds_newer_updates_refuse_too(tmp_path: Path) -> None:
     rec, server_dir = _ready(tmp_path)
     world = "data/sql/updates/db_world"
     rec.diffs[(server_dir, OLD, CORE_PIN)] = (("D", f"{world}/2026_09_21_05.sql"),)
-    (server_dir / world).mkdir(parents=True, exist_ok=True)
-    (server_dir / world / "2026_09_19_02.sql").write_text("--\n", encoding="utf-8")
+    _target_ships(rec, server_dir, world, "2026_09_19_02.sql", dest=".", rev=CORE_PIN)
     rec.applied_updates["acore_world"] = "2026_09_21_05.sql\n"
 
     _said, raised, _fake = _return(rec, server_dir)
@@ -186,6 +206,7 @@ def test_the_copy_named_is_the_newest_complete_one_from_before_the_updates(
         message
     )
     assert "without starting the server in between" in message
+    assert "Do not press Clean up… on Maintenance before restoring" in message
 
 
 def test_with_no_copy_from_before_it_says_the_way_back_is_closed(tmp_path: Path) -> None:
@@ -234,7 +255,7 @@ def test_an_update_moved_to_the_archive_is_not_a_removal(tmp_path: Path) -> None
     """Upstream archives updates at a release: the name is still shipped, only elsewhere."""
     rec, server_dir = _ready(tmp_path)
     rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{SPEECH}"),)
-    _target_ships(server_dir, "data/sql/playerbots/archive/2026", SPEECH)
+    _target_ships(rec, server_dir, "data/sql/playerbots/archive/2026", SPEECH)
     rec.applied_updates["acore_playerbots"] = f"{SPEECH}\n"
 
     _said, raised, _fake = _return(rec, server_dir)
@@ -248,7 +269,7 @@ def test_an_older_update_the_target_squashed_away_is_not_newer(tmp_path: Path) -
     rec, server_dir = _ready(tmp_path)
     old_one = "2026_01_02_00_ai_playerbot_texts.sql"
     rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{old_one}"),)
-    _target_ships(server_dir, BOTS_UPDATES, TARGET_NEWEST)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
     rec.applied_updates["acore_playerbots"] = f"{old_one}\n"
 
     _said, raised, _fake = _return(rec, server_dir)
@@ -346,22 +367,363 @@ def test_copy_from_before_reads_the_dump_itself(
             path.read_text(encoding="utf-8").replace("CREATE TABLE `updates`", "CREATE TABLE `x`"),
             encoding="utf-8",
         )
-    got = snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,))
+    got = snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,), game="wow-wotlk")
     assert (got == path) is found, got
 
 
 def test_copy_from_before_finds_a_name_split_across_reads(tmp_path: Path) -> None:
-    """The dump is read in pieces; a name straddling two of them is still seen."""
+    """The dump is read in pieces; a name straddling two of them is still seen.
+
+    The same dump with another name in that place IS named, so the refusal to name it
+    is the name's doing and not the dump's.
+    """
     path = tmp_path / CLEAN
+    banner = "-- MySQL dump 10.13\n"
     head = (
         "CREATE TABLE `updates` (\n  `name` varchar(200) NOT NULL\n);\n"
         "INSERT INTO `updates` VALUES ('"
     )
-    pad = snapshot.DUMP_READ_BYTES - 10 - len(head) - len("-- \n")
-    body = (
-        f"-- {'x' * pad}\n{head}{SPEECH}','0a1b','RELEASED','2026-10-01 00:00:00',0);\n"
-        "-- Dump completed on 2026-10-08 12:00:00\n"
+    pad = snapshot.DUMP_READ_BYTES - 10 - len(banner) - len(head) - len("-- \n")
+
+    def body(name: str) -> str:
+        return (
+            f"{banner}-- {'x' * pad}\n{head}{name}','0a1b','RELEASED','2026-10-01 00:00:00',0);\n"
+            "-- Dump completed on 2026-10-08 12:00:00\n"
+        )
+
+    assert body(SPEECH).index(SPEECH) == snapshot.DUMP_READ_BYTES - 10
+    path.write_text(body(SPEECH), encoding="utf-8")
+    assert (
+        snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,), game="wow-wotlk") is None
     )
-    assert body.index(SPEECH) == snapshot.DUMP_READ_BYTES - 10
-    path.write_text(body, encoding="utf-8")
-    assert snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,)) is None
+    path.write_text(body(TARGET_NEWEST), encoding="utf-8")
+    assert (
+        snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,), game="wow-wotlk") == path
+    )
+
+
+# -- cold review of a72e048f: what must still count as newer ----------------------------
+
+
+def test_a_name_that_is_not_dated_beside_the_updates_does_not_hide_one(tmp_path: Path) -> None:
+    """Letters sort after digits: a `playerbots_readme.sql` is not a newer update."""
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{SPEECH}"),)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST, "playerbots_readme.sql")
+    rec.applied_updates["acore_playerbots"] = f"{SPEECH}\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "a non-dated sibling skipped the applied update"
+
+
+def test_the_same_name_for_another_database_is_not_the_same_update(tmp_path: Path) -> None:
+    """`db_world/2026_09_21_00.sql` gone; `db_characters/2026_09_21_00.sql` is another file."""
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (("D", "data/sql/updates/db_world/2026_09_21_00.sql"),)
+    _target_ships(
+        rec,
+        server_dir,
+        "data/sql/updates/db_characters",
+        "2026_09_21_00.sql",
+        dest=".",
+        rev=CORE_PIN,
+    )
+    rec.applied_updates["acore_world"] = "2026_09_21_00.sql\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "the same base name in another database's folder hid it"
+    assert "acore_world has 1 update" in str(raised)
+
+
+def test_an_archived_core_update_still_counts_as_shipped(tmp_path: Path) -> None:
+    """The core's own archive layout: `archive/db_world/<version>/` is db_world's too."""
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (("D", "data/sql/updates/db_world/2026_09_21_00.sql"),)
+    _target_ships(
+        rec,
+        server_dir,
+        "data/sql/archive/db_world/6.x",
+        "2026_09_21_00.sql",
+        dest=".",
+        rev=CORE_PIN,
+    )
+    rec.applied_updates["acore_world"] = "2026_09_21_00.sql\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is None, raised
+    assert _asked_updates(rec) == []
+
+
+def test_a_file_on_disk_the_target_does_not_track_is_not_shipped(tmp_path: Path) -> None:
+    """The target's list is its commit's tree, so an untracked copy on disk hides nothing."""
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{SPEECH}"),)
+    stray = server_dir / BOTS.dest / "data/sql/custom" / SPEECH
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("-- a copy somebody left\n", encoding="utf-8")
+    rec.applied_updates["acore_playerbots"] = f"{SPEECH}\n"
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None, "an untracked same-name file on disk hid the update"
+
+
+def test_git_that_cannot_list_the_target_refuses(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{SPEECH}"),)
+    rec.trees[(server_dir / BOTS.dest, BOTS_PIN)] = None
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert "could not list" in str(raised), raised
+    assert not _built(rec)
+
+
+def test_a_database_that_was_down_is_stopped_again_after_a_refusal(tmp_path: Path) -> None:
+    """The refusal says nothing was started or changed, so the database goes back down."""
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    rec.db_was_up = False
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    started = rec.calls.index("start-db")
+    assert any(call.startswith("stop-db:") for call in rec.calls[started:]), rec.calls
+
+
+def test_a_database_that_was_up_is_left_up(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert not any(call.startswith("stop-db:") for call in rec.calls), rec.calls
+
+
+def test_a_database_that_was_down_goes_back_down_when_the_return_goes_on(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir, applied=False)
+    rec.db_was_up = False
+    said, raised, _fake = _return(rec, server_dir)
+    assert raised is None, raised
+    asked = rec.calls.index("start-db")
+    assert any(call.startswith("stop-db:") for call in rec.calls[asked:]), rec.calls
+    assert any("The database is stopped again" in line for line in said)
+
+
+def test_a_dump_another_game_recorded_is_never_named(tmp_path: Path) -> None:
+    """WotLK and Unbound share the acore_* names; Restore refuses the other game's dump."""
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    backups = _backups(server_dir)
+    _dump(backups / AFTER.replace("205101", "200000"), (TARGET_NEWEST,), game="wow-unbound")
+    _dump(backups / CLEAN, (TARGET_NEWEST,), game=None)
+    _said, raised, _fake = _return(rec, server_dir)
+    message = str(raised)
+    assert "200000" not in message, message
+    assert (
+        f"backups/{CLEAN}" in message
+    ), "an old dump with no record is still one Restore asks about"
+
+
+@pytest.mark.parametrize(
+    ("record", "kept"),
+    [
+        ("-- yulon-backup: game=wow-wotlk\n", True),
+        ("", True),
+        ("-- yulon-backup: game=wow-unbound\n", False),
+        ("-- yulon-backup: game=Wow WotLK\n", False),
+        ("-- yulon-backup: game=wow-wotlk\n-- yulon-backup: game=wow-unbound\n", False),
+    ],
+    ids=["this-game", "no-record", "other-game", "garbled", "two-games"],
+)
+def test_the_game_record_is_read_as_restore_reads_it(
+    tmp_path: Path, record: str, kept: bool
+) -> None:
+    """`copy_from_before()`'s reading agrees with `maintenance.backup_game()` on each shape."""
+    path = tmp_path / CLEAN
+    _dump(path, (TARGET_NEWEST,), game=None)
+    path.write_text(record + path.read_text(encoding="utf-8"), encoding="utf-8")
+    found = snapshot.copy_from_before(tmp_path, "acore_playerbots", (SPEECH,), game="wow-wotlk")
+    assert (found == path) is kept
+    try:
+        restore_reads = maintenance.backup_game(path)
+    except maintenance.MaintenanceError:
+        restore_reads = "refused"
+    assert (restore_reads in (None, "wow-wotlk")) is kept, restore_reads
+
+
+def test_tree_files_lists_what_the_commit_tracks_and_not_the_disk(tmp_path: Path) -> None:
+    """Real git: an untracked file beside the tracked one is not in the commit's list."""
+    import subprocess
+
+    from yulon import git
+
+    if not git.git_available():
+        pytest.skip("no host git")
+    repo = tmp_path / "repo"
+    (repo / BOTS_UPDATES).mkdir(parents=True)
+    (repo / BOTS_UPDATES / TARGET_NEWEST).write_text("--\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "x.cpp").write_text("//\n", encoding="utf-8")
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    run("init", "-q")
+    run("add", ".")
+    run("commit", "-q", "-m", "one")
+    head = run("rev-parse", "HEAD")
+    (repo / BOTS_UPDATES / SPEECH).write_text("-- untracked\n", encoding="utf-8")
+
+    got = git.RunnerGit().tree_files(repo, head, ("data/sql",))
+    assert got == (f"{BOTS_UPDATES}/{TARGET_NEWEST}",)
+    assert git.tree_files_args(head, ("data/sql",)) == [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        head,
+        "--",
+        "data/sql",
+    ]
+
+
+def test_a_stopped_database_is_started_from_yulons_compose_not_the_targets(
+    tmp_path: Path,
+) -> None:
+    """Live on m910q, 2026-10-09: with the server stopped the check had to start the database,
+    and the move had just put the TARGET's own `docker-compose.yml` in the core checkout.
+    `compose up ub-database` refused that file ("service ub-worldserver has neither an image
+    nor a build context"), so the press refused as "could not start the database" instead of
+    naming the updates. Yu'lon's compose is written back before the family's check now.
+    """
+    from tests.support_native import UPSTREAM_COMPOSE
+    from yulon import docker
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    rec.db_was_up = False
+    compose = server_dir / composegen.BASE_FILE
+
+    def start_db(spec: object, folder: Path, *, because: str = "") -> None:
+        rec.calls.append("start-db")
+        if compose.read_text(encoding="utf-8") == UPSTREAM_COMPOSE:
+            raise docker.DockerCommandError(
+                'service "ub-worldserver" has neither an image nor a build context specified'
+            )
+        rec.db_started = True
+
+    made = engine(rec, start_db=start_db)
+    made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    message = str(raised.value)
+    assert "acore_playerbots has 2 updates the tested commit does not have" in message, message
+    assert compose.read_text(encoding="utf-8") != UPSTREAM_COMPOSE, "the compose went back"
+    assert {rec.heads[server_dir / s.dest] for s in ENTRY.emulator.sources} == {OLD}
+
+
+# -- scoped re-review of a2f7ef7a ----------------------------------------------------------
+
+PENDING = "rev_1727000000000000000.sql"
+SQUASHED = "2026_10_01_00.sql"
+PENDING_SQL = ("UPDATE `creature_template` SET `speed_walk` = 1 WHERE `entry` = 18910;",)
+
+
+def _pending_squash(rec: Recorder, server_dir: Path, *, same_sql: bool) -> None:
+    """AzerothCore's import of pending files: `pending_db_world/rev_*` -> a dated file."""
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (
+        ("D", f"data/sql/updates/pending_db_world/{PENDING}"),
+        ("A", f"data/sql/updates/db_world/{SQUASHED}"),
+    )
+    _target_ships(
+        rec,
+        server_dir,
+        "data/sql/updates/db_world",
+        "2026_09_30_00.sql",
+        SQUASHED,
+        dest=".",
+        rev=CORE_PIN,
+    )
+    rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_world/{PENDING}")] = PENDING_SQL
+    rec.lines[(server_dir, CORE_PIN, f"data/sql/updates/db_world/{SQUASHED}")] = (
+        "-- DB update 2026_09_30_00 -> 2026_10_01_00",
+        "--",
+        *(PENDING_SQL if same_sql else ("DELETE FROM `creature` WHERE `guid` = 1;",)),
+        "",
+    )
+    rec.applied_updates["acore_world"] = f"{PENDING}\n"
+
+
+def test_a_return_over_a_pending_squash_is_not_refused(tmp_path: Path) -> None:
+    """The reviewer's probe: the applied `rev_` file was only re-filed, header and all."""
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=True)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is None, f"a wrong refusal on a squash: {raised}"
+    assert _asked_updates(rec) == []
+
+
+def test_a_removed_file_whose_sql_went_nowhere_still_refuses(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=False)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert f"acore_world has 1 update the tested commit does not have ({PENDING})" in str(raised)
+
+
+def test_git_that_cannot_read_the_files_refuses(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=True)
+    rec.lines_unreadable = True
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert "git could not read the update files it removes and adds" in str(raised), raised
+    assert not _built(rec)
+
+
+def test_an_unknown_database_state_is_said_not_hidden(tmp_path: Path) -> None:
+    """`db_running` that cannot say: the refusal must not claim nothing was started."""
+    from yulon.catalog.families import azerothcore
+
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    rec.db_was_up = None
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert azerothcore.DATABASE_MAYBE_STARTED in str(raised), raised
+    assert not any(call.startswith("stop-db:") for call in rec.calls)
+
+
+def test_file_lines_reads_every_file_in_one_git_run(tmp_path: Path) -> None:
+    """Real git: two files' lines at a commit, an empty line kept, an uncommitted edit not."""
+    import subprocess
+
+    from yulon import git
+
+    if not git.git_available():
+        pytest.skip("no host git")
+    repo = tmp_path / "repo"
+    (repo / "data/sql").mkdir(parents=True)
+    (repo / "data/sql/a.sql").write_text("-- a\n\nSELECT 1;\n", encoding="utf-8")
+    (repo / "data/sql/b.sql").write_text("SELECT 2;\n", encoding="utf-8")
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    run("init", "-q")
+    run("add", ".")
+    run("commit", "-q", "-m", "one")
+    head = run("rev-parse", "HEAD")
+    (repo / "data/sql/a.sql").write_text("changed on disk\n", encoding="utf-8")
+    got = git.RunnerGit().file_lines(repo, head, ("data/sql/a.sql", "data/sql/b.sql"))
+    assert got == {
+        "data/sql/a.sql": ("-- a", "", "SELECT 1;"),
+        "data/sql/b.sql": ("SELECT 2;",),
+    }

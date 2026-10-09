@@ -597,7 +597,7 @@ class CmangosInstaller(StagedInstaller):
                         backups,
                         schema,
                         [h for hashes in found.values() for h in hashes],
-                        self._of_this_game,
+                        game=self.entry.id,
                     )
                     for schema, found in applied.items()
                 }
@@ -612,20 +612,6 @@ class CmangosInstaller(StagedInstaller):
             logger.info(self._stop_the_database_again(container))
         yield "None of them was applied, so the older server can start on your databases."
 
-    def _of_this_game(self, backup: Path) -> bool:
-        """T603's check on a copy the refusal would name: it records this game, or none.
-
-        A copy that records another game is never named (a restore would refuse it); one
-        that records none is an old backup, which a restore takes after its own ask.
-        """
-        from yulon.controller_wow_wotlk import maintenance
-
-        try:
-            recorded = maintenance.backup_game(backup)
-        except maintenance.MaintenanceError:
-            return False
-        return recorded is None or recorded == self.entry.id
-
     def _conf_value(self, key: str) -> str | None:
         """The entry's conf table's value for `key`, unquoted, or None."""
         for table in self._data().conf.files.values():
@@ -636,7 +622,7 @@ class CmangosInstaller(StagedInstaller):
 
     def _tree(self, dest: Path, rev: str, path: str, *, what: str) -> dict[str, bytes]:
         """Git's files under `path` at `rev`, or the fail-closed refusal when git cannot say."""
-        found = self._seams.tree_files(dest, rev, path)
+        found = self._seams.tree_bytes(dest, rev, path)
         if found is None:
             raise InstallerError(
                 updates_unread_sentence(

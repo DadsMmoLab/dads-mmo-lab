@@ -10,7 +10,7 @@ database whether it holds a hash the target does not ship, before anything is bu
 stopped or copied.
 
 Every test drives the real `update_to_latest(to_pin=True)` on an installed Tortoise
-folder, with git's trees at the `tree_files` seam and the `migrations` ledger at the
+folder, with git's trees at the `tree_bytes` seam and the `migrations` ledger at the
 `sql_query` seam of `tests.support_native.Recorder`.
 """
 
@@ -96,8 +96,8 @@ def _ready(tmp_path: Path) -> tuple[Recorder, Path, native.StagedInstaller]:
     made._snapshot = FakeSnapshot(rec)  # type: ignore[attr-defined]
     # Both commits ship the one old file; the target has nothing newer.
     dest = server_dir / CORE.dest
-    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER}
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
     bots = server_dir / BOTS.dest
     for rev in (OLD, BOTS_PIN):
         rec.blobs[(bots, rev, BOTS_CMAKE)] = CMAKE
@@ -107,7 +107,7 @@ def _ready(tmp_path: Path) -> tuple[Recorder, Path, native.StagedInstaller]:
 def _core_newer(rec: Recorder, server_dir: Path, *, applied: bool = True) -> str:
     """Going back removes a world migration of the core; the database holds it."""
     dest = server_dir / CORE.dest
-    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, NEWER_NAME: NEWER}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, NEWER_NAME: NEWER}
     key = f":{_hash(NEWER)}"
     if applied:
         rec.migrations["tw_world"] = f":{_hash(OLDER)}\n{key}\n"
@@ -116,7 +116,7 @@ def _core_newer(rec: Recorder, server_dir: Path, *, applied: bool = True) -> str
 
 def _bots_newer(rec: Recorder, server_dir: Path, *, applied: bool = True) -> str:
     dest = server_dir / BOTS.dest
-    rec.trees[(dest, OLD, BOTS_WORLD)] = {NEWER_BOTS_NAME: NEWER_BOTS}
+    rec.byte_trees[(dest, OLD, BOTS_WORLD)] = {NEWER_BOTS_NAME: NEWER_BOTS}
     key = f"TortoiseBots:{_hash(NEWER_BOTS)}"
     if applied:
         rec.migrations["tw_world"] = f"{key}\n"
@@ -194,10 +194,10 @@ def test_a_changed_migration_counts_as_one_the_target_lacks(tmp_path: Path) -> N
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     ran = b"-- the bytes the server ran\n"
-    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: ran}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: ran}
     rec.migrations["tw_world"] = f":{_hash(ran)}\n"
     # The target ships a newer file too, and the old name with other bytes.
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {
         OLDER_NAME: b"-- new bytes\n",
         "20261201000000_world.sql": b"x",
     }
@@ -211,12 +211,12 @@ def test_each_database_is_named_with_its_own_count(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     auth = b"ALTER TABLE `account` ADD `y` INT;\n"
-    rec.trees[(dest, OLD, CORE_AUTH)] = {"20261003_auth.sql": auth}
-    rec.trees[(dest, OLD, CORE_WORLD)] = {"a_world.sql": NEWER, "b_world.sql": OLDER}
+    rec.byte_trees[(dest, OLD, CORE_AUTH)] = {"20261003_auth.sql": auth}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {"a_world.sql": NEWER, "b_world.sql": OLDER}
     rec.migrations["tw_logon"] = f":{_hash(auth)}\n"
     rec.migrations["tw_world"] = f":{_hash(NEWER)}\n:{_hash(OLDER)}\n"
     # The target ships neither of the world files.
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {}
 
     _said, raised = _return(made, server_dir)
 
@@ -246,7 +246,7 @@ def test_the_same_bytes_renamed_at_the_target_are_shipped(tmp_path: Path) -> Non
     """A key is module + hash: a file the target ships under another name is not lacked."""
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir)
-    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {
+    rec.byte_trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {
         OLDER_NAME: OLDER,
         "20260901000000_renamed.sql": NEWER,
     }
@@ -262,7 +262,7 @@ def test_the_same_bytes_under_another_module_do_not_count_as_shipped(tmp_path: P
     """TortoiseBots' migration is not the core's, whatever the bytes."""
     rec, server_dir, made = _ready(tmp_path)
     key = _bots_newer(rec, server_dir)
-    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {"x.sql": NEWER_BOTS}
+    rec.byte_trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {"x.sql": NEWER_BOTS}
 
     _said, raised = _return(made, server_dir)
 
@@ -275,7 +275,7 @@ def test_the_same_bytes_in_another_database_folder_do_not_count_as_shipped(
 ) -> None:
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir)
-    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_AUTH)] = {"x.sql": NEWER}
+    rec.byte_trees[(server_dir / CORE.dest, CORE_PIN, CORE_AUTH)] = {"x.sql": NEWER}
 
     _said, raised = _return(made, server_dir)
 
@@ -299,7 +299,9 @@ def test_an_older_name_that_sorts_after_the_target_is_still_lacked(tmp_path: Pat
     """No "sorts after" shortcut: Tortoise's ledger has no order, only hashes."""
     rec, server_dir, made = _ready(tmp_path)
     key = _core_newer(rec, server_dir)
-    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {"zzz_later.sql": b"-- other\n"}
+    rec.byte_trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {
+        "zzz_later.sql": b"-- other\n"
+    }
 
     _said, raised = _return(made, server_dir)
 
@@ -313,7 +315,7 @@ def test_an_older_name_that_sorts_after_the_target_is_still_lacked(tmp_path: Pat
 def test_git_that_cannot_list_a_folder_refuses(tmp_path: Path, which: str) -> None:
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
-    rec.trees[(dest, OLD if which == "old" else CORE_PIN, CORE_AUTH)] = None
+    rec.byte_trees[(dest, OLD if which == "old" else CORE_PIN, CORE_AUTH)] = None
 
     _said, raised = _return(made, server_dir)
 
@@ -363,13 +365,43 @@ def test_a_database_with_no_migrations_table_holds_none(tmp_path: Path) -> None:
     assert not _asked(rec), "the ledger was read from a database with no ledger"
 
 
+def test_the_database_is_started_with_the_compose_files_the_install_wrote(
+    tmp_path: Path,
+) -> None:
+    """T630's live finding (m910q): a start after the move must see Yu'lon's compose files.
+
+    Tortoise's sources live in `src/`, so no fetch can replace the server folder's compose;
+    the database-alone start the check makes reads exactly the files the install wrote.
+    """
+    from dataclasses import replace
+
+    from tests.test_update_to_latest import _compose_on_disk
+
+    rec, server_dir, made = _ready(tmp_path)
+    _core_newer(rec, server_dir)
+    before = _compose_on_disk(server_dir)
+    assert before, "the ground: the install wrote compose files"
+    seen: list[dict[str, tuple[bytes, int, int]]] = []
+
+    def start_db(*args: object, **kwargs: object) -> None:
+        seen.append(_compose_on_disk(server_dir))
+        rec.start_db(*args, **kwargs)  # type: ignore[arg-type]
+
+    made._seams = replace(made._seams, start_db=start_db)
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and seen, "the check never started the database"
+    assert seen == [before], "the database was started over compose files the install did not write"
+
+
 # -- the database goes back down ----------------------------------------------------------
 
 
 def test_a_database_the_check_started_goes_down_again_on_refusal(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir)
-    rec.db_up = False
+    rec.db_was_up = False
 
     _said, raised = _return(made, server_dir)
 
@@ -384,7 +416,7 @@ def test_a_database_the_check_started_goes_down_again_on_refusal(tmp_path: Path)
 def test_a_database_that_was_up_is_left_up(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir)
-    rec.db_up = True
+    rec.db_was_up = True
 
     _said, raised = _return(made, server_dir)
 
@@ -477,7 +509,7 @@ def test_a_module_character_migration_is_read_from_the_folder_its_install_rule_n
 ) -> None:
     """TortoiseBots keeps `data/sql/char`; the image's `data/sql/character` is not in the repo."""
     rec, server_dir, made = _ready(tmp_path)
-    rec.trees[(server_dir / BOTS.dest, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(server_dir / BOTS.dest, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
     rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
 
     _said, raised = _return(made, server_dir)
@@ -495,10 +527,10 @@ def test_the_install_rule_is_read_at_each_commit(tmp_path: Path) -> None:
     """The target's own rules decide where ITS files are; a rule the old commit lacks counts."""
     rec, server_dir, made = _ready(tmp_path)
     bots = server_dir / BOTS.dest
-    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
     rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
     # The target ships the same bytes, but its rules install nothing from `char`.
-    rec.trees[(bots, BOTS_PIN, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, BOTS_PIN, BOTS_CHAR)] = {CHAR_NAME: CHAR}
     rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.split(
         b'if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/char")'
     )[0]
@@ -514,8 +546,8 @@ def test_a_return_across_the_source_folder_rename_counts_the_same_file_as_shippe
     """The running commit keeps `data/sql/char`, the target `data/sql/character`: same bytes."""
     rec, server_dir, made = _ready(tmp_path)
     bots = server_dir / BOTS.dest
-    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
-    rec.trees[(bots, BOTS_PIN, "data/sql/character")] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, BOTS_PIN, "data/sql/character")] = {CHAR_NAME: CHAR}
     rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.replace(
         b"data/sql/char/", b"data/sql/character/"
     ).replace(b'data/sql/char")', b'data/sql/character")')
@@ -530,8 +562,8 @@ def test_a_return_across_the_source_folder_rename_counts_the_same_file_as_shippe
 def test_a_file_the_renamed_source_folder_does_not_carry_is_still_lacked(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     bots = server_dir / BOTS.dest
-    rec.trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
-    rec.trees[(bots, BOTS_PIN, "data/sql/character")] = {}
+    rec.byte_trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, BOTS_PIN, "data/sql/character")] = {}
     rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.replace(
         b"data/sql/char/", b"data/sql/character/"
     ).replace(b'data/sql/char")', b'data/sql/character")')
@@ -548,7 +580,7 @@ def test_a_module_with_sql_and_no_install_rule_refuses(tmp_path: Path, rev: str)
     bots = server_dir / BOTS.dest
     at = OLD if rev == "old" else BOTS_PIN
     rec.blobs[(bots, at, BOTS_CMAKE)] = b"# nothing installs data/sql here\n"
-    rec.trees[(bots, at, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    rec.byte_trees[(bots, at, BOTS_CHAR)] = {CHAR_NAME: CHAR}
 
     _said, raised = _return(made, server_dir)
 
@@ -560,7 +592,7 @@ def test_a_module_with_sql_and_no_install_rule_refuses(tmp_path: Path, rev: str)
 def test_a_module_cmake_git_cannot_read_refuses(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     del rec.blobs[(server_dir / BOTS.dest, OLD, BOTS_CMAKE)]
-    rec.trees[(server_dir / BOTS.dest, OLD, BOTS_CMAKE)] = None
+    rec.byte_trees[(server_dir / BOTS.dest, OLD, BOTS_CMAKE)] = None
 
     _said, raised = _return(made, server_dir)
 
@@ -573,7 +605,7 @@ def test_a_database_the_check_started_goes_down_again_when_nothing_was_applied(
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir, applied=False)
     rec.migrations["tw_world"] = f":{_hash(OLDER)}\n"
-    rec.db_up = False
+    rec.db_was_up = False
 
     said, raised = _return(made, server_dir)
 
@@ -586,7 +618,7 @@ def test_a_database_that_was_up_stays_up_when_nothing_was_applied(tmp_path: Path
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir, applied=False)
     rec.migrations["tw_world"] = f":{_hash(OLDER)}\n"
-    rec.db_up = True
+    rec.db_was_up = True
 
     _said, raised = _return(made, server_dir)
 
@@ -599,8 +631,11 @@ def test_a_migration_upstream_deleted_is_older_than_the_target_not_newer(tmp_pat
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     gone = b"-- deleted upstream\n"
-    rec.trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260601000000_world.sql": gone}
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER, "20261101000000_world.sql": b"x"}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260601000000_world.sql": gone}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {
+        OLDER_NAME: OLDER,
+        "20261101000000_world.sql": b"x",
+    }
     rec.migrations["tw_world"] = f":{_hash(gone)}\n:{_hash(OLDER)}\n"
 
     said, raised = _return(made, server_dir)
@@ -612,7 +647,7 @@ def test_a_migration_upstream_deleted_is_older_than_the_target_not_newer(tmp_pat
 def test_a_deleted_migration_that_sorts_after_the_target_is_still_newer(tmp_path: Path) -> None:
     rec, server_dir, made = _ready(tmp_path)
     key = _core_newer(rec, server_dir)
-    rec.trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.byte_trees[(server_dir / CORE.dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
 
     _said, raised = _return(made, server_dir)
 
@@ -624,8 +659,8 @@ def test_an_undated_deleted_migration_is_never_skipped_for_sorting(tmp_path: Pat
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     odd = b"-- odd name\n"
-    rec.trees[(dest, OLD, CORE_WORLD)] = {"0aaa_odd.sql": odd}
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {"0aaa_odd.sql": odd}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
     rec.migrations["tw_world"] = f":{_hash(odd)}\n"
 
     _said, raised = _return(made, server_dir)
@@ -639,8 +674,8 @@ def test_the_world_file_the_image_rewrites_is_asked_by_its_rewritten_hash(tmp_pa
     dest = server_dir / CORE.dest
     original = b"INSERT INTO `t` VALUES (7);\n  INSERT INTO `u` VALUES (8);\n"
     rewritten = b"INSERT IGNORE INTO `t` VALUES (7);\n  INSERT IGNORE INTO `u` VALUES (8);\n"
-    rec.trees[(dest, OLD, CORE_WORLD)] = {"20260903063722_world.sql": original}
-    rec.trees[(dest, CORE_PIN, CORE_WORLD)] = {}
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {"20260903063722_world.sql": original}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {}
     rec.migrations["tw_world"] = f":{_hash(rewritten)}\n"
 
     _said, raised = _return(made, server_dir)
@@ -662,7 +697,7 @@ def test_an_update_to_latest_is_not_asked(tmp_path: Path) -> None:
     _said, raised = _return(made, server_dir, to_pin=False)
 
     assert raised is None, raised
-    assert not any(call.startswith("tree-files:") for call in rec.calls)
+    assert not any(call.startswith("tree-bytes:") for call in rec.calls)
     assert not _asked(rec)
 
 
@@ -682,7 +717,7 @@ def test_a_family_whose_conf_has_no_auto_updater_is_not_asked(tmp_path: Path) ->
     """TBC's `refuse_new` already refuses a move that touches core migrations."""
     rec, server_dir, made = _cmangos(tmp_path, TBC)
     _said, raised = _return(made, server_dir)
-    assert not any(call.startswith("tree-files:") for call in rec.calls)
+    assert not any(call.startswith("tree-bytes:") for call in rec.calls)
     assert "database migrations" not in str(raised), raised
 
 
@@ -737,8 +772,8 @@ def _tar(files: dict[str, bytes]) -> bytes:
 def test_the_tar_is_read_byte_for_byte() -> None:
     crlf = b"SELECT 1;\r\nSELECT 2;\r\n"
     raw = _tar({"sql/u/a.sql": crlf, "sql/u/sub/c.sql": b"nested"})
-    assert git.parse_tree_files(raw) == {"sql/u/a.sql": crlf, "sql/u/sub/c.sql": b"nested"}
-    assert git.parse_tree_files(b"not a tar") is None
+    assert git.parse_tree_bytes(raw) == {"sql/u/a.sql": crlf, "sql/u/sub/c.sql": b"nested"}
+    assert git.parse_tree_bytes(b"not a tar") is None
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -765,8 +800,8 @@ def test_real_git_lists_a_commits_files_not_the_disks(tmp_path: Path) -> None:
     (folder / "a.sql").write_bytes(b"edited on disk")
 
     impl = git.RunnerGit()
-    assert impl.tree_files(repo, first, "sql/u") == {"sql/u/a.sql": b"one\r\n"}
-    assert impl.tree_files(repo, first, "sql/u/a.sql") == {"sql/u/a.sql": b"one\r\n"}
-    assert impl.tree_files(repo, first, "sql/none") == {}
-    assert impl.tree_files(repo, "f" * 40, "sql/u") is None
-    assert impl.tree_files(tmp_path, first, "sql/u") is None
+    assert impl.tree_bytes(repo, first, "sql/u") == {"sql/u/a.sql": b"one\r\n"}
+    assert impl.tree_bytes(repo, first, "sql/u/a.sql") == {"sql/u/a.sql": b"one\r\n"}
+    assert impl.tree_bytes(repo, first, "sql/none") == {}
+    assert impl.tree_bytes(repo, "f" * 40, "sql/u") is None
+    assert impl.tree_bytes(tmp_path, first, "sql/u") is None

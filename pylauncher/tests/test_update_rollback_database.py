@@ -416,12 +416,15 @@ def _asked_ready(rec: Recorder, answers: list[bool]) -> Callable[[object, object
     return wait_ready
 
 
-def test_a_rollback_forgets_older_copies_only_after_the_old_build_reported_ready(
+def test_a_rollback_forgets_no_older_copy_even_once_the_old_build_reported_ready(
     tmp_path: Path,
 ) -> None:
     """Live proof 2026-10-05, item 5: the copies went in the second the old build was recreated.
 
-    It then crash-looped, and the last copies holding the tables it needed were gone.
+    It then crash-looped, and the last copies holding the tables it needed were gone. Until
+    T633 they went once the old build reported ready; since the owner's "Delete only after
+    success" (2026-10-09) a rolled-back press forgets none: the A-press of T630 lost the only
+    copy from before the earlier update that way.
     """
     rec, server_dir, make = _spine(tmp_path, WOTLK)
     made = make(wait_ready=_asked_ready(rec, [False, True]))
@@ -431,7 +434,7 @@ def test_a_rollback_forgets_older_copies_only_after_the_old_build_reported_ready
     assert "is running again" in str(raised.value)
     old_up = _at(rec.calls, "ready?yes")
     assert _at(rec.calls, "put-back:") < old_up
-    assert rec.calls.count("prune") == 1 and _at(rec.calls, "prune") > old_up, rec.calls
+    assert "prune" not in rec.calls, rec.calls
 
 
 def test_an_old_build_that_does_not_come_up_after_the_put_back_keeps_every_copy_and_stops(
@@ -723,7 +726,8 @@ def test_a_kept_build_keeps_the_database_it_changed_and_names_the_copy_as_not_ne
     assert f"The copy of {WOTLK_LISTED} taken before it started is kept in" in text
     assert fake.taken[0].files[0].name in text and "it was not needed" in text
     assert _moving_heads(rec, server_dir, made) == {NEW}
-    assert "prune" in rec.calls, "the kept build's copy is the last one; older ones go"
+    # T633: the press did not succeed, so no older copy is forgotten.
+    assert "prune" not in rec.calls, rec.calls
 
 
 @pytest.mark.parametrize("how", ["stop-refused", "name-refused", "retag-refused"])

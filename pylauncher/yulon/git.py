@@ -926,12 +926,22 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
-def tree_files_args(rev: str, path: str) -> list[str]:
-    """`git archive --format=tar <rev> -- <path>`: a file or folder at a commit, as bytes."""
+def tree_files_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git ls-tree -r -z --name-only <rev> -- <paths>`: the files one commit tracks (T630)."""
+    return ["ls-tree", "-r", "-z", "--name-only", rev, "--", *paths]
+
+
+def parse_tree_files(raw: str) -> tuple[str, ...]:
+    """The paths of a `ls-tree -z --name-only` answer, unquoted, in git's order."""
+    return tuple(path for path in raw.split("\0") if path)
+
+
+def tree_bytes_args(rev: str, path: str) -> list[str]:
+    """`git archive --format=tar <rev> -- <path>`: a file or folder at a commit, as bytes (T632)."""
     return ["archive", "--format=tar", rev, "--", path]
 
 
-def parse_tree_files(raw: bytes) -> dict[str, bytes] | None:
+def parse_tree_bytes(raw: bytes) -> dict[str, bytes] | None:
     """`{repository path: exact bytes}` of every regular file in a `git archive` tar, or None.
 
     Bytes and not text: Tortoise's AutoUpdater hashes each migration file's exact bytes,
@@ -953,8 +963,30 @@ def parse_tree_files(raw: bytes) -> dict[str, bytes] | None:
 
 
 def folder_is_absent(listing: str) -> bool:
-    """`git ls-tree -z --name-only` printed nothing: the folder is not in that commit."""
+    """`git ls-tree -z --name-only` printed nothing: the path is not in that commit."""
     return not listing.strip("\0")
+
+
+def file_lines_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git grep -z -I --no-color -e "" <rev> -- <paths>`: every line of the files, one run (T630).
+
+    `-e ""` matches every line, empty ones too, and `-z` puts a NUL after each
+    `<rev>:<path>`, so an answer splits cleanly whatever a line holds. `-I` leaves
+    binary files out; `--no-color` and no pager, so nothing a config sets is run.
+    """
+    return ["grep", "-z", "-I", "--no-color", "-e", "", rev, "--", *paths]
+
+
+def parse_file_lines(raw: str, rev: str) -> dict[str, tuple[str, ...]]:
+    """`{path: lines}` from a `file_lines_args()` answer; a file with no lines is absent."""
+    found: dict[str, list[str]] = {}
+    lead = f"{rev}:"
+    for record in raw.split("\n"):
+        name, sep, line = record.partition("\0")
+        if not sep:
+            continue
+        found.setdefault(name.removeprefix(lead), []).append(line)
+    return {path: tuple(lines) for path, lines in found.items()}
 
 
 def changed_lines_args(old: str, new: str, path: str) -> list[str]:
@@ -1615,7 +1647,42 @@ class RunnerGit:
             return None
         return parse_changed_files(proc.stdout)
 
-    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """Each of `paths`' lines at commit `rev`, in one run. None = cannot ask (T630).
+
+        `git grep` exits 1 when nothing matched -- only files with no lines at all --
+        which is an answer (no lines), not a failure.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run(["git", *file_lines_args(rev, paths)], cwd=dest, env=_no_prompt_env())
+        except OSError as exc:
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        if proc.returncode not in (0, 1):
+            logger.debug(f"could not read the files {rev} has in {dest}: {proc.stderr.strip()}")
+            return None
+        return parse_file_lines(proc.stdout, rev)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
+
+        The commit's own list, not the disk's: an untracked file, or one a sparse
+        checkout leaves out, is not something the commit ships.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *tree_files_args(rev, paths)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
         """`{repository path: bytes}` of the files under `path` (a file or folder) at `rev` (T632).
 
         From the commit's own tree, never from the working tree: an untracked or edited
@@ -1626,10 +1693,10 @@ class RunnerGit:
             return None
         try:
             proc = runner.run_bytes(
-                ["git", *tree_files_args(rev, path)], cwd=dest, env=_no_prompt_env()
+                ["git", *tree_bytes_args(rev, path)], cwd=dest, env=_no_prompt_env()
             )
             if proc.returncode == 0:
-                return parse_tree_files(proc.stdout)
+                return parse_tree_bytes(proc.stdout)
             tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", path], cwd=dest)
         except (GitError, OSError) as exc:
             logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
@@ -2544,15 +2611,42 @@ class ContainerGit:
             return None
         return parse_changed_files(proc.stdout)
 
-    def tree_files(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
-        """`RunnerGit.tree_files()`, containerised: the read-only container, no network (T632)."""
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """`RunnerGit.file_lines()`, containerised; `writes=False`, nothing is fetched (T630)."""
         if not (dest / ".git").is_dir():
             return None
         try:
-            argv = self._argv(self._launcher(), dest, tree_files_args(rev, path), writes=False)
+            proc = self._capture(dest, file_lines_args(rev, paths), writes=False)
+        except GitError as exc:
+            # `git grep` exits 1 with nothing on stderr when no line matched at all.
+            if str(exc).rstrip().endswith("exited 1:"):
+                return {}
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        return parse_file_lines(proc.stdout, rev)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, tree_files_args(rev, paths), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`RunnerGit.tree_bytes()`, containerised: the read-only container, no network (T632)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            argv = self._argv(self._launcher(), dest, tree_bytes_args(rev, path), writes=False)
             proc = runner.run_bytes(argv, env=_no_prompt_env())
             if proc.returncode == 0:
-                return parse_tree_files(proc.stdout)
+                return parse_tree_bytes(proc.stdout)
             tree = self._capture(
                 dest, ["ls-tree", "-z", "--name-only", rev, "--", path], writes=False
             )
