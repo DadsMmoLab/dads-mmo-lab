@@ -1274,5 +1274,6 @@ def test_the_catalog_names_the_build_a_players_own_client_must_report_t576() -> 
     assert cat.get("wow-centurion").client.required_build == 12340
     assert cat.get("wow-unbound").client.required_build == 12340
     assert cat.get("wow-centurion").client.build == 12342
-    assert cat.get("wow-tbc").client.required_build is None
-    assert cat.get("wow-vanilla").client.required_build is None
+    # T594: the games that read the player's client at Install name their builds too (see
+    # test_install_client_build.py); a TBC/Vanilla/Tortoise number is no longer None.
+    assert cat.get("wow-tbc").client.required_build == 8606

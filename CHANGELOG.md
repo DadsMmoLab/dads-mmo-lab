@@ -23,6 +23,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
+- Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
+- A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.
 - A new Tortoise server no longer fills its log with every database query; older ones get this with **Reset to defaults**.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.

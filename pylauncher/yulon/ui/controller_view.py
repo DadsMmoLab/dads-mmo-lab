@@ -10861,6 +10861,7 @@ class ControllerView(QWidget):
             steam_module.client_executable(client_dir),
             version=client.version,
             build=client.required_build,
+            also=client.also_builds,
         )
 
     def _client_dir_busy(self) -> bool:

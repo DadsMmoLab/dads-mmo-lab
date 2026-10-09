@@ -596,6 +596,7 @@
       "client": {
         "version": "2.4.3",
         "build": 8606,
+        "required_build": 8606,
         "notes": [
           "A Vanilla client is the wrong version — the installer checks for this."
         ]
@@ -1038,6 +1039,11 @@
       "client": {
         "version": "1.12.1",
         "build": 5875,
+        "required_build": 5875,
+        "also_builds": [
+          6005,
+          6141
+        ],
         "notes": [
           "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
         ]
@@ -1447,6 +1453,8 @@
       "client": {
         "version": "1.18.1",
         "build": 7272,
+        "required_build": 5875,
+        "foreign_data_dies_after": "Loading transport templates...",
         "notes": [
           "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
         ]

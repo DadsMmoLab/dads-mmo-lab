@@ -2843,11 +2843,41 @@ class Client(_Strict):
             "`exe_patch` (Centurion: 12342). None: Yu'lon does not read the exe's build."
         ),
     )
+    also_builds: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        default=(),
+        description=(
+            "Further builds the server accepts besides `required_build` (T594): the Vanilla "
+            "world server takes 1.12.1, 1.12.2 and 1.12.3 (5875, 6005, 6141). Empty: only "
+            "`required_build`. Needs `required_build`."
+        ),
+    )
+    foreign_data_dies_after: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The world log's last line when a crash loop is the signature of a client whose "
+            "DATA files are not this server's (T593): Tortoise's world server dies right "
+            "after `Loading transport templates...` on a client whose TaxiPath/Lock tables "
+            "differ, exit 139. The exe's build cannot tell such a client apart (a Turtle exe "
+            "and a stock vanilla one both report 5875). SQL echo lines are ignored. None: "
+            "this server has no such known signature."
+        ),
+    )
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()
     exe_patch: ExePatch | None = None
     config_wtf: ConfigWtf | None = None
+
+    @model_validator(mode="after")
+    def _also_builds_extend_a_required_build(self) -> Client:
+        if self.also_builds and self.required_build is None:
+            raise ValueError("also_builds needs a required_build to extend")
+        if self.required_build in self.also_builds or len(set(self.also_builds)) != len(
+            self.also_builds
+        ):
+            raise ValueError(f"also_builds {list(self.also_builds)} repeats a build")
+        return self
 
     @model_validator(mode="after")
     def _packs_are_distinct(self) -> Client:
