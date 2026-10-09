@@ -463,7 +463,7 @@ def test_unbound_loads_the_same_character_question_through_its_user_game_store()
 def test_the_picker_says_how_many_bots_it_left_out(qapp: object) -> None:
     dialog = _dialog()
     said = dialog._controls["bot_guid"].status()  # type: ignore[attr-defined]  # noqa: SLF001
-    assert "1 playerbots characters are not listed" in said, said
+    assert "1 playerbots character is not listed" in said, said
 
 
 def test_the_typed_account_box_appears_only_when_the_picker_is_typed(qapp: object) -> None:

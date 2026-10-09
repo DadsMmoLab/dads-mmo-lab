@@ -95,9 +95,10 @@ class CharacterPicker(QWidget):
         if not roster.characters:
             notes.append(NONE_YET)
         if roster.bots_left_out:
+            many = roster.bots_left_out != 1
             notes.append(
-                f"{roster.bots_left_out} playerbots characters are not listed: "
-                "a bot character used here can crash the server."
+                f"{roster.bots_left_out} playerbots {'characters are' if many else 'character is'}"
+                " not listed: a bot character used here can crash the server."
             )
         self._status.setText(" ".join(notes))
         self._status.setVisible(bool(notes))

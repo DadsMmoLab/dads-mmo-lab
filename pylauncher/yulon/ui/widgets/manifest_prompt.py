@@ -232,7 +232,8 @@ class ManifestPromptDialog(QDialog):
         form.setContentsMargins(0, 0, 0, 0)
         form.setColumnStretch(0, 3)
         form.setColumnStretch(1, 2)
-        for row, prompt in enumerate(self._prompts):
+        row = 0
+        for prompt in self._prompts:
             label = QLabel(prompt.question, rows)
             label.setWordWrap(True)
             control = self._control_for(prompt, rows)
@@ -244,9 +245,18 @@ class ManifestPromptDialog(QDialog):
                 self._follower_rows[prompt.key] = (label, control)
                 label.setVisible(False)
                 control.setVisible(False)
-            form.addWidget(label, row, 0)
-            form.addWidget(control, row, 1, Qt.AlignmentFlag.AlignVCenter)
-        form.setRowStretch(len(self._prompts), 1)
+            if prompt.key in self._pickers:
+                # A list of characters is wide: the question above it, the picker under it
+                # across both columns, so a row of "Name — account A, level 80, Human Warrior"
+                # is not cut off.
+                form.addWidget(label, row, 0, 1, 2)
+                form.addWidget(control, row + 1, 0, 1, 2)
+                row += 2
+            else:
+                form.addWidget(label, row, 0)
+                form.addWidget(control, row, 1, Qt.AlignmentFlag.AlignVCenter)
+                row += 1
+        form.setRowStretch(row, 1)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -294,12 +304,14 @@ class ManifestPromptDialog(QDialog):
             picker.select(self._answers.get(key, ""))
             self._picked(key)
         self._show_followers()
+        self._fit(self._scroll, self._rows, self._parent_widget)
 
     @Slot(object)
     def _roster_failed(self, exc: object) -> None:
         for picker in self._pickers.values():
             picker.set_failed(str(exc))
         self._show_followers()
+        self._fit(self._scroll, self._rows, self._parent_widget)
 
     def _show_followers(self) -> None:
         """A follower asks for its own number only where its picker is a typed box."""
@@ -342,9 +354,10 @@ class ManifestPromptDialog(QDialog):
         So the rows' height is asked of the form AT the viewport's width, now
         and on every resize (`eventFilter`).
         """
-        self._scroll, self._rows = scroll, rows
+        if not hasattr(self, "_scroll"):
+            scroll.viewport().installEventFilter(self)
+        self._scroll, self._rows, self._parent_widget = scroll, rows, parent
         scroll.setMinimumHeight(_ROWS_MIN_HEIGHT)
-        scroll.viewport().installEventFilter(self)
         width = max(self.sizeHint().width(), _MIN_WIDTH)
         chrome = self.sizeHint().width() - scroll.sizeHint().width()
         rows_h = self._rows_height(max(width - chrome, 1))
