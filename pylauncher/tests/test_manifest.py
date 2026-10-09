@@ -222,6 +222,7 @@ def test_a_migration_module_rides_only_on_one_direct_file() -> None:
         {**step, "applied_by": "db-import"},
         {**step, "migration_module": ""},
         {**step, "migration_module": "a'b"},
+        {**step, "precondition": _ROSTER_PRECONDITION},
     ):
         with pytest.raises(ValidationError):
             parse_manifest({**README_EXAMPLE, "sql": [bad]})

@@ -277,15 +277,21 @@ class SqlStep(_Strict):
                     "can be put inside its transaction"
                 )
         if self.migration_module is not None and (
-            self.path is None or _glob_chars(self.path) or self.then or self.applied_by != "direct"
+            self.path is None
+            or _glob_chars(self.path)
+            or self.then
+            or self.applied_by != "direct"
+            or self.precondition is not None
         ):
             # T596. A ledger row is one file's hash, written by the program that ran
             # the file: a glob or a chain has no one hash, an inline statement has no
             # file the server's updater could ever match, and a db-import file is the
-            # updater's to record.
+            # updater's to record. No precondition either (Codex review): the updater
+            # has none, and a file skipped by one would still count as sent for a
+            # later file of the same bytes.
             raise ValueError(
                 "SqlStep.migration_module needs one direct `path` file: no glob, no `then`, "
-                "no inline statement"
+                "no inline statement, no precondition"
             )
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
