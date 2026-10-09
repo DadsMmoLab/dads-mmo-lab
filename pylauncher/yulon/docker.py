@@ -2082,6 +2082,21 @@ def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> s
     return proc.stdout.strip() or None
 
 
+def engine_size(*, wsl_distro: str | None = None, timeout: float = 10.0) -> tuple[int, int] | None:
+    """The daemon's own CPU count and memory in bytes (T636), or `None` when it does not say.
+
+    On Docker Desktop this is the WSL2 VM's limit, not the PC's. A read, bounded,
+    never raising, like `server_version`.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.NCPU}} {{.MemTotal}}"], wsl_distro=wsl_distro, timeout=timeout
+    )
+    parts = proc.stdout.split()
+    if proc.returncode != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
 @_a_lifecycle_command
 def remove_staged(
     spec: ContainerSpec,

@@ -1570,3 +1570,20 @@ def _no_server_reservation_runs_at_a_real_docker() -> Iterator[None]:
     docker.RESERVATIONS_ON = False
     yield
     docker.RESERVATIONS_ON = was
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_probes_in_the_support_file(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """`system-info.txt` (T636) asks Docker and the OS how big the machine is; no unit test does.
+
+    Patched where `system_info` looks them up, so a test that hands its own
+    `machine=`/`engine=` (or calls `machine.machine_lines` itself) is untouched.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    from yulon.support import sources
+
+    monkeypatch.setattr(sources, "docker_size", lambda distro: None)
+    monkeypatch.setattr(sources, "machine_lines", lambda: ["CPU: test"])

@@ -110,6 +110,8 @@ class Seams:
 
     live_logs: Callable[[InstallFacts, SilentTargets], list[LiveLog]] = _collect_live_logs
     docker_version: Callable[[str | None], str | None] = src.docker_version
+    machine: Callable[[], list[str]] | None = None
+    docker_size: Callable[[str | None], tuple[int, int] | None] | None = None
     now: Callable[[], datetime] = _utc_now
 
 
@@ -334,7 +336,13 @@ def build(
         collector.live(install, seams.live_logs, silent)
         collector.confs(install)
     # After the live logs, so a docker that went silent there is not asked for its version.
-    info = src.system_info(sources, seams.docker_version, silent_targets=silent)
+    info = src.system_info(
+        sources,
+        seams.docker_version,
+        silent_targets=silent,
+        machine=seams.machine,
+        engine=seams.docker_size,
+    )
     collector.text("system-info.txt", info, "info")
     stamp = seams.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
