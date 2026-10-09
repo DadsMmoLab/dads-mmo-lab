@@ -57,6 +57,7 @@ def backup(
     return _shared.backup(
         server_dir,
         mysql,
+        game=_shared.game_of(entry),
         only=only,
         label=label,
         spec=entry.container_spec(),
@@ -83,6 +84,7 @@ def plan_restore(
     return _shared.plan_restore(
         backup_file,
         server_dir,
+        game=_shared.game_of(entry),
         spec=entry.container_spec(),
         running=running,
         wsl_distro=wsl_distro,
@@ -104,6 +106,7 @@ def restore(
     return _shared.restore(
         plan,
         mysql,
+        game=_shared.game_of(entry),
         confirm=confirm,
         spec=entry.container_spec(),
         core_databases=entry.core_databases(),

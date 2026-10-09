@@ -76,6 +76,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A port the server cannot use is said in plain words, and a failed start shows Docker's error first.
 - A WotLK game client that is not build 12340 is named and refused, instead of dropping you after the password.
 - The **A module this app does not ship** box says when a game cannot take your own modules, instead of two dead buttons.
+- Restore refuses a backup made on another game, such as WotLK onto Unbound, and asks about an old one.
 
 ### Changed
 - Each WotLK-style server now has its own container names and ports, so a second one can run beside WotLK.
