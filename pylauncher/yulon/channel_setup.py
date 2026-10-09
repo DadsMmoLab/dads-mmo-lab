@@ -1342,7 +1342,7 @@ class InstallChannel:
         exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
-        hold_server: Callable[..., AbstractContextManager[object]] | None = None,
+        hold_server: docker.BudgetedHold | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir

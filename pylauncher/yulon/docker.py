@@ -38,7 +38,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, TypeVar
+from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
 from yulon import ansi, container_end, forgetting, platform, runner, server_build_presses, wsl
 from yulon.after_stop import StopTookEffect, TrueAfterStop
@@ -579,6 +579,19 @@ def _reserved_for(
                 raise
             logger.warning(f"{press} on {server_dir} without a reservation: {exc}")
         yield
+
+
+class BudgetedHold(Protocol):
+    """A server hold that may be asked to bound its take: `hold(press)` or `hold(press, budget=)`.
+
+    What `ui.controller_view._server_hold_for` builds and the command channel is handed (T610): a
+    hold that takes only `press` would fail only when a budget is set, so a mis-wired one is a
+    type error instead.
+    """
+
+    def __call__(
+        self, press: str, *, budget: float | None = ...
+    ) -> contextlib.AbstractContextManager[None]: ...
 
 
 GUI_HOLD_BUDGET_SECONDS = 15.0

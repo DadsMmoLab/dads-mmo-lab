@@ -235,9 +235,32 @@ def _constructions(callee: str) -> list[tuple[str, int, bool]]:
                 else node.func.id if isinstance(node.func, ast.Name) else ""
             )
             if name == callee:
-                held = "hold_server" in {k.arg for k in node.keywords}
-                found.append((path.name, node.lineno, held))
+                found.append((path.name, node.lineno, _wires_a_hold(node)))
     return found
+
+
+def _wires_a_hold(call: ast.Call) -> bool:
+    """True if the call passes `hold_server=` something that is not the literal `None`."""
+    return any(
+        keyword.arg == "hold_server"
+        and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
+        for keyword in call.keywords
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "wired"),
+    [
+        ("InstallPlay(a, hold_server=hold)", True),
+        ("InstallPlay(a, hold_server=_server_hold_for(e))", True),
+        ("InstallPlay(a, hold_server=None)", False),
+        ("InstallPlay(a)", False),
+    ],
+)
+def test_the_construction_guard_rejects_a_missing_or_none_hold(source: str, wired: bool) -> None:
+    """Mutation: count the keyword's presence alone, as the guard did, and `=None` passes."""
+    call = ast.parse(source).body[0].value  # type: ignore[attr-defined]
+    assert _wires_a_hold(call) is wired
 
 
 @pytest.mark.parametrize("callee", ["InstallAccounts", "InstallPlay"])

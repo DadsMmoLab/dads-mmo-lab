@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, assert_never, cast
+from typing import Any, NamedTuple, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -2740,14 +2740,16 @@ def _server_hold_for(
     *,
     wsl_distro: str | None,
     budget: float | None = None,
-) -> Callable[[str], contextlib.AbstractContextManager[None]]:
+) -> docker.BudgetedHold:
     """This server's cross-process hold, as the `hold_server` seam every writer is given (T610).
 
     A `budget` is for a seam the GUI thread calls: the take and the release are bounded by it. A
     caller may pass its own per call (`hold(press, budget=...)`): the channel's roll-back does.
     """
 
-    def hold(press: str, budget: float | None = budget) -> contextlib.AbstractContextManager[None]:
+    def hold(
+        press: str, *, budget: float | None = budget
+    ) -> contextlib.AbstractContextManager[None]:
         return docker.server_hold(
             server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name, budget=budget
         )
@@ -2755,16 +2757,23 @@ def _server_hold_for(
     return hold
 
 
+_R = TypeVar("_R")
+
+
 def _under_the_hold(
     hold: Callable[[str], contextlib.AbstractContextManager[None]],
     press: str,
-    call: Callable[[str, str, int], wotlk_accounts.AccountResult],
-) -> Callable[[str, str, int], wotlk_accounts.AccountResult]:
-    """`call` run inside the server's hold; a held server raises its sentence, nothing written."""
+    call: Callable[..., _R],
+) -> Callable[..., _R]:
+    """`call` run inside the server's hold; a held server raises its sentence, nothing written.
 
-    def held(name: str, password: str, level: int) -> wotlk_accounts.AccountResult:
+    The sentence is `docker.ServerHeldError`'s, raised before `call` runs (T610, T622). For the
+    seams a job runs: the wait for the hold is then off the GUI thread.
+    """
+
+    def held(*args: Any, **kwargs: Any) -> _R:
         with hold(press):
-            return call(name, password, level)
+            return call(*args, **kwargs)
 
     return held
 
@@ -2831,7 +2840,12 @@ def _assemble(
         network_plan=lambda mode: networking.plan(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
-        network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        # T622: the realmlist row and the applied mode's file are written under the server's hold.
+        network_apply=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Apply the network plan",
+            lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        ),
         # T610: the account row is written under the server's cross-process hold, in the shared
         # half so that every game's factory gets it (five of them pass their own writer).
         create_account=_under_the_hold(
@@ -2944,7 +2958,12 @@ def _assemble(
         # T94. HERE for the rebuild's reason: the file set and how each default
         # is made are catalog facts every game's tab reads the same way. The
         # WSL refusal lives in the route, where the distro is known.
-        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T622: written under the server's hold, as the Tuning saves are.
+        reset_settings=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Put settings back to how they were",
+            reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        ),
         # T106. Here for the rebuild's reason: which installs are offered it is a
         # fact of `catalog.json` (the family) and of the install (its distro),
         # both answered in `install_wiring`.
@@ -2970,10 +2989,18 @@ def _assemble(
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
-        bot_population=botpop.bot_count_route(entry, server_dir),
+        bot_population=botpop.bot_count_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T171. HERE for T99's reason: the file and the services are catalog
         # facts, and it is files only, so a server inside a WSL distro is served.
-        time_zone=server_time_zone.time_zone_route(entry, server_dir),
+        time_zone=server_time_zone.time_zone_route(
+            entry,
+            server_dir,
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        ),
         # T179. HERE for T171's reason: whether a server makes its movement maps
         # in the background is a catalog fact (`mmaps.background_block`).
         pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
@@ -3382,6 +3409,7 @@ def _for_wotlk(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         ),
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
@@ -3851,6 +3879,7 @@ def _for_vanilla(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
@@ -4022,6 +4051,7 @@ def _for_centurion(
             logs_dir=platform.config_dir() / "logs",
             wsl_distro=wsl_distro,
             forget=forget_record(entry.id, server_dir),
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         ),
         controller=centurion_controller.CenturionController(
             entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -14665,7 +14695,11 @@ class ControllerView(QWidget):
     def _bot_count_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and the box read again."""
         self._bot_count_writing = False
-        self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.bot_count_report.setText(str(exc))
+        else:
+            self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
         self.action_failed.emit(str(exc))
         self._look_up_bot_count()
 
@@ -14937,7 +14971,10 @@ class ControllerView(QWidget):
     def _time_zone_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
         self._time_zone_writing = False
-        if isinstance(exc, server_time_zone.TimeZoneSettingError):
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): its sentence alone, nothing written.
+            self.tuning_report.setPlainText(str(exc))
+        elif isinstance(exc, server_time_zone.TimeZoneSettingError):
             self.tuning_report.setPlainText(f"The time zone was not changed: {exc}")
         else:  # T214: a bug's words are Details' and the log's
             self.tuning_report.setPlainText(TIME_ZONE_BROKE)
@@ -19762,6 +19799,12 @@ class ControllerView(QWidget):
         self._reset_running = False
         self._put_back_running = False
         self._set_busy(False)
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon holds the server (T622): nothing was written, so the last reset's
+            # record stands, the Undo stays on offer, and there is nothing to read again.
+            self.tuning_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
         self.tuning_report.setPlainText(TUNING_RESET_BROKE)
         self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
@@ -19839,12 +19882,18 @@ class ControllerView(QWidget):
         self._put_back_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
+        undo = partial(
+            _undo_still_undoable,
+            self.services.controller.server_dir,
+            items,
+            self.services.bot_pool_rebuild,
+        )
+        hold = self.services.hold_server
         self._run(
-            partial(
-                _undo_still_undoable,
-                self.services.controller.server_dir,
-                items,
-                self.services.bot_pool_rebuild,
+            (
+                undo
+                if hold is None
+                else _under_the_hold(hold, "Put back what the last reset replaced", undo)
             ),
             self._undo_done,
             self._reset_failed,
@@ -20440,6 +20489,12 @@ class ControllerView(QWidget):
     def _apply_failed(self, exc: object) -> None:
         """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
+        if isinstance(exc, docker.ServerHeldError):
+            # Another Yu'lon is working on this server (T622): its own sentence, nothing applied.
+            self.network_text.appendPlainText("\n" + str(exc))
+            self.action_failed.emit(str(exc))
+            self.apply_button.setEnabled(True)
+            return
         self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
         plan = self._plan
         held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]
