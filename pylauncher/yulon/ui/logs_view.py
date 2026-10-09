@@ -200,6 +200,27 @@ def _intro(*, short: bool) -> str:
     return text + "."
 
 
+def _left_out_text(report: bundle.BundleReport) -> str:
+    """One short clause per reason a log was left out of the zip, or "" when none was (T609).
+
+    MANIFEST.txt inside the zip names each one; the line on screen is what the player reads
+    before sending, so it says how many and why.
+    """
+    clauses = []
+    if report.dropped:
+        clauses.append(f"{_logs(len(report.dropped))} left out to keep the file small")
+    if report.unvouched:
+        n = len(report.unvouched)
+        it = "it" if n == 1 else "them"
+        clauses.append(f"{_logs(n)} left out because the cleaner could not vouch for {it}")
+    names = "it" if len(report.dropped) + len(report.unvouched) == 1 else "them"
+    return f" {', '.join(clauses)}; MANIFEST.txt names {names}." if clauses else ""
+
+
+def _logs(n: int) -> str:
+    return f"{n} log" if n == 1 else f"{n} logs"
+
+
 def _size_text(size: int) -> str:
     """Bytes as a person reads them: `3.2 MB`, `412 KB`. Decimal, as Discord states its limit."""
     if size >= 1_000_000:
@@ -506,7 +527,7 @@ class LogsView(QWidget):
             return
         skipped = (
             f" {len(report.skipped)} skipped, MANIFEST.txt says why." if report.skipped else ""
-        )
+        ) + _left_out_text(report)
         if report.short_passwords:
             text = (
                 f"Saved {report.path} ({_size_text(report.size)}).{skipped} "

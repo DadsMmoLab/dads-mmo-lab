@@ -192,10 +192,10 @@ def _masked(text: str, server_dir: Path, game: str, wsl_distro: str | None, logs
     return _vouched(Redactor.build(values, home=Path.home(), also_home=homes), text)
 
 
-_REMOVED_LINE = "[a line was removed: Yu'lon could not be sure it was free of passwords]\n"
+_REMOVED_LINE = "[a line was removed: Yu'lon could not be sure it was free of secrets]\n"
 """Stands where a line the cleaner could not vouch for was (T606)."""
 _REMOVED_ALL = (
-    "[this log was removed: Yu'lon could not be sure it was free of passwords. "
+    "[this log was removed: Yu'lon could not be sure it was free of secrets. "
     "Read it in the container with docker logs.]\n"
 )
 
