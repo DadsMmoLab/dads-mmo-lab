@@ -30263,3 +30263,28 @@ def test_a_fresh_install_with_no_client_folder_puts_nothing_in(
     applier.client_dir = None
     view.put_default_addons_in()
     assert applier.installed == []
+
+
+def test_a_fresh_install_waits_for_a_busy_tab_and_leaves_the_addons_to_the_next_play(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, applier, _ = _addon_view(ps, tmp_path, original=original)
+    view._busy = True
+    view.put_default_addons_in()
+    assert applier.installed == []
+    view._busy = False
+    view._module_pending = "install something-else"
+    view.put_default_addons_in()
+    assert applier.installed == []
+
+
+def test_a_fresh_install_writes_nothing_into_a_ready_to_play_folder_that_is_not_this_servers(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    stranger = tmp_path / "clients" / "not-a-play-client"
+    stranger.mkdir()
+    view, applier, _ = _addon_view(ps, tmp_path, play=stranger, original=original)
+    view.put_default_addons_in()
+    assert applier.installed == []
