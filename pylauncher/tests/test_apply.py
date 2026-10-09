@@ -668,12 +668,13 @@ def test_docker_sql_keeps_the_password_and_the_sql_out_of_argv(
             "ac-database",
             "mysql",
             "-uroot",
+            "--default-character-set=utf8mb4",
             "acore_characters",
         ]
     ]
     flat = " ".join(seen[0])
     assert "hunter2" not in flat and "secret" not in flat  # the whole point
-    assert kwargs_seen[0]["input"] == "SET PASSWORD = 'secret'"  # SQL over stdin
+    assert kwargs_seen[0]["input"] == b"SET PASSWORD = 'secret'"  # SQL over stdin
     env = kwargs_seen[0]["env"]
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"  # value only in the env
 
@@ -723,10 +724,81 @@ def test_docker_sql_query_keeps_the_password_and_the_sql_out_of_argv_as_well(
         ]
     ]
     assert rows == "12401\n"  # stdout: the rows are the answer, stderr is not
-    assert kwargs_seen[0]["input"] == "SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
+    assert kwargs_seen[0]["input"] == b"SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
     env = kwargs_seen[0]["env"]
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"
     assert "hunter2" not in " ".join(seen[0])
+
+
+# Text an outside package's SQL can carry: an accent and a curly apostrophe (both in cp1252),
+# Cyrillic (in no Western code page), and a string literal that spans lines.
+_UNICODE_SCRIPT = (
+    "UPDATE npc SET name = 'Caf\u00e9', text = 'it\u2019s',\n"
+    "  greeting = '\u041f\u0440\u0438\u0432\u0435\u0442\n  second line' WHERE id = 1;\n"
+)
+
+
+def test_a_statement_reaches_mysql_as_utf8_bytes_with_no_newline_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T596 review: the script is bytes on stdin, never text through the locale codec.
+
+    `text=True` with no `encoding=` encodes stdin with the LOCALE codec and turns
+    `\\n` into `\\r\\n` on Windows: `\u00e9` arrived as a cp1252 byte, a line break inside
+    a literal was stored as CRLF, a Cyrillic letter raised `UnicodeEncodeError` -- while
+    the migrations ledger recorded the SHA1 of the file's own bytes. Pinned at the
+    `subprocess.run` call, which is the only place that behaves differently per
+    platform: the bytes handed over, and no text-mode switch of any spelling.
+    """
+    import subprocess
+
+    kwargs_seen: list[dict[str, object]] = []
+    argv_seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv_seen.append(argv)
+        kwargs_seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    DockerSql("ac-database", "hunter2").run_statement("characters", _UNICODE_SCRIPT)
+
+    kwargs = kwargs_seen[0]
+    assert kwargs["input"] == _UNICODE_SCRIPT.encode("utf-8")
+    assert b"\r" not in kwargs["input"]  # type: ignore[operator]
+    for text_mode in ("text", "universal_newlines", "encoding", "errors"):
+        assert not kwargs.get(text_mode), f"{text_mode}= puts stdin through the locale codec"
+    flags = argv_seen[0][argv_seen[0].index("-uroot") + 1 : -1]
+    assert flags == ["--default-character-set=utf8mb4"], argv_seen[0]
+
+
+def test_a_statement_that_cannot_be_encoded_is_not_sent_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lone surrogate has no UTF-8 spelling: an `ApplyError` that proves nothing ran."""
+    import subprocess
+
+    from yulon.apply import SqlNotSent
+
+    def never(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise AssertionError("mysql must not be started for a script that cannot be encoded")
+
+    monkeypatch.setattr(subprocess, "run", never)
+    with pytest.raises(SqlNotSent, match="UTF-8"):
+        DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT '\ud800'")
+
+
+def test_what_mysql_answers_is_decoded_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes back are UTF-8 too: `\u00e9` as two bytes is one letter, not `\u00c3\u00a9`."""
+    import subprocess
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, "Caf\u00e9\r\n".encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert DockerSql("ac-database", "hunter2").query("auth", "SELECT 1") == "Caf\u00e9\n"
 
 
 def test_a_query_that_failed_raises_instead_of_looking_like_an_empty_result(

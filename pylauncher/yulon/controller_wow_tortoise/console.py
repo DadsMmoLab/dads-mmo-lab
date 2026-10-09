@@ -24,6 +24,7 @@ than what this file remembers.
 from __future__ import annotations
 
 import subprocess
+from typing import Any
 
 from yulon.controller_wow_tortoise import docker_ctl, game
 
@@ -58,11 +59,11 @@ def send(
     *,
     wsl_distro: str | None = None,
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
-    **kwargs: float,
+    **kwargs: Any,
 ) -> ConsoleReply:
     """Send one line to this install's worldserver console and return that command's answer.
 
-    `kwargs` forwards `window`, which bounds how long the console is listened
+    `kwargs` forwards `window` and `answer_marker`, which bound how long the console is listened
     to. Forwarded rather than given a value here: nobody has measured how long a
     mangosd takes to answer a command, and a number invented in this file would
     read like one that had been.

@@ -1,0 +1,12 @@
+# Settings for the Discord notifier script and its tests only (ci.yml job
+# `discord-scripts`). Same rules as pylauncher/pyproject.toml.
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
