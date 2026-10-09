@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
+- The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
 - Install now refuses a game client of the wrong version before it builds anything, and names the version it needs.
 - A Tortoise server that restarts while loading its transports now says the game client's data is the likely cause.
 - A new Tortoise server no longer fills its log with every database query; older ones get this with **Reset to defaults**.
