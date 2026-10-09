@@ -26,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Merged changes, new issues and releases now post to the Discord server, each with a short summary.
 
 ### Fixed
+- On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
 - On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
 - A server left behind when Yu'lon's tested server code moves on is offered **Return to the tested pin…** to catch up.
 - A module build that fails because it needs newer server code now says which server press builds it, and in what order.

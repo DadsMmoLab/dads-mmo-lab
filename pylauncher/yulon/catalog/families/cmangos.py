@@ -74,7 +74,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import dbsecret, docker, git, platform
+from yulon import core_modules, dbsecret, docker, git, platform
 from yulon.catalog import bot_count, bot_dashboard, composegen
 from yulon.catalog.catalog import (
     CmangosData,
@@ -570,7 +570,9 @@ class CmangosInstaller(StagedInstaller):
                 what = (
                     "is new"
                     if status.startswith("A")
-                    else "was removed" if status.startswith("D") else "changed"
+                    else "was removed"
+                    if status.startswith("D")
+                    else "changed"
                 )
                 yield (
                     f"{prefix}{path} ({phase.name}) {what} in {source.repo} since this server "
@@ -1598,6 +1600,9 @@ class CmangosInstaller(StagedInstaller):
                 self._public_tokens(ctx.server_dir),
                 secrets=ctx.secrets,
             )
+            clash = self._modules_that_take_the_cores_names(ctx.server_dir, text)
+            if clash is not None:
+                raise InstallerError(clash)
             written = dockerfile.write(ctx.server_dir, text, ignore)
             made = self._make_the_modules_folder(ctx.server_dir, text)
         except dockerfile.CarriedSecretError as exc:
@@ -1677,6 +1682,41 @@ class CmangosInstaller(StagedInstaller):
             yield "Made the modules/ folder the build copies in (no module is in it yet)."
 
     _COPIES_MODULES = re.compile(r"^COPY\s+(?:--\S+\s+)*modules/", re.MULTILINE)
+
+    def _modules_that_take_the_cores_names(
+        self, server_dir: Path, recipe: str | None = None
+    ) -> str | None:
+        """Refuse a build that lays a server module over a core module of the same name (T611).
+
+        A recipe that copies the server's `modules/` over the core's (Tortoise's, for the
+        modules a player brought) mixes two modules of one name into a single folder, file by
+        file. A name taken at Install is refused there; this is the Rebuild's own look, because
+        "Update to latest" can move the core onto a module of that name afterwards. `recipe` is
+        the rendered Dockerfile when the stage has it, else the template is read, so the
+        question before the Rebuild's can be asked without rendering. Names the player's
+        module and the core's.
+        """
+        if recipe is None:
+            template = self._native().dockerfile_dir
+            try:
+                recipe = (
+                    (self.installers_root / template / "Dockerfile.tmpl").read_text(
+                        encoding="utf-8"
+                    )
+                    if template is not None
+                    else ""
+                )
+            except OSError:
+                return None
+        if self._COPIES_MODULES.search(recipe) is None:
+            return None
+        core_folder = f"{self.entry.emulator.sources[0].dest}/modules"
+        core_names = core_modules.names_in(server_dir / core_folder)
+        for name in core_modules.names_in(server_dir / "modules"):
+            core = core_modules.same_name_in(name, core_names)
+            if core is not None:
+                return core_modules.sentence(name, core, core_folder)
+        return None
 
     def _make_the_modules_folder(self, server_dir: Path, recipe: str) -> bool:
         """Make `<server>/modules/` when the recipe copies it in, so the `COPY` cannot fail (T596).

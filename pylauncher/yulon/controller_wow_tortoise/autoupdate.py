@@ -63,10 +63,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker, module_moves, server_build_presses
+from yulon import core_modules, docker, module_moves, server_build_presses
 from yulon.apply import (
     Applier,
     ApplyError,
+    ApplyRefusal,
     ApplyReport,
     Completer,
     CompletionRefused,
@@ -84,6 +85,9 @@ from yulon.manifest import Db, Manifest, When
 from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
+
+CORE_MODULES_DIR = "src/tortoise-wow/modules"
+"""The core's own `modules/`, under the server dir: the checkout the install clones (T611)."""
 
 CONF_FILE = "etc/mangosd.conf"
 """Where this install's copy of the fork's conf lives, relative to the server dir.
@@ -541,6 +545,7 @@ class GuardedApplier(Applier):
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
+        self._refuse_a_core_module_name(manifest)
         note = self._guard(manifest, "install")
         complete = complete or self._recompleter_for(manifest)
         return _with_note(
@@ -617,6 +622,24 @@ class GuardedApplier(Applier):
             said = self._put_back_a_refused_update(manifest, was_on)
             refused.args = (f"{refused} {said}".rstrip(),)
             raise
+
+    def _refuse_a_core_module_name(self, manifest: Manifest) -> None:
+        """Refuse a player's server module whose name the core's own `modules/` already uses (T611).
+
+        Read from the core's checkout on the disk every time, before anything is cloned or
+        copied: the core moves with "Update to latest", so an Update of a module that
+        installed cleanly meets the name later (an Update runs this `install()`). Remove is
+        not asked, so the way out stays.
+        """
+        if manifest.type != "module" or manifest.origin is None:
+            return
+        core = core_modules.same_name_in(
+            manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
+        )
+        if core is not None:
+            raise ApplyRefusal(
+                f"{core_modules.sentence(manifest.id, core, CORE_MODULES_DIR)} Nothing was changed."
+            )
 
     def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:
         """Where an outside add-on or database package's clone is, before its Update (T611)."""
