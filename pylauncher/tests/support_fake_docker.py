@@ -114,8 +114,8 @@ if args[:1] == ["run"] and "-i" in args and (
         box.write_text("removing", encoding="utf-8")
         subprocess.Popen(
             [sys.executable, "-c",
-             "import sys, time, pathlib; time.sleep(0.6); "
-             "pathlib.Path(sys.argv[1]).unlink(missing_ok=True)",
+             "import sys, time, pathlib; time.sleep(0.6); p = pathlib.Path(sys.argv[1]); "
+             "p.unlink() if p.exists() and p.read_text() == 'removing' else None",
              str(box)],
             start_new_session=True,
             stdin=subprocess.DEVNULL,
@@ -329,8 +329,8 @@ if args[:2] == ["rm", "-f"]:
         import subprocess
         subprocess.Popen(
             [sys.executable, "-c",
-             "import sys, time, pathlib; time.sleep(0.6); "
-             "pathlib.Path(sys.argv[1]).unlink(missing_ok=True)",
+             "import sys, time, pathlib; time.sleep(0.6); p = pathlib.Path(sys.argv[1]); "
+             "p.unlink() if p.exists() and p.read_text() == 'removing' else None",
              str(box)],
             start_new_session=True,
             stdin=subprocess.DEVNULL,
