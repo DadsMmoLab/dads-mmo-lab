@@ -7067,6 +7067,9 @@ REFRESH_FIRST_MS = 20_000
 After the window is up and after T612's add-on put-in (5 s), so neither waits for a fetch.
 """
 
+REFRESH_LET_GO_SECONDS = 1.0
+"""How long a starting Modules job waits for a cancelled refresh to end (T621)."""
+
 REFRESH_AGAIN_MS = 60 * 60 * 1000
 """How often a tab left open looks again. The cache makes the answer once a day per clone."""
 
@@ -7571,6 +7574,7 @@ class ControllerView(QWidget):
         # running one's (a fresh Event per run), set by whatever should not wait for it.
         self._refresh_running = False
         self._refresh_cancel = threading.Event()
+        self._refresh_ended = threading.Event()
         self._refresh_again_ms = REFRESH_AGAIN_MS
         self._console_pending = False
         self._tabs = QTabWidget(self)
@@ -17405,6 +17409,10 @@ class ControllerView(QWidget):
         """`_run()` for a Modules tab job: counted until its done or failed slot ends it."""
         self._module_jobs += 1
         self._stop_update_refresh()  # T621: a press that writes into the clones goes first
+        if self._refresh_running:
+            # Its fetch ends within a fifth of a second of the cancel; give it up to a second
+            # to let go of the clone before this job's git starts in the same one.
+            self._refresh_ended.wait(REFRESH_LET_GO_SECONDS)
         self._run(work, on_done, on_error)
 
     def _module_job_ended(self) -> None:
@@ -17542,9 +17550,17 @@ class ControllerView(QWidget):
         if self._waits_for_the_distro("update-refresh", self.refresh_updates):
             return
         cancel = threading.Event()
-        self._refresh_cancel = cancel
+        ended = threading.Event()
+        self._refresh_cancel, self._refresh_ended = cancel, ended
         self._refresh_running = True
-        self._run(lambda: route(cancel), self._refresh_done, self._refresh_failed)
+
+        def work() -> tuple[apply_module.ModuleUpdate, ...]:
+            try:
+                return route(cancel)
+            finally:
+                ended.set()  # the worker has let go of the clones
+
+        self._run(work, self._refresh_done, self._refresh_failed)
 
     def _stop_update_refresh(self) -> None:
         """Tell a running background refresh to stop; its answer, when it comes, is dropped."""

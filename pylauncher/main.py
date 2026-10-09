@@ -1532,6 +1532,8 @@ def build_window() -> object:
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()
+        # T621: every tab that opens, saved or new, counts its add-ons and modules a little later.
+        view.refresh_updates_later()
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,
         # so two installs under different parents both read "WoW WotLK —
@@ -1560,7 +1562,6 @@ def build_window() -> object:
             opened = controllers.get((install.game, install.server_dir))
             if opened is not None:
                 opened.put_default_addons_later()  # T612: off the Play path, a few seconds on
-                opened.refresh_updates_later()  # T621: add-on and module counts, once a day
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
     # The Catalog was made current before `currentChanged` was connected, so

@@ -7422,6 +7422,12 @@ def cached_module_updates(
     reader: CountingGit = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     clock = upstream.now_unix() if now is None else now
     resolve = newest_release if newest_release is not None else _github_newest_release
+    if cancel is not None:
+        resolve = _abandoned_on_cancel(resolve, cancel)
+        compare_commits = _abandoned_on_cancel(
+            compare_commits if compare_commits is not None else _github_compare_or_refused,
+            cancel,
+        )
     kept = _read_module_updates(server_dir, clock)
     root = server_dir / CLONE_DIRS[kind]
     try:
@@ -7470,10 +7476,52 @@ def cached_module_updates(
                 checked_unix=clock - upstream.MAX_AGE_SECONDS + upstream.RETRY_SECONDS,
             )
         rows.append(counted)
-    rows = github.settle(rows)
+    if cancel is not None and cancel.is_set():
+        # No more GitHub asks, and a row that still owes GitHub its question (a number a
+        # shallow checkout cannot prove) is left out of the cache, not kept as answered.
+        rows = [row for row in rows if not isinstance(row.behind, Behind)]
+    else:
+        rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(_without_put_back_tips(server_dir, rows))
+
+
+_CANCEL_POLL_SECONDS = 0.2
+"""How often `_abandoned_on_cancel()` looks at its `cancel` while a call is out."""
+
+
+def _abandoned_on_cancel(call: Callable[..., Any], cancel: threading.Event) -> Callable[..., Any]:
+    """`call`, which a cancel stops waiting for within `_CANCEL_POLL_SECONDS` (T621).
+
+    GitHub's two lookups are bounded only by their own ten-second timeout, and a Quit must
+    not wait on that. The call runs on a daemon thread; once `cancel` is set the caller gets
+    `None` ("no answer") at once and the thread finishes its one GET and ends by itself.
+    """
+
+    def ask(*args: Any) -> Any:
+        if cancel.is_set():
+            return None
+        answer: list[Any] = []
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                answer.append(call(*args))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                answer.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="update-refresh-lookup", daemon=True).start()
+        while not done.wait(_CANCEL_POLL_SECONDS):
+            if cancel.is_set():
+                return None
+        if isinstance(answer[0], BaseException):
+            raise answer[0]
+        return answer[0]
+
+    return ask
 
 
 def refresh_module_updates(

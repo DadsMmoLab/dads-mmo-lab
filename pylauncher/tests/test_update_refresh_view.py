@@ -288,3 +288,66 @@ def test_play_preparation_never_reaches_the_refresh(qapp: object, ps: _Ps, tmp_p
     )
     prepare = source.split("def _prepare_client", 1)[1].split("\n    def ", 1)[0]
     assert "module_refresh" not in prepare and "refresh_updates" not in prepare
+
+
+def test_a_module_job_waits_a_moment_for_the_cancelled_refresh_to_let_go_of_the_clone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    import time
+
+    route = _Route()
+    view, _runner = _view(ps, tmp_path, route, deferred=True)
+    view.refresh_updates()
+    threading.Timer(0.3, view._refresh_ended.set).start()
+    started = time.monotonic()
+    view._run_module_job(lambda: None, lambda _r: None, lambda _e: None)
+    waited = time.monotonic() - started
+    assert 0.25 <= waited < 0.9, f"waited {waited:.2f}s for a refresh that ended at 0.3s"
+
+
+def test_a_refresh_that_never_lets_go_holds_a_module_job_for_about_a_second_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    import time
+
+    view, _runner = _view(ps, tmp_path, _Route(), deferred=True)
+    view.refresh_updates()
+    started = time.monotonic()
+    view._run_module_job(lambda: None, lambda _r: None, lambda _e: None)
+    waited = time.monotonic() - started
+    assert 0.9 <= waited < 3, f"waited {waited:.2f}s"
+
+
+def test_a_module_job_with_no_refresh_running_does_not_wait(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    import time
+
+    view, _runner = _view(ps, tmp_path, _Route(), deferred=True)
+    started = time.monotonic()
+    view._run_module_job(lambda: None, lambda _r: None, lambda _e: None)
+    assert time.monotonic() - started < 0.2
+
+
+def test_a_module_job_does_not_wait_out_the_second_when_the_refresh_ends_on_the_cancel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    import time
+
+    class Blocking(_Route):
+        def __call__(self, cancel: threading.Event) -> tuple[apply_module.ModuleUpdate, ...]:
+            self.calls.append(cancel)
+            cancel.wait(10)
+            return ()
+
+    view, runner = _view(ps, tmp_path, Blocking(), deferred=True)
+    view.refresh_updates()
+    assert runner is not None
+    worker = threading.Thread(target=runner.finish, daemon=True)
+    worker.start()
+    time.sleep(0.1)
+    started = time.monotonic()
+    view._run_module_job(lambda: None, lambda _r: None, lambda _e: None)
+    waited = time.monotonic() - started
+    worker.join(5)
+    assert waited < 0.6, f"waited {waited:.2f}s for a refresh that ended the moment it was told"

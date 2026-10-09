@@ -321,3 +321,155 @@ def test_a_refresh_is_not_a_behind_count_the_player_asked_for(tmp_path: Path) ->
     server = _server(tmp_path, "mod-a")
     (row,) = _refresh(server, _Git([Behind.UNCOUNTED]), 1_000)
     assert isinstance(row, apply_module.ModuleUpdate) and row.behind is Behind.UNCOUNTED
+
+
+# ------------------------------------------- a cancel is not held up by GitHub (T621 polish)
+
+
+def _release_follower(tmp_path: Path) -> Path:
+    return _server(tmp_path, "mod-a")
+
+
+def test_a_quit_during_a_slow_release_lookup_returns_promptly(tmp_path: Path) -> None:
+    server = _release_follower(tmp_path)
+    cancel = threading.Event()
+    held = threading.Event()
+
+    def slow(slug: str) -> upstream.Release | None:
+        held.wait(30)  # GitHub taking its ten seconds, and then some
+        return None
+
+    threading.Timer(0.3, cancel.set).start()
+    started = time.monotonic()
+    rows = apply_module.refresh_module_updates(
+        server,
+        kind="module",
+        cancel=cancel,
+        git=_Git([1]),
+        releases={"mod-a": "o/mod-a"},
+        newest_release=slow,
+        now=1_000,
+    )
+    took = time.monotonic() - started
+    held.set()
+    assert rows == ()
+    assert took < 3, f"the refresh waited {took:.1f}s on GitHub after a cancel"
+
+
+def test_a_cancelled_refresh_asks_github_for_nothing_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server(tmp_path, "mod-a", "mod-b")
+    settled: list[object] = []
+    monkeypatch.setattr(
+        apply_module._GitHubCounts, "settle", lambda self, rows: settled.append(rows) or rows
+    )
+    cancel = threading.Event()
+    reader = _Git([Behind.UNCOUNTED, 3])
+    reader.on_fetch.append(lambda: cancel.set() if reader.fetches == 2 else None)
+    assert _refresh(server, reader, 1_000, cancel=cancel) == ()
+    assert settled == [], "GitHub's compare was asked after the refresh was cancelled"
+    # mod-a was counted but still owes GitHub its question, so it is not cached as answered.
+    follow = _Git([4, 5])
+    rows = apply_module.cached_module_updates(server, kind="module", git=follow, now=1_001)
+    assert follow.fetches == 2 and [r.behind for r in rows] == [4, 5]
+
+
+def test_an_uncancelled_refresh_still_settles_with_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server(tmp_path, "mod-a")
+    settled: list[object] = []
+    monkeypatch.setattr(
+        apply_module._GitHubCounts, "settle", lambda self, rows: settled.append(rows) or rows
+    )
+    _refresh(server, _Git([2]), 1_000)
+    assert len(settled) == 1
+
+
+# ------------------------------------------------------- the child's children go too
+
+
+def test_cancel_ends_a_grandchild_and_not_only_the_child() -> None:
+    import os
+
+    code = (
+        "import subprocess, sys, time\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(g.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    cancel = threading.Event()
+    seen: list[int] = []
+
+    def watch() -> None:
+        # The grandchild's pid arrives on the child's stdout, which run_cancellable holds;
+        # find it from the process table instead, by its parent.
+        time.sleep(1.5)
+        cancel.set()
+
+    threading.Thread(target=watch, daemon=True).start()
+    before = set(_children_of_pytest())
+    proc = runner.run_cancellable([sys.executable, "-c", code], timeout=60, cancel=cancel)
+    assert runner.cancelled(proc)
+    seen = [int(x) for x in proc.stdout.split()] if proc.stdout.strip() else []
+    assert seen, "the child never printed its grandchild's pid"
+    time.sleep(0.5)
+    for pid in seen:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+        # A zombie still answers kill 0 until reaped by init; look at its state.
+        state = Path(f"/proc/{pid}/stat").read_text().split(") ")[-1].split()[0]
+        assert state in ("Z", "X"), f"the grandchild {pid} outlived the cancel (state {state})"
+    assert set(_children_of_pytest()) <= before | set(seen)
+
+
+def _children_of_pytest() -> list[int]:
+    import os
+
+    out = subprocess.run(
+        ["pgrep", "-P", str(os.getpid())], capture_output=True, text=True, check=False
+    ).stdout
+    return [int(x) for x in out.split()]
+
+
+class _ShallowGit(_Git):
+    """A reader whose one clone is a shallow checkout on GitHub: its count is GitHub's to give."""
+
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
+        return Behind.UNCOUNTED
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        self.fetches += 1
+        return Counted(Behind.UNCOUNTED, "a" * 40, "b" * 40)
+
+    def remote_url(self, dest: Path) -> str | None:
+        return "https://github.com/o/mod-a"
+
+
+def test_a_quit_during_a_slow_github_compare_returns_promptly(tmp_path: Path) -> None:
+    server = _server(tmp_path, "mod-a")
+    cancel = threading.Event()
+    held = threading.Event()
+    asked: list[str] = []
+
+    def slow(slug: str, head: str, ref: str) -> None:
+        asked.append(slug)
+        held.wait(30)
+
+    threading.Timer(0.4, cancel.set).start()
+    started = time.monotonic()
+    rows = apply_module.refresh_module_updates(
+        server, kind="module", cancel=cancel, git=_ShallowGit([]), compare_commits=slow, now=1_000
+    )
+    took = time.monotonic() - started
+    held.set()
+    assert asked == ["o/mod-a"], "the compare was never reached, so this proved nothing"
+    assert rows == ()
+    assert took < 3, f"the refresh waited {took:.1f}s on GitHub's compare after a cancel"
