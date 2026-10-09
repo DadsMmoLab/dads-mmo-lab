@@ -1025,3 +1025,15 @@ def test_a_shipped_item_is_never_read_again_by_the_outside_hook(tmp_path: Path) 
     assert shipped.origin is None and shipped.source is not None
     applier.install(shipped, None)
     assert (server / "sql_scripts" / "clones" / "tortoise-gm-manager").is_dir()
+
+
+def test_a_src_link_is_not_searched_for_cpp(tmp_path: Path) -> None:
+    # A `src` that is a link (to /, or a junction to C:\) must not be walked before the
+    # link refusal comes: only a real src/ folder counts as module code.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "far.cpp").write_text("int x;\n")
+    package = tmp_path / "mod-linked"
+    package.mkdir()
+    (package / "src").symlink_to(elsewhere, target_is_directory=True)
+    assert not custom._has_cpp_in_src(package)

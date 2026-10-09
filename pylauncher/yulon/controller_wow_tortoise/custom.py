@@ -282,7 +282,10 @@ def _has_cpp_in_src(root: Path) -> bool:
     if not root.is_dir():
         return False
     return any(
-        child.name == "src" and child.is_dir() and _first_cpp(child) is not None
+        child.name == "src"
+        and not child.is_symlink()
+        and child.is_dir()
+        and _first_cpp(child) is not None
         for child in root.iterdir()
     )
 
