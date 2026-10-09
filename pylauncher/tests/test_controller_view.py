@@ -921,6 +921,49 @@ def test_installing_a_module_whose_prompt_has_no_default_asks_first(
     assert applier.values == [{"bot_guid": "42", "bot_account": "7"}]
 
 
+def test_a_character_question_is_handed_the_roster_read_and_the_jobs_runner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T637: the dialog reads this server's characters on a worker, through the view's runner.
+
+    A prompt asker that is handed a way to read, and the runner it must read with, is what
+    keeps the docker exec off the GUI thread. Mutation: drop either kwarg and the dialog
+    reads nothing (or reads inline).
+    """
+    given: dict[str, object] = {}
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        given.update(kw)
+        return {"bot_guid": "42", "bot_account": "7"}
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "mod-ah-bot")
+    view._module_action("install")
+
+    assert given["run_job"] is view._jobs
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    asked: list[object] = []
+    applier.character_roster = lambda entry: asked.append(entry) or "roster"  # type: ignore[method-assign,assignment]
+    assert given["characters"]() == "roster"  # type: ignore[operator]
+    assert asked == [WOTLK]
+
+
+def test_a_manifest_with_no_character_question_is_not_handed_a_roster_read(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    given: dict[str, object] = {}
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        given.update(kw)
+        return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "xp-rates")
+    view._module_action("install")
+    assert "characters" not in given and "run_job" not in given
+
+
 def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     view = ControllerView(
         WOTLK,

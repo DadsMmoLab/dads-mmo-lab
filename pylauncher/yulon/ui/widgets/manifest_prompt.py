@@ -28,9 +28,9 @@ happened to be showing.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -45,8 +45,11 @@ from PySide6.QtWidgets import (
 )
 
 from yulon.apply import check_answer, reapplies_on_top
+from yulon.character_pick import Roster
 from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt
+from yulon.ui.widgets.character_picker import CharacterPicker
+from yulon.ui.widgets.job import JobRunner, run_inline
 
 logger = get_logger(__name__)
 
@@ -150,6 +153,8 @@ class ManifestPromptDialog(QDialog):
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
         notes: Sequence[str] = (),
+        characters: Callable[[], Roster] | None = None,
+        run_job: JobRunner | None = None,
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
@@ -158,6 +163,14 @@ class ManifestPromptDialog(QDialog):
         self._answers: dict[str, str] = {}
         self._controls: dict[str, QWidget] = {}
         self._questions: list[str] = []
+        # T637: a question answered by picking a character; the ones that follow it take
+        # their answer from the same pick and show a typed box only when the pick cannot.
+        self._pickers: dict[str, CharacterPicker] = {}
+        self._followers: dict[str, list[Prompt]] = {}
+        self._follower_rows: dict[str, tuple[QLabel, QWidget]] = {}
+        for prompt in self._prompts:
+            if prompt.follows is not None:
+                self._followers.setdefault(prompt.follows, []).append(prompt)
         self.setWindowTitle(f"{manifest.name} needs an answer")
         self.setModal(True)
 
@@ -180,7 +193,7 @@ class ManifestPromptDialog(QDialog):
                 from_record.append(prompt)
             elif prompt.default is not None:
                 prefill[prompt.key] = prompt.default
-        missing = [p for p in self._prompts if p not in from_record]
+        missing = [p for p in self._prompts if p not in from_record and p.follows is None]
         if removing:
             # A Remove asks only what it has no record of (`apply.must_ask`), so
             # this dialog opening IS the no-record case, whatever pre-fills it.
@@ -191,7 +204,7 @@ class ManifestPromptDialog(QDialog):
             if missing:
                 questions = (
                     "the questions below"
-                    if len(missing) == len(self._prompts) and len(missing) > 1
+                    if len(missing) == len(self._shown_prompts()) and len(missing) > 1
                     else "these: " + "; ".join(p.question for p in missing)
                 )
                 self._notes.append(
@@ -222,9 +235,15 @@ class ManifestPromptDialog(QDialog):
         for row, prompt in enumerate(self._prompts):
             label = QLabel(prompt.question, rows)
             label.setWordWrap(True)
-            self._questions.append(prompt.question)
             control = self._control_for(prompt, rows)
             self._controls[prompt.key] = control
+            if prompt.follows is None:
+                self._questions.append(prompt.question)
+            else:
+                # Hidden unless the picker it follows has to be typed into instead.
+                self._follower_rows[prompt.key] = (label, control)
+                label.setVisible(False)
+                control.setVisible(False)
             form.addWidget(label, row, 0)
             form.addWidget(control, row, 1, Qt.AlignmentFlag.AlignVCenter)
         form.setRowStretch(len(self._prompts), 1)
@@ -249,6 +268,68 @@ class ManifestPromptDialog(QDialog):
             self.set_answer(key, value)
         self._recheck()
         self._fit(scroll, rows, parent)
+        self._start_reading(characters, run_job)
+
+    def _shown_prompts(self) -> list[Prompt]:
+        return [p for p in self._prompts if p.follows is None]
+
+    def _start_reading(
+        self, characters: Callable[[], Roster] | None, run_job: JobRunner | None
+    ) -> None:
+        """Read the server's characters off this thread, once, for every picker here (T637)."""
+        if not self._pickers:
+            return
+        if characters is None:
+            for picker in self._pickers.values():
+                picker.show_typing()
+            self._show_followers()
+            return
+        (run_job or run_inline)(characters, self._roster_arrived, self._roster_failed)
+
+    @Slot(object)
+    def _roster_arrived(self, roster: object) -> None:
+        assert isinstance(roster, Roster)
+        for key, picker in self._pickers.items():
+            picker.set_roster(roster)
+            picker.select(self._answers.get(key, ""))
+            self._picked(key)
+        self._show_followers()
+
+    @Slot(object)
+    def _roster_failed(self, exc: object) -> None:
+        for picker in self._pickers.values():
+            picker.set_failed(str(exc))
+        self._show_followers()
+
+    def _show_followers(self) -> None:
+        """A follower asks for its own number only where its picker is a typed box."""
+        for key, picker in self._pickers.items():
+            for follower in self._followers.get(key, ()):
+                label, control = self._follower_rows[follower.key]
+                label.setVisible(picker.typing)
+                control.setVisible(picker.typing)
+
+    def _picked(self, key: str) -> None:
+        """The picker for `key` changed: take its answer, and the followers' with it."""
+        picker = self._pickers[key]
+        value = picker.value()
+        self._answers[key] = value
+        account = picker.account_of(value)
+        if account is not None:
+            for follower in self._followers.get(key, ()):
+                self._put(follower.key, str(account))
+        elif not picker.typing and not value:
+            for follower in self._followers.get(key, ()):
+                self._put(follower.key, "")
+        self._recheck()
+
+    def _put(self, key: str, value: str) -> None:
+        self._answers[key] = value
+        control = self._controls.get(key)
+        if isinstance(control, QLineEdit) and control.text() != value:
+            control.blockSignals(True)
+            control.setText(value)
+            control.blockSignals(False)
 
     def _fit(self, scroll: QScrollArea, rows: QWidget, parent: QWidget | None) -> None:
         """Open as tall as the rows need, but never taller than the window it belongs to.
@@ -330,7 +411,13 @@ class ManifestPromptDialog(QDialog):
                 value = "0"
         self._answers[key] = value
         control = self._controls.get(key)
-        if isinstance(control, QLineEdit):
+        if isinstance(control, CharacterPicker):
+            control.select(value)
+            account = control.account_of(value)
+            for follower in self._followers.get(key, ()):
+                if account is not None:
+                    self._put(follower.key, str(account))
+        elif isinstance(control, QLineEdit):
             if control.text() != value:
                 control.setText(value)
         elif isinstance(control, QComboBox):
@@ -342,6 +429,12 @@ class ManifestPromptDialog(QDialog):
     # -- internals ---------------------------------------------------------
 
     def _control_for(self, prompt: Prompt, owner: QWidget) -> QWidget:
+        if prompt.kind == "character" and prompt.follows is None:
+            picker = CharacterPicker(owner, multi=prompt.multi)
+            picker.changed.connect(lambda key=prompt.key: self._picked(key))
+            self._pickers[prompt.key] = picker
+            self._answers[prompt.key] = ""
+            return picker
         if prompt.kind == "choice":
             combo = QComboBox(owner)
             for choice in prompt.choices:
@@ -364,7 +457,11 @@ class ManifestPromptDialog(QDialog):
         # No `QIntValidator`: a validator that silently drops keystrokes leaves
         # a person typing into a box that does nothing and says nothing. The
         # refusal is shown as a sentence instead, under the form.
-        edit.setPlaceholderText({"int": "a whole number", "float": "a number"}.get(prompt.kind, ""))
+        edit.setPlaceholderText(
+            {"int": "a whole number", "float": "a number", "character": "a whole number"}.get(
+                prompt.kind, ""
+            )
+        )
         edit.textChanged.connect(lambda text, key=prompt.key: self._text_changed(key, text))
         self._answers[prompt.key] = ""
         return edit
@@ -394,6 +491,8 @@ def ask_manifest_prompts(
     remembered: Mapping[str, str] | None = None,
     removing: bool = False,
     notes: Sequence[str] = (),
+    characters: Callable[[], Roster] | None = None,
+    run_job: JobRunner | None = None,
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -409,6 +508,8 @@ def ask_manifest_prompts(
         remembered=remembered,
         removing=removing,
         notes=notes,
+        characters=characters,
+        run_job=run_job,
     )
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")

@@ -137,6 +137,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
+from yulon.character_pick import Roster
 from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -770,6 +771,8 @@ class PromptAsker(Protocol):
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
         notes: Sequence[str] = (),
+        characters: Callable[[], Roster] | None = None,
+        run_job: JobRunner | None = None,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -14502,6 +14505,7 @@ class ControllerView(QWidget):
             where = "online" if character.online else "offline"
             item = QListWidgetItem(
                 f"{character.name} — level {character.level} — {where} — {character.account}"
+                f" — GUID {character.guid}"
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
@@ -18020,7 +18024,7 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
-        extra: dict[str, tuple[str, ...]] = {}
+        extra: dict[str, Any] = {}
         if action != "remove":
             # T302 (cold review): an answer written to a key the Server rates card
             # writes starts at what the card says now -- over the mod's default and
@@ -18036,6 +18040,12 @@ class ControllerView(QWidget):
                 note = server_rates.prompt_note(manifest, rates)
                 if note is not None:
                     extra["notes"] = (note,)
+        if applier is not None and any(p.kind == "character" for p in asked):
+            # T637: the server's own characters to pick from, read on a worker by the dialog
+            # (the answers' check and this read both go through the applier's seams).
+            entry = self.entry
+            extra["characters"] = lambda: applier.character_roster(entry)
+            extra["run_job"] = self._jobs
         answers = self._prompt_asker(
             self,
             manifest,

@@ -501,7 +501,7 @@ def test_revive_is_offered_offline_where_the_tree_measured_that_it_works(
     view.refresh_characters()
 
     view.character_list.setCurrentRow(1)
-    assert view.character_list.currentItem().text().endswith("PLAYER")
+    assert view.character_list.currentItem().text().endswith("PLAYER — GUID 2")
     assert view.revive_button.isEnabled() is True, view.revive_button.text()
     assert "logged in" not in view.revive_button.text(), view.revive_button.text()
     assert "Ganaar" in view.revive_button.text(), view.revive_button.text()
@@ -1426,3 +1426,14 @@ def test_the_set_level_press_goes_through_the_saving_variant(tmp_path: Path) -> 
     pump_until(lambda: bool(play.saving), "the press reaches the play")
 
     assert play.saving == [("Guglu", 80)]
+
+
+def test_every_row_shows_its_guid(tmp_path: Path) -> None:
+    """T637: the GUID a module's question used to ask for, readable on the row."""
+    people = _people()
+    view = _view(tmp_path, play=_Play(characters=people))
+    view.refresh_characters()
+    rows = view._character_rows()
+    assert len(rows) == len(people) > 0
+    for person, text in zip(people, rows, strict=True):
+        assert text.endswith(f"GUID {person.guid}"), text

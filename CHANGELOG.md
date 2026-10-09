@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- **Auction House Bot** asks you to pick its character from your server's own list, and the Characters tab shows each GUID.
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
