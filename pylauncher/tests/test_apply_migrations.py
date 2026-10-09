@@ -340,6 +340,29 @@ def test_an_encode_or_pipe_error_on_a_lone_file_is_an_apply_error_that_says_part
     assert failed.value.__cause__ is boom
 
 
+def test_a_byte_order_mark_is_not_sent_but_the_ledger_key_is_the_files_own_bytes(
+    tmp_path: Path,
+) -> None:
+    """The row's hash must equal the server updater's SHA1 of the file as it lies on disk.
+
+    mysql chokes on a leading BOM, so the script drops it; the ledger key (`Hash`) is
+    still the SHA1 of the raw bytes WITH it, because that is what the core's updater
+    computes for the same file and compares (Codex review, 2026-10-09: pinned, not
+    changed). Hashing what Yu'lon sent instead would make the updater run the file again.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / ITEM
+    (clone / CHAR_FILE).parent.mkdir(parents=True)
+    raw = b"\xef\xbb\xbf" + ROWS_ONLY.encode("utf-8")
+    (clone / CHAR_FILE).write_bytes(raw)
+    write_clone_claim(clone, item_id=ITEM, url="", completed=True)
+    ledger = _Ledger(tables=())
+    _applier(tmp_path, ledger).install(_manifest(("characters", CHAR_FILE)))
+
+    text = ledger.sent[0][2]
+    assert "\ufeff" not in text
+    assert f"'{hashlib.sha1(raw).hexdigest().upper()}'" in text
+
+
 def test_a_file_that_is_not_utf8_is_refused_before_anything_is_sent(tmp_path: Path) -> None:
     server = _server(tmp_path, {CHAR_FILE: ROWS_ONLY})
     clone = server / "sql_scripts" / "clones" / ITEM
