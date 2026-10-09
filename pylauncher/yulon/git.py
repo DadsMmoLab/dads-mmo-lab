@@ -934,6 +934,28 @@ def parse_tree_files(raw: str) -> tuple[str, ...]:
     return tuple(path for path in raw.split("\0") if path)
 
 
+def file_lines_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git grep -z -I --no-color -e "" <rev> -- <paths>`: every line of the files, one run (T630).
+
+    `-e ""` matches every line, empty ones too, and `-z` puts a NUL after each
+    `<rev>:<path>`, so an answer splits cleanly whatever a line holds. `-I` leaves
+    binary files out; `--no-color` and no pager, so nothing a config sets is run.
+    """
+    return ["grep", "-z", "-I", "--no-color", "-e", "", rev, "--", *paths]
+
+
+def parse_file_lines(raw: str, rev: str) -> dict[str, tuple[str, ...]]:
+    """`{path: lines}` from a `file_lines_args()` answer; a file with no lines is absent."""
+    found: dict[str, list[str]] = {}
+    lead = f"{rev}:"
+    for record in raw.split("\n"):
+        name, sep, line = record.partition("\0")
+        if not sep:
+            continue
+        found.setdefault(name.removeprefix(lead), []).append(line)
+    return {path: tuple(lines) for path, lines in found.items()}
+
+
 def changed_lines_args(old: str, new: str, path: str) -> list[str]:
     """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
     return [*_DIFF_ARGS, "-U0", old, new, "--", path]
@@ -1591,6 +1613,26 @@ class RunnerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """Each of `paths`' lines at commit `rev`, in one run. None = cannot ask (T630).
+
+        `git grep` exits 1 when nothing matched -- only files with no lines at all --
+        which is an answer (no lines), not a failure.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run(["git", *file_lines_args(rev, paths)], cwd=dest, env=_no_prompt_env())
+        except OSError as exc:
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        if proc.returncode not in (0, 1):
+            logger.debug(f"could not read the files {rev} has in {dest}: {proc.stderr.strip()}")
+            return None
+        return parse_file_lines(proc.stdout, rev)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
@@ -2514,6 +2556,22 @@ class ContainerGit:
             logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
             return None
         return parse_changed_files(proc.stdout)
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """`RunnerGit.file_lines()`, containerised; `writes=False`, nothing is fetched (T630)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, file_lines_args(rev, paths), writes=False)
+        except GitError as exc:
+            # `git grep` exits 1 with nothing on stderr when no line matched at all.
+            if str(exc).rstrip().endswith("exited 1:"):
+                return {}
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        return parse_file_lines(proc.stdout, rev)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""

@@ -4875,6 +4875,13 @@ def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ..
     return git.ContainerGit().tree_files(dest, rev, paths)
 
 
+def _git_file_lines(
+    dest: Path, rev: str, paths: Sequence[str]
+) -> dict[str, tuple[str, ...]] | None:
+    """Each file's lines at one commit of this checkout, one containerised run (T630)."""
+    return git.ContainerGit().file_lines(dest, rev, paths)
+
+
 def _git_changed_lines(dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
     """One file's `+`/`-` lines between two commits of this checkout, containerised."""
     return git.ContainerGit().changed_lines(dest, old, new, path)
@@ -6191,13 +6198,22 @@ class Seams:
     the compile start. `None` is git that could not say, which the route refuses.
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
+    """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
     tree_files: Callable[[Path, str, Sequence[str]], tuple[str, ...] | None] = _git_tree_files
     """T630: the files a commit tracks under some paths (`git ls-tree`); None = could not say.
 
     What "Return to the tested pin…" asks of the commit it moved to: which update
     files it ships, read from the commit and not from the disk.
     """
-    """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
+    file_lines: Callable[[Path, str, Sequence[str]], dict[str, tuple[str, ...]] | None] = (
+        _git_file_lines
+    )
+    """T630: each named file's lines at one commit, in ONE git run; None = could not say.
+
+    What "Return to the tested pin…" reads of an update file the move removes and of
+    the ones it adds beside it, to tell an update upstream re-filed (AzerothCore's
+    pending squash) from one the target does not have.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
@@ -6605,6 +6621,7 @@ class Seams:
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
             tree_files=repo.tree_files,
+            file_lines=repo.file_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),

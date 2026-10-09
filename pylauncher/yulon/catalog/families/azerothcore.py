@@ -80,6 +80,12 @@ AzerothCore's updater, and mod-playerbots' own on its database, write one `updat
 row per file it applied, keyed by the file's base name (`apply.read_ledger()` asks
 the same table), and nothing ever takes a row back: updates only go forward."""
 
+DATABASE_MAYBE_STARTED = (
+    "Yu'lon could not tell whether the database was running before it asked it, so it may "
+    "have started the database for that; Stop on the Server tab takes it down."
+)
+"""Said instead of keeping quiet when the database's state before the check is unknown (T630)."""
+
 _DATED = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{2}")
 """An update named by its date, `YYYY_MM_DD_NN`: the only names whose order means age."""
 
@@ -109,18 +115,18 @@ def newer_updates_refusal(
     total = sum(len(names) for names in applied.values())
     those = "that update" if total == 1 else "those updates"
     head = (
-        "Going back to the commit this app was tested against would start the older server "
-        f"on databases a newer build has already updated: {'; '.join(each)}. Database updates "
-        f"only go forward, so the older server would meet {_listed(databases)} as "
-        f"{those} left {'it' if len(databases) == 1 else 'them'}, which it was not built for "
-        f"and may not start on. {NOTHING_DONE}"
+        "Your databases already hold updates the commit this app was tested against does not "
+        f"have: {'; '.join(each)}. Database updates only go forward, so that commit's server "
+        f"would meet {_listed(databases)} as {those} left "
+        f"{'it' if len(databases) == 1 else 'them'}, which it was not built for and may not "
+        f"start on. {NOTHING_DONE}"
     )
     missing = [database for database in databases if copies.get(database) is None]
     if missing:
         latest = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
         return (
             f"{head} Yu'lon found no copy of {_listed(missing)} from before {those} in the "
-            "server's backups folder, so this server cannot go back to the tested commit: keep "
+            "server's backups folder, so this server cannot move to the tested commit: keep "
             f"the build you have ({latest} keeps it current)."
         )
     found = [copy for copy in copies.values() if copy is not None]
@@ -128,12 +134,13 @@ def newer_updates_refusal(
     back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
     one = len(databases) == 1
     return (
-        f"{head} To go back, first put {_listed(databases)} back as "
+        f"{head} To move it there, first put {_listed(databases)} back as "
         f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
         f"restore {files} on Maintenance (it works with the server stopped), then press "
         f"{back} again without starting the server in between, since a start would apply "
         f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
-        "copy was taken."
+        f"copy was taken. Do not press Clean up… on Maintenance before restoring: it keeps "
+        f"only the newest copies and may remove {'this one' if len(found) == 1 else 'these'}."
     )
 
 
@@ -141,7 +148,8 @@ def updates_unread(source: str, why: str) -> str:
     """The fail-closed refusal: git or the database could not say (T630)."""
     return (
         f"Yu'lon could not read which database updates {source}, so it could not tell "
-        f"whether the older server can start on your databases ({why}). {NOTHING_DONE}"
+        f"whether the tested commit's server can start on your databases ({why}). "
+        f"{NOTHING_DONE}"
     )
 
 
@@ -560,7 +568,7 @@ class AzerothCoreInstaller(StagedInstaller):
         *,
         to_pin: bool,
     ) -> Generator[str, None, object]:
-        """Refuse a way back onto databases a newer build already updated (T630).
+        """Refuse a Return onto databases that hold updates the tested commit lacks (T630).
 
         Asked by the update route right after the move and before anything is built,
         stopped or copied; a refusal puts every source back. Only for "Return to the
@@ -602,13 +610,25 @@ class AzerothCoreInstaller(StagedInstaller):
                     for name, held in applied.items()
                 }
                 raise InstallerError(newer_updates_refusal(applied, copies))
+        except InstallerError as exc:
+            if was_up is False:
+                logger.info(self._stop_the_database_again(database))
+            if was_up is None:
+                # Re-review of a2f7ef7a: "nothing changed" would not be known to be true.
+                raise InstallerError(f"{exc} {DATABASE_MAYBE_STARTED}") from exc
+            raise
         except BaseException:
             if was_up is False:
                 logger.info(self._stop_the_database_again(database))
             raise
         if was_up is False:
             yield self._stop_the_database_again(database)
-        yield "None of them was applied, so the older server can start on your databases."
+        elif was_up is None:
+            yield DATABASE_MAYBE_STARTED
+        yield (
+            "None of them was applied, so the tested commit's server can start on your "
+            "databases."
+        )
         return None
 
     def _database_was_up(self, container: str) -> bool | None:
@@ -644,7 +664,7 @@ class AzerothCoreInstaller(StagedInstaller):
             if new is None:
                 raise InstallerError(
                     updates_unread(
-                        f"going back takes away in {source.repo}", "git did not say its commit"
+                        f"the move takes away in {source.repo}", "git did not say its commit"
                     )
                 )
             if new == old:
@@ -653,7 +673,7 @@ class AzerothCoreInstaller(StagedInstaller):
             if pairs is None:
                 raise InstallerError(
                     updates_unread(
-                        f"going back takes away in {source.repo}",
+                        f"the move takes away in {source.repo}",
                         f"git could not compare {old[:7]} with {new[:7]}",
                     )
                 )
@@ -666,7 +686,7 @@ class AzerothCoreInstaller(StagedInstaller):
             if tracked is None:
                 raise InstallerError(
                     updates_unread(
-                        f"going back takes away in {source.repo}",
+                        f"the move takes away in {source.repo}",
                         f"git could not list the SQL files {new[:7]} ships",
                     )
                 )
@@ -679,6 +699,7 @@ class AzerothCoreInstaller(StagedInstaller):
             for path in tracked:
                 if path.endswith(".sql"):
                     beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
+            left: list[str] = []
             for path in removed:
                 name = posixpath.basename(path)
                 if (_database_part(path), name) in shipped:
@@ -688,8 +709,55 @@ class AzerothCoreInstaller(StagedInstaller):
                     for other in beside.get(posixpath.dirname(path), ())
                 ):
                     continue
-                lacked[name] = None
+                left.append(path)
+            added = [
+                path for status, path in pairs if status.startswith("A") and path.endswith(".sql")
+            ]
+            refiled = self._refiled(source.repo, dest, old, new, left, added) if left else set()
+            for path in left:
+                if path not in refiled:
+                    lacked[posixpath.basename(path)] = None
         return tuple(lacked)
+
+    def _refiled(
+        self,
+        repo: str,
+        dest: Path,
+        old: str,
+        new: str,
+        removed: Sequence[str],
+        added: Sequence[str],
+    ) -> set[str]:
+        """The removed update files the move only re-filed under a new name (re-review, a2f7ef7a).
+
+        AzerothCore's routine squash moves `updates/pending_db_world/rev_*.sql` into a
+        dated `updates/db_world/` file, with a `-- DB update A -> B` header in front:
+        never dated, never the same name, and a forward Return (T588) over it took the
+        applied `rev_` row as an update the target lacks. So a removed file whose SQL --
+        its lines less blank ones and `--` comments -- is that of a file the move ADDED
+        for the same database is the same update, re-filed. Read in one git run per
+        side (`Seams.file_lines`); git that cannot say refuses.
+        """
+        wanted = {_database_part(path) for path in removed}
+        beside = [path for path in added if _database_part(path) in wanted]
+        if not beside:
+            return set()
+        before = self._seams.file_lines(dest, old, removed)
+        after = self._seams.file_lines(dest, new, beside)
+        if before is None or after is None:
+            raise InstallerError(
+                updates_unread(
+                    f"the move takes away in {repo}",
+                    "git could not read the update files it removes and adds",
+                )
+            )
+        filed = {(_database_part(path), _sql_of(after.get(path, ()))) for path in beside}
+        return {
+            path
+            for path in removed
+            if _sql_of(before.get(path, ()))
+            and (_database_part(path), _sql_of(before.get(path, ()))) in filed
+        }
 
     def _applied_of(self, server_dir: Path, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
         """Per database, which of `names` its `updates` table holds; only those holding any.
@@ -1088,6 +1156,13 @@ class AzerothCoreInstaller(StagedInstaller):
             yield "This server has no separate database import step."
             return
         yield from self.stage_import(ctx, CallableGate(self._probe, self._reset), service)
+
+
+def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:
+    """An update file's SQL: its lines less blank ones and `--` comments, right-stripped."""
+    return tuple(
+        line.rstrip() for line in lines if line.strip() and not line.lstrip().startswith("--")
+    )
 
 
 def _database_part(path: str) -> tuple[str, ...]:

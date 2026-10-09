@@ -503,6 +503,12 @@ class Recorder:
     from here and never from the disk, as the real seam reads the commit's tree.
     """
 
+    lines: dict[tuple[Path, str, str], tuple[str, ...]] = field(default_factory=dict)
+    """T630: `file_lines()`'s answer per `(checkout, commit, path)`; absent is a file with none."""
+
+    lines_unreadable: bool = False
+    """T630: `file_lines()` answers None (git could not read the files)."""
+
     db_was_up: bool | None = True
     """What `db_running()` answers for the database container (T630): up, by default."""
 
@@ -595,6 +601,16 @@ class Recorder:
             for path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        self.calls.append(f"file-lines:{dest.name}:{rev[:7]}:{len(paths)}")
+        if self.lines_unreadable:
+            return None
+        return {
+            path: self.lines[(dest, rev, path)] for path in paths if (dest, rev, path) in self.lines
+        }
 
     def db_running(self, container: str) -> bool | None:
         self.calls.append(f"db-running?:{container}")
@@ -908,6 +924,7 @@ class Recorder:
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
             tree_files=self.tree_files,
+            file_lines=self.file_lines,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,

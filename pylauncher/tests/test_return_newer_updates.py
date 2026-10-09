@@ -20,6 +20,7 @@ answered at the `sql_query` seam the route asks.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,8 @@ def test_a_return_over_a_newer_playerbots_update_refuses_before_anything_is_buil
     assert "acore_playerbots has 2 updates the tested commit does not have" in message, message
     assert SPEECH in message and REQUESTER in message
     assert "Database updates only go forward" in message
-    assert "the older server would meet acore_playerbots as those updates left it" in message
+    assert "that commit's server would meet acore_playerbots as those updates left it" in message
+    assert not re.search(r"\bolder\b|Going back", message), message
     assert "Nothing was built, stopped or changed" in message
     assert f"backups/{CLEAN}" in message
     assert server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN) in message
@@ -204,6 +206,7 @@ def test_the_copy_named_is_the_newest_complete_one_from_before_the_updates(
         message
     )
     assert "without starting the server in between" in message
+    assert "Do not press Clean up… on Maintenance before restoring" in message
 
 
 def test_with_no_copy_from_before_it_says_the_way_back_is_closed(tmp_path: Path) -> None:
@@ -618,3 +621,109 @@ def test_a_stopped_database_is_started_from_yulons_compose_not_the_targets(
     assert "acore_playerbots has 2 updates the tested commit does not have" in message, message
     assert compose.read_text(encoding="utf-8") != UPSTREAM_COMPOSE, "the compose went back"
     assert {rec.heads[server_dir / s.dest] for s in ENTRY.emulator.sources} == {OLD}
+
+
+# -- scoped re-review of a2f7ef7a ----------------------------------------------------------
+
+PENDING = "rev_1727000000000000000.sql"
+SQUASHED = "2026_10_01_00.sql"
+PENDING_SQL = ("UPDATE `creature_template` SET `speed_walk` = 1 WHERE `entry` = 18910;",)
+
+
+def _pending_squash(rec: Recorder, server_dir: Path, *, same_sql: bool) -> None:
+    """AzerothCore's import of pending files: `pending_db_world/rev_*` -> a dated file."""
+    rec.diffs[(server_dir, OLD, CORE_PIN)] = (
+        ("D", f"data/sql/updates/pending_db_world/{PENDING}"),
+        ("A", f"data/sql/updates/db_world/{SQUASHED}"),
+    )
+    _target_ships(
+        rec,
+        server_dir,
+        "data/sql/updates/db_world",
+        "2026_09_30_00.sql",
+        SQUASHED,
+        dest=".",
+        rev=CORE_PIN,
+    )
+    rec.lines[(server_dir, OLD, f"data/sql/updates/pending_db_world/{PENDING}")] = PENDING_SQL
+    rec.lines[(server_dir, CORE_PIN, f"data/sql/updates/db_world/{SQUASHED}")] = (
+        "-- DB update 2026_09_30_00 -> 2026_10_01_00",
+        "--",
+        *(PENDING_SQL if same_sql else ("DELETE FROM `creature` WHERE `guid` = 1;",)),
+        "",
+    )
+    rec.applied_updates["acore_world"] = f"{PENDING}\n"
+
+
+def test_a_return_over_a_pending_squash_is_not_refused(tmp_path: Path) -> None:
+    """The reviewer's probe: the applied `rev_` file was only re-filed, header and all."""
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=True)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is None, f"a wrong refusal on a squash: {raised}"
+    assert _asked_updates(rec) == []
+
+
+def test_a_removed_file_whose_sql_went_nowhere_still_refuses(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=False)
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert f"acore_world has 1 update the tested commit does not have ({PENDING})" in str(raised)
+
+
+def test_git_that_cannot_read_the_files_refuses(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _pending_squash(rec, server_dir, same_sql=True)
+    rec.lines_unreadable = True
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert "git could not read the update files it removes and adds" in str(raised), raised
+    assert not _built(rec)
+
+
+def test_an_unknown_database_state_is_said_not_hidden(tmp_path: Path) -> None:
+    """`db_running` that cannot say: the refusal must not claim nothing was started."""
+    from yulon.catalog.families import azerothcore
+
+    rec, server_dir = _ready(tmp_path)
+    _newer_bots_update(rec, server_dir)
+    rec.db_was_up = None
+    _said, raised, _fake = _return(rec, server_dir)
+    assert raised is not None
+    assert azerothcore.DATABASE_MAYBE_STARTED in str(raised), raised
+    assert not any(call.startswith("stop-db:") for call in rec.calls)
+
+
+def test_file_lines_reads_every_file_in_one_git_run(tmp_path: Path) -> None:
+    """Real git: two files' lines at a commit, an empty line kept, an uncommitted edit not."""
+    import subprocess
+
+    from yulon import git
+
+    if not git.git_available():
+        pytest.skip("no host git")
+    repo = tmp_path / "repo"
+    (repo / "data/sql").mkdir(parents=True)
+    (repo / "data/sql/a.sql").write_text("-- a\n\nSELECT 1;\n", encoding="utf-8")
+    (repo / "data/sql/b.sql").write_text("SELECT 2;\n", encoding="utf-8")
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    run("init", "-q")
+    run("add", ".")
+    run("commit", "-q", "-m", "one")
+    head = run("rev-parse", "HEAD")
+    (repo / "data/sql/a.sql").write_text("changed on disk\n", encoding="utf-8")
+    got = git.RunnerGit().file_lines(repo, head, ("data/sql/a.sql", "data/sql/b.sql"))
+    assert got == {
+        "data/sql/a.sql": ("-- a", "", "SELECT 1;"),
+        "data/sql/b.sql": ("SELECT 2;",),
+    }
