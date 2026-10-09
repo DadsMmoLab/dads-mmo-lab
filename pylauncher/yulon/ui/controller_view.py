@@ -5057,9 +5057,11 @@ def dashboard_on_question(*, lan: bool) -> str:
         else f"Only this PC will be able to reach it, at {bot_dashboard.URL}."
     )
     return (
-        "Yu'lon builds the bots module's own dashboard (a few minutes the first time), turns "
-        "the bots module's telemetry on in tortoise_bots.conf (a copy of the file is kept), adds "
-        "the dashboard to this server's docker-compose.yml and starts it.\n\n"
+        "Yu'lon sets up the dashboard from TortoiseBots' ready-made program when one fits this "
+        "server's bots module (checked against its published checksum), otherwise it builds the "
+        "module's own (a few minutes the first time). It turns the bots module's telemetry on in "
+        "tortoise_bots.conf (a copy of the file is kept), adds the dashboard to this server's "
+        "docker-compose.yml and starts it.\n\n"
         "If the server is running, it is then restarted so the bots module starts sending. "
         "Anyone playing is disconnected for a few minutes.\n\n"
         f"{where}\n\nSwitch it on?"

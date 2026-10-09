@@ -9,10 +9,13 @@ source for the tab's log panel.
 
 1. the refusals, before anything is written: no dashboard in this module's
    checkout, a compose file this app did not write, a mixed SELinux label;
-2. the image, built from `tools/observability` in the module checkout the
-   install already cloned. First because it is the slow step (a Go build, a
-   few minutes the first time) and the one most likely to fail -- a failure
-   here has changed nothing;
+2. the image. First choice (T542) is TortoiseBots' prebuilt linux binary, from
+   the newest release at or before the module's commit, proved against the
+   release's sha256 file (`botdash_binary`); with none that fits, or a proof
+   that fails, one line says why and the image is built from `tools/observability`
+   in the module checkout the install already cloned (a Go build, a few minutes
+   the first time). First because it is the slow step and the one most likely to
+   fail -- a failure here has changed nothing;
 3. `.env` gets this install's session secret if it has none;
 4. the conf is backed up once (`.before-dashboard`, `copy2`, so the mode goes
    with it) and the three keys are written, keeping the file's mode;
@@ -30,7 +33,7 @@ world keeps sending to an address nobody listens on until it restarts, which is
 harmless; the tab offers the restart.
 
 **After an update** the image is rebuilt from the module the update moved
-(`after_update()`). If that rebuild fails after the module moved, the old
+(`after_update()`), the binary picked again for the module's new commit. If that rebuild fails after the module moved, the old
 container is removed rather than left running: its daemon speaks the old
 module's datagram protocol and nothing on either side says so (T162, measured
 on TortoiseBots 632e1b63 -> ad9d71fb, protocol 4 -> 5: the daemon never reads

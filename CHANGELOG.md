@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 
 ### Changed
+- The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.
 
 ## v0.9.15-Public — 2026-10-09
 
