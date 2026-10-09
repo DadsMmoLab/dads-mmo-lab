@@ -17,10 +17,17 @@ from tests.test_controller_view import (
     _Ps,
     _services,
     _with_the_card_buttons,
-    ps,  # noqa: F401
 )
+from yulon import runner
 from yulon.ui import controller_view as cv
 from yulon.ui.controller_view import ControllerView
+
+
+@pytest.fixture
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
 
 
 def _modules(ps_: _Ps, tmp_path: Path, *, box: bool, rows: bool) -> tuple[ControllerView, Any, Any]:
@@ -74,7 +81,7 @@ def test_the_box_keeps_its_sentence_where_the_card_does_and_never_takes_it_back(
 def test_a_hidden_box_costs_the_tab_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     with_box = _modules(ps, tmp_path / "a", box=True, rows=False)
     without = _modules(ps, tmp_path / "b", box=False, rows=False)
-    for view, window, _tab in (with_box, without):
+    for _, window, _tab in (with_box, without):
         _at(window, (960, 640))
     assert without[0].addon_box.isHidden()
     assert without[0].modules_panel.height() > with_box[0].modules_panel.height()

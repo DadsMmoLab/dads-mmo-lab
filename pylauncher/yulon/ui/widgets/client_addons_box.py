@@ -29,7 +29,8 @@ ADDON_BOX_TITLE = "Game add-ons you bring"
 ADDON_BOX_NOTE = (
     "Add a game add-on from a link (a GitHub, GitLab or Codeberg repository or a .zip link "
     "there), or from a folder or a zip already on this computer. It goes into the game client "
-    "you play with. Add-ons you put there yourself are never touched."
+    "you play with. An add-on of yours with the same name is replaced only if you say yes, "
+    "and Remove puts yours back."
 )
 
 ADDON_LINK_LABEL = "Add-on from link…"
@@ -117,7 +118,7 @@ class ClientAddonsBox(QGroupBox):
             self.note.setVisible(not compact)
             labels = COMPACT_LABELS if compact else WHOLE_LABELS
             for button, text in zip(
-                (self.link_button, self.folder_button, self.zip_button), labels
+                (self.link_button, self.folder_button, self.zip_button), labels, strict=True
             ):
                 button.setText(text)
             self.list_label.setVisible(not compact and self.choice.count() > 0)

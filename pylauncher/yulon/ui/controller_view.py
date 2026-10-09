@@ -7797,6 +7797,16 @@ ADDON_POINTER = (
 
 ADDON_REPLACE_TITLE = "Replace {id}?"
 
+ADDON_NO_INTERFACE = (
+    "{name} cannot go into {folder}: it has no Interface folder, so Yu'lon cannot tell it is a "
+    "game client. Start the game once so it makes one, or choose the folder you play from with "
+    "\u201c{button}\u201d on the Server tab. Nothing on this machine was changed."
+)
+
+ADDON_COULD_NOT_GO_ON = (
+    "{what}: Yu'lon could not go on ({why}). Nothing on this machine was changed."
+)
+
 ADDON_REMOVE_TITLE = "Remove {name}?"
 
 ADDON_REMOVE_QUESTION = (
@@ -8163,6 +8173,8 @@ class ControllerView(QWidget):
         self._addon_link_asker: LinkAsker = addon_link_asker or ask_addon_link
         self._addon_folder_asker: FolderAsker = addon_folder_asker or ask_module_folder
         self._addon_zip_asker: FolderAsker = addon_zip_asker or ask_addon_zip
+        # The add-on Update in flight, for T150's question (None for every other job).
+        self._addon_update_asked: Manifest | None = None
         # T36's client-folder press. The same `DirPicker` shape the Catalog's
         # own folder pickers use (`catalog_view._qt_dir_picker`), reused rather
         # than a second modal dialog function that would open the same window.
@@ -18296,28 +18308,61 @@ class ControllerView(QWidget):
         route = self.services.client_addons
         if route is None or not isinstance(result, client_addons.Prepared):
             return
-        manifest = result.manifest
-        if self._stopped_for_the_client(what, manifest):
-            result.discard()
-            return
         try:
-            question = route.replacement_question(result)
-        except Exception as exc:  # boundary: the disk; the applier refuses what it cannot ask
-            logger.warning(f"could not tell what adding {manifest.id} would replace: {exc}")
-            question = None
-        if question is not None and not self._confirm(
-            ADDON_REPLACE_TITLE.format(id=manifest.id), question
-        ):
+            self._addon_install(route, result, what)
+        except Exception as exc:  # boundary: a GUI-thread slot that raises dies without a word
+            logger.warning(f"{what}: stopped before the install: {exc}")
             result.discard()
-            self._addon_cancelled(f"{what} {manifest.id}")
+            self._acting_on = None
+            said = ADDON_COULD_NOT_GO_ON.format(what=what, why=" ".join(str(exc).split()))
+            self.module_report.setPlainText(said)
+            self.action_failed.emit(said)
+
+    def _addon_install(
+        self, route: client_addons.ClientAddons, read: client_addons.Prepared, what: str
+    ) -> None:
+        """The checks between the read and the install, then the install on a worker.
+
+        Asked again here, after the read: a Rebuild or another job may have started during a
+        long download, and the install writes `modules/` and the client.
+        """
+        manifest = read.manifest
+        if self._addon_busy():
+            read.discard()
             return
-        replacing = any(m.id == manifest.id for m in route.installed())
+        if self._stopped_for_the_client(what, manifest):
+            read.discard()
+            return
+        if route.applier.client_dir is None:
+            read.discard()
+            folder = self.services.play_client_dir or self.services.client_dir
+            said = ADDON_NO_INTERFACE.format(
+                name=manifest.name,
+                folder=folder if folder is not None else "your game client",
+                button=SET_CLIENT_DIR_LABEL,
+            )
+            self.module_report.setPlainText(said)
+            self.action_failed.emit(said)
+            return
+        # Two questions, each its own: a folder of the player's with that name, and a checkout
+        # of ANOTHER repository under this id (T47: the install would reset it).
+        player_question = route.replacement_question(read)
+        repository_question = route.applier.replacement_question(manifest)
+        for question in (player_question, repository_question):
+            if question is not None and not self._confirm(
+                ADDON_REPLACE_TITLE.format(id=manifest.id), question
+            ):
+                read.discard()
+                self._addon_cancelled(f"{what} {manifest.id}")
+                return
         self._acting_on = manifest
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}\u2026")
         self._run_module_job(
             lambda: route.install(
-                result, replacing=replacing, replace_existing=question is not None
+                read,
+                replacing=repository_question is not None,
+                replace_existing=player_question is not None,
             ),
             self._addon_done,
             self._addon_failed,
@@ -18343,6 +18388,19 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _addon_failed(self, exc: object) -> None:
+        asked, self._addon_update_asked = self._addon_update_asked, None
+        route = self.services.client_addons
+        if isinstance(exc, ReleaseDirectionUnknown) and asked is not None and route is not None:
+            # T150 for an add-on: nobody could show the release is not a step back. Ask; on a
+            # yes press the same update again with the question's own approval, nothing wider.
+            self._module_job_ended()
+            if self._confirm(MODULE_UPDATE_UNCHECKED_TITLE.format(id=asked.id), exc.question):
+                self._start_addon_update(route, asked, exc.approval)
+            else:
+                self._module_pending = None
+                self._acting_on = None
+                self._addon_cancelled(f"update {asked.id}")
+            return
         self._module_failed(exc)
         self.refresh_addon_box()
 
@@ -18350,7 +18408,14 @@ class ControllerView(QWidget):
         route = self.services.client_addons
         if route is None:
             return None
-        return next((m for m in route.installed() if m.id == item_id), None)
+        try:
+            return next((m for m in route.installed() if m.id == item_id), None)
+        except Exception as exc:  # boundary: the records are files the player may have edited
+            logger.warning(f"could not read the add-ons Yu'lon put in the client: {exc}")
+            self.module_report.setPlainText(
+                ADDON_COULD_NOT_GO_ON.format(what="add-on list", why=" ".join(str(exc).split()))
+            )
+            return None
 
     @Slot(str)
     def update_addon(self, item_id: str) -> None:
@@ -18360,10 +18425,25 @@ class ControllerView(QWidget):
             return
         if self._stopped_for_the_client(f"update {manifest.id}", manifest):
             return
+        self._start_addon_update(route, manifest, None)
+
+    def _start_addon_update(
+        self,
+        route: client_addons.ClientAddons,
+        manifest: Manifest,
+        approved: apply_module.UncheckedApproval | None,
+    ) -> None:
         self._acting_on = manifest
+        self._addon_update_asked = manifest
         self._module_pending = f"update {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}\u2026")
-        self._run_module_job(lambda: route.update(manifest), self._addon_done, self._addon_failed)
+        self._run_module_job(
+            lambda: (
+                route.update(manifest, approved=approved) if approved else route.update(manifest)
+            ),
+            self._addon_done,
+            self._addon_failed,
+        )
 
     @Slot(str)
     def remove_addon(self, item_id: str) -> None:

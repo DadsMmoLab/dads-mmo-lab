@@ -38,11 +38,36 @@ def _manifest(name: str = "pfUI") -> Manifest:
 
 
 @dataclass
+class _Applier:
+    """The slice of the tab's applier the box asks: the client it really writes to, one question."""
+
+    client_dir: Path | None
+    question: str | None = None
+    raises: Exception | None = None
+
+    def replacement_question(self, manifest: Manifest) -> str | None:
+        if self.raises:
+            raise self.raises
+        return self.question
+
+
+class _Staging:
+    def __init__(self, route: _Route) -> None:
+        self.route = route
+
+    def discard(self) -> None:
+        self.route.discarded += 1
+
+
+@dataclass
 class _Route:
     """The seam `ControllerView` presses, recording what it was asked."""
 
     refusal: str | None = None
     question: str | None = None
+    applier: _Applier = field(default_factory=lambda: _Applier(Path("/client")))
+    update_errors: list[Exception] = field(default_factory=list)
+    on_read: Any = None
     install_error: Exception | None = None
     rows: list[Manifest] = field(default_factory=list)
     calls: list[tuple[str, Any]] = field(default_factory=list)
@@ -50,9 +75,11 @@ class _Route:
 
     def _prepared(self, via: str, what: object) -> Prepared:
         self.calls.append((via, what))
+        if self.on_read:
+            self.on_read()
         if self.refusal:
             raise AddonRefusal(self.refusal)
-        return Prepared(manifest=_manifest())
+        return Prepared(manifest=_manifest(), staged=cast(Any, _Staging(self)))
 
     def from_link(self, url: str, **_: object) -> Prepared:
         return self._prepared("link", url)
@@ -78,8 +105,12 @@ class _Route:
             action="install", item_id=prepared.manifest.id, family="mod", done=("Installed pfUI",)
         )
 
-    def update(self, manifest: Manifest, **_: object) -> ApplyReport:
-        self.calls.append(("update", manifest.id))
+    def update(self, manifest: Manifest, **kwargs: object) -> ApplyReport:
+        self.calls.append(
+            ("update", manifest.id) if not kwargs else ("update", manifest.id, kwargs)
+        )
+        if self.update_errors:
+            raise self.update_errors.pop(0)
         return ApplyReport(
             action="install", item_id=manifest.id, family="mod", done=("Updated pfUI",)
         )
@@ -185,12 +216,41 @@ def test_the_folder_and_zip_presses_hand_the_chosen_path_on(qapp: object, tmp_pa
     ]
 
 
-def test_a_second_press_for_an_add_on_already_added_is_an_update_of_it(
+def test_a_same_source_add_again_is_a_plain_update_and_asks_nothing(
     qapp: object, tmp_path: Path
 ) -> None:
     view, route = _view(tmp_path, _Route(rows=[_manifest()]))
+    asked: list[Any] = []
+    _answering(view, True, asked)
     view.addon_box.link_button.click()
+    assert asked == []
+    assert route.calls[1][1]["replacing"] is False
+
+
+REPO_QUESTION = "modules/pfui is a checkout of shagu/pfUI, not of fork/pfUI.\n\nReplace it?"
+
+
+def test_a_checkout_of_another_repository_is_asked_and_the_yes_is_passed_on(
+    qapp: object, tmp_path: Path
+) -> None:
+    route = _Route(rows=[_manifest()], applier=_Applier(Path("/c"), question=REPO_QUESTION))
+    view, route = _view(tmp_path, route)
+    asked: list[Any] = []
+    _answering(view, True, asked)
+    view.addon_box.link_button.click()
+    assert asked == [("Replace pfui?", REPO_QUESTION)]
     assert route.calls[1][1]["replacing"] is True
+
+
+def test_a_no_to_the_repository_question_installs_nothing_and_lets_the_staging_go(
+    qapp: object, tmp_path: Path
+) -> None:
+    route = _Route(rows=[_manifest()], applier=_Applier(Path("/c"), question=REPO_QUESTION))
+    view, route = _view(tmp_path, route, confirm=False)
+    view.addon_box.link_button.click()
+    assert [c[0] for c in route.calls] == ["link"]
+    assert route.discarded == 1
+    assert "cancelled — nothing on this machine was changed" in view.module_report.toPlainText()
 
 
 @pytest.mark.parametrize("press", ["link_button", "folder_button", "zip_button"])
@@ -249,26 +309,172 @@ def test_a_replace_question_no_installs_nothing_and_lets_the_staging_go(
 ) -> None:
     route = _Route(question="An add-on named pfUI is already in this client. Replace it?")
     view, route = _view(tmp_path, route, confirm=False)
-    discarded: list[bool] = []
-    original = route._prepared
-
-    def tracking(via: str, what: object) -> Prepared:
-        prepared = original(via, what)
-        object.__setattr__(prepared, "discard", lambda: discarded.append(True))
-        return prepared
-
-    route._prepared = tracking  # type: ignore[method-assign]
     view.addon_box.link_button.click()
     assert [c[0] for c in route.calls] == ["link"]
     assert "cancelled — nothing on this machine was changed" in view.module_report.toPlainText()
-    assert discarded == [True]
+    assert route.discarded == 1
 
 
-def test_without_a_client_folder_the_add_on_is_not_started(qapp: object, tmp_path: Path) -> None:
+def test_a_press_the_client_check_stops_installs_nothing_and_lets_the_staging_go(
+    qapp: object, tmp_path: Path
+) -> None:
     view, route = _view(tmp_path, client=False)
-    view._stopped_for_the_client = lambda what, manifest: True  # type: ignore[method-assign]
+    stopped: list[str] = []
+
+    def stop(what: str, manifest: Manifest) -> bool:
+        stopped.append(what)
+        return True
+
+    cast(Any, view)._stopped_for_the_client = stop
+    view.addon_box.link_button.click()
+    assert stopped == ["add-on from link"]
+    assert [c[0] for c in route.calls] == ["link"]
+    assert route.discarded == 1
+
+
+def test_an_update_the_client_check_stops_updates_nothing(qapp: object, tmp_path: Path) -> None:
+    view, route = _view(tmp_path, _Route(rows=[_manifest()]))
+    stopped: list[str] = []
+
+    def stop(what: str, manifest: Manifest) -> bool:
+        stopped.append(what)
+        return True
+
+    cast(Any, view)._stopped_for_the_client = stop
+    view.addon_box.update_button.click()
+    assert stopped == ["update pfui"]
+    assert route.calls == []
+
+
+def test_a_remove_while_a_module_job_runs_is_refused_in_words(qapp: object, tmp_path: Path) -> None:
+    view, route = _view(tmp_path, _Route(rows=[_manifest()]))
+    asked: list[Any] = []
+    _answering(view, True, asked)
+    view._module_pending = "update mod-x"
+    view.remove_addon("pfui")
+    assert route.calls == [] and asked == []
+    assert "update mod-x" in view.module_report.toPlainText()
+
+
+def test_an_update_while_a_module_job_runs_is_refused_in_words(
+    qapp: object, tmp_path: Path
+) -> None:
+    view, route = _view(tmp_path, _Route(rows=[_manifest()]))
+    view._module_pending = "update mod-x"
+    view.update_addon("pfui")
+    assert route.calls == []
+    assert "update mod-x" in view.module_report.toPlainText()
+
+
+def test_a_rebuild_started_during_the_read_stops_the_install_and_lets_the_staging_go(
+    qapp: object, tmp_path: Path
+) -> None:
+    route = _Route()
+    view, route = _view(tmp_path, route)
+    route.on_read = lambda: setattr(view, "_busy", True)
     view.addon_box.link_button.click()
     assert [c[0] for c in route.calls] == ["link"]
+    assert route.discarded == 1
+    assert "Wait" in view.module_report.toPlainText()
+
+
+def test_a_raise_after_the_read_leaks_no_staging_and_says_so(qapp: object, tmp_path: Path) -> None:
+    view, route = _view(tmp_path)
+
+    def boom(what: str, manifest: Manifest) -> bool:
+        raise RuntimeError("the disk went away")
+
+    cast(Any, view)._stopped_for_the_client = boom
+    view.addon_box.link_button.click()
+    said = view.module_report.toPlainText()
+    assert "the disk went away" in said and NOTHING in said
+    assert route.discarded == 1
+    assert [c[0] for c in route.calls] == ["link"]
+    assert not view._module_job_running()
+
+
+def test_a_list_that_cannot_be_read_does_not_kill_the_remove_press(
+    qapp: object, tmp_path: Path
+) -> None:
+    view, route = _view(tmp_path, _Route(rows=[_manifest()]))
+
+    def broken() -> list[Manifest]:
+        raise OSError("unreadable")
+
+    route.installed = broken  # type: ignore[method-assign]
+    view.remove_addon("pfui")
+    assert route.calls == []
+    assert "unreadable" in view.module_report.toPlainText()
+
+
+def test_an_update_nobody_can_place_asks_and_a_yes_presses_it_again_approved(
+    qapp: object, tmp_path: Path
+) -> None:
+    from yulon.apply import ReleaseDirectionUnknown
+
+    approval = cast(Any, object())
+    route = _Route(rows=[_manifest()])
+    route.update_errors = [
+        ReleaseDirectionUnknown("could not place it", "Update anyway?", approval)
+    ]
+    view, route = _view(tmp_path, route)
+    asked: list[Any] = []
+    _answering(view, True, asked)
+    view.addon_box.update_button.click()
+    assert asked == [("Update pfui without checking?", "Update anyway?")]
+    assert route.calls[-1] == ("update", "pfui", {"approved": approval})
+    assert "Updated pfUI" in view.module_report.toPlainText()
+
+
+def test_an_update_nobody_can_place_and_a_no_changes_nothing(qapp: object, tmp_path: Path) -> None:
+    from yulon.apply import ReleaseDirectionUnknown
+
+    route = _Route(rows=[_manifest()])
+    route.update_errors = [
+        ReleaseDirectionUnknown("could not place it", "Update anyway?", cast(Any, 1))
+    ]
+    view, route = _view(tmp_path, route, confirm=False)
+    view.addon_box.update_button.click()
+    assert len(route.calls) == 1
+    assert "cancelled — nothing on this machine was changed" in view.module_report.toPlainText()
+
+
+def test_the_note_does_not_promise_what_a_replace_breaks() -> None:
+    from yulon.ui.widgets.client_addons_box import ADDON_BOX_NOTE
+
+    assert "never touched" not in ADDON_BOX_NOTE
+    assert "replaced only if you say yes" in ADDON_BOX_NOTE and "puts yours back" in ADDON_BOX_NOTE
+
+
+@pytest.mark.parametrize(("game", "interface"), [("wow-centurion", 30300), ("wow-tortoise", 11200)])
+def test_a_client_folder_with_no_interface_folder_refuses_the_add_on_and_writes_nothing(
+    game: str, interface: int, qapp: object, tmp_path: Path
+) -> None:
+    """The reproduced case: the install "succeeded", skipped its step, and listed the add-on."""
+    client = tmp_path / "client"
+    client.mkdir()
+    source = tmp_path / "src" / "pfUI"
+    source.mkdir(parents=True)
+    (source / "pfUI.toc").write_text(f"## Interface: {interface}\n## Title: pfUI\npfUI.lua\n")
+    (source / "pfUI.lua").write_text("x = 1\n")
+    services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / game, client)
+    view = ControllerView(
+        CATALOG.get(game),
+        services,
+        status_poll_ms=0,
+        job_runner=run_inline,
+        addon_folder_asker=lambda _p, _t: source,
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.addon_box.folder_button.click()
+
+    said = view.module_report.toPlainText()
+    assert str(client) in said and "Interface" in said and NOTHING in said
+    assert failures and failures[0] == said
+    assert not (client / "Interface").exists()
+    assert view.addon_box.choice.count() == 0
+    assert not view._module_job_running()
 
 
 def test_update_and_remove_press_the_chosen_add_on(qapp: object, tmp_path: Path) -> None:
