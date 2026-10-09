@@ -69,7 +69,9 @@ class CleanUpDialog(QDialog):
         self._now = now
         self._keep_now = keep_now
         self.plan: Plan | None = None
-        self._unusable = sum(1 for r in shelf.rows if not r.usable)
+        self._unusable = len(
+            backup_shelf.plan_clean_up(shelf, Rule(include_unusable=True), now=now).names
+        )
 
         box = QVBoxLayout(self)
         intro = QLabel(ALWAYS_KEPT, self)

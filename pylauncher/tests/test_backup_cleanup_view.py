@@ -619,3 +619,15 @@ def test_every_game_wires_the_shelf_to_its_own_folder_and_game(
     assert seam.game_id == game_id
     assert seam.spec == entry.container_spec()
     assert services.backups_dir() == backup_shelf.backups_dir(tmp_path)
+
+
+def test_the_dialog_does_not_count_a_gz_as_a_file_it_would_delete(
+    qapp: object, tmp_path: Path
+) -> None:
+    put(tmp_path, "20261003_100000", "acore_world")
+    (folder_of(tmp_path) / "old.sql.gz").write_bytes(b"\x1f\x8b")
+    shelf = backup_shelf.read_shelf(tmp_path, game_id=GAME, installed={})
+    dialog = CleanUpDialog(shelf, keep_now=None)
+    assert "(0)" in dialog.unusable_check.text()
+    assert not dialog.unusable_check.isEnabled()
+    dialog.deleteLater()

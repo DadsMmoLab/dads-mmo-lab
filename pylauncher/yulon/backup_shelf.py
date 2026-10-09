@@ -72,7 +72,19 @@ _STAMP_FORMAT = "%Y%m%d_%H%M%S"
 
 # Labels with a fixed spelling. `before-new-build` is matched here, BEFORE the
 # `before-<id>` shape, or an update's copy would read as an item called "new-build".
-_FIXED_LABELS = ("before-new-build", "after-new-build", "pre-restore", "move")
+_FIXED_LABELS = (
+    "before-new-build",
+    "after-new-build",
+    "pre-restore",
+    "before-move-load",
+    "before-move",
+)
+# What a move into this server writes (T601): the copy taken first, and the copies taken
+# before each load. Read before the `before-<id>` shape, or a move would read as an item
+# called "move".
+_MOVE_LABELS = ("before-move", "before-move-load")
+_IN_USE_MINUTES = 30
+"""A `.partial` changed this recently may still be being written, so it is left alone."""
 _ITEM_LABEL_LEAD = "before-"
 
 Kind = Literal["dump", "partial", "gz"]
@@ -112,6 +124,8 @@ class ShelfRow:
     links: int
     kept_because: str | None
     cannot_delete: str | None
+    unchecked: bool = False
+    """Yu'lon could not read the file to check it (a read error, not a verdict): kept."""
     named_by_yulon: bool = True
     """False for a `.sql` the player put there under a name of their own: listed, so Restore
     can still pick it, and never deleted by Yu'lon."""
@@ -173,13 +187,14 @@ def read_shelf(
     game_id: str | None,
     installed: Mapping[str, frozenset[str]] | None = None,
     marker: object = _UNSET,
+    now: datetime | None = None,
 ) -> Shelf:
     """List the backups folder: top-level regular files only, newest first.
 
     Args:
         game_id: This server's game, so a file recorded for another game is known
             for what it is. None skips that check.
-        installed: What `apply.installed_clones()` says is installed; read here
+        installed: What is installed per family (`apply.installed_clones()`'s shape); read here
             when not given. A failed read protects every `before-<id>` copy.
         marker: The restore marker (`maintenance.interrupted_restore()`); read
             from the folder when not given.
@@ -198,6 +213,7 @@ def read_shelf(
         game_id=game_id,
         installed=installed,
         marker=marker,
+        now=now,
     )
     final: list[ShelfRow] = []
     for r in rows:
@@ -296,6 +312,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
     named = stamp_named or kind != "dump"
     candidates = _candidates(rest) if kind != "gz" else [(None, rest)]
     usable, problem, game = False, None, None
+    unchecked = False
     if kind == "partial":
         problem = "A backup that was cut short; it never became a copy that can be restored."
     elif kind == "gz":
@@ -307,6 +324,10 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             usable = True
         except MaintenanceError as exc:
             problem = str(exc)
+            if isinstance(exc.__cause__, OSError):
+                # A read that failed proves nothing about the file: never "unusable".
+                unchecked = True
+                problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
     label, database = candidates[0]
     if usable:
         for cand_label, cand_db in candidates:
@@ -337,6 +358,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
         links=st.st_nlink,
         kept_because=None,
         cannot_delete=None,
+        unchecked=unchecked,
         named_by_yulon=named,
     )
 
@@ -373,11 +395,27 @@ def _protections(
     game_id: str | None,
     installed: Mapping[str, frozenset[str]] | None,
     marker: object,
+    now: datetime | None = None,
 ) -> dict[str, str]:
     kept: dict[str, str] = {}
 
     def keep(name: str, why: str) -> None:
         kept.setdefault(name, why)
+
+    def good(r: ShelfRow) -> bool:
+        """A whole dump: a `.partial`, a cut-short file or one not yet checked is never cover."""
+        return r.kind == "dump" and r.usable
+
+    # 0. a file that could not be read, and a `.partial` that may still be written
+    clock = (now or datetime.now()).timestamp()
+    for r in rows:
+        if r.unchecked:
+            keep(r.name, f"{r.problem} It is kept until Yu'lon can check it.")
+        elif r.kind == "partial" and clock - r.identity[3] / 1e9 < _IN_USE_MINUTES * 60:
+            keep(
+                r.name,
+                f"it may still be writing: it was changed less than {_IN_USE_MINUTES} minutes ago.",
+            )
 
     # 1. the newest good copy of every database
     newest: dict[str, ShelfRow] = {}
@@ -391,7 +429,7 @@ def _protections(
         keep(r.name, f"it is the newest good copy of {database}.")
 
     # 2. the newest update copy set
-    updates = [r for r in rows if r.label == "before-new-build"]
+    updates = [r for r in rows if r.label == "before-new-build" and good(r)]
     if updates:
         latest = max(r.made_at for r in updates)
         for r in updates:
@@ -399,6 +437,17 @@ def _protections(
                 keep(
                     r.name, "it is the copy the last update took, kept so the update can be undone."
                 )
+
+    # 2b. the newest copies a move into this server took, per label and database
+    newest_move: dict[tuple[str, str], ShelfRow] = {}
+    for r in rows:
+        if r.label not in _MOVE_LABELS or not good(r) or r.database is None:
+            continue
+        best = newest_move.get((r.label, r.database))
+        if best is None or (r.made_at, r.name) > (best.made_at, best.name):
+            newest_move[(r.label, r.database)] = r
+    for r in newest_move.values():
+        keep(r.name, "the copy taken before the last move into this server.")
 
     # 3. the restore marker
     record = maintenance.interrupted_restore(server_dir) if marker is _UNSET else marker
@@ -419,14 +468,14 @@ def _protections(
                     keep(r.name, "an unfinished restore names it.")
 
     # 4. the earliest copy before an item that is installed
-    items = {r.item for r in rows if r.item}
-    if items:
+    if any(r.item for r in rows):
         try:
-            now_installed = (
-                installed if installed is not None else apply.installed_clones(server_dir)
+            present = (
+                set().union(*installed.values())
+                if installed is not None
+                else _installed_here(server_dir)
             )
-            present = set().union(*now_installed.values()) if now_installed else set()
-        except Exception as exc:  # noqa: BLE001 - "could not tell" protects, it never guesses
+        except OSError as exc:
             logger.warning(f"could not read what is installed in {server_dir}: {exc}")
             for r in rows:
                 if r.item:
@@ -436,8 +485,8 @@ def _protections(
                         "copy of one.",
                     )
         else:
-            for item in items & present:
-                copies = [r for r in rows if r.item == item]
+            for item in {r.item for r in rows if r.item and good(r)} & present:
+                copies = [r for r in rows if r.item == item and good(r)]
                 earliest = min(r.made_at for r in copies)
                 for r in copies:
                     if r.made_at == earliest:
@@ -446,6 +495,23 @@ def _protections(
                             f"it was taken before {item} was installed, and {item} still is.",
                         )
     return kept
+
+
+def _installed_here(server_dir: Path) -> set[str]:
+    """The names of the folders in every clone directory, read here and not through
+    `docker.clone_names()`, which answers "nothing" for a folder it cannot list.
+
+    A folder that is not there holds nothing. Any other failure to look raises `OSError`,
+    and the caller then keeps every undo copy: an unreadable list is not an empty one.
+    """
+    found: set[str] = set()
+    for folder in set(apply.CLONE_DIRS.values()):
+        try:
+            with os.scandir(server_dir / folder) as listing:
+                found.update(e.name for e in listing if not e.name.startswith(".") and e.is_dir())
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return found
 
 
 # ----------------------------------------------------------------------- plans
@@ -509,7 +575,9 @@ def _select(shelf: Shelf, rule: Rule, now: datetime) -> list[ShelfRow]:
                 chosen[r.name] = r
     if rule.include_unusable:
         for r in shelf.rows:
-            if not r.usable:
+            # A wow-manage `.gz` is a good file Yu'lon cannot restore, never a broken one:
+            # only a single Delete, with its question, removes one.
+            if not r.usable and r.kind != "gz" and not r.unchecked:
                 chosen[r.name] = r
     return sorted(
         (r for name, r in chosen.items() if name in allowed),
@@ -735,7 +803,8 @@ _MADE_BY = {
     "pre-restore": "taken before a restore",
     "before-new-build": "taken before an update",
     "after-new-build": "the new build's data, taken as an update went back",
-    "move": "taken for moving to another computer",
+    "before-move": "taken before moving accounts and characters in",
+    "before-move-load": "taken before one step of moving in",
 }
 
 
@@ -773,7 +842,9 @@ def describe(r: ShelfRow, game_id: str | None = None) -> str:
     if r.kind == "dump" and _foreign(r, game_id):
         game += " (another game)"
     parts = [when, database, size, what_made_it(r), game]
-    if not r.usable and r.kind == "dump":
+    if r.unchecked:
+        parts.append("could not be checked")
+    elif not r.usable and r.kind == "dump":
         parts.append("cut short or unreadable")
     return " · ".join(parts)
 

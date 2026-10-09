@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from dataclasses import replace as dataclasses_replace
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ import pytest
 from yulon import backup_shelf, docker
 from yulon.backup_shelf import Plan, Rule, ShelfRefusal
 from yulon.controller_wow_wotlk import maintenance
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 
 GAME = "wow-wotlk"
 BANNER = b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n"
@@ -59,6 +61,12 @@ def put(
     path = folder_of(server) / f"{stamp}_{middle}{database}.sql"
     path.write_bytes(dump_of(database, game=game, whole=whole, pad=pad))
     return path
+
+
+def age(path: Path, minutes: int = 90) -> None:
+    """Make a file look `minutes` old, so a `.partial` is a leftover and not a dump in flight."""
+    then = time.time() - minutes * 60
+    os.utime(path, (then, then))
 
 
 def shelf(
@@ -144,7 +152,8 @@ def test_a_row_says_when_what_and_how_big(server: Path) -> None:
         ("before-new-build", "acore_characters"),
         ("after-new-build", "acore_auth"),
         ("before-bigger-stacks", "acore_world"),
-        ("move", "acore_world"),
+        ("before-move", "acore_world"),
+        ("before-move-load", "acore_characters"),
     ],
 )
 def test_the_label_is_read_before_the_database(server: Path, label: str, database: str) -> None:
@@ -319,8 +328,8 @@ def test_the_newest_update_copy_set_is_kept_and_an_older_set_is_not(server: Path
 
 def test_files_the_restore_marker_names_are_kept(server: Path) -> None:
     named = put(server, "20261001_100000", "acore_world", label="pre-restore")
-    source = put(server, "20261002_100000", "acore_world", label="move")
-    other = put(server, "20261003_100000", "acore_world", label="move")
+    source = put(server, "20261002_100000", "acore_world", label="pre-restore")
+    other = put(server, "20261003_100000", "acore_world", label="pre-restore")
     put(server, "20261009_100000", "acore_world")
     marker = maintenance.InterruptedRestore(
         marker=maintenance.marker_path(server),
@@ -372,22 +381,6 @@ def test_the_copy_before_an_item_that_is_not_installed_is_not_kept(server: Path)
     put(server, "20261009_100000")
     found = shelf(server, installed={"mod": frozenset({"something-else"})})
     assert row(found, first.name).kept_because is None
-
-
-def test_when_the_installed_list_cannot_be_read_every_before_item_copy_is_kept(
-    server: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    first = put(server, "20261001_100000", label="before-bigger-stacks")
-    plain = put(server, "20261002_100000", label="move")
-    put(server, "20261009_100000")
-
-    def broken(_server: Path) -> dict[str, frozenset[str]]:
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(backup_shelf.apply, "installed_clones", broken)
-    found = backup_shelf.read_shelf(server, game_id=GAME)
-    assert row(found, first.name).kept_because
-    assert row(found, plain.name).kept_because is None
 
 
 # ------------------------------------------------------------------- plans
@@ -476,6 +469,7 @@ def test_clean_up_can_add_the_cut_short_files(server: Path) -> None:
     broken = put(server, "20261001_100000", "acore_world", whole=False)
     partial = folder_of(server) / "20261002_100000_acore_world.sql.partial"
     partial.write_bytes(b"half")
+    age(partial)
     found = shelf(server)
     assert backup_shelf.plan_clean_up(found, Rule(older_than_days=999), now=NOW).names == ()
     plan = backup_shelf.plan_clean_up(found, Rule(include_unusable=True), now=NOW)
@@ -936,3 +930,193 @@ def test_retention_is_a_keep_rule_run_through_the_same_checks(server: Path, call
 )
 def test_sizes_are_said_in_the_unit_that_does_not_round_them_to_zero(size: int, said: str) -> None:
     assert backup_shelf.size_text(size) == said
+
+
+# ------------------------------------------- the Opus review of 720b428d (REWORK)
+
+
+def run_as_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def test_a_cut_short_first_attempt_is_not_the_earliest_copy_before_an_item(server: Path) -> None:
+    """A leftover `.partial` of the first press must not take the item's undo protection."""
+    partial = folder_of(server) / "20261001_100000_before-mod-x_acore_world.sql.partial"
+    partial.write_bytes(dump_of("acore_world", whole=False))
+    age(partial)
+    real = put(server, "20261001_100500", label="before-mod-x")
+    put(server, "20261005_100000")
+    found = shelf(server, installed={"module": frozenset({"mod-x"})})
+    assert row(found, real.name).kept_because
+    assert "mod-x" in row(found, real.name).kept_because
+
+
+def test_a_cut_short_dump_is_not_the_earliest_copy_before_an_item(server: Path) -> None:
+    put(server, "20261001_100000", label="before-mod-x", whole=False)
+    real = put(server, "20261001_100500", label="before-mod-x")
+    put(server, "20261005_100000")
+    found = shelf(server, installed={"module": frozenset({"mod-x"})})
+    assert row(found, real.name).kept_because
+
+
+def test_a_killed_updates_partial_is_not_the_newest_update_set(server: Path) -> None:
+    good = put(server, "20261001_100000", label="before-new-build")
+    partial = folder_of(server) / "20261003_100000_before-new-build_acore_world.sql.partial"
+    partial.write_bytes(dump_of("acore_world", whole=False))
+    age(partial)
+    put(server, "20261005_100000")
+    found = shelf(server)
+    assert row(found, good.name).kept_because
+    assert "last update" in row(found, good.name).kept_because
+
+
+def test_a_cut_short_update_copy_is_not_the_newest_update_set(server: Path) -> None:
+    good = put(server, "20261001_100000", label="before-new-build")
+    put(server, "20261003_100000", label="before-new-build", whole=False)
+    put(server, "20261005_100000")
+    assert row(shelf(server), good.name).kept_because
+
+
+@pytest.mark.skipif(run_as_root(), reason="root reads a mode-000 folder")
+def test_an_unreadable_clone_folder_keeps_every_before_item_copy(server: Path) -> None:
+    """`docker.clone_names` answers 'nothing installed' for a folder it cannot list."""
+    first = put(server, "20261001_100000", label="before-mod-x")
+    later = put(server, "20261004_100000", label="before-mod-x")
+    plain = put(server, "20261002_100000", label="pre-restore")
+    put(server, "20261009_100000")
+    (server / "modules").mkdir()
+    (server / "modules" / "mod-x").mkdir()
+    (server / "modules").chmod(0)
+    try:
+        found = backup_shelf.read_shelf(server, game_id=GAME)
+    finally:
+        (server / "modules").chmod(0o755)
+    assert row(found, first.name).kept_because
+    assert row(found, later.name).kept_because
+    assert "could not read" in row(found, first.name).kept_because
+    assert row(found, plain.name).kept_because is None
+
+
+def test_a_missing_clone_folder_is_nothing_installed_not_a_doubt(server: Path) -> None:
+    first = put(server, "20261001_100000", label="before-mod-x")
+    put(server, "20261009_100000")
+    assert row(backup_shelf.read_shelf(server, game_id=GAME), first.name).kept_because is None
+
+
+def test_an_installed_item_found_on_disk_keeps_its_earliest_copy(server: Path) -> None:
+    first = put(server, "20261001_100000", label="before-mod-x")
+    later = put(server, "20261004_100000", label="before-mod-x")
+    put(server, "20261009_100000")
+    (server / "modules" / "mod-x").mkdir(parents=True)
+    found = backup_shelf.read_shelf(server, game_id=GAME)
+    assert row(found, first.name).kept_because
+    assert row(found, later.name).kept_because is None
+
+
+def test_the_newest_move_copies_are_kept_per_label_and_database(server: Path) -> None:
+    old = put(server, "20261001_100000", "acore_world", label="before-move")
+    new = put(server, "20261003_100000", "acore_world", label="before-move")
+    chars = put(server, "20261003_100100", "acore_characters", label="before-move-load")
+    old_load = put(server, "20261001_100100", "acore_characters", label="before-move-load")
+    put(server, "20261009_100000", "acore_world")
+    put(server, "20261009_100000", "acore_characters")
+    found = shelf(server)
+    assert row(found, new.name).kept_because == (
+        "the copy taken before the last move into this server."
+    )
+    assert row(found, chars.name).kept_because
+    assert row(found, old.name).kept_because is None
+    assert row(found, old_load.name).kept_because is None
+    assert row(found, new.name).item is None
+    assert row(found, new.name).label == "before-move"
+    assert row(found, chars.name).label == "before-move-load"
+
+
+def test_a_cut_short_move_copy_is_not_the_newest_move_copy(server: Path) -> None:
+    good = put(server, "20261001_100000", "acore_world", label="before-move")
+    put(server, "20261003_100000", "acore_world", label="before-move", whole=False)
+    put(server, "20261009_100000", "acore_world")
+    assert row(shelf(server), good.name).kept_because
+
+
+def test_clean_up_never_sweeps_a_gz_even_with_the_unusable_option(server: Path) -> None:
+    put(server, "20261008_100000", "acore_world")
+    gz = folder_of(server) / "acore_world_pre_restore.sql.gz"
+    gz.write_bytes(b"\x1f\x8b")
+    broken = put(server, "20261001_100000", "acore_world", whole=False)
+    found = shelf(server)
+    plan = backup_shelf.plan_clean_up(found, Rule(include_unusable=True), now=NOW)
+    assert gz.name not in plan.names
+    assert broken.name in plan.names
+    assert gz.name not in backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW).names
+
+
+def test_a_single_delete_may_still_remove_a_gz(server: Path) -> None:
+    put(server, "20261008_100000", "acore_world")
+    gz = folder_of(server) / "acore_world_pre_restore.sql.gz"
+    gz.write_bytes(b"\x1f\x8b")
+    plan = backup_shelf.plan_delete(shelf(server), gz.name)
+    assert plan.names == (gz.name,)
+
+
+@pytest.mark.skipif(run_as_root(), reason="root reads a mode-000 file")
+def test_a_dump_that_cannot_be_read_is_kept_as_unchecked_not_called_unusable(
+    server: Path,
+) -> None:
+    put(server, "20261009_100000", "acore_world")
+    shaky = put(server, "20261001_100000", "acore_world")
+    shaky.chmod(0)
+    try:
+        found = shelf(server)
+    finally:
+        shaky.chmod(0o644)
+    r = row(found, shaky.name)
+    assert r.unchecked is True
+    assert r.usable is False
+    assert r.kept_because
+    assert "could not check" in r.kept_because
+    plan = backup_shelf.plan_clean_up(found, Rule(include_unusable=True, keep_newest=1), now=NOW)
+    assert shaky.name not in plan.names
+
+
+def test_a_transient_read_error_in_the_game_record_is_unchecked_too(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put(server, "20261009_100000", "acore_world")
+    shaky = put(server, "20261001_100000", "acore_world")
+
+    def flaky(path: Path) -> str | None:
+        raise MaintenanceError(f"could not read {path}: busy") from OSError("busy")
+
+    monkeypatch.setattr(backup_shelf.maintenance, "backup_game", flaky)
+    r = row(shelf(server), shaky.name)
+    assert r.unchecked is True
+    assert r.kept_because
+
+
+def test_a_dump_proven_bad_is_still_unusable_and_not_unchecked(server: Path) -> None:
+    put(server, "20261009_100000", "acore_world")
+    bad = put(server, "20261001_100000", "acore_world", whole=False)
+    r = row(shelf(server), bad.name)
+    assert r.usable is False
+    assert r.unchecked is False
+    assert r.kept_because is None
+
+
+def test_a_recent_partial_is_in_use_and_kept(server: Path) -> None:
+    fresh = folder_of(server) / "20261009_100000_acore_world.sql.partial"
+    fresh.write_bytes(b"half")
+    old = folder_of(server) / "20261001_100000_acore_world.sql.partial"
+    old.write_bytes(b"half")
+    age(old, 31)
+    found = shelf(server)
+    assert "may still be writing" in (row(found, fresh.name).kept_because or "")
+    assert row(found, old.name).kept_because is None
+    assert row(found, fresh.name).cannot_delete
+
+
+def test_a_partial_just_inside_the_half_hour_is_kept(server: Path) -> None:
+    edge = folder_of(server) / "20261009_100000_acore_world.sql.partial"
+    edge.write_bytes(b"half")
+    age(edge, 29)
+    assert row(shelf(server), edge.name).kept_because
