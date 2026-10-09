@@ -2426,6 +2426,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "never the copy just taken, so a backup the player took is never named as one. An "
         "OSError listing it names none, and the sentence then says nothing about older copies"
     ),
+    ("backup_shelf.py", "_rows_in"): (
+        "T604. Lists this server's own `sql_scripts/backups/` to show the Maintenance tab's "
+        "Backups rows and to plan a Delete or a Clean up. It decides a DELETE, bounded five "
+        "times: top-level entries only (no walk), a regular file that is not a link, a name "
+        "that is a dump (`<stamp>_<...>.sql`), `.sql.partial` or `.sql.gz`, and a file that no "
+        "protection names; and nothing is removed until `carry_out()` has taken the "
+        "maintenance lease and read the folder again and found the file unchanged. An "
+        "OSError listing it shows an empty list and removes nothing"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "

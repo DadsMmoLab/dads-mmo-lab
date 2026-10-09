@@ -112,6 +112,9 @@ class ShelfRow:
     links: int
     kept_because: str | None
     cannot_delete: str | None
+    named_by_yulon: bool = True
+    """False for a `.sql` the player put there under a name of their own: listed, so Restore
+    can still pick it, and never deleted by Yu'lon."""
 
 
 @dataclass(frozen=True)
@@ -222,6 +225,11 @@ def _outside(folder: Path, server_dir: Path) -> str | None:
 def _why_not(r: ShelfRow, kept: str | None, refused: str | None) -> str | None:
     if refused:
         return refused
+    if not r.named_by_yulon:
+        return (
+            "Yu'lon did not make this file (its name is not one of Yu'lon's backup names), so "
+            "it will not delete it. Delete it in your file manager if you want it gone."
+        )
     if kept:
         return f"Yu'lon keeps this one: {kept}"
     if r.links > 1:
@@ -261,7 +269,7 @@ def _kind_of(name: str) -> Kind | None:
         return "partial"
     if lowered.endswith(".sql.gz"):
         return "gz"
-    if lowered.endswith(".sql") and _STAMP_NAME.match(name):
+    if lowered.endswith(".sql"):
         return "dump"
     return None
 
@@ -275,12 +283,17 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
     stamped = _STEM.match(stem)
     made_at = datetime.fromtimestamp(st.st_mtime)
     rest = stem
+    stamp_named = False
     if stamped is not None:
         try:
             made_at = datetime.strptime(stamped.group("stamp"), _STAMP_FORMAT)
             rest = stamped.group("rest") or ""
+            stamp_named = True
         except ValueError:
             pass
+    # A `.sql` under a name of the player's own is listed (Restore can pick it) and never
+    # deleted; a leftover `.partial` and a wow-manage `.gz` are Yu'lon's to clear.
+    named = stamp_named or kind != "dump"
     candidates = _candidates(rest) if kind != "gz" else [(None, rest)]
     usable, problem, game = False, None, None
     if kind == "partial":
@@ -316,7 +329,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
         made_at=made_at,
         label=label,
         item=item,
-        database=database if kind != "gz" else None,
+        database=database if kind != "gz" and named else None,
         usable=usable,
         problem=problem,
         game=game,
@@ -324,6 +337,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
         links=st.st_nlink,
         kept_because=None,
         cannot_delete=None,
+        named_by_yulon=named,
     )
 
 

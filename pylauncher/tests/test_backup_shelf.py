@@ -89,6 +89,26 @@ def test_the_shelf_lists_only_top_level_backup_files(server: Path) -> None:
     assert names == {keep.name, "20261002_100000_acore_world.sql.partial", "dump.sql.gz"}
 
 
+def test_a_sql_file_the_player_put_there_is_listed_for_restore_but_never_deleted(
+    server: Path,
+) -> None:
+    mine = folder_of(server) / "my-characters.sql"
+    mine.write_bytes(dump_of("acore_characters"))
+    put(server, "20261009_100000", "acore_characters")
+    found = shelf(server)
+    r = row(found, mine.name)
+    assert r.named_by_yulon is False
+    assert r.database is None
+    assert r.cannot_delete
+    assert "did not make this file" in r.cannot_delete
+    with pytest.raises(ShelfRefusal, match="did not make this file"):
+        backup_shelf.plan_delete(found, mine.name)
+    plan = backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW)
+    assert mine.name not in plan.names
+    # and it is not cover for a database: the Yu'lon-named copy is still the newest good one
+    assert row(found, "20261009_100000_acore_characters.sql").kept_because
+
+
 def test_a_linked_file_is_not_listed(server: Path) -> None:
     elsewhere = server / "elsewhere.sql"
     elsewhere.write_bytes(dump_of("acore_world"))
