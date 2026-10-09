@@ -112,7 +112,7 @@ def row_detail(verdict: Any) -> str:
 def dot_tone(status: str) -> str:
     """The row's dot: "up", "between", "attention" or "down" (unknown claims nothing: grey)."""
     word = status.lower()
-    if word in ("loop", "partial"):
+    if word in ("loop", "partial", "failed"):
         return "attention"
     tone = realm_tone(word)
     if tone == "up":

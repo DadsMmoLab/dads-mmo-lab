@@ -38,6 +38,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
 - **Save logs for support…** now says how many logs it left out of the zip, and why, before you send it.
 - A Tortoise world that fails a database update now stops and names the file and error, instead of hanging.
+- The realm badge says UPDATE FAILED, not STARTING, for a Tortoise world stuck at a failed database update.
 
 ### Changed
 

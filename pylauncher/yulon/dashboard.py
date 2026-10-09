@@ -286,7 +286,8 @@ def line(verdict: Verdict) -> str:
     identical on a tab and mean opposite things.
     """
     if verdict.state == "stopped":
-        return "stopped"
+        # T608: a world a Stop killed at a failed update keeps the sentence on the tab.
+        return f"stopped — {verdict.failure}" if verdict.failure else "stopped"
     if verdict.state == "starting":
         return "starting — Docker restarted and is bringing this server back up"
     if verdict.state == "unknown":
@@ -581,7 +582,13 @@ class Dashboard:
                 failure=self._update_failure(state.started_at, uptime),
             )
         if state.status != "running":
-            return Verdict("stopped", state.restart_count, state.started_at, uptime)
+            return Verdict(
+                "stopped",
+                state.restart_count,
+                state.started_at,
+                uptime,
+                failure=self._kept_failure(state.started_at),
+            )
         verdict = self._with_population(state, uptime, after_a_loop=self._looping)
         if restoring and verdict.players is not None:
             self._restoring_until = None  # its database answered: the race is over
@@ -816,6 +823,15 @@ class Dashboard:
         text = self._log_of(self.spec.world, run)
         self._run_log_cache = (self._ticks, run, text)
         return text
+
+    def _kept_failure(self, run: str) -> str:
+        """The sentence already read for run `run`, once that run has stopped (T608).
+
+        Never a new read: a stopped world is looked at every tick for as long as it stays
+        stopped. A Stop kills a world stuck at a failed update, and what `_update_failure()`
+        read while it ran is still true of that run; a new run has its own `started_at`.
+        """
+        return self._failure_text if self._failure_run == run else ""
 
     def _update_failure(self, run: str, uptime: timedelta | None) -> str:
         """The sentence for a failed update in run `run`'s own log, or `""` (T600).
