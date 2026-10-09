@@ -3325,6 +3325,7 @@ class Applier:
         # before `_record_client_copies()` wrote the new ones (round 1 review).
         previous_copies = read_client_copies(clone, item_id=manifest.id)
         log.previous_copies = previous_copies
+        self._check_hold()
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -3475,8 +3476,11 @@ class Applier:
         self._refuse_checkout_links(manifest, clone, "install", vals)
         self._refuse_a_clash(manifest, clone)
         self._refuse_links(manifest, clone)
+        self._check_hold()
         self._deploy(manifest, clone, log)
+        self._check_hold()
         self._folders(manifest, log)
+        self._check_hold()
         self._patches(manifest, clone, vals, "install", log)
         # Both SQL passes are refused as one, BEFORE either runs: the guard's
         # own sentence says no rows were written, and after the install-time
@@ -3494,16 +3498,19 @@ class Applier:
             if moving:
                 # D5: a put-back runs no SQL, and its report says these were kept.
                 module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
+        self._check_hold()
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
         # a `configure()` nothing calls. After `_conf()`, because a configure
         # patch may target the conf that step activates (`mod-ale`'s does),
         # which is the state a later `configure()` always finds.
+        self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
         if first_configure_sql and restore is None:
             self._sql(manifest, clone, vals, "configure", log)
         try:
+            self._check_hold()
             self._client(manifest, clone, log)
             self._dbc(manifest, clone, log)
         except BaseException as failure:
@@ -3531,6 +3538,7 @@ class Applier:
                     self._take_back(copy, log)
             log.skipped.extend(log.client_left_behind)  # an install's report has no left_behind
             log.client_left_behind.clear()
+        self._check_hold()
         self._finish_claim(
             manifest,
             clone,
@@ -4389,8 +4397,10 @@ class Applier:
             # nothing.
             self._require_own_clone(manifest, clone, "configure")
         self._refuse_checkout_links(manifest, clone, "configure", vals)
+        self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
+        self._check_hold()
         self._conf(manifest, clone, vals, log)
         self._remember(manifest, values, log)
         return self._report("configure", manifest, log)
@@ -4426,6 +4436,7 @@ class Applier:
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
         self._refuse_checkout_links(manifest, clone, "remove", vals)
+        self._check_hold()
         self._patches(manifest, clone, vals, "remove", log)
         sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
@@ -4444,16 +4455,20 @@ class Applier:
                     "row will keep reading Installed"
                 )
         for step in manifest.deploy:
+            self._check_hold()
             self._undeploy(step, clone, log)
+        self._check_hold()
         self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
         # files are this app's own live in the clone's claim file.
+        self._check_hold()
         self._unclient(manifest, clone, log)
         if clone.exists():
             # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
             # a bare rmtree stops at the first one, having already deleted an
             # unknown part of the checkout. Reported from a real install:
             # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
+            self._check_hold()
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         # T557, after the remove: an update or a skipped version of a module
@@ -5775,6 +5790,17 @@ class Applier:
         except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
             return None, f"{type(exc).__name__}: {exc}"
         return bool(rows.strip()), ""
+
+    def _check_hold(self) -> None:
+        """Between an action's steps: stop at once if another Yu'lon's "Stop anyway" ended the hold.
+
+        The SQL checks between its statements (`_refuse_if_the_hold_was_lost`); this is the same
+        for the rest of an Install, Remove or Configure -- the clone, the copies, the folders,
+        the patches and the conf edits -- so nothing more is written under a server that
+        another Yu'lon has just stopped (T607 review).
+        """
+        if self._hold_lost is not None and self._hold_lost.is_set():
+            raise ApplyRefusal(forgetting.ACTION_HOLD_LOST)
 
     def _refuse_if_the_hold_was_lost(self) -> None:
         """No statement is sent once another Yu'lon's Stop anyway ended this press's hold (T568)."""
