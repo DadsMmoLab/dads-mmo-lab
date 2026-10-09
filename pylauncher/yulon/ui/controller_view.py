@@ -9929,7 +9929,7 @@ class ControllerView(QWidget):
             holder.ours
             and not holder.here
             and holder.container
-            and (single_instance.holds_the_lock())
+            and single_instance.holds_the_lock()
         ):
             self._leftover = holder
             self.clear_reservation_button.setEnabled(True)

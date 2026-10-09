@@ -284,3 +284,27 @@ def test_a_reservation_its_press_lets_go_is_not_lost(fake_docker: Path, server: 
         pass
     time.sleep(0.3)  # the watcher has seen the CLI end by now
     assert not held.lost.is_set()
+
+
+def test_a_daemon_that_will_not_make_the_reservation_is_moot_not_a_reason_to_refuse(
+    fake_docker: Path, server: Path
+) -> None:
+    """The take itself finding Docker down (an image is there to ask with) is `moot`, like the
+    chain finding it down: the command meets that in its own words.
+
+    Mutation this catches: `moot` always False, which put "could not reserve" in front of the
+    Docker banner's advice whenever the daemon went away between the chain and the take.
+    """
+    (fake_docker / "claim-no-daemon").write_text("", encoding="utf-8")
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert refused.value.moot is True
+
+
+def test_an_image_the_daemon_refuses_is_not_moot(fake_docker: Path, server: Path) -> None:
+    (fake_docker / "missing-images").write_text(IMAGE, encoding="utf-8")
+    with pytest.raises(docker.ServerReservationUnavailable) as refused:
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert refused.value.moot is False
