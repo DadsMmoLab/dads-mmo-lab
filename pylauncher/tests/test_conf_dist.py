@@ -407,9 +407,59 @@ def test_a_whole_number_default_whose_comment_talks_of_decimals_is_text() -> Non
     assert _by_key("# Gold rate multiplier\nGold.Rate = 2\n")["Gold.Rate"].type is None
 
 
-def test_a_default_past_a_32_bit_int_is_text() -> None:
-    assert _by_key("Big.Number = 4000000000\n")["Big.Number"].type is None
+def test_a_default_past_a_32_bit_number_is_text() -> None:
+    assert _by_key("Big.Number = 4294967296\n")["Big.Number"].type is None
     assert _by_key("Small.Number = 2147483647\n")["Small.Number"].type == "int"
+    assert _by_key("Low.Number = -2147483649\n")["Low.Number"].type is None
+
+
+def test_a_number_key_accepts_the_whole_uint32_range_unless_its_comment_shows_a_negative() -> None:
+    """Codex review: `AuctionHouseBot.GUID = 0` is read as a uint32, so 3000000000 is legitimate.
+
+    A default of 0 or above says nothing about signedness, so the number check must not cap
+    at the signed 32-bit largest; a comment that shows a negative value means signed.
+    """
+    text = (
+        "AuctionHouseBot.GUID = 0\n"
+        "# 0 for off, -1 for no limit\n"
+        "Cap.Items = 0\n"
+        "Level.Offset = -3\n"
+        "Big.Id = 4000000000\n"
+    )
+    found = _by_key(text)
+    assert [found[k].type for k in found] == ["int", "int", "int", "int"]
+    assert found["Big.Id"].default == "4000000000"
+    rows = tuple(
+        tuning.TuningRow(
+            module_id="mod-x",
+            module_name="Mod X",
+            family="module",
+            file=CONF,
+            key=item.key,
+            label=item.key,
+            explain=item.help,
+            type=item.type,
+            min=None,
+            max=None,
+            default=item.default,
+            current=None,
+            installed=True,
+            backend="conf",
+            read_only_reason=None,
+        )
+        for item in found.values()
+    )
+    spec = conf_dist.conf_keys(rows, "module", "mod-x", CONF)
+    tuning.check(spec["AuctionHouseBot.GUID"], "3000000000")
+    with pytest.raises(tuning.TuningError):
+        tuning.check(spec["AuctionHouseBot.GUID"], "4294967296")
+    with pytest.raises(tuning.TuningError):
+        tuning.check(spec["AuctionHouseBot.GUID"], "-1")
+    tuning.check(spec["Cap.Items"], "-1")
+    with pytest.raises(tuning.TuningError):
+        tuning.check(spec["Cap.Items"], "2147483648")
+    tuning.check(spec["Level.Offset"], "-9")
+    tuning.check(spec["Big.Id"], "4294967295")
 
 
 def test_a_default_with_a_sign_or_leading_zero_is_not_read_as_a_switch() -> None:

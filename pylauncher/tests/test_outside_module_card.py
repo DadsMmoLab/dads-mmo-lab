@@ -194,3 +194,19 @@ def test_the_servers_own_conf_never_gets_a_card_from_a_module_that_names_it(
     object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-evil"})})
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert _ids(view) == ["server-rates"], "the Server rates card is the tab's own"
+
+
+def test_one_reload_reads_the_installed_modules_once(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Codex review: the declared cards and the dist cards must come from one snapshot."""
+    view = _outside_view(ps, tmp_path / "s", tmp_path / "u", conf="Mod.Enable = 0\n")
+    reads: list[int] = []
+    was = view.services.installed_modules
+    assert was is not None
+
+    def counted() -> Any:
+        reads.append(1)
+        return was()
+
+    object.__setattr__(view.services, "installed_modules", counted)
+    view.reload_tuning()
+    assert len(reads) == 1, reads

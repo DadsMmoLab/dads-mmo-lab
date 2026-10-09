@@ -18546,11 +18546,10 @@ class ControllerView(QWidget):
             self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
-        rows = tuning.rows_for(
-            manifests,
-            self._installed_clones() or {},
-            self.services.controller.server_dir,
-        )
+        # One reading of what is installed for both builders, so the declared cards and
+        # the `.conf.dist` ones come from the same snapshot.
+        installed = self._installed_clones() or {}
+        rows = tuning.rows_for(manifests, installed, self.services.controller.server_dir)
         self._tuning_rows = rows
         # T590: a module whose conf declares no keys (one added by link or folder) gets a
         # card from its `.conf.dist`; the server's own confs and any file a card already
@@ -18558,7 +18557,7 @@ class ControllerView(QWidget):
         server_dir = self.services.controller.server_dir
         self._outside_rows = conf_dist.rows_for(
             manifests,
-            self._installed_clones() or {},
+            installed,
             server_dir,
             core_files=self._tuning_core_files(),
             declared_files=tuple(dict.fromkeys(row.file for row in rows)),

@@ -36,8 +36,10 @@ no `.conf.dist`, or none that has a key in it: no card.
 and an unsure case degrades to a text box: `0` and `1` make a switch unless the comment
 names another number (a key that takes 0 to 4 and defaults to 0 is not a switch); a whole
 number is a number unless the comment speaks of decimals (`Rate = 1` may take 1.5) or it
-does not fit a 32-bit int; everything else is text. No range is invented, and none is read
-from the prose. The help text is the module author's own words, never reworded.
+does not fit 32 bits, and a default of 0 or more is let through up to the `uint32` largest
+unless the comment shows a negative (`reads_unsigned`); everything else is text. No range is
+invented, and none is read from the prose. The help text is the module author's own words,
+never reworded.
 
 Nothing here imports Qt, and nothing here writes a file.
 """
@@ -230,8 +232,19 @@ def _help(lines: Iterable[str]) -> str | None:
     return text
 
 
-_INT32_SMALLEST = -(2**31)
-_INT32_LARGEST = 2**31 - 1
+_NEGATIVE_IN_PROSE = re.compile(r"(?<![\w.])-[0-9]")
+"""A negative number written in a comment (`-1 for no limit`): the key is read as signed."""
+
+
+def reads_unsigned(default: str, words: str | None) -> bool:
+    """Whether a whole-number key is checked as a `uint32`: default 0 or more, no negative shown.
+
+    A default says nothing about signedness (`AuctionHouseBot.GUID = 0` is a `uint32`),
+    so a key that starts at 0 or above is let through up to 4294967295, which the signed range
+    would refuse. A comment that shows a negative value (`-1` for no limit) keeps the signed
+    range. A negative number given where 0 is meant is refused: the raw editor is the way round.
+    """
+    return int(default) >= 0 and not _NEGATIVE_IN_PROSE.search(words or "")
 
 
 _TOGGLE_IN_PROSE = re.compile(
@@ -263,11 +276,9 @@ def _type_of(key: str, raw: str, words: str | None) -> str | None:
     """`bool`, `int` or `None` (a text box), only where the default makes it certain."""
     if not _WHOLE.fullmatch(raw):
         return None
-    number = int(raw)
-    if not _INT32_SMALLEST <= number <= _INT32_LARGEST:
-        return None
     prose = words or ""
-    if _DECIMALISH.search(prose):
+    smallest, largest = tuning.int_range(reads_unsigned(raw, prose))
+    if not smallest <= int(raw) <= largest or _DECIMALISH.search(prose):
         return None
     return "bool" if raw in ("0", "1") and _is_a_toggle(key, prose) else "int"
 
@@ -384,6 +395,9 @@ def conf_keys(
             default=row.default,
             explain=row.explain,
             type="bool" if row.type == "bool" else "int" if row.type == "int" else None,
+            unsigned=row.type == "int"
+            and row.default is not None
+            and reads_unsigned(row.default, row.explain),
         )
         for row in rows
         if (row.family, row.module_id, row.file) == (family, module_id, file)
