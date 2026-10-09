@@ -1750,7 +1750,7 @@ def merged_pr(world, number=7, new=(), fixed=(), changed=(), commits=1, claude=N
         {"filename": "CHANGELOG.md", "patch": patch},
     ]
     world.claude = claude or FakeClaude(stop_reason="refusal")
-    set_event(world, push_event("Merge PR"))
+    set_event(world, push_event("Merge pull request #7 from dev/the-thing"))
 
 
 def merged_embed(world):
@@ -2261,10 +2261,10 @@ def test_a_push_to_another_branch_posts_nothing_for_a_pr_merged_into_yulon(world
     assert world.discord("POST") == []
 
 
-def test_a_bullet_needs_four_key_words_unless_the_line_has_fewer():
-    line = "Backup restore keeps newest copy always"
-    assert not dn.is_changelog_line("Backup restore keeps", [line])
-    assert dn.is_changelog_line("Backup restore keeps newest copy", [line])
+def test_a_bullet_needs_three_key_words_unless_the_line_has_fewer():
+    line = "Backup restore keeps newest copy"
+    assert not dn.is_changelog_line("Backup restore", [line])
+    assert dn.is_changelog_line("Backup restore keeps", [line])
     assert dn.is_changelog_line("Alpha beta", ["Alpha beta"])
 
 
@@ -2278,3 +2278,124 @@ def test_a_bullet_must_carry_a_fair_share_of_the_lines_key_words():
     line = "alpha beta gamma delta epsilon zeta theta iota kappa lambda sigma omega"
     assert not dn.is_changelog_line("alpha beta gamma delta", [line])
     assert dn.is_changelog_line("alpha beta gamma delta epsilon", [line])
+
+
+# --- T625: why a Claude reply was refused is logged; a direct push does not wait ----------------
+
+
+def refusal_log(reply, source=None, capsys=None):
+    source = source or (["Alpha is out for players"], ["Gamma no longer crashes"], [])
+    assert dn.shape_release_reply(reply, source) is None
+    return capsys.readouterr().out
+
+
+def test_an_invented_bullet_is_logged_with_the_rule_and_the_bullet(capsys):
+    out = refusal_log("## New:\n- A brand new invented feature here", capsys=capsys)
+    assert "refused" in out.lower() and "not a line" in out
+    assert "A brand new invented feature here" in out and "New" in out
+
+
+def test_the_first_offending_bullet_is_the_one_logged(capsys):
+    reply = (
+        "## New:\n- Alpha out for players\n## Fixes:\n- Server crash again\n- Another invented one"
+    )
+    out = refusal_log(reply, capsys=capsys)
+    assert "Server crash again" in out and "Another invented one" not in out
+
+
+@pytest.mark.parametrize(
+    ("reply", "rule", "shown"),
+    [
+        ("Some prose.", "shape", "Some prose."),
+        ("## New:\n- See [x](https://e.com)", "link", "See [x](https://e.com)"),
+        ("## Fixes:\n- Gamma\n## New:\n- Alpha", "order", "## New:"),
+        ("## New:\n1. Alpha", "shape", "1. Alpha"),
+    ],
+)
+def test_every_refusal_names_its_rule_and_the_line(capsys, reply, rule, shown):
+    out = refusal_log(reply, capsys=capsys)
+    assert rule in out and shown in out
+
+
+def test_an_accepted_reply_logs_no_refusal(capsys):
+    reply = "## New:\n- Alpha out for players"
+    assert dn.shape_release_reply(reply, (["Alpha is out for players"], [], [])) is not None
+    assert "refused" not in capsys.readouterr().out.lower()
+
+
+def test_a_direct_push_does_not_wait_for_a_retry(world, monkeypatch):
+    slept = []
+    monkeypatch.setattr(dn.time, "sleep", slept.append)
+    set_event(world, push_event("Direct fix"))
+    assert dn.cmd_merged() == 0
+    assert dn.RETRY_WAIT not in slept
+    lookups = [c for c in world.calls if c[1].endswith("/pulls")]
+    assert len(lookups) == 1
+
+
+@pytest.mark.parametrize(
+    "message", ["Fix the thing (#7)", "Merge pull request #7 from dev/the-thing"]
+)
+def test_a_commit_that_looks_like_a_pr_merge_is_retried(world, monkeypatch, message):
+    slept = []
+    monkeypatch.setattr(dn.time, "sleep", slept.append)
+    set_event(world, push_event(message))
+    assert dn.cmd_merged() == 0
+    assert dn.RETRY_WAIT in slept
+
+
+# Fair bullets that the first validator refused in the live measurement (5 runs of Claude).
+MEASURED_FAIR = [
+    (
+        "Saving settings no longer freezes the window.",
+        "Saving settings no longer freezes the window; Network **Apply**, uninstall and the time "
+        "zone wait for another job instead of failing.",
+    ),
+    (
+        "Addon and module update chips now fill in by themselves once a day.",
+        "Addon and module update chips now fill in by themselves once a day, without pressing "
+        "**Check for updates**.",
+    ),
+    (
+        "On Centurion, Revive works again after a server update.",
+        "On Centurion, **Revive** works again after a server update, and pathfinding data no "
+        "longer crashes while made.",
+    ),
+    (
+        "An account created with a GM level on a running Tortoise server is GM at once.",
+        "An account created with a GM level on a running Tortoise server is GM at once, with no "
+        "restart.",
+    ),
+    (
+        "A WotLK client that is not build 12340 is refused up front, naming the version it needs.",
+        "A WotLK game client that is not build 12340 is named and refused, instead of dropping "
+        "you after the password.",
+    ),
+    (
+        "Install refuses a game client of the wrong version before building, naming the one "
+        "needed.",
+        "Install now refuses a game client of the wrong version before it builds anything, and "
+        "names the version it needs.",
+    ),
+]
+
+
+@pytest.mark.parametrize(("bullet", "line"), MEASURED_FAIR)
+def test_the_fair_bullets_seen_in_the_live_measurement_are_accepted(bullet, line):
+    assert dn.is_changelog_line(bullet, [line, "Some other unrelated line about something"])
+
+
+def test_a_bullet_is_scored_against_its_best_line_among_many():
+    lines = ["Unrelated thing happens", MEASURED_FAIR[0][1], "Another different line entirely"]
+    assert dn.is_changelog_line(MEASURED_FAIR[0][0], lines)
+
+
+def test_a_negation_after_the_covered_clause_is_not_dropped_but_one_inside_it_is():
+    line = "Stop no longer waits on a slow Docker, then it goes ahead after a few seconds"
+    assert dn.is_changelog_line("Stop no longer waits on a slow Docker", [line])
+    assert not dn.is_changelog_line("Stop waits on a slow Docker", [line])
+
+
+def test_a_one_word_opening_of_a_line_is_not_a_clause_to_match():
+    assert not dn.is_changelog_line("Stop", ["Stop, then restart the server again"])
+    assert not dn.is_changelog_line("Stop restart", ["Stop, then restart the server again"])

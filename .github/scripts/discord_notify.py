@@ -445,6 +445,7 @@ def _find_prs(commits: list, branch: str) -> list[dict]:
     for attempt in (1, 2):
         pending = [at for at in range(len(commits)) if at not in found]
         if attempt == 2:
+            pending = [at for at in pending if _looks_like_a_merge(commits[at])]
             if not pending:
                 break
             log(f"{len(pending)} commit(s) without a merged PR yet: asking again in {RETRY_WAIT}s.")
@@ -476,6 +477,13 @@ def _find_prs(commits: list, branch: str) -> list[dict]:
             seen.add(found[at]["number"])
             out.append(found[at])
     return out
+
+
+def _looks_like_a_merge(commit: dict) -> bool:
+    """A squash merge ends "(#N)"; a merge commit starts "Merge pull request #N". Only those
+    can have a PR that GitHub has not linked yet, so a plain direct push does not wait."""
+    first = _first_line(commit)
+    return bool(re.search(r"\(#\d+\)\s*$", first) or first.startswith("Merge pull request #"))
 
 
 def _pr_by_number(number: int, branch: str) -> dict | None:
@@ -934,9 +942,9 @@ _NEGATION_RE = re.compile(
     r"\b(?:no|not|never|cannot|none|nothing|nor|without|refus\w*|reject\w*|prevent\w*)\b|n't\b",
     re.IGNORECASE,
 )
-MATCH_SHARE = 0.7  # of the bullet's key words that are in the line
+MATCH_SHARE = 0.55  # of the bullet's key words that are in the line
 COVER_SHARE = 0.4  # of the line's key words that are in the bullet
-MIN_KEY_WORDS = 4  # a bullet has at least this many key words, or all of a shorter line's
+MIN_KEY_WORDS = 3  # a bullet has at least this many key words, or all of a shorter line's
 
 
 def _same_word(a: str, b: str) -> bool:
@@ -951,27 +959,46 @@ def _key_words(text: str) -> list[str]:
     return seen
 
 
+_CLAUSE_END_RE = re.compile(r"[.;,]\s| \u2014 ")
+
+
+def _clauses(item: str) -> list[str]:
+    """The whole line and each of its openings that ends at a phrase end (3+ key words).
+
+    A bullet is often the line cut at a phrase end, so it is scored against those too.
+    """
+    out = [item]
+    for found in _CLAUSE_END_RE.finditer(item):
+        opening = item[: found.start()]
+        if len(_key_words(opening)) >= MIN_KEY_WORDS:
+            out.append(opening)
+    return out
+
+
 def is_changelog_line(bullet: str, items: list[str]) -> bool:
     """True if `bullet` is one of `items`, shortened or reworded a little.
 
-    Stop words are ignored. The bullet needs at least MIN_KEY_WORDS key words (all of a
-    shorter line's), MATCH_SHARE of them must be words of the line (a word and its ending
-    count as the same) and COVER_SHARE of the line's key words must be in the bullet. A
-    bullet that adds or drops a negation ("no longer", "not", "never", "n't", "refuses",
-    ...) against the line says something else and is refused.
+    The bullet is scored against its best-matching line, and against each opening of a line
+    that ends at a phrase end. Stop words are ignored. The bullet needs at least
+    MIN_KEY_WORDS key words (all of a shorter line's), MATCH_SHARE of them must be words of the
+    line (a word and its ending count as the same) and COVER_SHARE of the line's key words
+    must be in the bullet. A bullet that adds or drops a negation ("no longer", "not",
+    "never", "n't", "refuses", ...) against the text it matches says something else and is
+    refused.
     """
     mine = _key_words(bullet)
     negated = bool(_NEGATION_RE.search(bullet))
     for item in items:
-        theirs = _key_words(item)
-        if not mine or len(mine) < min(MIN_KEY_WORDS, len(theirs)):
-            continue
-        if negated != bool(_NEGATION_RE.search(item)):
-            continue
-        inside = sum(any(_same_word(w, t) for t in theirs) for w in mine)
-        covered = sum(any(_same_word(w, t) for w in mine) for t in theirs)
-        if inside >= MATCH_SHARE * len(mine) and covered >= COVER_SHARE * len(theirs):
-            return True
+        for clause in _clauses(item):
+            theirs = _key_words(clause)
+            if not mine or len(mine) < min(MIN_KEY_WORDS, len(theirs)):
+                continue
+            if negated != bool(_NEGATION_RE.search(clause)):
+                continue
+            inside = sum(any(_same_word(w, t) for t in theirs) for w in mine)
+            covered = sum(any(_same_word(w, t) for w in mine) for t in theirs)
+            if inside >= MATCH_SHARE * len(mine) and covered >= COVER_SHARE * len(theirs):
+                return True
     return False
 
 
@@ -1049,6 +1076,24 @@ def shape_release_reply(reply: str, source=None) -> str | None:
     refused; a "\u2026and N more" line of Claude's is dropped and ours is added from the
     source's counts.
     """
+    lists, problem = parse_reply(reply, source)
+    if problem is None:
+        totals = tuple(len([i for i in x if i.strip()]) for x in source) if source else None
+        out = render_release(*lists.values(), totals=totals)
+        problem = None if out else ("empty", "no bullets")
+        if problem is None:
+            return out
+    log(f"Claude's reply was refused ({problem[0]}): {problem[1]!r}. Using the built list.")
+    return None
+
+
+def parse_reply(reply: str, source=None):
+    """(lists, None) for a reply in the shape, else (lists so far, (rule, first bad line)).
+
+    The rules: "shape" (prose, an intro, numbered items, a bullet before any heading),
+    "order" (a heading out of order or twice), "code, link or mention", and with `source`
+    "not a line under <heading>" (a bullet that is not one of the CHANGELOG's lines there).
+    """
     lists: dict[str, list[str]] = {heading: [] for heading in RELEASE_HEADINGS}
     last = -1
     target = None
@@ -1059,24 +1104,24 @@ def shape_release_reply(reply: str, source=None) -> str | None:
         if line in lists:
             at = RELEASE_HEADINGS.index(line)
             if at <= last:
-                return None
+                return lists, ("order", line)
             last = at
             target = lists[line]
         elif _CONTENT_RE.search(line):
-            return None
+            return lists, ("code, link or mention", line.strip())
         elif target is not None and line.startswith("- ") and line[2:].strip():
             bullet = line[2:].strip()
             if source is not None and _MORE_RE.fullmatch(bullet):
                 continue
             target.append(bullet)
         else:
-            return None
+            return lists, ("shape", line.strip())
     if source is not None:
         for heading, items in zip(RELEASE_HEADINGS, source, strict=True):
-            if not all(is_changelog_line(b, items) for b in lists[heading]):
-                return None
-    totals = tuple(len([i for i in items if i.strip()]) for items in source) if source else None
-    return render_release(*lists.values(), totals=totals) or None
+            for bullet in lists[heading]:
+                if not is_changelog_line(bullet, items):
+                    return lists, (f"not a line under {heading}", bullet)
+    return lists, None
 
 
 def _fit_link(head: list[str], lines: list[str], link: str) -> str:
