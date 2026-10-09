@@ -943,3 +943,16 @@ def test_daemon_arch_folds_docker_infos_names_to_the_release_assets_names(
         assert seen[said] == want
     monkeypatch.setattr(docker, "_docker", answer("", 1))
     assert docker.daemon_arch() is None
+
+
+def test_a_module_commit_whose_date_cannot_be_read_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.rev_date = "yesterday-ish"
+
+    said = _on(switch)
+
+    why = [line for line in said if "prebuilt" in line]
+    assert "could not tell when this server's bots version was made" in why[0], why
+    assert github.urls == []
