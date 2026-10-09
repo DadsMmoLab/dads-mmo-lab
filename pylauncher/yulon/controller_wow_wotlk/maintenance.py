@@ -983,7 +983,14 @@ class RestorePlan:
         return not self.refusals
 
     def with_unlabeled_accepted(self) -> RestorePlan:
-        """This plan, once the player has agreed to restore a backup that names no game."""
+        """This plan, once the player has agreed to restore a backup that names no game.
+
+        A plan whose backup DOES name its game is returned as it is. An answer to a
+        question that was never asked would stay on the plan and cover a file swapped
+        for an unlabelled one of the same size, which keeps the token (Codex review).
+        """
+        if not self.game_unproven:
+            return self
         return dataclasses.replace(self, unlabeled_accepted=True)
 
     @property

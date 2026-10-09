@@ -334,6 +334,21 @@ def test_a_labelled_plan_is_no_cover_for_a_same_size_file_that_has_lost_its_reco
     assert mysql.loaded == []
 
 
+def test_an_acknowledgement_is_not_recorded_on_a_plan_that_was_never_unproven(
+    tmp_path: Path,
+) -> None:
+    """Else a same-size swap for an unlabelled file keeps both the token and the 'yes'."""
+    record = line_for("wow-wotlk")
+    path = write(tmp_path, record + dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK).with_unlabeled_accepted()
+    assert not made.unlabeled_accepted
+    path.write_bytes(b"-- " + b"x" * (len(record) - 4) + b"\n" + dump_of("acore_characters"))
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="does not say which game it is from"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
 def test_an_acknowledgement_does_not_unrefuse_a_wrong_game(tmp_path: Path) -> None:
     path = write(tmp_path, line_for("wow-unbound") + dump_of("acore_characters"))
     made = dataclasses.replace(plan(path, tmp_path, WOTLK), unlabeled_accepted=True)
