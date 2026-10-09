@@ -349,6 +349,11 @@ _MYSQL_CLI = re.compile(
     r"(?P<head>\b(?i:mysql|mariadb|mysqldump|mysqladmin)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]-p)"
     r"(?P<value>[^\s\"',\]]+)"
 )
+_HTTP_CLI_AUTH = re.compile(
+    r"(?P<head>\b(?i:curl|wget|https?|xh)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]"
+    r"(?:-u|--user|--proxy-user|--auth|--http-user|--ftp-user)(?:[ \t=]+|['\"],[ \t]*['\"])"
+    r"['\"]?[^\s:'\"]{0,64}:)(?P<value>[^\s'\",\]]+)"
+)
 _USER_THEN_PASSWORD = re.compile(
     r"(?P<head>[ \t'\"]-u[^\s\"',]+['\"]?,?[ \t]*['\"]?-p)(?P<value>[^\s\"',\]]+)"
 )
@@ -397,6 +402,7 @@ _HEAD_VALUE = (
     _DASH_PASSWORD,
     _ARGV_PASSWORD,
     _MYSQL_CLI,
+    _HTTP_CLI_AUTH,
     _USER_THEN_PASSWORD,
     _ACCOUNT_CREATE,
     _ACCOUNT_PASSWORD,

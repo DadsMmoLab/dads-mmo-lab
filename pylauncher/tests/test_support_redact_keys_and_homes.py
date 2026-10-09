@@ -680,3 +680,18 @@ def test_a_personal_access_token_is_masked_by_its_key_and_by_its_shape() -> None
     assert (
         redactor.checked("a patch applied, pat on the back") == "a patch applied, pat on the back"
     )
+
+
+def test_an_http_client_user_and_password_argument_is_masked() -> None:
+    secret = "Zq" + secrets.token_hex(10) + "Wv"
+    redactor = Redactor.build([])
+    for line in (
+        f"curl -u alice:{secret} https://example.test",
+        f"curl --user alice:{secret} https://example.test",
+        f"curl -s -u 'alice:{secret}' https://example.test",
+        f"http --auth alice:{secret} example.test",
+        f"['curl', '-u', 'alice:{secret}', 'https://example.test']",
+    ):
+        out = redactor.checked(line)
+        assert secret not in out and "alice" in out, out
+    assert redactor.checked("docker exec -u 1000:1000 web") == "docker exec -u 1000:1000 web"
