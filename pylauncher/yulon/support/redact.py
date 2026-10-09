@@ -346,18 +346,30 @@ _ARGV_PASSWORD = re.compile(
     r"(?P<head>['\"](?:-p|--password|--pass|--pwd)['\"],[ \t]*['\"])(?P<value>[^'\"]+)"
 )
 # A password right after -p may be quoted (-p'x' / -p"x"): the quotes go with it, and so do
-# the other spellings a log prints (T617): shell-joined quotes (-p'it'\''s'), a quote that
-# is itself escaped (JSON -p\"x\", a Python repr -p\'x\'), and a quote left open by a
-# cut-off line (the rest of the line is the password). Every gap is bounded.
+# the other spellings a log prints (T617): quote pieces joined to each other (-p'it'\''s',
+# -p'a'"b", the `'"'"'` that `shlex.join` writes), a word quoted around the -p itself
+# ('-pHun'"'"'ter2' or a repr "-pHun'ter2"), a quote that is itself escaped (JSON -p\"x\", a
+# Python repr -p\'x\', up to eight backslashes), Windows -p^"x^", and a quote left open by a
+# cut-off line (the rest of the line is the password). A quote right after -p that is
+# followed by a space or the end is a CLOSING quote ('mysql -p' in docs): no password.
+# Every gap is bounded.
+_QS = r"(?:'[^'\r\n]*'|\"[^\"\r\n]*\")"  # one quoted piece, possibly empty
+_SHLEX_JOIN = r"'\\{0,8}\"'\\{0,8}\"'"  # the `'"'"'` shlex writes for a ' (JSON-escaped: '\"'\"')
 _QUOTED_OR_BARE = (
     r"(?P<value>"
-    r"'[^'\r\n]*'(?:\\'(?:'[^'\r\n]*'|[^\s\"',\]\\]+)?){0,20}"  # 'a'\''b'
-    r"|\"[^\"\r\n]+\""
-    r"|\\{1,4}'[^\r\n]{1,200}?\\{1,4}'"  # \'a\'
-    r"|\\{1,4}\"[^\r\n]{1,200}?\\{1,4}\""  # \"a\"
-    r"|\\{1,4}['\"][^\r\n]*"  # \"a   (cut off)
+    # '-pa b'"'"'c' / '-pa'\"'\"'b' (JSON): the word is quoted around the -p, to its closing quote
+    r"(?<='-p)(?=[^\s'\r\n])(?:" + _SHLEX_JOIN + r"|\\(?=" + _SHLEX_JOIN + r")"
+    r"|\\[^\r\n]|[^'\\\r\n])+"
+    r"|(?<=\"-p)(?=[^\s\"\r\n])(?:\\[^\r\n]|[^\"\\\r\n])+"
+    # -p'a'"b"  -p"a"'b'  -p'a'\''b'  -p'a'\"'\"'b': pieces and escaped quotes, joined
+    r"|" + _QS + r"(?:" + _QS + r"|\\{1,8}['\"](?:" + _QS + r"|[^\s\"',\]\\]+)?){0,20}"
+    r"|\\{1,8}'[^\r\n]{1,200}?\\{1,8}'"  # \'a\'
+    r"|\\{1,8}\"[^\r\n]{1,200}?\\{1,8}\""  # \"a\"
+    r"|\^\"[^\r\n]{1,200}?\^\""  # ^"a^"
+    r"|\\{1,8}['\"](?=[^\s'\"\\])[^\r\n]*"  # \"a   (cut off)
+    r"|\^\"(?=[^\s\"^])[^\r\n]*"  # ^"a   (cut off)
     r"|[^\s\"',\]]+"
-    r"|['\"][^\r\n]*)"  # 'a   (cut off)
+    r"|['\"](?=[^\s'\"])[^\r\n]*)"  # 'a   (cut off)
 )
 _MYSQL_CLI = re.compile(
     r"(?P<head>\b(?i:mysql|mariadb|mysqldump|mysqladmin)(?:\.exe)?\b[^\r\n]{0,300}?[ \t'\"]-p)"

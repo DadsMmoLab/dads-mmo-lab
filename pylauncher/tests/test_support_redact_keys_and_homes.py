@@ -765,7 +765,79 @@ def test_the_quote_shapes_leave_the_text_around_a_password_alone() -> None:
         "mysql -uroot -pabc acore",
     ):
         out = redactor.redact(line)
-        assert "abc" not in out and "SELECT 1" in out or "acore" in out, out
+        assert "abc" not in out, out
+        assert "SELECT 1" in out or "acore" in out, out
     assert (
         redactor.redact("mysql -uroot -p'abc' -e 'SELECT 1'") == "mysql -uroot -p*** -e 'SELECT 1'"
     )
+
+
+def _pw_with(sep: str) -> tuple[str, str, str]:
+    head, tail = "Zq" + secrets.token_hex(3), secrets.token_hex(3) + "Wv"
+    return head, tail, head + sep + tail
+
+
+_AWKWARD_SEPARATORS = ["'", '"', "'\"'", "\"'", " ", "'  '", "$ !", '"" \'', "' \"", "\\'", "\\\\'"]
+
+
+@pytest.mark.parametrize("sep", _AWKWARD_SEPARATORS)
+def test_a_password_with_quotes_in_it_is_masked_whole_in_every_serialisation(sep: str) -> None:
+    """`shlex.join` (Yu'lon writes it for `sg`), a Python repr and JSON, of a password with
+    quotes and spaces in it: no half of it survives (T617 review)."""
+    import json
+    import shlex
+
+    head, tail, password = _pw_with(sep)
+    argv = ["mysql", "-uroot", f"-p{password}", "acore"]
+    joined = shlex.join(argv)
+    for line in (joined, json.dumps(joined), repr(joined), repr(argv), json.dumps(argv)):
+        out = Redactor.build([]).redact(line)
+        assert head not in out and tail not in out, (line, out)
+        if line != repr(joined):  # a repr of the joined line cannot tell its closing quote apart
+            assert "acore" in out, (line, out)
+        assert Redactor.build([]).checked(line) == out
+
+
+def test_a_quote_piece_joined_to_another_quote_piece_is_one_password() -> None:
+    head, tail = "Zq" + secrets.token_hex(3), secrets.token_hex(3) + "Wv"
+    for line in (
+        f"mysql -uroot -p'{head}'\"{tail}\" acore",
+        f"mysql -uroot -p\"{head}\"'{tail}' acore",
+        f"mysql -uroot -p'{head}'\"'\"'{tail}' acore",
+        f"mysql -uroot '-p{head}'\"'\"'{tail}' acore",
+    ):
+        out = Redactor.build([]).redact(line)
+        assert head not in out and tail not in out, (line, out)
+        assert out.endswith(" acore"), out
+        assert Redactor.build([]).checked(line) == out
+
+
+def test_an_empty_quoted_password_does_not_swallow_the_rest_of_the_line() -> None:
+    redactor = Redactor.build([])
+    for empty in ('""', "''"):
+        out = redactor.redact(f'mysql -uroot -p{empty} -e "SELECT 1" acore')
+        assert out == 'mysql -uroot -p*** -e "SELECT 1" acore', out
+
+
+def test_a_quote_after_dash_p_that_only_closes_a_phrase_is_not_a_password() -> None:
+    redactor = Redactor.build([])
+    for text in ("see 'mysql -p' in docs", 'see "mysql -p" in docs', "run 'mysql -p'"):
+        assert redactor.redact(text) == text
+
+
+def test_a_caret_escaped_windows_password_is_masked_whole() -> None:
+    secret = "Zq" + secrets.token_hex(4) + "Wv"
+    for line, expected in (
+        (f'mysql.exe -uroot -p^"{secret}^" acore', "mysql.exe -uroot -p*** acore"),
+        (f'mysql.exe -uroot -p^"{secret}', "mysql.exe -uroot -p***"),
+    ):
+        assert Redactor.build([]).redact(line) == expected
+        assert Redactor.build([]).checked(line) == expected
+
+
+def test_json_nested_three_deep_still_masks_an_escaped_quote_password() -> None:
+    secret = "Zq" + secrets.token_hex(4) + "Wv"
+    bs = "\\" * 7  # seven backslashes: a JSON string inside a JSON string inside one
+    line = f'"mysql -uroot -p{bs}"{secret}{bs}" acore"'
+    out = Redactor.build([]).redact(line)
+    assert secret not in out and out.endswith(' acore"'), out
