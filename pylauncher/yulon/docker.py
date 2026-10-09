@@ -8334,9 +8334,9 @@ class ServerHolder:
         """
         if not self.host or self.host != socket.gethostname() or not self.pid.isdigit():
             return None
-        from yulon.selfupdate.layout import pid_is_alive
+        from yulon.selfupdate.layout import pid_liveness
 
-        return pid_is_alive(int(self.pid))
+        return pid_liveness(int(self.pid))
 
     def since(self, now: float | None = None) -> str:
         """The daemon's creation stamp as "14:02 (3 minutes ago)"; empty when unreadable."""

@@ -538,3 +538,18 @@ def test_a_live_process_of_this_users_is_a_working_yulon_not_a_leftover(
         assert "Another Yu'lon is working on" in said and "docker rm" not in said, said
     finally:
         theirs.kill()
+
+
+def test_a_pid_that_cannot_be_probed_is_unknown_not_dead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected OSError from the probe is "cannot tell", so "Clear it" is not offered.
+
+    Mutation this catches: `False` for any error (the old `pid_is_alive()` answer).
+    """
+    import errno
+
+    def broken(_pid: int, _sig: int) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "kill", broken)
+    holder = docker.ServerHolder("n", "c", host=socket.gethostname(), pid="12345", ours=True)
+    assert holder.live_here() is None

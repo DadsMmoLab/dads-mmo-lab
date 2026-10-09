@@ -522,8 +522,9 @@ class Controller:
     def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
         """The server folders (by compose working dir) of `containers`, each with one container.
 
-        Only a folder this host can see: a working dir inside a WSL distro, or one Docker has
-        no label for, is skipped (and logged), since there is no id file to put in it.
+        Only a folder this host can see and Yu'lon built (it has `native.STATE_FILE`): a working
+        dir inside a WSL distro, one Docker has no label for, or the user's own compose project
+        is skipped (and logged), since Yu'lon writes no id file into a folder that is not its own.
         """
         found: dict[Path, str] = {}
         for name in containers:
@@ -536,6 +537,12 @@ class Controller:
                 logger.info(f"no server folder this host can see for {name} ({working!r})")
                 continue
             if folder.resolve() == self.server_dir.resolve():
+                continue
+            if not (folder / native.STATE_FILE).is_file():
+                # Not a server Yu'lon built: the user's own compose project in the way.
+                # Stopped as before, unreserved -- no id file written into their folder, and
+                # no reservation container run from their image (T568, Opus review).
+                logger.info(f"{folder} is not a Yu'lon server; stopping {name} unreserved")
                 continue
             found.setdefault(folder, name)
         return found
