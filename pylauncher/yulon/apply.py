@@ -6912,7 +6912,9 @@ class Applier:
                 log.current_copies[str(dest)] = before
                 return
             if dest not in fresh:
-                before = self._set_aside(src, dest, previous, before, log)
+                before = self._set_aside(
+                    src, dest, previous, before, log, same_bytes_too=bool(addon)
+                )
             fresh.add(dest)
             log.current_copies[str(dest)] = before
             _copy_unshared(src, dest)
@@ -6971,8 +6973,14 @@ class Applier:
         previous: ClientCopy | None,
         copy: ClientCopy,
         log: _Log,
+        *,
+        same_bytes_too: bool = False,
     ) -> ClientCopy:
         """Move the player's `dest` to a free aside name when `_placer()`'s rule says so.
+
+        `same_bytes_too` (an outside add-on's file, T613 review round 1): a file of the
+        player's with the add-on's own bytes is set aside as well, so Remove puts
+        theirs back rather than deleting a file Yu'lon did not put there.
 
         The receipt naming the aside is written to the claim FIRST (`log.persist`),
         then the file is renamed: a crash between the two leaves a record of an
@@ -6987,7 +6995,7 @@ class Applier:
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             return copy
         here = sha256_of(dest)
-        if here == sha256_of(src):
+        if here == sha256_of(src) and not same_bytes_too:
             return copy
         if previous is not None and here == previous.sha256:
             return copy  # this item's own copy from an earlier install

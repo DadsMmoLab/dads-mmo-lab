@@ -680,3 +680,112 @@ def test_data_receipts_leave_out_every_add_on_receipt(tmp_path: Path) -> None:
     applier, _manifest_, _addon = _install(tmp_path)
 
     assert client_receipts(applier.server_dir) and data_receipts(applier.server_dir) == ()
+
+
+def test_an_identical_file_of_the_players_in_a_known_folder_is_set_aside_and_put_back(
+    tmp_path: Path,
+) -> None:
+    """The folder is another item's, so no question; the one file in it is the player's."""
+    client = _client(tmp_path)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    smaller = {k: v for k, v in FILES.items() if k != "modules/bags.lua"}
+    two = _manifest(item="pfui-two")
+    applier.install(two, folder=FolderSource(_source(tmp_path / "two", smaller), copy_folder))
+    addon = client / "Interface" / "AddOns" / "pfUI"
+    (addon / "modules").mkdir()
+    (addon / "modules" / "bags.lua").write_text(FILES["modules/bags.lua"], encoding="utf-8")
+    one = _manifest(item="pfui")
+    applier.install(one, folder=FolderSource(_source(tmp_path / "one"), copy_folder))
+
+    applier.remove(one)
+
+    assert (addon / "modules" / "bags.lua").read_text() == FILES["modules/bags.lua"]
+    assert not list((addon / "modules").glob("*.yulon-module-old*"))
+
+
+def test_an_update_of_a_shipped_add_on_never_takes_a_dropped_file_back(tmp_path: Path) -> None:
+    applier, manifest, addon = _install(tmp_path, outside=False)
+    newer = {k: v for k, v in FILES.items() if k != "modules/bags.lua"}
+
+    applier.install(manifest, folder=FolderSource(_source(tmp_path / "v2", newer), copy_folder))
+
+    assert (addon / "modules" / "bags.lua").is_file()
+
+
+def test_a_recorded_folder_aside_that_is_not_beside_the_add_on_is_never_moved(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    manifest = _manifest()
+    applier.install(
+        manifest, folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+    elsewhere = tmp_path / "Documents"
+    (elsewhere / "precious").mkdir(parents=True)
+    claim_path = applier.clone_dir(manifest) / CLAIM_FILE
+    claim = json.loads(claim_path.read_text())
+    for entry in claim["client_files"]:
+        if entry.get("folder"):
+            entry["aside"] = str(elsewhere)
+    claim_path.write_text(json.dumps(claim))
+
+    report = applier.remove(manifest)
+
+    assert (elsewhere / "precious").is_dir()
+    assert not (client / "Interface" / "AddOns" / "pfUI").exists()
+    assert any(str(elsewhere) in line and "not beside it" in line for line in report.left_behind)
+
+
+def test_a_failed_install_after_the_players_folder_was_set_aside_puts_it_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import apply as apply_module
+
+    client = _client(tmp_path)
+    mine = _hand_installed(client, {"pfUI.toc": "## Interface: 11200\n", "mine.lua": "-- mine\n"})
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    real = apply_module._copy_unshared
+    copied: list[str] = []
+
+    def breaks_on_the_second(src: object, dst: object) -> object:
+        copied.append(str(dst))
+        if len(copied) == 2:
+            raise OSError(28, "No space left on device", str(dst))
+        return real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module, "_copy_unshared", breaks_on_the_second)
+
+    with pytest.raises(OSError):
+        applier.install(
+            _manifest(), folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+        )
+
+    assert (mine / "mine.lua").read_text() == "-- mine\n"
+    assert not (mine.parent / "pfUI.yulon-addon-old").exists()
+    assert sorted(p.name for p in mine.iterdir()) == ["mine.lua", "pfUI.toc"]
+
+
+def test_the_play_keep_list_leaves_out_a_folder_set_aside(tmp_path: Path) -> None:
+    from yulon.ui.controller_view import module_kept_files
+
+    client = _client(tmp_path)
+    _hand_installed(client)
+    server = tmp_path / "server"
+    server.mkdir()
+    applier = Applier(server, client_dir=client)
+    applier.install(
+        _manifest(), folder=FolderSource(_source(tmp_path), copy_folder), replace_addons=True
+    )
+
+    kept = module_kept_files(server, client)
+
+    assert Path("Interface/AddOns/pfUI") not in kept
+    assert Path("Interface/AddOns/pfUI/pfUI.lua") in kept
