@@ -354,8 +354,9 @@ def test_a_different_digest_is_refused_with_both_counts() -> None:
     assert said == (
         "The databases in this file are not at the same version as this server's "
         "(acore_auth: 10 updates in the file, 12 here), and Yu'lon cannot convert characters "
-        "between versions. Put both servers on the same version (press Update the server to "
-        "latest… on the one that is behind, and pack again if it was the old one), then try again."
+        "between versions. Put both servers on the same version (use "
+        "“Update the server to latest…” under “Server build ▾” on the Modules tab on the one "
+        "that is behind, and pack again if it was the old one), then try again."
     )
 
 

@@ -832,17 +832,37 @@ class ImportResult:
         return "\n".join(lines)
 
 
-def session_key_sql(entry: CatalogEntry) -> str:
-    """`UPDATE` that clears every account's stored session key, or "" for a scheme with none."""
-    auth = entry.databases.auth
-    scheme = entry.accounts.scheme
-    if scheme == "azerothcore":
-        return f"UPDATE `{auth}`.`account` SET `session_key` = NULL;"
-    if scheme == "trinitycore":
-        return f"UPDATE `{auth}`.`account` SET `session_key_auth` = NULL;"
-    if scheme in ("mangos_sha", "mangos_srp6"):
-        return f"UPDATE `{auth}`.`account` SET `sessionkey` = '';"
-    return ""
+_SESSION_KEY_COLUMNS = ("session_key", "session_key_auth", "sessionkey")
+"""The names the cores give the stored session key of an account (AzerothCore, TrinityCore, CMaNGOS
+and Tortoise). Asked of the database rather than decided per core: a column that is not there is
+not updated, and one that is there is cleared whatever core says it."""
+
+
+def session_key_sql(entry: CatalogEntry, columns: Sequence[tuple[str, bool]]) -> str:
+    """`UPDATE` that clears the stored session key of every account, or "" if there is none.
+
+    `columns` is `(name, nullable)` for each session-key column the account table has: a nullable
+    one is set to NULL (a binary key has no meaningful empty string), a NOT NULL text one to ''.
+    """
+    sets = [f"`{name}` = {'NULL' if nullable else repr('')}" for name, nullable in columns]
+    if not sets:
+        return ""
+    return f"UPDATE `{entry.databases.auth}`.`account` SET {', '.join(sets)};"
+
+
+def _session_key_columns(world: MoveWorld) -> list[tuple[str, bool]]:
+    names = ", ".join(f"'{c}'" for c in _SESSION_KEY_COLUMNS)
+    out = world.mysql.query(
+        "SELECT COLUMN_NAME, IS_NULLABLE FROM information_schema.COLUMNS "
+        f"WHERE TABLE_SCHEMA = '{_literal(world.entry.databases.auth)}' AND TABLE_NAME = 'account' "
+        f"AND COLUMN_NAME IN ({names}) ORDER BY COLUMN_NAME;"
+    )
+    found: list[tuple[str, bool]] = []
+    for line in out.splitlines():
+        name, _tab, nullable = line.partition("\t")
+        if name.strip() in _SESSION_KEY_COLUMNS:
+            found.append((name.strip(), nullable.strip().upper() == "YES"))
+    return found
 
 
 def realm_name_sql(entry: CatalogEntry, name: str) -> str:
@@ -1037,8 +1057,16 @@ def _fix_ups(
         "server. Remove it on the Accounts tab: it is a GM account whose password the old "
         "computer knows.",
     )
+    try:
+        session_sql = session_key_sql(world.entry, _session_key_columns(world))
+    except Exception as exc:  # noqa: BLE001 - a note, like every fix-up after the load
+        logger.warning(f"after the move: could not look for session keys: {exc}")
+        session_sql = ""
+        notes.append(
+            "The stored session keys could not be looked for; they are harmless and expire."
+        )
     run(
-        session_key_sql(world.entry),
+        session_sql,
         "The stored session keys could not be cleared; they are harmless and expire.",
     )
     if use_old_realm_name and manifest.realm_name:

@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 import yulon
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 from yulon.log import get_logger
+from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
 
 logger = get_logger(__name__)
 
@@ -485,8 +486,9 @@ def version_difference(
     return (
         "The databases in this file are not at the same version as this server's "
         f"({'; '.join(differences)}), and Yu'lon cannot convert characters between versions. "
-        "Put both servers on the same version (press Update the server to latest… on the one "
-        "that is behind, and pack again if it was the old one), then try again."
+        "Put both servers on the same version (use "
+        f"{under_server_build(UPDATE_TO_LATEST)} on the one that is behind, and pack again if "
+        "it was the old one), then try again."
     )
 
 

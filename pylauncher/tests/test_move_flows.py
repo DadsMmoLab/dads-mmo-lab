@@ -71,6 +71,7 @@ class Db:
         self.version_table = version_table
         self.fail_load_of = fail_load_of
         self.fail_dump_of = fail_dump_of
+        self.session_columns = "session_key\tYES\n"
         self.extra_tables = extra_tables or {}  # schema -> {table: rows} the target alone has
         self.queries: list[str] = []
         self.executed: list[str] = []
@@ -113,6 +114,8 @@ class Db:
             if table == "realmlist":
                 return "1\n"
             return f"{self.extra_tables.get(schema, {}).get(table, 0)}\n"
+        if "'session_key'" in sql and "information_schema.COLUMNS" in sql:
+            return self.session_columns
         if "information_schema.TABLES" in sql:
             return f"{self.version_table}\n" if self.version_table else ""
         if "COUNT(*)" in sql:
@@ -795,15 +798,37 @@ def test_session_keys_are_cleared_with_the_column_each_core_uses(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    ("game_id", "fragment"),
+    ("game_id", "columns", "sql"),
     [
-        ("wow-tbc", "UPDATE `realmd`.`account` SET `sessionkey` = ''"),
-        ("wow-vanilla", "UPDATE `realmd`.`account` SET `sessionkey` = ''"),
-        ("wow-centurion", "UPDATE `centurion_auth`.`account` SET `session_key_auth` = NULL"),
+        (
+            "wow-wotlk",
+            [("session_key", True)],
+            "UPDATE `acore_auth`.`account` SET `session_key` = NULL;",
+        ),
+        ("wow-tbc", [("sessionkey", False)], "UPDATE `realmd`.`account` SET `sessionkey` = '';"),
+        (
+            "wow-centurion",
+            [("session_key_auth", True)],
+            "UPDATE `centurion_auth`.`account` SET `session_key_auth` = NULL;",
+        ),
+        ("wow-wotlk", [], ""),
     ],
 )
-def test_session_key_columns_per_core(tmp_path: Path, game_id: str, fragment: str) -> None:
-    assert fragment in move_flows.session_key_sql(entry(game_id))
+def test_session_key_columns_are_cleared_as_the_database_has_them(
+    game_id: str, columns: list[tuple[str, bool]], sql: str
+) -> None:
+    assert move_flows.session_key_sql(entry(game_id), columns) == sql
+
+
+def test_a_server_whose_account_table_has_no_session_key_column_gets_no_update(
+    tmp_path: Path,
+) -> None:
+    box, _package, plan = ready(tmp_path)
+    box.db.session_columns = ""
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert "session_key" not in "\n".join(box.db.executed)
 
 
 def test_the_realm_name_stays_this_servers_by_default(tmp_path: Path) -> None:
