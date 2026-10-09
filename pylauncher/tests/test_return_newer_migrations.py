@@ -561,7 +561,7 @@ def test_a_database_that_was_up_stays_up_when_nothing_was_applied(tmp_path: Path
 
 
 def test_a_migration_upstream_deleted_is_older_than_the_target_not_newer(tmp_path: Path) -> None:
-    """A forward Return over a squash: the old commit's file is gone from the target, applied long ago."""
+    """A forward Return over a squash: the old file is gone from the target, applied long ago."""
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     gone = b"-- deleted upstream\n"
@@ -600,7 +600,7 @@ def test_an_undated_deleted_migration_is_never_skipped_for_sorting(tmp_path: Pat
 
 
 def test_the_world_file_the_image_rewrites_is_asked_by_its_rewritten_hash(tmp_path: Path) -> None:
-    """The Dockerfile's `sed` rewrites `INSERT INTO` to `INSERT IGNORE INTO`; the database holds that."""
+    """The Dockerfile's `sed` makes `INSERT IGNORE INTO`; the database holds that copy's hash."""
     rec, server_dir, made = _ready(tmp_path)
     dest = server_dir / CORE.dest
     original = b"INSERT INTO `t` VALUES (7);\n  INSERT INTO `u` VALUES (8);\n"
