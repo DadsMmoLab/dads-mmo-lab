@@ -842,6 +842,15 @@ def backup_game(path: Path) -> str | None:
         head = _read_edge(path, 0)
     except OSError as exc:
         raise MaintenanceError(f"could not read {path}: {exc}") from exc
+    return _game_in_head(head, path.name)
+
+
+def _game_in_head(head: bytes, name: str) -> str | None:
+    """`backup_game()`'s reading, of the first bytes of a file already in hand.
+
+    Split out so `restore()` can read the record from the very handle it then loads,
+    rather than from a path the file may have been replaced behind.
+    """
     match = _DUMP_HEADER.search(head)
     if match is None:
         return None
@@ -853,7 +862,7 @@ def backup_game(path: Path) -> str | None:
         record = _GAME_RECORD_BYTES.fullmatch(line)
         if record is None:
             raise MaintenanceError(
-                f"The game record in {path.name} cannot be read, so Yu'lon cannot tell which "
+                f"The game record in {name} cannot be read, so Yu'lon cannot tell which "
                 "game it is from and will not restore it."
             )
         game_id = record.group(1).decode("ascii")
@@ -861,7 +870,7 @@ def backup_game(path: Path) -> str | None:
             found.append(game_id)
     if len(found) > 1:
         raise MaintenanceError(
-            f"{path.name} names two different games ({found[0]} and {found[1]}), so it cannot "
+            f"{name} names two different games ({found[0]} and {found[1]}), so it cannot "
             "be trusted to belong to either. Yu'lon will not restore it."
         )
     return found[0] if found else None
@@ -961,6 +970,12 @@ class RestorePlan:
     Yu'lon cannot tell its game from its schema names. It is a question the player
     answers once (`with_unlabeled_accepted()`); `restore()` will not load such a
     file until they have."""
+    content_digest: str = ""
+    """SHA-256 of the file as `plan_restore()` read it, taken in the scan it already makes.
+
+    In the token, so a file replaced by one of the same length and schemas is no longer
+    the file that was checked or agreed to (T603, Codex review): the acknowledgement of an
+    unlabelled backup is an answer about THIS file."""
     unlabeled_accepted: bool = False
     """The player said yes to `game_unproven`. Set only by `with_unlabeled_accepted()`.
 
@@ -1000,11 +1015,13 @@ class RestorePlan:
         Derived from the file's identity and length plus the schemas it names,
         so a caller cannot restore a file it never inspected, and a plan cannot
         be reused against a file that has been replaced by one of a different
-        size. It is not a content hash and does not claim to notice a
-        same-length substitution — `restore()` re-plans for that. What it does
-        buy is that no confirmation can be spelled `True`.
+        size, and (T603) one replaced by a different file of the same size. What it
+        also buys is that no confirmation can be spelled `True`.
         """
-        material = f"{self.backup.resolve()}|{self.size_bytes}|{','.join(self.databases)}"
+        material = (
+            f"{self.backup.resolve()}|{self.size_bytes}|{','.join(self.databases)}"
+            f"|{self.content_digest}"
+        )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1140,6 +1157,7 @@ def plan_restore(
     size = 0
     starts_database = False
     game_unproven = False
+    digest = ""
 
     if backup_file.suffix == ".gz":
         refusals.append(
@@ -1154,7 +1172,7 @@ def plan_restore(
         except MaintenanceError as exc:
             refusals.append(str(exc))
         else:
-            databases = _databases_named_in(backup_file)
+            databases, digest = _scan_dump(backup_file)
             if not databases:
                 refusals.append(
                     f"{backup_file.name} names no database (no USE or CREATE DATABASE), so "
@@ -1202,6 +1220,7 @@ def plan_restore(
         interrupted=interrupted_restore(server_dir),
         starts_database=starts_database,
         game_unproven=game_unproven,
+        content_digest=digest,
     )
     if refusals:
         logger.info(f"restore of {backup_file.name} refused: {'; '.join(refusals)}")
@@ -1284,6 +1303,56 @@ def restore(
             "Nothing was restored; look at it again."
         )
 
+    # The file is opened ONCE and kept: what is checked below and what is loaded at the
+    # end are this one handle, so a file replaced after this point cannot change what
+    # loads, however long the safety copy takes (T603, Codex review).
+    try:
+        source = plan.backup.open("rb")
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {plan.backup}: {exc}") from exc
+    with source:
+        if os.fstat(source.fileno()).st_size != plan.size_bytes:
+            raise MaintenanceError(
+                f"{plan.backup.name} is not the file that was checked — it changed in between. "
+                "Nothing was restored; look at it again."
+            )
+        return _restore_from(
+            source,
+            plan,
+            fresh,
+            mysql,
+            game=game,
+            spec=spec,
+            core_databases=core_databases,
+            running=running,
+            wsl_distro=wsl_distro,
+            now=now,
+            safety_label=safety_label,
+            before_load=before_load,
+        )
+
+
+def _restore_from(
+    source: IO[bytes],
+    plan: RestorePlan,
+    fresh: RestorePlan,
+    mysql: MysqlDocker,
+    *,
+    game: Game,
+    spec: docker.ContainerSpec,
+    core_databases: Sequence[str],
+    running: RunningNames | None,
+    wsl_distro: str | None,
+    now: datetime | None,
+    safety_label: str,
+    before_load: Callable[[], object] | None,
+) -> RestoreReport:
+    """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
+    recorded = _recorded_game_of(source, plan.backup.name)
+    if recorded is not None and recorded != game.id:
+        raise MaintenanceError(f"restore refused: {_wrong_game_refusal(recorded, game)}")
+    if recorded is None and not plan.unlabeled_accepted:
+        raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     # `fresh`, not `plan`: the marker is the one thing here that can appear
@@ -1337,8 +1406,8 @@ def restore(
     try:
         if before_load is not None:
             before_load()
-        with plan.backup.open("rb") as source:
-            mysql.load_from(source)
+        source.seek(0)
+        mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
         # A sentence of ours reads in place; a program's words go to `detail` (T194 R1).
         said = f" {exc}" if isinstance(exc, MaintenanceError) else ""
@@ -1379,6 +1448,17 @@ def restore(
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
+
+
+def _recorded_game_of(source: IO[bytes], name: str) -> str | None:
+    """The game record of an open file, read from its first bytes, then rewound."""
+    try:
+        source.seek(0)
+        head = source.read(_EDGE_BYTES)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return _game_in_head(head, name)
 
 
 def _usable_copies(earlier: InterruptedRestore | None) -> dict[str, Path]:
@@ -1608,7 +1688,15 @@ def drop_tables_not_in(mysql: SchemaMysql, database: str, keep: Sequence[str]) -
 
 
 def _databases_named_in(path: Path) -> tuple[str, ...]:
-    """Every schema a dump file writes into, in the order it first names them.
+    """Every schema a dump file writes into, in the order it first names them."""
+    return _scan_dump(path)[0]
+
+
+def _scan_dump(path: Path) -> tuple[tuple[str, ...], str]:
+    """`(schemas the file writes into, SHA-256 of the file)`, in one pass.
+
+    The scan reads the whole file already, so the digest costs one hash per chunk
+    on top of the regexes and no second read.
 
     The whole file is scanned, not just the head. The guide's own backup command
     puts three databases in one file (`--databases acore_characters acore_auth
@@ -1620,18 +1708,20 @@ def _databases_named_in(path: Path) -> tuple[str, ...]:
     found: list[str] = []
     seen: set[str] = set()
     carry = b""
+    digest = hashlib.sha256()
     with path.open("rb") as fh:
         while True:
             chunk = fh.read(_SCAN_CHUNK)
             if not chunk:
                 break
+            digest.update(chunk)
             data = carry + chunk
             for name in _databases_named_in_bytes(data):
                 if name not in seen:
                     seen.add(name)
                     found.append(name)
             carry = data[-_SCAN_OVERLAP:]
-    return tuple(found)
+    return tuple(found), digest.hexdigest()
 
 
 def _databases_named_in_bytes(data: bytes) -> list[str]:

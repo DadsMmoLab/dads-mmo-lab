@@ -349,6 +349,86 @@ def test_an_acknowledgement_is_not_recorded_on_a_plan_that_was_never_unproven(
     assert mysql.loaded == []
 
 
+def test_an_acknowledged_file_replaced_by_a_different_unlabelled_one_of_the_same_size_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The yes was about THIS file: the token carries the content, not just the length."""
+    path = write(tmp_path, dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK).with_unlabeled_accepted()
+    original = path.read_bytes()
+    path.write_bytes(original.replace(b"VALUES (1)", b"VALUES (2)"))
+    assert len(path.read_bytes()) == len(original)
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="is not the file that was checked"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
+def test_what_is_loaded_is_the_file_that_was_checked_even_if_it_is_replaced_meanwhile(
+    tmp_path: Path,
+) -> None:
+    """The safety copy can take long; a file renamed over the backup then must not be loaded."""
+    path = write(tmp_path, line_for("wow-wotlk") + dump_of("acore_characters"))
+    original = path.read_bytes()
+    made = plan(path, tmp_path, WOTLK)
+
+    class Swapping(FakeMysql):
+        def dump_into(self, database: str, sink: IO[bytes]) -> None:
+            super().dump_into(database, sink)
+            other = tmp_path / "other.sql"
+            other.write_bytes(line_for("wow-unbound") + dump_of("acore_characters"))
+            os.replace(other, path)  # during the safety copy
+
+    mysql = Swapping(("acore_characters",))
+    restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == [original]
+
+
+def test_a_file_that_turns_out_to_name_another_game_when_it_is_opened_is_not_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapped between the re-plan and the open, to a same-size file of another game: the
+    record of the handle that is about to be loaded is what is judged."""
+    path = write(tmp_path, line_for("wow-wotlk") + dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK)
+    path.write_bytes(line_for("wow-other") + dump_of("acore_characters"))
+    assert path.stat().st_size == made.size_bytes
+    monkeypatch.setattr(
+        maintenance, "plan_restore", lambda *a, **k: made
+    )  # the re-plan saw the old file
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="will not do it"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
+def test_a_file_that_has_lost_its_record_when_it_is_opened_is_not_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = line_for("wow-wotlk")
+    path = write(tmp_path, record + dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK)
+    path.write_bytes(b"-- " + b"x" * (len(record) - 4) + b"\n" + dump_of("acore_characters"))
+    monkeypatch.setattr(maintenance, "plan_restore", lambda *a, **k: made)
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="does not say which game it is from"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
+def test_a_file_whose_size_changed_when_it_is_opened_is_not_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write(tmp_path, line_for("wow-wotlk") + dump_of("acore_characters"))
+    made = plan(path, tmp_path, WOTLK)
+    path.write_bytes(path.read_bytes() + b"-- more\n")
+    monkeypatch.setattr(maintenance, "plan_restore", lambda *a, **k: made)
+    mysql = FakeMysql(("acore_characters",))
+    with pytest.raises(MaintenanceError, match="is not the file that was checked"):
+        restore(made, mysql, game=WOTLK, confirm=made.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
 def test_an_acknowledgement_does_not_unrefuse_a_wrong_game(tmp_path: Path) -> None:
     path = write(tmp_path, line_for("wow-unbound") + dump_of("acore_characters"))
     made = dataclasses.replace(plan(path, tmp_path, WOTLK), unlabeled_accepted=True)
