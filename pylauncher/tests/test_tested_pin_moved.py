@@ -13,6 +13,7 @@ The reading is local: each moving source's `.git/HEAD` against the catalog's
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -168,6 +169,21 @@ def test_the_route_offers_the_return_on_an_install_behind_the_catalog(tmp_path: 
     # false of a move onto a newer tested commit; this one says neither.
     assert "newer server" not in question
     assert "back on" not in question
+
+
+def test_the_moved_pin_question_names_large_kept_update_copies(tmp_path: Path) -> None:
+    """T646: the same rule and size sentence as the other two questions."""
+    _checkout(tmp_path, {CORE: OLD_CORE, BOTS: OLD_BOTS})
+    folder = tmp_path / "sql_scripts" / "backups"
+    folder.mkdir(parents=True)
+    copy = folder / "20261001_100000_before-new-build_acore_world.sql"
+    copy.write_bytes(b"")
+    os.truncate(copy, 1200 * 1_048_576)
+    route = install_wiring.update_to_latest_for_app(ENTRY, tmp_path)
+    assert route is not None
+    question = route.pin_confirmation()
+    assert OLD_CORE[:7] in question
+    assert "1.2 GB" in question and "until an update succeeds" in question
 
 
 def test_the_route_offers_nothing_on_the_catalog_pin(tmp_path: Path) -> None:

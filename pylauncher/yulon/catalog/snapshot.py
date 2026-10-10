@@ -139,6 +139,26 @@ def _rollback_safety_database(path: Path) -> str | None:
     return path.stem.split(marker, 1)[1]
 
 
+def kept_copies_bytes(directory: Path) -> int:
+    """The bytes the update's own copies take in `directory`: its copies and safety copies.
+
+    What "Update the server to latest…" shows when failed updates have piled up (T646). A backup the
+    player took is not counted. Never raises: a folder that cannot be read counts as nothing.
+    """
+    total = 0
+    try:
+        found = list(directory.iterdir())
+    except OSError:
+        return 0
+    for path in found:
+        if is_snapshot_file(path) or _rollback_safety_database(path) is not None:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
 def older_copies(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     """The update copies in `directory` other than `keep`, newest first. Never raises.
 

@@ -1127,6 +1127,27 @@ divergence before it moves anything (T126), and names it the next time.
 """
 
 
+COPIES_RULE = (
+    "A copy is kept until an update succeeds, and then only the newest stays; "
+    "Maintenance \u2192 Clean up\u2026 removes old ones sooner."
+)
+"""The owner's rule (T633) as it is true: older copies go only after an update succeeded (T646)."""
+
+KEPT_COPIES_LARGE_BYTES = 500 * 1_048_576
+"""Above this the question names what the kept update copies take (T646)."""
+
+
+def _size_words(size: int) -> str:
+    return f"{size / 1_073_741_824:.1f} GB" if size >= 1_073_741_824 else _megabytes(size)
+
+
+def kept_copies_size(kept_bytes: int) -> str:
+    """ " Update copies from earlier presses already take X there." once X is large, else ""."""
+    if kept_bytes <= KEPT_COPIES_LARGE_BYTES:
+        return ""
+    return f" Update copies kept from earlier presses already take {_size_words(kept_bytes)} there."
+
+
 def update_to_latest_confirmation(
     entry: CatalogEntry,
     server_dir: Path,
@@ -1135,6 +1156,7 @@ def update_to_latest_confirmation(
     *,
     copied: Sequence[str] = (),
     not_copied: Sequence[str] = (),
+    kept_bytes: int = 0,
 ) -> str:
     """The one question asked before an update to latest. The approved design's own words.
 
@@ -1179,7 +1201,7 @@ def update_to_latest_confirmation(
             f"{_as_it_was(copied)} just before the new server started: it copies "
             f"{'it' if len(copied) == 1 else 'them'} then, with your server stopped. The copy "
             "adds a few minutes to the time your server is down and takes some hundreds of MB "
-            "in the server's backups folder; Yu'lon keeps only the newest."
+            f"in the server's backups folder. {COPIES_RULE}{kept_copies_size(kept_bytes)}"
         )
         if not_copied:
             database += (
@@ -1232,7 +1254,15 @@ def world_updates_note(entry: CatalogEntry) -> str:
     return said
 
 
-def return_to_pin_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
+def _kept_copies_clause(kept_bytes: int) -> str:
+    """The rule, said in the return questions only once the kept copies are large (T646)."""
+    size = kept_copies_size(kept_bytes)
+    return f" {COPIES_RULE}{size}" if size else ""
+
+
+def return_to_pin_confirmation(
+    entry: CatalogEntry, server_dir: Path, repo: str, kept_bytes: int = 0
+) -> str:
     """The question asked before going back to the commit this app was tested against.
 
     The way out of the button above, and it is the SAME press with the target
@@ -1254,8 +1284,8 @@ def return_to_pin_confirmation(entry: CatalogEntry, server_dir: Path, repo: str)
         f"This compiles the server again from that commit — the same wait as the update "
         f"({MEASURED_BUILD_TIMES}) — and your server is down while its containers are "
         f"replaced. It does NOT undo anything the newer server already wrote into your "
-        f"databases; only the backup you took covers that.{world_updates_note(entry)} Say no "
-        "and nothing happens at all."
+        f"databases; only the backup you took covers that.{world_updates_note(entry)}"
+        f"{_kept_copies_clause(kept_bytes)} Say no and nothing happens at all."
     )
 
 
@@ -1628,7 +1658,7 @@ def _on_and_tested(moved: Sequence[CatalogPin]) -> str:
 
 
 def moved_pin_confirmation(
-    entry: CatalogEntry, server_dir: Path, moved: Sequence[CatalogPin]
+    entry: CatalogEntry, server_dir: Path, moved: Sequence[CatalogPin], kept_bytes: int = 0
 ) -> str:
     """The "Return to the tested pin…" question when the pin moved under this server (T588).
 
@@ -1645,7 +1675,8 @@ def moved_pin_confirmation(
         f"compiles the server from them ({MEASURED_BUILD_TIMES}), and your server is down while "
         "its containers are replaced. If the build fails, the build you have now is put back. "
         "Once the new server has come up, nothing undoes what it writes into your databases; a "
-        f"backup you take first covers that.{world_updates_note(entry)}\n\nThe build compiles your "
+        f"backup you take first covers that.{world_updates_note(entry)}"
+        f"{_kept_copies_clause(kept_bytes)}\n\nThe build compiles your "
         "modules as they are: if a module has an update written for these commits, update it on "
         f"the Modules tab first, without pressing “{server_build_presses.REBUILD}” in between. Say "
         "no and nothing happens at all."
@@ -3064,7 +3095,23 @@ def copy_putting_back_line(copy: snapshot.Snapshot) -> str:
         f"Putting {_listed(copy.databases)} back {_as_it_was(copy.databases)} just before the "
         "new build started: the copy is checked, the tables the new build added are dropped, "
         "and the copy is loaded over the rest, before the build from before this update starts "
-        "again."
+        f"again. {restore_duration(copy.size_bytes)}"
+    )
+
+
+RESTORE_MB_PER_MINUTE = 150
+"""Measured (T643): a 144 MB world dump loads in about a minute."""
+
+
+def restore_duration(size_bytes: int) -> str:
+    """A rough time for loading a copy of this size back, said as the put-back starts (T646)."""
+    minutes = round(size_bytes / (RESTORE_MB_PER_MINUTE * 1_048_576))
+    if minutes < 1:
+        return "This takes less than a minute."
+    unit = "minute" if minutes == 1 else "minutes"
+    return (
+        f"This takes at least about {minutes} {unit} (slower on some computers), and your "
+        "server stays down until it is done."
     )
 
 

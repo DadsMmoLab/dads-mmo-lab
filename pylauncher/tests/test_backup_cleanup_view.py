@@ -408,6 +408,7 @@ def test_clean_up_removes_what_the_dialog_showed_and_reports_it(
     a, b, c = three_worlds(tmp_path)
     view.refresh_backups()
     accept_with(monkeypatch, lambda d: d.keep_spin.setValue(1))
+    view.refresh_backups()
     view.clean_up_backups()
     assert not a.exists()
     assert not b.exists()
@@ -428,6 +429,7 @@ def test_cancelling_the_dialog_deletes_and_saves_nothing(
         d.auto_check.setChecked(True)
 
     monkeypatch.setattr(CleanUpDialog, "exec", lambda self: (setup(self), 0)[1])
+    view.refresh_backups()
     view.clean_up_backups()
     assert all(f.exists() for f in files)
     assert backup_shelf.Seam(tmp_path, GAME).keep() is None
@@ -443,6 +445,7 @@ def test_agreeing_with_the_automatic_keep_ticked_stores_it_per_install(
         d.auto_check.setChecked(True)
 
     accept_with(monkeypatch, setup)
+    view.refresh_backups()
     view.clean_up_backups()
     assert backup_shelf.Seam(tmp_path, GAME).keep() == 2
     assert (keep_store / "backup-keep" / "abc123.json").is_file()
@@ -458,6 +461,7 @@ def test_clean_up_refuses_everything_when_the_folder_changed_behind_the_dialog(
         put(tmp_path, "20261004_100000", "acore_world")  # a Backup finished while it was open
 
     accept_with(monkeypatch, setup)
+    view.refresh_backups()
     view.clean_up_backups()
     assert all(f.exists() for f in (a, b, c))
     assert "changed" in view.maintenance_report.toPlainText()
@@ -580,6 +584,7 @@ def test_clean_up_in_a_folder_linked_out_opens_no_dialog(
     folder.symlink_to(other, target_is_directory=True)
     opened: list[object] = []
     monkeypatch.setattr(CleanUpDialog, "exec", lambda self: opened.append(self) or 1)
+    view.refresh_backups()
     view.clean_up_backups()
     assert not opened
     assert "leads out of the server's own folder" in view.maintenance_report.toPlainText()
@@ -601,6 +606,8 @@ def test_delete_and_clean_up_wait_while_one_of_them_runs(
     assert not view.clean_up_button.isEnabled()
     assert "the delete is running" in view.clean_up_button.toolTip()
     fn, done, _failed = held[0]
+    done(fn())
+    fn, done, _failed = held[1]  # the refresh after the delete reads the folder in a job too
     done(fn())
     assert view.clean_up_button.isEnabled()
 
@@ -657,3 +664,60 @@ def test_no_maintenance_button_is_cut_short_down_to_800_wide(
         assert cut == [], f"at {size}: {cut}"
     finally:
         window.close()
+
+
+# ------------------------------------------------- reading off the GUI thread (T646)
+
+
+def test_the_backups_are_read_by_the_job_runner_not_in_the_refresh_slot(
+    view: ControllerView, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading can open every update copy end to end; that must never block the GUI thread."""
+    put(tmp_path, "20261001_103000", "acore_world")
+    queued: list[tuple[Any, Any, Any]] = []
+    monkeypatch.setattr(view, "_run", lambda fn, done, failed: queued.append((fn, done, failed)))
+    reads: list[str] = []
+    real = backup_shelf.Seam.read
+    monkeypatch.setattr(backup_shelf.Seam, "read", lambda self: reads.append("read") or real(self))
+
+    view.refresh_backups()
+
+    assert reads == [], "the folder was read inside the slot"
+    assert texts(view) == [view_module.READING_BACKUPS]
+    assert not view.restore_button.isEnabled()
+    assert not view.clean_up_button.isEnabled()
+    fn, done, _failed = queued.pop()
+    done(fn())
+    assert reads == ["read"]
+    (line,) = texts(view)
+    assert "acore_world" in line
+    assert view_module.READING_BACKUPS not in view.maintenance_report.toPlainText()
+
+
+def test_a_slow_read_that_is_superseded_does_not_overwrite_the_newer_one(
+    view: ControllerView, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put(tmp_path, "20261001_103000", "acore_world")
+    queued: list[tuple[Any, Any, Any]] = []
+    monkeypatch.setattr(view, "_run", lambda fn, done, failed: queued.append((fn, done, failed)))
+    view.refresh_backups()
+    view.refresh_backups()
+    (f1, d1, _), (f2, d2, _) = queued
+    d2(f2())
+    assert len(texts(view)) == 1
+    d1(f1())  # the first, late: ignored
+    assert len(texts(view)) == 1
+
+
+def test_clean_up_uses_the_list_already_read_and_never_reads_on_the_gui_thread(
+    view: ControllerView, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    three_worlds(tmp_path)
+    view.refresh_backups()
+
+    def boom(self: object) -> None:
+        raise AssertionError("Clean up read the folder on the GUI thread")
+
+    monkeypatch.setattr(backup_shelf.Seam, "read", boom)
+    accept_with(monkeypatch, lambda d: None)
+    view.clean_up_backups()

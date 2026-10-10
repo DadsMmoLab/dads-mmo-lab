@@ -2426,6 +2426,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "never the copy just taken, so a backup the player took is never named as one. An "
         "OSError listing it names none, and the sentence then says nothing about older copies"
     ),
+    ("catalog/snapshot.py", "kept_copies_bytes"): (
+        "T646. Lists this server's own `sql_scripts/backups/` to ADD UP the sizes of the "
+        "update's own copies (`_before-new-build_` and `_after-new-build_` files) for the "
+        'sentence "Update the server to latest…" asks with once they are large. It decides no '
+        "write and reads no content: only names and sizes. An OSError listing it counts "
+        "nothing, and the sentence then says nothing about size"
+    ),
     ("catalog/snapshot.py", "copy_from_before"): (
         "T630. Lists this server's own `sql_scripts/backups/` to NAME, in the sentence "
         '"Return to the tested pin…" refuses with, the newest dump of a database that holds '

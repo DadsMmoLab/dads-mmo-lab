@@ -79,12 +79,14 @@ from yulon.catalog.native import (
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
+    BACKUPS_FOLDER,
     ROLLBACK_SAFETY_LABEL,
     SNAPSHOT_LABEL,
     CopyNotUsable,
     DatabaseSnapshot,
     PutBack,
     Snapshot,
+    kept_copies_bytes,
     prune_older,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
@@ -725,6 +727,11 @@ def update_to_latest_for_app(
         }
         return {**found, **met}
 
+    def kept_copies() -> int:
+        # T646: a directory listing in the server folder; callers read it only where the
+        # folder may be read (this distro, not stopped), like the upstream cache.
+        return kept_copies_bytes(server_dir / BACKUPS_FOLDER)
+
     def confirmation() -> str:
         # §2: the cache lives in the server folder, and reading a WSL folder
         # starts its distro -- for a question the player may cancel. The folder
@@ -744,7 +751,13 @@ def update_to_latest_for_app(
         copied = family.snapshot_databases() if isinstance(family, StagedInstaller) else ()
         not_copied = family.snapshot_left_out() if isinstance(family, StagedInstaller) else ()
         text = update_to_latest_confirmation(
-            entry, server_dir, repo, tuple(said.values()), copied=copied, not_copied=not_copied
+            entry,
+            server_dir,
+            repo,
+            tuple(said.values()),
+            copied=copied,
+            not_copied=not_copied,
+            kept_bytes=0 if (elsewhere or stopped) else kept_copies(),
         )
         return f"{text}\n\n{WSL_DISTRO_STOPPED_NOTE}" if stopped else text
 
@@ -796,9 +809,11 @@ def update_to_latest_for_app(
         # T588: the question names the move the version line offered, from the same
         # two readings; a folder this must not read gets the question it always had.
         if _in_the_distro(server_dir, wsl_distro) and not _distro_down(wsl_distro):
+            kept = kept_copies()
             moved = moved_pins(read_state(server_dir, valid=()), pins())
             if moved:
-                return moved_pin_confirmation(entry, server_dir, moved)
+                return moved_pin_confirmation(entry, server_dir, moved, kept)
+            return return_to_pin_confirmation(entry, server_dir, repo, kept)
         return return_to_pin_confirmation(entry, server_dir, repo)
 
     def news() -> upstream.UpstreamNews:
