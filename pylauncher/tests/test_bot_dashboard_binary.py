@@ -818,16 +818,74 @@ def test_a_module_commit_that_is_not_on_github_says_so(
     assert fake.calls[0].startswith("build observability ")
 
 
-def test_a_compare_that_finds_no_such_commit_says_so_too(
+def _gone() -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("u", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("where", ["/compare/v2026-10-11...", "/commits/v2026-10-11"])
+def test_one_deleted_tag_is_skipped_and_the_next_release_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = _daily("2026-10-09", 3)
+    github.rev_date = "2026-10-11T12:00:00Z"
+    for release in github.releases:
+        github.serve(str(release["tag_name"]))
+    github.fail[where] = _gone()
+
+    said = _on(switch)
+
+    assert github.urls[-1].endswith("/v2026-10-10/" + LINUX), github.urls
+    assert not any("not on GitHub" in line for line in said), said
+
+
+def test_every_tag_gone_is_the_plain_no_release_fits_sentence_not_not_on_github(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
-    github.fail["/compare/"] = urllib.error.HTTPError("u", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+    github.fail["/compare/"] = _gone()
 
     said = _on(switch)
 
     why = [line for line in said if "prebuilt" in line]
-    assert "not on GitHub" in why[0] and "did not answer" not in why[0], why
+    assert "not on GitHub" not in why[0] and "did not answer" not in why[0], why
+    assert "none of the 1 releases" in why[0], why
+    assert github.urls == []
+
+
+def test_a_release_created_within_the_slack_after_the_commit_is_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.rev_date = "2026-10-09T07:30:00Z"  # the release is created 30 minutes later
+    _on(switch)
+    assert any("/compare/v2026-10-09..." in u for u in github.api), github.api
+
+
+def test_a_release_created_beyond_the_slack_after_the_commit_is_not_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.rev_date = "2026-10-09T06:30:00Z"  # the release is created 90 minutes later
+    _on(switch)
+    assert not any("/compare/" in u for u in github.api), github.api
+
+
+def test_the_request_budget_bounds_the_compares_and_the_sentence_says_how_many(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, github, switch = _setup(tmp_path, monkeypatch)
+    github.releases = _daily("2026-10-01", 10)
+    github.rev_date = "2026-12-31T00:00:00Z"
+    github.behind = {str(r["tag_name"]): 4 for r in github.releases}  # all newer than the module
+
+    said = _on(switch)
+
+    compared = [u for u in github.api if "/compare/" in u]
+    assert len(compared) == binary.MAX_COMPARES == 3
+    why = [line for line in said if "prebuilt" in line]
+    assert "none of the 3 releases" in why[0] and "10" not in why[0], why
+    assert len(github.api) == 2 + 3, github.api
 
 
 @pytest.mark.parametrize(
@@ -956,3 +1014,21 @@ def test_a_module_commit_whose_date_cannot_be_read_is_told_plainly(
     why = [line for line in said if "prebuilt" in line]
     assert "could not tell when this server's bots version was made" in why[0], why
     assert github.urls == []
+
+
+def test_the_daemon_questions_are_bounded_so_a_wedged_docker_cannot_hang_the_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    seen: list[float | None] = []
+
+    def ask(_argv: list[str], *_a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kw.get("timeout"))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess([], 0, "4\n", "")
+
+    monkeypatch.setattr(docker, "_docker", ask)
+    docker.daemon_arch()
+    docker.daemon_cpus()
+
+    assert len(seen) == 2 and all(t is not None and 0 < t <= 10 for t in seen), seen

@@ -9282,7 +9282,13 @@ def container_exit(
     return ContainerExit(status, exit_code, finished, cid)
 
 
-def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) -> int | None:
+DAEMON_INFO_TIMEOUT = 10.0
+"""Seconds a default `docker info` question may take: a wedged Docker must not hang a press."""
+
+
+def daemon_cpus(
+    *, timeout: float | None = DAEMON_INFO_TIMEOUT, wsl_distro: str | None = None
+) -> int | None:
     """How many CPUs the Docker DAEMON has (`docker info --format {{.NCPU}}`); None if unknown.
 
     The daemon's, not this process's host: on Docker Desktop the containers run in
@@ -9297,7 +9303,9 @@ def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) 
     return int(text)
 
 
-def daemon_arch(*, timeout: float | None = None, wsl_distro: str | None = None) -> str | None:
+def daemon_arch(
+    *, timeout: float | None = DAEMON_INFO_TIMEOUT, wsl_distro: str | None = None
+) -> str | None:
     """The Docker DAEMON's CPU architecture, as `"amd64"` or `"arm64"` (anything else as the
     daemon spells it); None if it would not say (T542).
 
