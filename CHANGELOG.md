@@ -26,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
 
 ### Fixed
+- Making the support file no longer takes minutes on big old logs: it keeps their newest lines and says what it cut.
 - While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
 - **Start** on a server whose build is gone says so and names **Rebuild the server…** before starting anything.
 - **Rebuild the server…** on a server from the retired playerbots fork says so at once, not after half an hour.
