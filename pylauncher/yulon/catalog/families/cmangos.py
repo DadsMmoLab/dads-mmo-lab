@@ -64,17 +64,19 @@ rot; the mutation run above is how they were re-checked rather than re-copied.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import posixpath
 import queue
+import re
 import threading
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import dbsecret, docker, git, platform
-from yulon.catalog import bot_count, bot_dashboard, composegen
+from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses, tuning
+from yulon.catalog import bot_count, bot_dashboard, composegen, snapshot
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
@@ -85,6 +87,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
+from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import InstallerError, InstallStopped, UpdateRefused
 from yulon.catalog.native import (
     CORRECTIONS_BUTTON_LABEL,
@@ -100,6 +103,7 @@ from yulon.catalog.native import (
     CorrectionCheck,
     ImportGate,
     MarkerRow,
+    Seams,
     Secrets,
     ServersDownWork,
     Stage,
@@ -120,6 +124,133 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 
 logger = get_logger(__name__)
+
+IMAGE_TREE = re.compile(r"^/opt/[^/]+/(?P<inside>.+)$")
+"""`Database.AutoUpdate.Path` is `/opt/<the core's name>/<folder inside its tree>` (T632)."""
+
+MIGRATIONS_TABLE_QUESTION = "SHOW TABLES LIKE 'migrations'"
+MIGRATIONS_QUESTION = (
+    "SELECT CONCAT(`Module`, ':', UPPER(`Hash`)) FROM `migrations` WHERE UPPER(`Hash`) IN "
+)
+"""Which hashes a database's `migrations` ledger holds, as the `<module>:<hash>` key (T632)."""
+
+NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
+
+
+def _listed(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+SEDDED_FILE = "20260903063722_world.sql"
+"""The one core file the image's build rewrites (`Dockerfile.tmpl`'s `sed` on `world/<this>`)."""
+
+
+def _hashes_of(data: bytes, *, edited: bool) -> tuple[str, ...]:
+    """Upper-case SHA-1 of a migration file's bytes, and of the image's rewritten copy (T632)."""
+    spellings = [data]
+    if edited:
+        spellings.append(INSERT_IGNORE.sub(rb"\1INSERT IGNORE INTO", data))
+    return tuple(dict.fromkeys(hashlib.sha1(one).hexdigest().upper() for one in spellings))
+
+
+@dataclass
+class _Direction:
+    """Whether a move goes forward, asked at most once and only when a file needs it (T632)."""
+
+    seams: Seams
+    repo: str
+    dest: Path
+    old: str
+    new: str
+    _said: bool | None = None
+
+    def known(self) -> bool:
+        """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
+        if self._said is None:
+            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
+            if said is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        f"going back takes away in {self.repo}",
+                        f"{why}, so the direction of the move is unknown",
+                    )
+                )
+            self._said = said
+        return self._said
+
+
+def updates_unread_sentence(source: str, why: str) -> str:
+    """The fail-closed refusal: git or the database could not say (T632, T630's shape)."""
+    return (
+        f"Yu'lon could not read which database migrations {source}, so it could not tell "
+        f"whether the older server can start on your databases ({why}). {NOTHING_DONE}"
+    )
+
+
+def newer_migrations_refusal(
+    applied: Mapping[str, Mapping[str, Sequence[str]]],
+    copies: Mapping[str, Path | None],
+) -> str:
+    """Why "Return to the tested pin…" stopped on Tortoise: the databases are ahead (T632).
+
+    `applied` is, per database, the files whose migration its `migrations` table holds that
+    the tested commit does not ship (file label -> the held hashes); `copies` is the dump
+    `snapshot.copy_from_before_migrations()` found per database, or None.
+    """
+    each = []
+    for schema, files in applied.items():
+        names = list(files)
+        shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        each.append(
+            f"{schema} has {len(names)} migration{'' if len(names) == 1 else 's'} the tested "
+            f"commit does not have ({shown})"
+        )
+    databases = list(applied)
+    total = sum(len(files) for files in applied.values())
+    those = "that migration" if total == 1 else "those migrations"
+    head = (
+        "Going back to the commit this app was tested against would start the older server "
+        f"on databases a newer build has already migrated: {'; '.join(each)}. Database "
+        f"migrations only go forward, so the older server would meet {_listed(databases)} as "
+        f"{those} left {'it' if len(databases) == 1 else 'them'}, which it was not built for "
+        f"and may not start on. {NOTHING_DONE}"
+    )
+    missing = [schema for schema in databases if copies.get(schema) is None]
+    if missing:
+        latest = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+        return (
+            f"{head} Yu'lon found no copy of {_listed(missing)} from before {those} in the "
+            "server's backups folder, so this server cannot go back to the tested commit: keep "
+            f"the build you have ({latest} keeps it current)."
+        )
+    dumps = _listed([f"{path.parent.name}/{path.name}" for path in copies.values() if path])
+    back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+    one = len(databases) == 1
+    return (
+        f"{head} To go back, first put {_listed(databases)} back as "
+        f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
+        f"restore {dumps} on Maintenance (it works with the server stopped), then press "
+        f"{back} again without starting the server in between, since a start would apply "
+        f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
+        "copy was taken."
+    )
+
+
+MODULE_INSTALL_RULE = re.compile(
+    r"install\(\s*DIRECTORY\s+\"[^\"]*/data/sql/(?P<src>[\w.-]+)/?\"\s+"
+    r"DESTINATION\s+\"[^\"]*/data/sql/(?P<dst>[\w.-]+)\"\s*\)",
+    re.IGNORECASE,
+)
+"""A module's `install(DIRECTORY .../data/sql/<repo folder>/ DESTINATION .../data/sql/<image>)`.
+
+The folder the AutoUpdater reads inside the image is the DESTINATION's; the module's repository
+holds it under the source's name (TortoiseBots keeps `data/sql/char` and installs it as
+`data/sql/character`), so the files to hash are the source's (T632)."""
+
+INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
+"""What the image's build rewrites in one core world file (`Dockerfile.tmpl`, the `sed` before
+the runtime stage): its database hash is the rewritten copy's, so both spellings are asked."""
+
 
 CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
 """The one sentence every refusal here about a malformed catalog entry ends in.
@@ -352,6 +483,8 @@ class CmangosInstaller(StagedInstaller):
             root = ctx.server_dir / spec.source
             yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
             results = self._resolve(spec, text, root)
+            if not results:
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
             for result in results:
                 if result.applied and result.present:
                     yield (
@@ -370,7 +503,7 @@ class CmangosInstaller(StagedInstaller):
     """The conf key that switches a CMaNGOS-lineage world server's own start-time updater on."""
 
     def databases_a_new_build_changes(self) -> tuple[Db, ...]:
-        """Login and characters when this tree's world server migrates them at start (T217).
+        """Login, characters and world when this tree's world server migrates them at start.
 
         Read off the entry's own conf table, never off its id: a tree whose
         `mangosd.conf` sets `Database.AutoUpdate.Enabled` to 1 runs its AutoUpdater
@@ -384,15 +517,14 @@ class CmangosInstaller(StagedInstaller):
         files once -- happens with the servers down, before that start, and stays
         if the build is put back.)
 
-        World is left out on the owner's word of 2026-10-04: it is the biggest of
-        the three and the slowest to copy, so a rollback puts back login and
-        characters and says that the world database is not put back.
+        World is copied too since T643. T217 left it out on the owner's word of
+        2026-10-04 ("the biggest and the slowest to copy"); measured on yulon-ubuntu's
+        Tortoise install on 2026-10-10 it dumped to 144 MB in 4.1 s (tw_char: 94 MB in
+        5.6 s), and without it a world migration could not be undone: the rollback
+        started the old build on the migrated world, and "Return to the tested pin…"
+        found no copy of it to name.
         """
-        return ("auth", "characters") if self._updates_at_start() else ()
-
-    def databases_changed_but_not_copied(self) -> tuple[Db, ...]:
-        """World, on a tree whose updater migrates it at start but whose copy leaves it out."""
-        return ("world",) if self._updates_at_start() else ()
+        return ("auth", "characters", "world") if self._updates_at_start() else ()
 
     def _updates_at_start(self) -> bool:
         """Whether this tree's conf table switches the world server's AutoUpdater on."""
@@ -441,7 +573,409 @@ class CmangosInstaller(StagedInstaller):
                 yield from self._name_what_moved(
                     reports, source, dest, old, self._seams.head_sha(dest)
                 )
-        return catch_up
+        yield from self._refuse_newer_migrations(server_dir, moved, to_pin=to_pin)
+        return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
+
+    # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
+
+    def _conf_defaults_moved(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> tuple[_ConfDefaults, ...]:
+        """Per conf that follows a moved source's template, the defaults that changed.
+
+        Read from git at the commit the checkout left and the one it stands on now
+        (`Seams.tree_bytes`), never from disk or from memory: TortoiseBots cb90e735 moved
+        `AiPlayerbot.PoolBudgetWhenTickOverMs` 150 -> 0 and the four pool keys the install
+        writes anyway. A key of the conf table's own `keys` is Yu'lon's and is left out;
+        so is a value cmake fills in (`@VAR@`), whose built value the template does not say.
+        Nothing is written here: the press still may refuse, and the file is changed with
+        the servers down (`servers_down_work()`).
+        """
+        by_repo = {source.repo: (dest, old) for source, dest, old in moved}
+        found: list[_ConfDefaults] = []
+        for name, table in self._data().conf.files.items():
+            follow = table.defaults_follow
+            if follow is None or follow.repo not in by_repo:
+                continue
+            dest, old = by_repo[follow.repo]
+            new = self._seams.head_sha(dest)
+            if new is None or new == old:
+                continue
+            before = self._template_defaults(dest, old, follow.path)
+            after = self._template_defaults(dest, new, follow.path)
+            if before is None or after is None:
+                found.append(_ConfDefaults(name, follow.repo, old, new, None))
+                continue
+            changed = tuple(
+                (key, before[key], after[key])
+                for key in sorted(before)
+                if key in after
+                and before[key] != after[key]
+                and key not in table.keys
+                and "@" not in before[key] + after[key]
+            )
+            if changed:
+                found.append(_ConfDefaults(name, follow.repo, old, new, changed))
+        return tuple(found)
+
+    def _template_defaults(self, dest: Path, rev: str, path: str) -> dict[str, str] | None:
+        """Each key the template at `rev` sets exactly once, with its value; None = unread."""
+        files = self._seams.tree_bytes(dest, rev, path)
+        data = None if files is None else files.get(path)
+        if data is None:
+            return None
+        text = data.decode("utf-8", "replace")
+        values: dict[str, str] = {}
+        for key, count in _assignments(text).items():
+            value = tuning.conf_value(text, key) if count == 1 else None
+            if value is not None:
+                values[key] = value
+        return values
+
+    def _carry_defaults(
+        self, server_dir: Path, item: _ConfDefaults, written: list[tuple[Path, Path]]
+    ) -> Iterator[str]:
+        """Set each live value still equal to the old default to the new one, after a backup.
+
+        A key set more than once is left alone: which copy the server reads is its
+        parser's business (ACE's INI import here, AzerothCore's first-wins elsewhere),
+        and a guess would move the copy it ignores. A key the file does not set is the
+        code's default, which moved with the template.
+        """
+        path = server_dir / ETC_DIR / item.name
+        if item.moved is None:
+            yield (
+                f"Yu'lon could not read {item.repo}'s template for {item.name} at both "
+                f"commits, so {item.name} is kept as it is."
+            )
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            yield f"{item.name} could not be read ({exc}), so it is kept as it is."
+            return
+        counts = _assignments(text)
+        edits = {
+            key: new
+            for key, old, new in item.moved
+            if counts.get(key) == 1 and tuning.conf_value(text, key) == old
+        }
+        if not edits:
+            return
+        try:
+            made = tuning.write(path, edits, root=server_dir)
+        except (OSError, tuning.TuningError) as exc:
+            yield f"{item.name} could not be changed ({exc}), so it is kept as it is."
+            return
+        written.append((path, made))
+        said = ", ".join(f"{key} {old} -> {new}" for key, old, new in item.moved if key in edits)
+        yield (
+            f"{item.name}: {said}, the new default of {item.repo} at {item.new[:7]}; a value "
+            f"you had changed is kept, and the file as it was is {made.name}."
+        )
+
+    def _conf_defaults_work(
+        self, server_dir: Path, confs: tuple[_ConfDefaults, ...]
+    ) -> ServersDownWork | None:
+        """`_carry_defaults()` with the servers down; a rollback puts each file back."""
+        if not confs:
+            return None
+        written: list[tuple[Path, Path]] = []
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            for item in confs:
+                yield from self._carry_defaults(server_dir, item, written)
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            while written:
+                path, made = written.pop()
+                try:
+                    tuning.restore(made, path)
+                except OSError as exc:
+                    yield f"{path.name} could not be put back from {made.name}: {exc}"
+                    continue
+                yield f"{path.name} is back as it was before this press ({made.name})."
+
+        return ServersDownWork(
+            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+        )
+
+    # -- going back over migrations a newer build already applied (T632) ----
+
+    def _refuse_newer_migrations(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, None]:
+        """Refuse "Return to the tested pin…" onto databases a newer build already migrated.
+
+        Tortoise's worldserver applies its core's and TortoiseBots' migration files at
+        start (`Database.AutoUpdate.Enabled`), records each in the database's
+        `migrations` table as `Module` + `Hash` (key `<module>:<SHA-1 of the file>`,
+        `AutoUpdater.cpp` `GetMigrationKey()`) and never takes one back; the older
+        core then starts on a schema it does not know. T630 refused this for
+        AzerothCore by file name; here the ledger has no names, so the files the move
+        takes away are read from git at both commits and hashed
+        (`_migrations_the_target_lacks()`), and only then are the databases asked.
+        Before anything is built, stopped or copied; a refusal puts every source back.
+        Only a Return, and only for a tree whose conf switches that updater on.
+        """
+        yield from ()
+        if not to_pin or not self._updates_at_start():
+            return
+        lacked = self._migrations_the_target_lacks(moved)
+        if not lacked:
+            return
+        count = sum(len(files) for files in lacked.values())
+        yield (
+            f"The tested commit does not ship {count} database migration"
+            f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
+            f"they already hold {'it' if count == 1 else 'them'}."
+        )
+        container = self.entry.container_spec().db
+        try:
+            was_up: bool | None = self._seams.ask_db_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            was_up = None
+        try:
+            applied = self._migrations_applied(server_dir, lacked)
+            if applied:
+                backups = server_dir / snapshot.BACKUPS_FOLDER
+                copies = {
+                    schema: snapshot.copy_from_before_migrations(
+                        backups,
+                        schema,
+                        [h for hashes in found.values() for h in hashes],
+                        game=self.entry.id,
+                    )
+                    for schema, found in applied.items()
+                }
+                raise InstallerError(newer_migrations_refusal(applied, copies))
+        except BaseException:
+            # What this press started it puts back, as the adopt press does.
+            if was_up is False:
+                logger.info(self._stop_the_database_again(container))
+            raise
+        # The check passed: the same, so a press that goes on finds the database as it was.
+        if was_up is False:
+            logger.info(self._stop_the_database_again(container))
+        yield "None of them was applied, so the older server can start on your databases."
+
+    def _conf_value(self, key: str) -> str | None:
+        """The entry's conf table's value for `key`, unquoted, or None."""
+        for table in self._data().conf.files.values():
+            value = table.keys.get(key)
+            if value is not None:
+                return value.strip().strip('"')
+        return None
+
+    def _tree(self, dest: Path, rev: str, path: str, *, what: str) -> dict[str, bytes]:
+        """Git's files under `path` at `rev`, or the fail-closed refusal when git cannot say."""
+        found = self._seams.tree_bytes(dest, rev, path)
+        if found is None:
+            raise InstallerError(
+                updates_unread_sentence(
+                    f"going back takes away in {what}",
+                    f"git could not list {path} at {rev[:7]}",
+                )
+            )
+        return found
+
+    def _folder_names(self) -> dict[Db, str]:
+        """The three folder names the updater reads, from the conf; a catalog error if absent."""
+        names: dict[Db, str] = {}
+        for role, key in (
+            ("auth", "Database.AutoUpdate.AuthUpdateName"),
+            ("characters", "Database.AutoUpdate.CharUpdateName"),
+            ("world", "Database.AutoUpdate.WorldUpdateName"),
+        ):
+            value = self._conf_value(key)
+            if value is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "going back takes away",
+                        "the catalog does not name this server's migration folders",
+                    )
+                )
+            names[role] = value  # type: ignore[index]
+        return names
+
+    def _migrations_at(
+        self, source: EmulatorSource, dest: Path, rev: str, *, core: bool
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file name: the hashes the database may hold for it}` at `rev`.
+
+        The core's files are `Database.AutoUpdate.Path`'s folders inside its own tree. A
+        module's are wherever ITS install rules put them (`MODULE_INSTALL_RULE`, read from
+        `<module>.cmake` at that same commit): TortoiseBots keeps `data/sql/char` and the
+        image gets it as `data/sql/character`, so reading the configured name from the
+        repository finds nothing. A module with files under `data/sql` and no install rule
+        that says where they go is not read, so it refuses.
+        """
+        what = source.repo
+        names = self._folder_names()
+        base = self._conf_value("Database.AutoUpdate.Path")
+        where: dict[Db, str | None] = {}
+        if core:
+            inside = IMAGE_TREE.match(base) if base is not None else None
+            if inside is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "going back takes away",
+                        "the catalog does not say where this server's migrations are",
+                    )
+                )
+            root = inside["inside"].strip("/")
+            where = {role: f"{root}/{name}" for role, name in names.items()}
+        else:
+            module = posixpath.basename(source.dest.rstrip("/"))
+            text = self._tree(dest, rev, f"{module}.cmake", what=what).get(f"{module}.cmake", b"")
+            rules = {
+                m["dst"]: m["src"]
+                for m in MODULE_INSTALL_RULE.finditer(text.decode("utf-8", "replace"))
+            }
+            every = self._tree(dest, rev, "data/sql", what=what)
+            folders = {
+                posixpath.dirname(path)
+                for path in every
+                if path.endswith(".sql") and posixpath.dirname(path).startswith("data/sql")
+            }
+            parsed = {f"data/sql/{src}" for src in rules.values()}
+            for uncovered in sorted(folders):
+                if not any(uncovered == one or uncovered.startswith(f"{one}/") for one in parsed):
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} does not say where {uncovered} is "
+                            "installed",
+                        )
+                    )
+            for dst in sorted(rules):
+                if dst not in names.values():
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} installs data/sql/{dst}, which is "
+                            "not one of the migration folders this server reads",
+                        )
+                    )
+            where = {
+                role: (f"data/sql/{rules[name]}" if name in rules else None)
+                for role, name in names.items()
+            }
+        found: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for role, folder in where.items():
+            files = self._tree(dest, rev, folder, what=what) if folder else {}
+            found[role] = {
+                posixpath.basename(path): _hashes_of(
+                    data, edited=core and role == "world" and path.endswith(f"/{SEDDED_FILE}")
+                )
+                for path, data in files.items()
+                if posixpath.dirname(path) == folder and path.endswith(".sql")
+            }
+        return found
+
+    def _migrations_the_target_lacks(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file label: its keys}` the running commit has and the target lacks.
+
+        Both lists come from git's tree at each commit (never from disk, where an untracked
+        or edited copy hides a removal), per source and per database folder. A key is
+        `<module>:<SHA-1>`, so the same bytes under the same module and database count as
+        shipped by the target whatever the file is now called; the same bytes in another
+        module's or database's folder do not. Only a file present at the running commit
+        counts, and when the target is ahead of it in history (`Seams.is_ancestor`) a file
+        the target's name list lacks was deleted upstream: older, not newer (a Return that
+        moves forward over a squash). Never by name order: going back, a migration written
+        before the target's newest but merged after it is newer.
+        """
+        sources = self.entry.emulator.sources
+        lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for source, dest, old in moved:
+            new = self._seams.head_sha(dest)
+            if new is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        f"going back takes away in {source.repo}", "git did not say its commit"
+                    )
+                )
+            if new == old:
+                continue
+            core = not any(
+                source.dest.startswith(f"{other.dest.rstrip('/')}/modules/")
+                for other in sources
+                if other is not source
+            )
+            module = "" if core else posixpath.basename(source.dest.rstrip("/"))
+            # Only a move FORWARD in history can have a deleted file: going back, every file
+            # the running commit added since is one the target lacks, however its name is dated
+            # (Tortoise dates a migration by when it was written, not merged).
+            forward = _Direction(self._seams, source.repo, dest, old, new)
+            before = self._migrations_at(source, dest, old, core=core)
+            after = self._migrations_at(source, dest, new, core=core)
+            for role, files in before.items():
+                shipped = {h for hashes in after[role].values() for h in hashes}
+                for name, hashes in files.items():
+                    if shipped.intersection(hashes):
+                        continue
+                    if name not in after[role] and forward.known():
+                        continue
+                    label = f"{module}/{name}" if module else name
+                    lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)
+        return lacked
+
+    def _migrations_applied(
+        self, server_dir: Path, lacked: Mapping[Db, Mapping[str, tuple[str, ...]]]
+    ) -> dict[str, dict[str, tuple[str, ...]]]:
+        """Per schema, which lacked files its `migrations` table holds (label -> held hashes).
+
+        The database is brought up alone (a stopped server has it down), never the world:
+        a start would run the updater. A table that does not exist holds none; a database
+        that cannot answer refuses.
+        """
+        spec = self.entry.container_spec()
+        try:
+            self._seams.start_db(spec, server_dir, because="nothing was built or changed")
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                updates_unread_sentence(
+                    "your databases already have",
+                    f"Yu'lon could not start the database to ask it: {exc}",
+                )
+            ) from exc
+        password = self.resolve_secrets(server_dir).db_password
+        client = self._native().db.client
+        schemas = self.entry.schema_map()
+        ask = self._query_seam()
+        applied: dict[str, dict[str, tuple[str, ...]]] = {}
+        for role, files in lacked.items():
+            schema = schemas[role]
+            digests = sorted({key.partition(":")[2] for keys in files.values() for key in keys})
+            quoted = ", ".join(f"'{digest}'" for digest in digests)
+            try:
+                if not ask(spec.db, client, password, schema, MIGRATIONS_TABLE_QUESTION).strip():
+                    continue
+                rows = ask(spec.db, client, password, schema, f"{MIGRATIONS_QUESTION}({quoted})")
+            except (docker.DockerCommandError, RuntimeError, OSError) as exc:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "your databases already have",
+                        f"Yu'lon could not ask {schema} which of them it already has: {exc}",
+                    )
+                ) from exc
+            held = {line.strip().upper() for line in rows.splitlines() if line.strip()}
+            found = {
+                label: tuple(key.partition(":")[2] for key in keys if key.upper() in held)
+                for label, keys in files.items()
+            }
+            found = {label: hashes for label, hashes in found.items() if hashes}
+            if found:
+                applied[schema] = found
+        return applied
 
     def _refuse_new_chain_files(
         self,
@@ -525,7 +1059,7 @@ class CmangosInstaller(StagedInstaller):
                     "already has of it cannot be known"
                 )
             elif (
-                phase.on_update in ("apply_new", "replace_changed")
+                phase.on_update in ("apply_new", "replace_changed", "reapply_changed")
                 and phase.into != self.entry.databases.world
             ):
                 why = f"it writes {phase.into}, and only the world database is updated this way"
@@ -583,16 +1117,40 @@ class CmangosInstaller(StagedInstaller):
         """Bring the world the `apply_new` files its `*-db` pin adds, servers down (T531).
 
         `forward()` -- the old servers stopped, the new build not yet started -- is
-        `_catch_up_world()`. Nothing to undo in `back()`: the world is not copied
-        (owner, 2026-10-04), so what went in stays with its ledger rows, and the next
-        press applies only what is still missing. `finishes_start_refusal` is False:
+        `_catch_up_world()`. Nothing to undo in `back()`: the world is not copied on the
+        trees this runs on (TBC and Vanilla have no start-time updater, so their update
+        copies nothing; owner, 2026-10-04), so what went in stays with its ledger rows, and
+        the next press applies only what is still missing. `finishes_start_refusal` is False:
         this work clears nothing that refuses a start.
+
+        T656: and the defaults a moved module changed, carried into the live confs that
+        follow its template (`_conf_defaults_work()`), after the world's work and put back
+        before it on a rollback.
         """
-        if not isinstance(changes, _WorldCatchUp) or not (
-            changes.applying() or changes.replacing()
-        ):
+        if not isinstance(changes, _MovedChanges):
             return None
-        catch_up = changes
+        world = self._world_catch_up_work(changes.catch_up)
+        confs = self._conf_defaults_work(server_dir, changes.confs)
+        if world is None or confs is None:
+            return world or confs
+        first, then = world, confs
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            yield from first.forward(ctx)
+            yield from then.forward(ctx)
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            yield from then.back(ctx)
+            yield from first.back(ctx)
+
+        return ServersDownWork(
+            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+        )
+
+    def _world_catch_up_work(self, catch_up: _WorldCatchUp) -> ServersDownWork | None:
+        """T531's work: the `apply_new` files a `*-db` pin adds, or None when there are none."""
+        if not (catch_up.applying() or catch_up.replacing() or catch_up.reapplying()):
+            return None
         applied: list[int] = [0, 0]
         """World updates applied, bot table files loaded: what a rollback leaves in place."""
 
@@ -689,6 +1247,8 @@ class CmangosInstaller(StagedInstaller):
             yield from self._bring_new_world_files(ctx, catch_up, ledger, applied)
         if catch_up.replacing():
             yield from self._replace_changed_files(ctx, catch_up, ledger, applied)
+        if catch_up.reapplying():
+            yield from self._reapply_changed_files(ctx, catch_up, ledger, applied)
 
     def _bring_new_world_files(
         self,
@@ -995,6 +1555,79 @@ class CmangosInstaller(StagedInstaller):
                 )
         yield f"{loaded} of {len(due)} bot table file(s) loaded."
 
+    def _reapply_changed_files(
+        self,
+        ctx: StageContext,
+        catch_up: _WorldCatchUp,
+        ledger: dict[tuple[str, str], sqlplan.FileRow],
+        applied: list[int],
+    ) -> Iterator[str]:
+        """Each `reapply_changed` file whose bytes the ledger lacks, run again (T659).
+
+        The db repo's `utilities/cmangos_custom.sql`: upstream's InstallFullDB.sh runs it last
+        on every full install, so it is data corrections to apply on top of everything else.
+        Every statement is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts
+        the row back, so running it again changes nothing the first run did not
+        (`sqlplan.repeat_problem()`); a file of another shape, or one that names another
+        schema, is named and not run. Nothing was seeded: the import writes no ledger row for
+        it, so the first update applies it once to every server, and a later one only when
+        upstream edited the file. A failed or half-run row is simply owed again.
+        """
+        world = self.entry.databases.world
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        sub = plan.model_copy(update={"phases": catch_up.reapplying()})
+        others = self._other_schemas()
+        for run in self._expand(sub, ctx.server_dir, {}):
+            if run.path is None:
+                continue
+            self._check_cancel(ctx.cancel)
+            sha = sqlplan.file_digest(run.path)
+            row = ledger.get((run.phase.name, run.rel))
+            if row is not None and row.sha256 == sha and row.state == sqlplan.FILE_APPLIED:
+                continue
+            why = sqlplan.repeat_problem(run.path)
+            reaches = sqlplan.foreign_schemas(run.path, others, executable_comments_ok=True)
+            if why or reaches:
+                said = why or f"it reaches outside {world} ({', '.join(reaches)})"
+                yield (
+                    f"{run.rel} was not applied: {said}, so running it on a server that has "
+                    "data could leave something a fresh install would not. A fresh install of "
+                    "the server applies it."
+                )
+                continue
+            yield (
+                f"Applying {run.rel} ({run.phase.name}) to {world}: data corrections, safe to "
+                "repeat."
+            )
+            self._record_world_files(
+                ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),)
+            )
+            refused: list[sqlplan.PhaseRun] = []
+            yield from self._stream(
+                _apply_one(
+                    run,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    exec_stdin=self._seams.exec_stdin,
+                    refused=refused,
+                ),
+                cancel=None,
+                stage="world-updates",
+            )
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            if not refused:
+                applied[0] += 1
+            self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
+            if refused:
+                yield (
+                    f"The database refused {run.rel}, so some of it may be in and some not. "
+                    "It is safe to repeat: the next update applies it again."
+                )
+
     def _other_schemas(self) -> set[str]:
         """Every schema of this server that is not its world: what an update may never name."""
         names = self.entry.databases
@@ -1095,7 +1728,8 @@ class CmangosInstaller(StagedInstaller):
             return
         for spec, text in loaded:
             yield f"Checking {spec.file} still applies to the new {spec.source}."
-            self._resolve(spec, text, server_dir / spec.source, dry_run=True)
+            if not self._resolve(spec, text, server_dir / spec.source, dry_run=True):
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
         yield "Every source patch this app carries still applies."
 
     def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
@@ -1117,7 +1751,10 @@ class CmangosInstaller(StagedInstaller):
             text = self._patch_text(spec)
             root = server_dir / spec.source
             yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
-            for result in self._resolve(spec, text, root):
+            results = self._resolve(spec, text, root)
+            if not results:
+                yield self.OBSOLETE_NOTE.format(file=spec.file, source=spec.source)
+            for result in results:
                 if result.applied:
                     yield f"Patched {result.path}."
                 else:
@@ -1143,10 +1780,37 @@ class CmangosInstaller(StagedInstaller):
         and says nothing was changed, so a class name in front of it would be
         noise, as `_write_dockerfile` says of `DockerfileError`.
         """
+        if self._obsolete(spec, text, root):
+            return ()
         try:
             return patch.apply(text, root, name=spec.file, dry_run=dry_run)
         except patch.PatchError as exc:
             raise InstallerError(str(exc)) from exc
+
+    def _obsolete(self, spec: SourcePatch, text: str, root: Path) -> bool:
+        """Whether the defect `spec` removes is already gone from every file it edits (T600).
+
+        Only for a patch whose catalog row names `obsolete_when_absent`. Every file the patch
+        edits must exist and lack that text; one that is missing, unreadable or still has it
+        leaves the ordinary apply (and its refusal) in charge, because a hang that is still
+        there must not be built.
+        """
+        marker = spec.obsolete_when_absent
+        if marker is None:
+            return False
+        try:
+            paths = {hunk.path for hunk in patch.parse(text)}
+            return bool(paths) and all(
+                marker not in (root.joinpath(*path.split("/"))).read_text(encoding="utf-8")
+                for path in paths
+            )
+        except (OSError, UnicodeDecodeError, patch.PatchError):
+            return False
+
+    OBSOLETE_NOTE = (
+        "{file} is not needed: {source} no longer has the code it removes (upstream fixed it, or "
+        "it is already out). Leaving the sources as they are."
+    )
 
     def _refuse_to_patch_what_will_not_be_rebuilt(
         self, ctx: StageContext, loaded: Sequence[tuple[SourcePatch, str]]
@@ -1597,7 +2261,11 @@ class CmangosInstaller(StagedInstaller):
                 self._public_tokens(ctx.server_dir),
                 secrets=ctx.secrets,
             )
+            clash = self._modules_that_take_the_cores_names(ctx.server_dir, text)
+            if clash is not None:
+                raise InstallerError(clash)
             written = dockerfile.write(ctx.server_dir, text, ignore)
+            made = self._make_the_modules_folder(ctx.server_dir, text)
         except dockerfile.CarriedSecretError as exc:
             # AHEAD of the `DockerfileError` arm below, which it subclasses.
             # `render()` proved a token value carries this install's password and
@@ -1671,6 +2339,68 @@ class CmangosInstaller(StagedInstaller):
                 yield f"Wrote {name}"
             else:
                 yield f"{name} is already exactly what this install needs."
+        if made:
+            yield "Made the modules/ folder the build copies in (no module is in it yet)."
+
+    _COPIES_MODULES = re.compile(r"^COPY\s+(?:--\S+\s+)*modules/", re.MULTILINE)
+
+    def _modules_that_take_the_cores_names(
+        self, server_dir: Path, recipe: str | None = None
+    ) -> str | None:
+        """Refuse a build that lays a server module over a core module of the same name (T611).
+
+        A recipe that copies the server's `modules/` over the core's (Tortoise's, for the
+        modules a player brought) mixes two modules of one name into a single folder, file by
+        file. A name taken at Install is refused there; this is the Rebuild's own look, because
+        "Update to latest" can move the core onto a module of that name afterwards. `recipe` is
+        the rendered Dockerfile when the stage has it, else the template is read, so the
+        question before the Rebuild's can be asked without rendering. Names the player's
+        module and the core's.
+        """
+        if recipe is None:
+            template = self._native().dockerfile_dir
+            try:
+                recipe = (
+                    (self.installers_root / template / "Dockerfile.tmpl").read_text(
+                        encoding="utf-8"
+                    )
+                    if template is not None
+                    else ""
+                )
+            except OSError:
+                return None
+        if self._COPIES_MODULES.search(recipe) is None:
+            return None
+        core_folder = f"{self.entry.emulator.sources[0].dest}/modules"
+        core_names = core_modules.names_in(server_dir / core_folder)
+        for name in core_modules.names_in(server_dir / "modules"):
+            core = core_modules.same_name_in(name, core_names)
+            if core is not None:
+                return core_modules.sentence(name, core, core_folder)
+        return None
+
+    def _make_the_modules_folder(self, server_dir: Path, recipe: str) -> bool:
+        """Make `<server>/modules/` when the recipe copies it in, so the `COPY` cannot fail (T596).
+
+        A recipe that lays the server's `modules/` over the core's (Tortoise's, for the
+        server modules a player brings from a link or a folder) names a folder a server
+        that took no module does not have, and BuildKit fails a `COPY` whose source is
+        missing from the context. Keyed on the rendered recipe and not on the game, so
+        the stage makes exactly the folder the file it just wrote asks for. An existing
+        folder, and whatever is in it, is left alone. True when it was made.
+        """
+        if self._COPIES_MODULES.search(recipe) is None:
+            return False
+        folder = server_dir / "modules"
+        if folder.is_dir():
+            return False
+        if os.path.lexists(folder):
+            raise InstallerError(
+                f"{folder} is in the way: this install's build copies a modules/ folder in, and "
+                "that is not a folder. Move it aside and press again."
+            )
+        folder.mkdir(parents=True)
+        return True
 
     def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
         """The folder the tools read the client from: itself, or a view of it in `view` (T260).
@@ -2103,6 +2833,12 @@ class CmangosInstaller(StagedInstaller):
         # T129: a `warn` phase with a refused step is not recorded as applied,
         # so a later correction of it is still offered -- the press's own rule.
         refused: set[str] = set()
+        refused_runs: list[sqlplan.PhaseRun] = []
+
+        def carried_on_past(run: sqlplan.PhaseRun) -> None:
+            refused.add(run.phase.name)
+            refused_runs.append(run)
+
         yield from self._stream(
             lambda sink: sqlplan.apply(
                 runs,
@@ -2112,7 +2848,7 @@ class CmangosInstaller(StagedInstaller):
                 exec_stdin=self._seams.exec_stdin,
                 sink=sink,
                 cancel=ctx.cancel,
-                on_refused=lambda run: refused.add(run.phase.name),
+                on_refused=carried_on_past,
             ),
             cancel=ctx.cancel,
             stage="import",
@@ -2186,6 +2922,69 @@ class CmangosInstaller(StagedInstaller):
                 f"({type(exc).__name__}: {exc})."
             ) from exc
         yield "The databases are imported and marked complete."
+        yield from self._remember_refused_corrections(ctx, refused_runs)
+
+    def _remember_refused_corrections(
+        self, ctx: StageContext, refused: Sequence[sqlplan.PhaseRun]
+    ) -> Iterator[str]:
+        """Write a `failed` row for each `reapply_changed` file the import carried on past (T661).
+
+        The import is `warn` on that file, so a refusal was one log line and the install went on.
+        The row is what the Server tab's banner reads (`_stuck_world_updates()`), the next update
+        applies the file again from it, and `after_ready()` says so in the install's closing
+        lines -- from the ledger, so a resumed install says it as well as the run that met it.
+        """
+        if not refused:
+            return
+        reapplying = {phase.name for phase in self._world_catch_up_plan().reapplying()}
+        rows = tuple(
+            sqlplan.FileRow(
+                run.phase.name, run.rel, sqlplan.file_digest(run.path), sqlplan.FILE_FAILED
+            )
+            for run in refused
+            if run.phase.name in reapplying and run.path is not None
+        )
+        if not rows:
+            return
+        try:
+            self._record_world_files(ctx, rows)
+        except InstallerError as exc:
+            logger.warning(f"could not record the refused corrections file: {exc}")
+            return
+        yield (
+            f"{', '.join(row.file for row in rows)}: refused by the database. It is recorded, "
+            "and the install goes on."
+        )
+
+    def after_ready(self, server_dir: Path) -> Iterator[str]:
+        """Say, in the install's closing lines, which data-corrections file never went in (T661).
+
+        Reads the file ledger for a `reapply_changed` file left `failed` or `started`. Never
+        raises: the server is up, and a database that cannot be asked is not an install failure.
+        """
+        try:
+            ctx_secrets = self.resolve_secrets(server_dir)
+            db = self._native().db
+            plan = self._data().sql
+            ledger = sqlplan.read_file_ledger(
+                self._query_seam(),
+                container=self.entry.container_spec().db,
+                client=db.client,
+                password=ctx_secrets.db_password,
+                marker_db=plan.marker_db,
+            )
+            reapplying = {phase.name for phase in self._world_catch_up_plan().reapplying()}
+        except (RuntimeError, OSError, ValueError, docker.DockerCommandError) as exc:
+            logger.warning(f"could not read which corrections files are unfinished: {exc}")
+            return
+        for row in ledger.values():
+            if row.phase in reapplying and row.state in (sqlplan.FILE_FAILED, sqlplan.FILE_STARTED):
+                yield (
+                    f"warning: {row.file} did not finish going in: the database refused it. It "
+                    f"holds data corrections this server may run without for now. Press "
+                    f'"{CORRECTIONS_BUTTON_LABEL}" on the Server tab to run it again; the next '
+                    "update does too."
+                )
 
     def _stop_a_world_the_failed_run_left(self, ctx: StageContext) -> Iterator[str]:
         """Stop this install's own world container when its previous run failed (T206).
@@ -2581,7 +3380,11 @@ class CmangosInstaller(StagedInstaller):
         return CorrectionCheck("current")
 
     def _stuck_world_updates(self, ctx: StageContext) -> tuple[StuckWorldUpdate, ...]:
-        """The `started`/`failed` world updates of `apply_new` phases, in the order they run (T545).
+        """The `started`/`failed` world updates of `apply_new` and `reapply_changed` phases (T545).
+
+        In the order they run. A `reapply_changed` file (T659's `cmangos custom`) is listed
+        too (T661): the next update would apply it again by itself, but the player is told
+        now what failed, and `repeatable` is that phase's own check (`sqlplan.repeat_problem`).
 
         Bot (`replace_changed`) rows are left out: the next update loads such a file again on
         its own, since a whole-table file is safe to repeat (T534). A row whose file is gone
@@ -2590,7 +3393,9 @@ class CmangosInstaller(StagedInstaller):
         holds its exact bytes under a new name: that is listed as the new file with
         `renamed_from`, and the press moves the record there (`sqlplan.renamed_stuck()`).
         """
-        applying = {phase.name for phase in self._world_catch_up_plan().applying()}
+        catch_up = self._world_catch_up_plan()
+        reapplying = {phase.name for phase in catch_up.reapplying()}
+        applying = {phase.name for phase in catch_up.applying()} | reapplying
         if not applying:
             return ()
         plan = self._data().sql
@@ -2654,7 +3459,14 @@ class CmangosInstaller(StagedInstaller):
                     phase=row.phase,
                     file=file,
                     state=row.state,
-                    repeatable=there and sqlplan.whole_table_problem(path) is None,
+                    repeatable=there
+                    and (
+                        sqlplan.repeat_problem(path)
+                        if row.phase in reapplying
+                        else sqlplan.whole_table_problem(path)
+                    )
+                    is None,
+                    reapply=row.phase in reapplying,
                     behind=behind,
                     sha256=sqlplan.file_digest(path) if there else row.sha256,
                     changed=there and sqlplan.file_digest(path) != row.sha256,
@@ -2733,7 +3545,13 @@ class CmangosInstaller(StagedInstaller):
                     f"{self.entry.databases.world} stays as it is; Yu'lon does not undo it."
                 )
                 continue
-            reaches = sqlplan.foreign_schemas(path, others)
+            if one.reapply and (why := sqlplan.repeat_problem(path)):
+                yield (
+                    f"{one.file} was not run: {why}, so running it on a server that has data "
+                    "could leave something a fresh install would not. Nothing after it was run."
+                )
+                return
+            reaches = sqlplan.foreign_schemas(path, others, executable_comments_ok=one.reapply)
             if reaches:
                 yield (
                     f"{one.file} reaches outside {self.entry.databases.world} "
@@ -3619,6 +4437,32 @@ class CmangosInstaller(StagedInstaller):
 
 
 @dataclass(frozen=True)
+class _ConfDefaults:
+    """One live conf whose template's defaults changed between two commits of a source (T656)."""
+
+    name: str
+    """The conf table's file name, under the server's `etc`."""
+    repo: str
+    old: str
+    new: str
+    moved: tuple[tuple[str, str, str], ...] | None
+    """`(key, old default, new default)` per changed key; None when git could not say."""
+
+
+def _assignments(text: str) -> dict[str, int]:
+    """How many active `Key = value` lines set each key (a `#`, `;` or `[` line sets none)."""
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped[0] in "#;[" or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@dataclass(frozen=True)
 class _WorldCatchUp:
     """The plan's `on_update` phases, each with the source whose checkout holds its files (T531)."""
 
@@ -3639,6 +4483,10 @@ class _WorldCatchUp:
     def replacing(self) -> tuple[SqlPhase, ...]:
         """The `replace_changed` phases, in plan order (T534)."""
         return tuple(phase for phase, _owner in self.phases if phase.on_update == "replace_changed")
+
+    def reapplying(self) -> tuple[SqlPhase, ...]:
+        """The `reapply_changed` phases, in plan order (T659)."""
+        return tuple(phase for phase, _owner in self.phases if phase.on_update == "reapply_changed")
 
     def refusing(self, source: EmulatorSource) -> tuple[SqlPhase, ...]:
         """The `refuse_new` phases whose files live in `source`'s checkout (T533)."""
@@ -3708,6 +4556,14 @@ def _glob_names(glob: str, path: str) -> bool:
     return where == folder and fnmatch.fnmatchcase(name, pattern)
 
 
+@dataclass(frozen=True)
+class _MovedChanges:
+    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656)."""
+
+    catch_up: _WorldCatchUp
+    confs: tuple[_ConfDefaults, ...]
+
+
 @dataclass
 class _Remembering:
     """An `ImportGate` that keeps its last probe, so the family need not probe twice.
@@ -3737,8 +4593,8 @@ class _Remembering:
         self.last = self.inner.probe()
         return self.last
 
-    def reset(self) -> tuple[str, ...]:
-        return self.inner.reset()
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        return self.inner.reset(everything=everything)
 
     def adoption_gaps(self) -> tuple[str, ...]:
         """Straight through: there is nothing to remember, and it is not a state.

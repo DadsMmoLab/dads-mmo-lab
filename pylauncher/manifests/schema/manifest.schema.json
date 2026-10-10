@@ -338,10 +338,17 @@
           "title": "Added",
           "type": "string"
         },
+        "addon": {
+          "default": false,
+          "description": "Made by the add-on route (`yulon.client_addons`, T613): the item is client add-ons alone, completed by that route's reader only, and refused by the applier the moment anything makes it more (SQL, settings, a rebuild).",
+          "title": "Addon",
+          "type": "boolean"
+        },
         "kind": {
           "enum": [
             "link",
-            "folder"
+            "folder",
+            "archive"
           ],
           "title": "Kind",
           "type": "string"
@@ -356,8 +363,35 @@
             }
           ],
           "default": null,
-          "description": "The folder it was copied from (kind='folder'); null for a link.",
+          "description": "The folder it was copied from (kind='folder'), or the zip it was unpacked from (kind='archive', a zip on this computer); null for a link.",
           "title": "Path"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "kind='archive' only, and required there: the SHA-256 of the zip that was installed (T613), so an Update can tell a changed download from the same one.",
+          "title": "Sha256"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "kind='archive' only: the https link the zip was downloaded from (T613), for Update to fetch again. Null for a zip on this computer.",
+          "title": "Url"
         }
       },
       "required": [
@@ -462,6 +496,19 @@
           "default": null,
           "description": "A row that must be found before this answer is used; see `ExistsCheck`."
         },
+        "follows": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "character only (T637): the key of another character prompt. This one gets no row of its own: it takes its answer from the character picked for that prompt (`mod-ah-bot`'s `bot_account` follows `bot_guid`: one pick, two answers).",
+          "title": "Follows"
+        },
         "key": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Key",
@@ -474,7 +521,8 @@
             "int",
             "float",
             "bool",
-            "choice"
+            "choice",
+            "character"
           ],
           "title": "Kind",
           "type": "string"
@@ -504,6 +552,22 @@
           "default": null,
           "description": "int/float only: the smallest answer accepted, inclusive (T122). The mob multipliers declare 0.01: `X=X*{m}` at 0 -- or at 1e-50, which a FLOAT column rounds to 0 -- cannot be divided back by their Remove.",
           "title": "Min"
+        },
+        "multi": {
+          "default": false,
+          "description": "character only (T637): the answer is a comma list of GUIDs, one per ticked character, as `AuctionHouseBot.GUIDs` reads it. False: exactly one GUID.",
+          "title": "Multi",
+          "type": "boolean"
+        },
+        "part": {
+          "default": "guid",
+          "description": "character only (T637): which part of the picked character this answer is: its `guid`, or the id of its `account`. `account` needs `follows`.",
+          "enum": [
+            "guid",
+            "account"
+          ],
+          "title": "Part",
+          "type": "string"
         },
         "question": {
           "minLength": 1,
@@ -621,7 +685,7 @@
     },
     "SqlStep": {
       "additionalProperties": false,
-      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.\n\n`precondition` and `verify` are T63's two halves of one problem: a direct\nstep whose ORDER cannot be satisfied inside a single press. `mod-city-bots`\nimports its 400-citizen roster into `acore_playerbots`, and that file writes\n`playerbots_account_type` \u2014 a table mod-playerbots creates on the world\nserver's FIRST start, which is necessarily after the rebuild this install\nonly reports. So the step can be right and still be too early, and the two\nhonest answers to that are *say so and do nothing* and *prove it worked*:\n\n* `precondition` \u2014 asked before the file is opened. No row (or a database\n  that cannot be asked at all, which is what a schema that does not exist\n  yet looks like) means the step is SKIPPED with `missing` in the report and\n  not one row written. Install again after the missing thing exists; the\n  import is idempotent by construction (the roster file drops and recreates\n  its own table), so a repeat is a repair.\n* `verify` \u2014 asked after, once per entry, and each entry says its own\n  sentence. No row RAISES: the file ran, so \"skipped\" would be a lie, and a\n  module reported installed whose roster is half there is exactly the defect\n  wow-manage's `city_bots_import_roster` verified 400/400 to catch.\n\nBoth are `direct`-only. A `db-import` step is handed to another program on a\nlater boot and nothing here is in a position to check either end of it, so\ndeclaring one there would be a field nothing reads.",
+      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.\n\n`precondition` and `verify` are T63's two halves of one problem: a direct\nstep whose ORDER cannot be satisfied inside a single press. `mod-city-bots`\nimports its 400-citizen roster into `acore_playerbots`, and that file writes\n`playerbots_account_type` \u2014 a table mod-playerbots creates on the world\nserver's FIRST start, which is necessarily after the rebuild this install\nonly reports. So the step can be right and still be too early, and the two\nhonest answers to that are *say so and do nothing* and *prove it worked*:\n\n* `precondition` \u2014 asked before the file is opened. No row (or a database\n  that cannot be asked at all, which is what a schema that does not exist\n  yet looks like) means the step is SKIPPED with `missing` in the report and\n  not one row written. Install again after the missing thing exists; the\n  import is idempotent by construction (the roster file drops and recreates\n  its own table), so a repeat is a repair.\n* `verify` \u2014 asked after, once per entry, and each entry says its own\n  sentence. No row RAISES: the file ran, so \"skipped\" would be a lie, and a\n  module reported installed whose roster is half there is exactly the defect\n  wow-manage's `city_bots_import_roster` verified 400/400 to catch.\n\nBoth are `direct`-only. A `db-import` step is handed to another program on a\nlater boot and nothing here is in a position to check either end of it, so\ndeclaring one there would be a field nothing reads.\n\n`migration_module` (T596) is for a server whose own updater keeps a\n`migrations(Name, Module, Hash, AppliedAt)` table in each database (the\nTortoise core, `AutoUpdater.cpp:135-170`). The app runs the file itself and\nwrites the row the updater would have written, so neither runs it twice; a\nfile whose hash the table already holds under that Module is not sent again.",
       "properties": {
         "applied_by": {
           "default": "direct",
@@ -642,6 +706,20 @@
           ],
           "title": "Db",
           "type": "string"
+        },
+        "migration_module": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]{1,255}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Record the file in the server's own `migrations` table under this Module name and skip it when that table already holds its hash. One direct file only.",
+          "title": "Migration Module"
         },
         "note": {
           "anyOf": [

@@ -2638,6 +2638,14 @@ def test_reset_drops_exactly_the_present_plan_schemas_from_partial() -> None:
     assert server.databases == ["somebody_else"]
 
 
+def test_reset_everything_is_refused_because_a_plan_has_no_compose_importer() -> None:
+    """T658's `everything` follows an ended compose importer, which a plan never runs."""
+    server = _Server(databases=["mangos", "characters"], tables={"mangos": ["x"]})
+    with pytest.raises(InstallerError):
+        _gate(server).reset(everything=True)
+    assert server.dropped == []
+
+
 def test_reset_drops_through_one_script_over_stdin_with_the_secret_in_the_environment() -> None:
     server = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
     _gate(server, password=GATE_SECRET).reset()

@@ -229,7 +229,9 @@ def test_the_refusals_are_reached_only_from_a_rebuild() -> None:
         "rebuild_stages": {"rebuild"},
         # `rebuild` is `rebuild_for_app()`'s inner generator, which the walk
         # also credits to the function around it.
-        "rebuild": {"update_to_latest", "rebuild", "rebuild_for_app"},
+        # T601 level 2: a server brought from another computer gets the tab's own Rebuild once
+        # for its modules (`move_server._rebuild_for_modules`).
+        "rebuild": {"update_to_latest", "rebuild", "rebuild_for_app", "_rebuild_for_modules"},
     }
     seen: dict[str, set[str]] = {name: set() for name in allowed}
     for path in _sources():

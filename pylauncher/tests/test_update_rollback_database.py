@@ -64,7 +64,7 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
     "wow-unbound": ("auth", "characters", "world", "playerbots"),  # WotLK's family and pin
     "wow-tbc": (),
     "wow-vanilla": (),
-    "wow-tortoise": ("auth", "characters"),
+    "wow-tortoise": ("auth", "characters", "world"),
     "wow-centurion": (),
 }
 """Per shipped entry, by role: what its new build can write at its first start.
@@ -76,8 +76,9 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
   updates before the first start, so those three are copied first too.
 * Tortoise: the worldserver's own AutoUpdater (`Database.AutoUpdate.Enabled`
   in its conf table) migrates the login, characters and world databases at
-  start. World is left out on the owner's word of 2026-10-04: it is the biggest
-  and the slowest to copy, so its rollback says it is not put back.
+  start, so all three are copied. World was left out on the owner's word of
+  2026-10-04 until T643 measured it (144 MB in 4.1 s on yulon-ubuntu, 2026-10-10)
+  and found a world migration could not be undone without it.
 * TBC, Vanilla: no start-time updater (no AutoUpdate key; their `*-db`
   repositories stay on their pin).
 * Centurion: `Updates.EnableDatabases` is forced to 0 by the catalog's own
@@ -101,7 +102,7 @@ def test_every_shipped_entry_names_the_databases_its_new_build_changes() -> None
     ("game", "names"),
     [
         ("wow-wotlk", WOTLK_COPY),
-        ("wow-tortoise", ("tw_logon", "tw_char")),
+        ("wow-tortoise", ("tw_logon", "tw_char", "tw_world")),
         ("wow-tbc", ()),
         ("wow-vanilla", ()),
         ("wow-centurion", ()),
@@ -327,10 +328,15 @@ def test_a_stop_during_the_core_updates_names_the_press_not_the_install(tmp_path
     inner = made._seams.one_shot
 
     def one_shot(
-        service: str, where: Path, *, sink: object = None, cancel: object = None
+        service: str,
+        where: Path,
+        *,
+        sink: object = None,
+        cancel: object = None,
+        record_ended: bool = False,
     ) -> AttachedRun:
         stop.set()
-        return inner(service, where, sink=sink, cancel=cancel)
+        return inner(service, where, sink=sink, cancel=cancel, record_ended=record_ended)
 
     made._seams = replace(made._seams, one_shot=one_shot)
     with pytest.raises(InstallerError) as raised:
@@ -360,16 +366,14 @@ def test_a_copy_that_cannot_be_taken_never_starts_the_new_build(tmp_path: Path) 
     assert "is NOT put back" not in text
 
 
-def test_tortoise_copies_login_and_characters_and_says_world_is_not_put_back(
-    tmp_path: Path,
-) -> None:
+def test_tortoise_copies_and_puts_back_login_characters_and_world(tmp_path: Path) -> None:
+    """Since T643 the world goes back with the other two (`tests/test_tortoise_world_copy.py`)."""
     rec, _dir, _made, fake, _said, raised = _press(
         tmp_path, TORTOISE, wait_ready=_old_build_comes_back()
     )
-    assert [copy.databases for copy in fake.taken] == [("tw_logon", "tw_char")]
-    assert "put-back:tw_logon,tw_char" in rec.calls
-    text = str(raised)
-    assert "tw_world" in text and "not copied" in text
+    assert [copy.databases for copy in fake.taken] == [("tw_logon", "tw_char", "tw_world")]
+    assert "put-back:tw_logon,tw_char,tw_world" in rec.calls
+    assert "not copied" not in str(raised)
 
 
 @pytest.mark.parametrize("entry", [TBC, VANILLA], ids=lambda entry: entry.id)
@@ -416,12 +420,15 @@ def _asked_ready(rec: Recorder, answers: list[bool]) -> Callable[[object, object
     return wait_ready
 
 
-def test_a_rollback_forgets_older_copies_only_after_the_old_build_reported_ready(
+def test_a_rollback_forgets_no_older_copy_even_once_the_old_build_reported_ready(
     tmp_path: Path,
 ) -> None:
     """Live proof 2026-10-05, item 5: the copies went in the second the old build was recreated.
 
-    It then crash-looped, and the last copies holding the tables it needed were gone.
+    It then crash-looped, and the last copies holding the tables it needed were gone. Until
+    T633 they went once the old build reported ready; since the owner's "Delete only after
+    success" (2026-10-09) a rolled-back press forgets none: the A-press of T630 lost the only
+    copy from before the earlier update that way.
     """
     rec, server_dir, make = _spine(tmp_path, WOTLK)
     made = make(wait_ready=_asked_ready(rec, [False, True]))
@@ -431,7 +438,7 @@ def test_a_rollback_forgets_older_copies_only_after_the_old_build_reported_ready
     assert "is running again" in str(raised.value)
     old_up = _at(rec.calls, "ready?yes")
     assert _at(rec.calls, "put-back:") < old_up
-    assert rec.calls.count("prune") == 1 and _at(rec.calls, "prune") > old_up, rec.calls
+    assert "prune" not in rec.calls, rec.calls
 
 
 def test_an_old_build_that_does_not_come_up_after_the_put_back_keeps_every_copy_and_stops(
@@ -623,6 +630,8 @@ def test_a_tortoise_old_build_that_crash_loops_is_stopped_at_its_restart_with_it
         lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "SigCgt:\t0000000000000000\n", ""),
     )
     monkeypatch.setattr(docker, "_pause", lambda control, seconds: None)
+    # T600: a deaf world's log tail is read to see whether it ends on a failed update.
+    monkeypatch.setattr(docker, "_logs", lambda *_a, **_kw: "Loading maps...\n")
     rec, server_dir, make = _spine(tmp_path, TORTOISE)
     made = make(wait_ready=_asked_ready(rec, [False, False]))
     made._snapshot = FakeSnapshot(rec)
@@ -643,6 +652,52 @@ def test_a_tortoise_old_build_that_crash_loops_is_stopped_at_its_restart_with_it
     assert heard == [docker.WORLD_STILL_LOADING, docker.WORLD_RESTARTED_STOPPING]
     assert native.OLD_BUILD_WAIT_HINT in said
     assert said.index(native.OLD_BUILD_WAIT_HINT) == said.index(docker.WORLD_STILL_LOADING) + 1
+
+
+def test_the_stop_wait_of_a_world_stuck_at_a_failed_update_kills_it_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T600: the failed build's world sits in a read after a failed update and ignores the stop.
+
+    Every stop path (the rollback's included) used to say "still loading" until "Stop now
+    anyway"; now it says which update failed and what MariaDB said, kills the stuck world and
+    goes on.
+
+    Mutation: drop the `_stuck_at_a_failed_update()` check in `world_load_steps()`, and the
+    steps are the loading hint, again and again.
+    """
+    import subprocess
+
+    spec = TORTOISE.container_spec()
+    monkeypatch.setattr(
+        docker,
+        "container_state",
+        lambda name, **_kw: docker.ContainerState(
+            status="running", started_at="2026-10-05T01:00:00Z"
+        ),
+    )
+    monkeypatch.setattr(
+        docker,
+        "exec_output",
+        lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "SigCgt:\t0000000000000000\n", ""),
+    )
+    monkeypatch.setattr(docker, "_pause", lambda control, seconds: None)
+    monkeypatch.setattr(
+        docker,
+        "_logs",
+        lambda *_a, **_kw: (
+            "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+            "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+        ),
+    )
+    killed: list[str] = []
+    monkeypatch.setattr(docker, "kill_container", lambda name, **_kw: killed.append(name))
+
+    heard = list(docker.world_load_steps(spec, docker.StopControl()))
+
+    assert killed == [spec.world]
+    assert len(heard) == 1 and "20260903063722_world.sql" in heard[0]
+    assert docker.WORLD_STILL_LOADING not in heard
 
 
 def test_a_mixed_tags_record_refuses_the_update_before_anything_is_fetched(
@@ -675,7 +730,8 @@ def test_a_kept_build_keeps_the_database_it_changed_and_names_the_copy_as_not_ne
     assert f"The copy of {WOTLK_LISTED} taken before it started is kept in" in text
     assert fake.taken[0].files[0].name in text and "it was not needed" in text
     assert _moving_heads(rec, server_dir, made) == {NEW}
-    assert "prune" in rec.calls, "the kept build's copy is the last one; older ones go"
+    # T633: the press did not succeed, so no older copy is forgotten.
+    assert "prune" not in rec.calls, rec.calls
 
 
 @pytest.mark.parametrize("how", ["stop-refused", "name-refused", "retag-refused"])
@@ -1098,7 +1154,8 @@ def test_the_wotlk_question_names_all_four_databases_and_what_copying_them_costs
     assert "only the newest" in text
 
 
-def test_the_tortoise_question_says_its_world_database_is_not_copied() -> None:
+def test_a_database_a_family_leaves_out_of_the_copy_is_named_in_the_question() -> None:
+    """The spine's `databases_changed_but_not_copied()` hook; unused by shipped games (T643)."""
     text = native.update_to_latest_confirmation(
         TORTOISE, Path("/srv"), "x/y", copied=("tw_logon", "tw_char"), not_copied=("tw_world",)
     )

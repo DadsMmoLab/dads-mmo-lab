@@ -64,6 +64,12 @@ made by it has the wrong tiles for maps 0, 1 and 30: Update to latest and Return
 pin (`clear`) switch pathfinding off, remove the tiles and forget the record
 (`_drop_outdated()`), and the next start makes the set again.
 
+**The cross-process hold (T623).** The job runs for hours, so it never holds the server for
+its run. Only the moments that write do: the Server tab's Start and Stop (wrapped by the
+controller's `_pathfinding`) and a status poll's transitions (`mmaps_status(hold=)`). Every press
+below that replaces or removes `data/mmaps` already reserves the server, and finds a running job
+from the record, so another Yu'lon's press never races it.
+
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
 through hooks in the install spine and in `purge`; the job is started again
@@ -72,10 +78,12 @@ once a rebuild's server is ready.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -94,6 +102,14 @@ logger = get_logger(__name__)
 
 RECORD_FILE = ".yulon-mmaps.json"
 """In the server folder: the background job's record (see the module docstring)."""
+
+PROGRESS_FILE = ".yulon-mmaps-progress.json"
+"""In the server folder: how far a RUNNING job has got (T623), written by the status poll.
+
+The record is written only under the server's hold; the poll holds nothing, so what it
+learns from the log -- the percentage and the map -- goes here, to a file of its own that no
+transition depends on. `read_record()` lays it over the record of a queued or running run when
+it names the same container and start; every write or removal of the record retires it."""
 
 PATHFINDING_KEY = "mmap.enablePathFinding"
 """The world server's switch for the movement maps (worldserver.conf.dist:394, facts §4)."""
@@ -250,7 +266,41 @@ class Record:
 
 
 def read_record(server_dir: Path) -> Record | None:
-    """The record; None when there is none. One that cannot be read is a failed job's.
+    """The record, with a running job's progress laid over it; None when there is none.
+
+    The progress comes from `PROGRESS_FILE` (T623) and only for a queued or running record
+    that names the container id and start the progress file names: a progress file left by an
+    older run, or one that cannot be read, is no progress.
+    """
+    record = _read_record_file(server_dir)
+    if record is None or record.unreadable or record.state not in ("queued", "running"):
+        return record
+    seen = _read_progress(server_dir)
+    if (
+        seen is None
+        or not record.container_id
+        or seen.get("container_id") != record.container_id
+        or seen.get("started") != record.started
+    ):
+        return record
+    percent, current = _int_or_none(seen.get("percent")), _int_or_none(seen.get("map"))
+    return replace(
+        record,
+        percent=percent if percent is not None else record.percent,
+        map=current if current is not None else record.map,
+    )
+
+
+def _read_progress(server_dir: Path) -> dict[str, object] | None:
+    try:
+        raw = json.loads((server_dir / PROGRESS_FILE).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return cast("dict[str, object]", raw) if isinstance(raw, dict) else None
+
+
+def _read_record_file(server_dir: Path) -> Record | None:
+    """`.yulon-mmaps.json` as it is on disk. One that cannot be read is a failed job's.
 
     A record nobody can read must not be taken for "not started": its container
     may still be running. It is read as `failed` with no container named, so a
@@ -299,23 +349,75 @@ def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """`text` through a temporary file of its own beside `path`, renamed into place.
+
+    A name of its own (T623): two processes write these files, and one fixed name let one's
+    rename find its file gone, or take the other's half-written one. Raises `OSError`.
+    """
+    staged: Path | None = None
+    try:
+        handle, name = tempfile.mkstemp(
+            dir=path.parent, prefix=path.name + ".", suffix=".yulon-new"
+        )
+        staged = Path(name)
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.chmod(staged, 0o644)  # `mkstemp` makes it 0600; these were always ordinary files
+        os.replace(staged, path)
+    except OSError:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+        raise
+
+
 def _write_record(server_dir: Path, record: Record) -> None:
     """The record, through a temporary name renamed into place: whole or not at all.
+
+    Only under the server's hold, or inside a press that holds it (T623). Retires the
+    progress file: what it said belongs to a run the record has now moved past.
 
     Raises:
         MmapsError: it could not be written; the record on disk is the one before.
     """
     path = server_dir / RECORD_FILE
-    staged = path.with_name(path.name + ".yulon-new")
     try:
         fields = {key: value for key, value in asdict(record).items() if key != "unreadable"}
-        staged.write_text(json.dumps({"version": 1, **fields}, indent=2) + "\n", "utf-8")
-        os.replace(staged, path)
+        _atomic_write(path, json.dumps({"version": 1, **fields}, indent=2) + "\n")
     except OSError as exc:
-        staged.unlink(missing_ok=True)
         raise MmapsError(
             f"{path} could not be written ({exc}); check that the server folder can be written."
         ) from exc
+    _retire_progress(server_dir)
+
+
+def _write_progress(server_dir: Path, record: Record) -> None:
+    """A running job's percentage and map, to `PROGRESS_FILE` and nowhere else (T623).
+
+    The only write the status poll makes without the hold. It cannot touch the record, so no
+    interleaving with a transition recorded under the hold can overwrite one; at worst it
+    leaves a file that names a run the record has moved past, which `read_record()` ignores
+    and the next write or removal of the record retires. A failed write is a progress not
+    shown, not a failed poll.
+    """
+    body = {
+        "version": 1,
+        "container_id": record.container_id,
+        "started": record.started,
+        "percent": record.percent,
+        "map": record.map,
+    }
+    try:
+        _atomic_write(server_dir / PROGRESS_FILE, json.dumps(body) + "\n")
+    except OSError as exc:
+        logger.info(f"could not save how far {record.container} has got: {exc}")
+
+
+def _retire_progress(server_dir: Path) -> None:
+    try:
+        (server_dir / PROGRESS_FILE).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.info(f"could not remove {server_dir / PROGRESS_FILE}: {exc}")
 
 
 def _forget_record(server_dir: Path) -> None:
@@ -330,6 +432,7 @@ def _forget_record(server_dir: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         raise MmapsError(f"its record {path} could not be removed ({exc}).") from exc
+    _retire_progress(server_dir)
 
 
 # -- what a status says -------------------------------------------------------------
@@ -558,11 +661,19 @@ def mmaps_status(
     clock: Clock | None = None,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
+    hold: docker.BudgetedHold | None = None,
 ) -> MmapsStatus:
     """The job's state for the Server tab, reconciled with Docker; never raises for Docker.
 
     Asks Docker (an inspect, a bounded log tail, the world server's start time),
     so a caller on the GUI thread should poll it from a worker.
+
+    `hold` (T623): the server's cross-process hold, for the poll's TRANSITIONS only -- a run
+    that ended, a lost container, a finished set that is no longer whole, the conf switch still
+    owed. A poll that finds one takes the hold (bounded, `docker.GUI_HOLD_BUDGET_SECONDS`),
+    reads and asks Docker again inside it, and records; one that cannot take it writes nothing
+    and answers with what it read, and the next poll tries again. A poll with nothing to record
+    is a read and takes nothing. No `hold`: record inline, as a press that holds already does.
 
     Raises:
         MmapsError: the entry has no background movement maps, or the record
@@ -570,7 +681,7 @@ def mmaps_status(
     """
     job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
     with _LOCK:
-        return _reconcile(job, runner or DockerRunner(), clock or _utc_now)
+        return _reconcile(job, runner or DockerRunner(), clock or _utc_now, hold)
 
 
 def start_mmaps(
@@ -955,25 +1066,69 @@ def remove_for_uninstall(
 # -- the moving parts ---------------------------------------------------------------
 
 
-def _reconcile(job: Job, run: Runner, now: Clock) -> MmapsStatus:
-    """The record brought up to what Docker says; the status that follows from it."""
+RECORD_PRESS = "Record the pathfinding data's result"
+"""The press another Yu'lon is told about while a poll records a transition under the hold."""
+
+
+class _WriteNeeded(Exception):
+    """A poll read a transition it must record: carries the status to answer if it cannot.
+
+    Raised only on the read-only pass (`held=False`), before anything is written; the
+    pass under the hold (`held=True`) never raises it.
+    """
+
+    def __init__(self, unrecorded: MmapsStatus) -> None:
+        super().__init__("a transition to record")
+        self.unrecorded = unrecorded
+
+
+def _reconcile(
+    job: Job, run: Runner, now: Clock, hold: docker.BudgetedHold | None = None
+) -> MmapsStatus:
+    """The record brought up to what Docker says; the status that follows from it.
+
+    Without a `hold` every write is made inline (a press that holds the server already, a
+    test). With one (T623) the first pass only reads; a transition it would have to write
+    is done again under the hold, from a fresh read, or answered unrecorded when the hold is
+    refused (another Yu'lon works on the server) or cannot be made.
+    """
+    if hold is None:
+        return _reconcile_pass(job, run, now, held=True)
+    try:
+        return _reconcile_pass(job, run, now, held=False)
+    except _WriteNeeded as need:
+        unrecorded = need.unrecorded
+    with contextlib.ExitStack() as taken:
+        try:
+            taken.enter_context(hold(RECORD_PRESS, budget=docker.GUI_HOLD_BUDGET_SECONDS))
+        except docker.ServerHeldError as exc:
+            logger.info(f"{job.container}: not recorded yet, the server is held ({exc})")
+            return unrecorded
+        return _reconcile_pass(job, run, now, held=True)
+
+
+def _reconcile_pass(job: Job, run: Runner, now: Clock, *, held: bool) -> MmapsStatus:
     record = read_record(job.server_dir)
     if record is None:
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if record.state in ("queued", "running"):
-        return _reconcile_live(job, record, run, now)
+        return _reconcile_live(job, record, run, now, held)
     if record.state == "done":
-        return _done_status(job, record, run, now)
+        return _done_status(job, record, run, now, held)
     return _failed_status(job, record)
 
 
-def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
+def _reconcile_live(
+    job: Job, record: Record, run: Runner, now: Clock, held: bool = True
+) -> MmapsStatus:
     # Always the name THIS folder's job has (`container_name()`), never one read
     # off the record: a record edited by hand must not point a removal elsewhere.
     facts = run.inspect(job.container, timeout=STATUS_TIMEOUT)
     if not facts.status and not facts.missing:
         return replace(_status_of(record), docker_unanswered=True)
     if facts.missing:
+        if not held:
+            raise _WriteNeeded(_status_of(record))
         why = (
             "its container is gone (Docker was restarted or it was removed) before it finished."
             if record.state == "running"
@@ -993,9 +1148,17 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
         moved = replace(
             latest, state="running", container_id=record.container_id or facts.container_id
         )
-        if moved != record:
-            _write_record(job.server_dir, moved)
+        # T623: progress goes to its own file (`_write_progress`), never to the record. This
+        # pass holds nothing, and the log read above can be slow: another Yu'lon may have
+        # recorded the end (`done`, under the hold) meanwhile, and a write of `running` from
+        # here would overwrite it -- the next poll would then find no container for a
+        # "running" record and record a COMPLETE set as failed. Only the transitions under the
+        # hold write the record.
+        if (moved.percent, moved.map) != (record.percent, record.map):
+            _write_progress(job.server_dir, moved)
         return _status_of(moved)
+    if not held:
+        raise _WriteNeeded(_status_of(latest))
     return _finished(job, latest, facts, tail, run, now)
 
 
@@ -1109,7 +1272,9 @@ def _refresh_world_data(job: Job) -> None:
         pass
 
 
-def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
+def _done_status(
+    job: Job, record: Record, run: Runner, now: Clock, held: bool = True
+) -> MmapsStatus:
     """A complete set: switched on once (retried until it was), and whether a restart is due.
 
     Counted again first: a set emptied since (a new extraction, Task 6, or a hand)
@@ -1117,6 +1282,8 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
     """
     plan = job.block.mmaps
     if _set_size(job) < plan.min_files:
+        if not held:
+            raise _WriteNeeded(_status_of(record, pathfinding_on=_pathfinding_on(job)))
         # A poll never raises for this: a folder it cannot clear, or a switch it
         # cannot turn off, is a failed state with its reason (fix round 2).
         try:
@@ -1132,6 +1299,8 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
         logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:
+        if not held:
+            raise _WriteNeeded(_status_of(record, pathfinding_on=_pathfinding_on(job)))
         try:
             conf.set_keys(job.world_conf, {PATHFINDING_KEY: "1"})
         except InstallerError as exc:

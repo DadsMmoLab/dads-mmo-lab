@@ -5,7 +5,7 @@ Top-level package. See pyplan/README.md for the full design document.
 
 import importlib
 
-_FALLBACK_VERSION = "0.9.15-Public"
+_FALLBACK_VERSION = "0.9.16-Public"
 
 
 def _stamped_version() -> str | None:

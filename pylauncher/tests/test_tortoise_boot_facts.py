@@ -348,7 +348,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "187af788177aa2f9f0e61eb8c5b9653d8f4f7199", (
+    assert core.rev == "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
@@ -358,10 +358,16 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "2026-09-17 (.notes/gates/t86-*); since T136 187af788, the same branch two commits on "
         "(PR #525: a creature whose max health a rate truncates to 0 gets 1 HP, Creature.cpp "
         "only), installed fresh and pressed on `yulon-ubuntu` 2026-09-26 "
-        "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
+        "(.notes/gates/t136-tortoise-pins/); since T656 6131a26f, the 1181dev tip on "
+        "2026-10-10 (T597 read it on 2026-10-08), five commits on: main merged in with no "
+        "tree change, the world shutdown logging the headless (bot) sessions out before the "
+        "databases close (World.cpp, one line, PR #563), and two world-data updates (vendor "
+        "stock, five deleted Redridge creatures, starter throwing weapons, eleven Dark Iron "
+        "gameobjects); AutoUpdater.cpp, mangosd.conf.dist.in, CMake and sql/base unchanged. "
+        "Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "83d88fdc034b224d88a2ecade975e26f8d1d513c", (
+    assert module.rev == "18d4d14b3efdd804dccc527003f5c92a02ff0c2c", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -400,7 +406,25 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "had pinned the world thread at 100% with a few hundred bots) and #521 (travel "
         "destinations looked up by hash and filtered by distance before the costly checks, "
         "cross-map distances without a heap allocation): 4 commits, no conf key, SQL or "
-        "build change"
+        "build change; and since T656 it is fb0b2eb5, the commit release v2026-10-10 names "
+        "at build v5 (T597 had measured a504a625, v2026-10-08 build v7, on the way; the "
+        "lane began on 1fbee392, build v2, and moved with the release): 87 commits, "
+        "cb90e735 among them (#663, the fix of #642's world stalls), one idempotent "
+        "character migration (a `tortoise_bots_claimed` ledger, "
+        "CREATE TABLE IF NOT EXISTS), the character migrations' source folder renamed "
+        "`char` -> `character` with the installed folder and every file name unchanged, the "
+        "two confs installed as `.dist` templates with the live file made only when missing "
+        "(so a fresh image still ships `aiplayerbot.conf`), new default-on keys the install "
+        "does not write (`CombatTickBudgetUs`, `TravelPickBudgetUs`, `TargetWorldTickMs`, "
+        "`EquipUpgradeThreshold`), `PoolBudgetWhenTickOverMs` 150 -> 0 in the `.dist` only, "
+        "the `.dist`'s pool defaults now the 500 random bots the install already writes, "
+        "BOTPERF gaining fields Yu'lon does not parse, and the dashboard protocol still 8; "
+        "T664 moved it on to 18d4d14b, the commit release v2026-10-10 names at build v15 "
+        "(chosen without a live run, code and CI only): 20 commits past fb0b2eb5, no SQL, "
+        "CMake or core change, no conf key renamed; `TargetWorldTickMs` 50 -> 100 in the "
+        "`.dist` and the code (Yu'lon's conf carry moves a live 50), the pool AI one turn "
+        "queue, and new `LogRetentionDays` 3: bot logs on by default, packed to .csv.gz each "
+        "hour, packs older than 3 days deleted"
     )
     for source in sources:
         assert re.fullmatch(
@@ -733,6 +757,26 @@ def test_the_world_does_not_print_every_sql_statement_it_runs() -> None:
     ), "the dist ships 0, which prints every statement the world runs"
 
 
+def test_the_login_server_does_not_print_every_sql_statement_it_runs() -> None:
+    """realmd prints them too, session keys included, and its dist has no key for it (T618).
+
+    Read at the pinned rev (187af788): `realmd/Main.cpp:203` calls `sLog.Initialize()`, the
+    same `Log.cpp:358-370` that reads `LogFilter_SQLText` (default `false`, `Log.cpp:49`)
+    for mangosd, and `realmd.conf.dist.in` ships `LogLevel = 1`, the level `Execute` and
+    `_Query` (`DatabaseMysql.cpp:229`, `:357`) log `SQL: ...` at. `AuthSocket.cpp:990` runs
+    `UPDATE account SET sessionkey = '<80 hex>' ...` through them, so a support zip carried
+    the login credential. `realmd.conf.dist.in` does not mention the key at all, so the
+    patch appends it.
+    """
+    keys = _native().cmangos.conf.files["realmd.conf"].keys  # type: ignore[union-attr]
+    assert (
+        keys.get("LogFilter_SQLText") == "1"
+    ), "the key is absent, so realmd prints every statement"
+    assert keys.get("LogFilter_SQLText") == (
+        _native().cmangos.conf.files["mangosd.conf"].keys.get("LogFilter_SQLText")  # type: ignore[union-attr]
+    ), "the world and the login server must agree"
+
+
 def test_the_two_confs_this_image_does_not_ship_as_plain_dists_name_their_templates() -> None:
     """`materialise()`'s default is `<name>.dist` beside the file, and twice it is wrong here.
 
@@ -846,3 +890,41 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "what it prints (`08d-world-run2.txt`), and it is asserted beside the fatal pattern "
         "because a change to one is usually a change to both"
     )
+
+
+def test_the_fatal_pattern_names_a_world_update_that_failed_to_apply_t600() -> None:
+    """A failed migration's lines are fatal, and the healthy migration lines are not.
+
+    Measured shapes (`.notes/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/
+    rehearsal.log:126-130`, and `AutoUpdater.cpp:236`, `World.cpp:1950` at the pin):
+
+        [1062] Duplicate entry '44070' for key 'PRIMARY'
+        [DB Auto-Updater] Migration 20260903063722_world with hash 34F8... failed to apply.
+        DB AutoUpdater FAILED, cancelling server.
+
+    On the build before T600's patch the world hangs after the first of the two
+    updater lines and never prints the second, so the first must match on its own;
+    on the patched build both print. Neither may match what a healthy start prints
+    about old or renamed migrations at info level, which is why the alternative is
+    anchored on `failed to apply` and not on `Migration`.
+    """
+    ready = _native().ready
+    assert ready.fatal is not None and ready.regex is True
+    for dying in (
+        "[DB Auto-Updater] Migration 20260903063722_world with hash "
+        "34F86966897E9206E13773D73C2232677DA2FFED failed to apply.",
+        "DB AutoUpdater FAILED, cancelling server.",
+    ):
+        assert re.search(ready.fatal, dying), f"the fatal pattern walks past {dying!r}"
+    for healthy in (
+        "[DB Auto-Updater] Migration 20260918120000_world with hash "
+        "0123456789abcdef0123456789abcdef01234567 for module TortoiseBots exists in DB but "
+        "not as file, old migration?",
+        "[DB Auto-Updater] Migration with hash 0123456789ABCDEF is migrated with name "
+        "20260918120000_world but now has name 20260918120001_world.",
+        "[DB Auto-Updater] Migration with hash 0123456789ABCDEF was migrated with name "
+        "20260918120000_world but now has name 20260918120001_world.",
+        "[DB Auto-Updater] Attempting to execute update 20261007161727_world, hash E8C9BA.",
+        "[DB Auto-Updater] Found 5 possible migrations for character.",
+    ):
+        assert not re.search(ready.fatal, healthy), f"it fires on a healthy line: {healthy!r}"

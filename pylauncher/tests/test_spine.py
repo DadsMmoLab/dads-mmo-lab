@@ -2426,6 +2426,45 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "never the copy just taken, so a backup the player took is never named as one. An "
         "OSError listing it names none, and the sentence then says nothing about older copies"
     ),
+    ("catalog/snapshot.py", "kept_copies_bytes"): (
+        "T646. Lists this server's own `sql_scripts/backups/` to ADD UP the sizes of the "
+        "update's own copies (`_before-new-build_` and `_after-new-build_` files) for the "
+        'sentence "Update the server to latest…" asks with once they are large. It decides no '
+        "write and reads no content: only names and sizes. An OSError listing it counts "
+        "nothing, and the sentence then says nothing about size"
+    ),
+    ("catalog/snapshot.py", "copy_from_before_migrations"): (
+        "T632. `copy_from_before()` for Tortoise: lists this server's own "
+        "`sql_scripts/backups/` to NAME the newest complete dump of a database whose "
+        "`migrations` table holds none of the hashes the tested commit lacks, and that "
+        "Restore would take as this game's. It decides no write: the files are only read. An "
+        "OSError listing it names none, and the sentence then says no copy was found"
+    ),
+    ("catalog/snapshot.py", "copy_from_before"): (
+        "T630. Lists this server's own `sql_scripts/backups/` to NAME, in the sentence "
+        '"Return to the tested pin…" refuses with, the newest dump of a database that holds '
+        "none of the updates the tested commit lacks. It decides no write: the files are only "
+        "read, and only their names and contents choose which one the sentence names. An "
+        "OSError listing it names none, and the sentence then says no copy was found"
+    ),
+    ("backup_shelf.py", "_rows_in"): (
+        "T604. Lists this server's own `sql_scripts/backups/` to show the Maintenance tab's "
+        "Backups rows and to plan a Delete or a Clean up. It decides a DELETE, bounded five "
+        "times: top-level entries only (no walk), a regular file that is not a link, a name "
+        "that is a dump (`<stamp>_<...>.sql`), `.sql.partial` or `.sql.gz`, and a file that no "
+        "protection names; and nothing is removed until `carry_out()` has taken the "
+        "maintenance lease and read the folder again and found the file unchanged. An "
+        "OSError listing it shows an empty list and removes nothing"
+    ),
+    ("backup_shelf.py", "_installed_here"): (
+        "T604 review. Lists the directory names inside this server's own clone folders "
+        "(`modules/`, `ale_scripts/`, `sql_scripts/clones/`) to learn which items are installed, "
+        "because the undo copy taken before an installed item is never deleted. It decides no "
+        "write and no refusal of its own: a folder that is not there is empty, and any other "
+        "failure to list raises, which makes the shelf KEEP every item's undo copy "
+        "(`docker.clone_names()` answers 'nothing installed' for a folder it cannot list, "
+        "which is the wrong way round for a delete)"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
@@ -2472,6 +2511,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "another case, so the copy lands on it rather than beside it. It decides which existing "
         "name is written, never whether the client may be written: that is the step's own "
         "`dest`. A folder that cannot be listed raises, and the install stops"
+    ),
+    ("core_modules.py", "names_in"): (
+        "T611. Lists a core's own `modules/` folder (`src/tortoise-wow/modules` under the server "
+        "folder) for the names of the modules in it, so a player's module of the same name is "
+        "refused before the build mixes the two. Read-only and it decides no write: it answers "
+        "a refusal sentence, and a folder that cannot be listed has no names"
     ),
     ("catalog/world_data.py", "_folder_hash"): (
         "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
@@ -2773,6 +2818,38 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`except OSError` answers the EMPTY tuple, and the caller says `there is no backup "
         "of this file to revert to` rather than restoring something it could not see"
     ),
+    ("controller_wow_tortoise/custom.py", "_first_cpp"): (
+        "T596. Walks a Tortoise package (a folder the player chose, or a fresh clone), `.git` "
+        "aside, for C/C++ source; decides a REFUSAL (C++ in a repository not named like a "
+        "server module, or outside the `src/` the core builds) raised before the copy or, "
+        "after a clone, before any step reads it, never a write"
+    ),
+    ("controller_wow_tortoise/custom.py", "_has_cpp_in_src"): (
+        "T596. Looks for a folder named exactly `src` in a package (the core's module glob is "
+        "case-sensitive) to tell a server module the core will compile from a data package; "
+        "decides the manifest's rebuild flag and a refusal, never a write"
+    ),
+    ("controller_wow_tortoise/custom.py", "_conf_steps"): (
+        "T596. Lists a server module's `conf/` for `*.conf.dist` files to name the settings "
+        "steps the install writes to `etc/modules/<n>.conf`; refuses a file with no [Section] "
+        "line before anything is copied or written, and the write itself is the applier's "
+        "`_conf()`, which never replaces a file that is already there"
+    ),
+    ("controller_wow_tortoise/custom.py", "_sql_files"): (
+        "T596. Lists data/sql/<auth|character|char|world> of a package to name the .sql files "
+        "the derived manifest runs; decides no write by itself - every file it names then goes "
+        "through the applier's running-world guard, ledger read and backup - and an empty "
+        "answer only means the package brings no database changes"
+    ),
+    ("controller_wow_tortoise/custom.py", "_unused"): (
+        "T596. Walks a package for .sql files it does not run, to NAME them in the report's "
+        "skipped lines; decides no write"
+    ),
+    ("controller_wow_tortoise/modules.py", "named"): (
+        "T596. Lists the server's backups folder for the files an outside item's automatic "
+        "backup wrote (`*_before-<id>_*.sql`) so Remove can name the first; decides no write, "
+        "and an empty answer is said as `no backup taken before its database changes was found`"
+    ),
     ("module_source.py", "_rewrite_index"): (
         "lists the user manifest directory to REBUILD its index from the files that are "
         "actually there, never appending to it - which is why a crash between the item write "
@@ -2828,6 +2905,70 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "(under a temporary name, then renamed into place), never a write into the "
         "original; `refresh()` refuses a folder without the marker, or an original other "
         "than the one it names, before it lists anything"
+    ),
+    ("addon_layout.py", "_visible"): (
+        "T613. Lists a folder of a client add-on source -- a staging folder Yu'lon unpacked, a "
+        "folder the player chose, or a clone -- to find the add-on folders in it and to name "
+        "what it holds in a refusal. Read-only: the reader never writes, and it decides only "
+        "which folders are add-ons and under which names; the copy into the game client is "
+        "the installer's, behind the applier's own guards. A link is never entered"
+    ),
+    ("addon_layout.py", "_tocs"): (
+        "T613. Lists one candidate add-on folder for its `.toc` files, never through a link. "
+        "Read-only; it decides an add-on's name and which toc counts, never a write"
+    ),
+    ("ale_playerbots.py", "_sources"): (
+        "T645. Walks `modules/mod-ale/src` (os.walk, followlinks=False; linked files skipped) for "
+        "the C++ files that read `sPlayerbotAIConfig.<name>`, to rewrite the names "
+        "mod-playerbots' header no longer declares for ONE compile. It decides a write, but "
+        "only into upstream source files the bridge records first and puts back byte for byte "
+        "after the compile, and only a file whose name and contents it read itself: never a "
+        "player's file (a file changed since the bridge wrote it is left), never through a link"
+    ),
+    ("addon_archive.py", "check_folder"): (
+        "T613. Walks a folder the player chose (or a clone) with `links.walk`, `.git` aside, "
+        "to hold it to the zip's caps and rules before it is copied: a link, a program file, "
+        "too deep, too many files or too many bytes refuses the whole folder. It decides a "
+        "REFUSAL and never a write. A folder that cannot be listed is passed over, as "
+        "`links.walk` does, and the copy that follows then fails on it with its own sentence"
+    ),
+    ("apply.py", "_take_back_one_addon"): (
+        "T613 PR-2. Lists the client's `Interface/AddOns` to find an OUTSIDE add-on's folder "
+        "in the case it has on disk, for its Remove by receipt. It decides no write itself: "
+        "each file is deleted only by `take_back_file()` when its bytes are the receipt's, "
+        "and only inside that one add-on's folder; an unreadable listing takes the "
+        "receipt's own spelling"
+    ),
+    ("apply.py", "_put_the_players_folder_back"): (
+        "T613 re-review. Lists the client's `Interface/AddOns` to find the add-on's name in the "
+        "case it has on disk, before putting the player's own folder back from its recorded "
+        "aside. It decides only whether that name is free; the rename is only from an aside "
+        "beside it with Yu'lon's aside name, never a link, and only ONTO `Interface/AddOns/"
+        "<one folder name>`: a note or claim naming the add-on `/elsewhere/x` or `../x` is "
+        "refused, and both ends' real parents must be that AddOns folder (round 3)"
+    ),
+    ("apply.py", "_holds_more_than"): (
+        "T613 PR-2. Walks an outside add-on's folder after its Remove (`links.walk`, never "
+        "into a link) only to SAY whether it still holds files Yu'lon did not put there; "
+        "decides no write"
+    ),
+    ("client_addons.py", "_installed_names"): (
+        "T613 PR-2. Lists the client's `Interface/AddOns` for the add-ons already there, read "
+        "only to word the reader's dependency notes ('needs X, which Yu'lon did not find'); "
+        "decides no write and no refusal"
+    ),
+    ("client_addons.py", "pack_addon_names"): (
+        "T613 PR-3. Lists the folders of a checkout-folder client pack's source in the server's "
+        "own checkout (Unbound's add-ons) only to name them as shipped, so the add-on box "
+        "refuses an outside add-on of the same name; it decides a refusal and no write, and a "
+        "folder that cannot be listed adds nothing"
+    ),
+    ("addon_archive.py", "sweep_stale"): (
+        "T613 PR-2. Lists Yu'lon's own `<cache>/addons/staging/` and `/downloads/` once at "
+        "start for the folders a stopped run left, and removes each one older than "
+        "`STALE_SECONDS` through `_remove()` (`rmtree.remove_tree`, which refuses a link). It "
+        "decides a removal only inside Yu'lon's cache, never in a game client or a server "
+        "folder; a folder that cannot be listed is passed over and logged"
     ),
     ("client_packs.py", "_numbered_parts"): (
         "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
@@ -2999,6 +3140,30 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "by the user pressing a button. It does not decide whether the app may write somewhere "
         "it does not own, so it is not `native._listing()`. A folder that cannot be listed "
         "answers no files, so the tab shows the cards' own files and the server's, as before"
+    ),
+    ("move_server.py", "_lua_members"): (
+        "T601 level 2. Walks the Lua engine's own script folder (`env/dist/etc/modules/"
+        "lua_scripts`, refused when it or a folder on the way is a link; links and dot-files "
+        "inside are skipped) to READ the player's scripts into a move package. It decides no "
+        "write: the files are read, never changed, and the package is written elsewhere"
+    ),
+    ("move_server.py", "_install_from_folder"): (
+        "T624. Lists the server folder's own top level for `.yulon-move-folder-*` staging "
+        "folders a killed bring-in left, to remove them. They hold only copies of a module's "
+        "files from a package; it decides no write into the server, and the folder route that "
+        "follows has its own listings"
+    ),
+    ("move_server.py", "_folder_module_members"): (
+        "T624. Walks a folder module's own clone folder under `modules/` (links refused, `.git` "
+        "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
+        "write: the files are read, never changed, and the package is written elsewhere"
+    ),
+    ("move_flows.py", "_backup_for_the_package"): (
+        "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
+        "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
+        "not there before, and only `*_move_*`, the label the pack gives them). It decides no "
+        "write outside the install: those files are the run's own, in the install's own "
+        "backups folder, and an auth dump with every verifier must not stay behind"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "

@@ -580,3 +580,52 @@ def test_the_support_file_save_picker_cancel_is_none(
     monkeypatch.setattr(folder_picker, "run_dialog", _Shown(accept_with=None))
 
     assert logs_view._qt_save_picker(None, tmp_path / "s.zip") is None  # type: ignore[arg-type]
+
+
+# -- T601: opening one existing file (a move package) --------------------------
+
+
+@linux_only
+def test_an_open_file_dialog_is_for_one_existing_file_and_lists_the_drives(
+    qapp: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_linux: None,
+    qt_settings: QSettings,
+) -> None:
+    card, _stick = _two_volumes(tmp_path / "media")
+    monkeypatch.setattr(folder_picker, "mount_roots", lambda: (tmp_path / "media",))
+    package = tmp_path / "a.zip"
+    package.write_bytes(b"x")
+    seen: dict[str, object] = {}
+
+    def run(dialog: QFileDialog) -> bool:
+        seen["mode"] = dialog.fileMode()
+        seen["accept"] = dialog.acceptMode()
+        seen["filter"] = list(dialog.nameFilters())
+        seen["sidebar"] = list(dialog.sidebarUrls())
+        dialog.selectFile(str(package))
+        return True
+
+    monkeypatch.setattr(folder_picker, "run_dialog", run)
+    chosen = folder_picker.pick_open_file(None, "Pick", tmp_path, "Move packages (*.zip)")
+    assert chosen == package
+    assert seen["mode"] == QFileDialog.FileMode.ExistingFile
+    assert seen["accept"] == QFileDialog.AcceptMode.AcceptOpen
+    assert seen["filter"] == ["Move packages (*.zip)"]
+    assert _url(card) in seen["sidebar"]  # type: ignore[operator]
+    _flush_deletes()
+
+
+@linux_only
+def test_cancelling_the_open_file_dialog_is_none_not_the_working_directory(
+    qapp: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_linux: None,
+    qt_settings: QSettings,
+) -> None:
+    monkeypatch.setattr(folder_picker, "mount_roots", lambda: ())
+    monkeypatch.setattr(folder_picker, "run_dialog", lambda dialog: False)
+    assert folder_picker.pick_open_file(None, "Pick", tmp_path, "*.zip") is None
+    _flush_deletes()

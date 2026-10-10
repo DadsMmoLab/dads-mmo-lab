@@ -44,7 +44,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from yulon import docker, git
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.catalog.native import LatestRoute
 from yulon.channel import Answer, Channel
 from yulon.controller import Controller, StartRefused
@@ -286,18 +286,23 @@ class ModuleMoved:
         return move
 
 
-def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
-    """Where the bots module's checkout lives in this install, read off the catalog.
+def module_source(entry: CatalogEntry) -> EmulatorSource | None:
+    """The catalog source of the bots module: the one whose folder sits inside the core's.
 
-    The source compiled INTO the core: the one whose folder sits inside the
-    first source's. None when the entry has none, and then nothing is wrapped.
+    None when the entry has none, and then nothing is wrapped.
     """
     sources = entry.emulator.sources
     if not sources:
         return None
     core = Path(sources[0].dest)
     inside = [s for s in sources[1:] if Path(s.dest).is_relative_to(core)]
-    return server_dir / inside[-1].dest if inside else None
+    return inside[-1] if inside else None
+
+
+def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
+    """Where the bots module's checkout lives in this install, read off the catalog."""
+    source = module_source(entry)
+    return None if source is None else server_dir / source.dest
 
 
 RESTART_REFUSED = "The restart was refused, so the server was not stopped:"
@@ -331,7 +336,11 @@ def restart_world(controller: Controller) -> None:
     # started, which is what `StopFailed` tells the caller.
     with contextlib.ExitStack() as composite:
         try:
-            composite.enter_context(docker.lifecycle(controller.server_dir))
+            composite.enter_context(
+                docker.lifecycle(
+                    controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
+                )
+            )
             controller.stop()
         except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
             raise StopFailed(str(exc)) from exc

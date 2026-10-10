@@ -308,7 +308,9 @@ def _tables_in(sql: SqlQuery, through: Db) -> dict[str, set[str]]:
     return tables
 
 
-def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
+def reset_unfinished(
+    sql: SqlWrite, mysql: MysqlDocker, *, everything: bool = False
+) -> tuple[str, ...]:
     """Drop the schemas an import left half-written, so it can write them again.
 
     The whole reason this exists, measured on yulon-ubuntu 2026-08-23: running
@@ -330,6 +332,12 @@ def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
     the check costs three `docker exec`s and this is the only function in the
     package that destroys anything — a guard that exists twice on the path to a
     `DROP DATABASE` is a guard that survives someone reordering the caller.
+
+    `everything` (T658): every core schema there, finished-looking or not. For
+    schemas an ENDED import left (`docker.one_shot_ended_marker()`): the importer
+    creates the `updates` tables before it applies the updates, so a killed one
+    leaves schemas that pass the marker test above and are not finished. The
+    player-data refusal still comes first.
 
     Returns:
         The schemas dropped, in the order they were dropped. Empty if there was
@@ -360,7 +368,7 @@ def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
     if not present:
         return ()
     listing = _tables_in(sql, _DB_KEYS[present[0]])
-    doomed = [name for name in present if not set(IMPORT_MARKERS) <= listing[name]]
+    doomed = [name for name in present if everything or not set(IMPORT_MARKERS) <= listing[name]]
     for name in doomed:
         # Routed through the schema being dropped, which MySQL allows — the
         # connection simply loses its default database, and `docker exec` opens

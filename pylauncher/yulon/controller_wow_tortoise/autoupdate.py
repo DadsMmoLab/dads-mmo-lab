@@ -57,30 +57,39 @@ gets, and answering it with "nothing outstanding" would be the same defect
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker
+from yulon import core_modules, docker, module_moves, server_build_presses
 from yulon.apply import (
     Applier,
     ApplyError,
+    ApplyRefusal,
     ApplyReport,
     Completer,
+    CompletionRefused,
     FolderSource,
     LastUpdate,
+    SqlBackup,
     SqlRunner,
+    UncheckedApproval,
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
-from yulon.git import Git
+from yulon.git import Git, HeadReader, RevRestorer
 from yulon.log import get_logger
 from yulon.manifest import Db, Manifest, When
 from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
+
+CORE_MODULES_DIR = "src/tortoise-wow/modules"
+"""The core's own `modules/`, under the server dir: the checkout the install clones (T611)."""
 
 CONF_FILE = "etc/mangosd.conf"
 """Where this install's copy of the fork's conf lives, relative to the server dir.
@@ -420,7 +429,7 @@ def check_restart_is_survivable(
     the world reads at startup, so nothing about it brings the updater forward.
     """
     if not world_running:
-        return f"auto-update guard: not applied, the world is not running " f"({arming.summary()})"
+        return f"auto-update guard: not applied, the world is not running ({arming.summary()})"
     if not manifest.build.restart:
         return f"auto-update guard: this item asks for no restart ({arming.summary()})"
     armed = arming.armed
@@ -482,6 +491,11 @@ class GuardedApplier(Applier):
         self.arming = arming
         self.world_running = world_running
         self.settings_for = settings_for
+        # `recomplete` (the base's, since T613 PR-2) is set by `modules.applier()`
+        # (T596). An upstream update can add or rename a `conf/*.conf.dist`, add SQL or
+        # an add-on, and the manifest persisted at the first install knows none of
+        # them: a server module whose new settings file is not put in place stops the
+        # world from starting after the next Rebuild (Codex review).
 
     def _guard(self, manifest: Manifest, action: When) -> str:
         check_manifest(manifest)
@@ -510,21 +524,24 @@ class GuardedApplier(Applier):
         release: upstream.Release | None = None,
         expect_head: str | None = None,
         record_move: bool = False,
+        replace_addons: bool = False,
     ) -> ApplyReport:
-        # `folder` and `complete` are the base class's second way to fill
-        # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
-        # not dropped: custom modules are wow-wotlk-only, so nothing reaches
-        # this class with either set today, and a subclass that silently
+        # `folder` and `complete` are the base class's second way to fill an
+        # item's folder (from a link or a folder on this computer). Passed
+        # THROUGH, not dropped: since T596 this game's own custom route sends an
+        # add-on or a database package here with both set, and a subclass that
         # ignored a keyword its base accepts would report an install it copied
         # nothing for. The guard still runs first, whichever route fills the
-        # folder -- the restart a C++ module asks for is the same restart.
+        # folder.
         # `release` and `expect_head` are the same rule's next two keywords
         # (T150): the release `update()` proved is not a step back and the
         # commit it proved that from. The one addon on this game that follows
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
+        self._refuse_a_core_module_name(manifest)
         note = self._guard(manifest, "install")
+        complete = complete or self._recompleter_for(manifest)
         return _with_note(
             super().install(
                 manifest,
@@ -536,6 +553,7 @@ class GuardedApplier(Applier):
                 release=release,
                 expect_head=expect_head,
                 record_move=record_move,
+                replace_addons=replace_addons,
             ),
             note,
         )
@@ -547,6 +565,7 @@ class GuardedApplier(Applier):
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: Completer | None = None,
     ) -> ApplyReport:
         """T557's put-back re-applies the item through `_install()`, so it asks the same guard.
 
@@ -564,7 +583,126 @@ class GuardedApplier(Applier):
             note = "auto-update guard: not asked, this put-back follows a failed build"
         else:
             note = self._guard(manifest, "install")
-        return _with_note(super().put_back(manifest, values, last=last, automatic=automatic), note)
+        return _with_note(
+            super().put_back(
+                manifest,
+                values,
+                last=last,
+                automatic=automatic,
+                complete=complete or self._recompleter_for(manifest),
+            ),
+            note,
+        )
+
+    def update(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        approved: UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        """`Applier.update()`, and a server module the new code makes unacceptable goes back (T596).
+
+        An outside item is read again once its clone is on the new commit
+        (`recomplete`). When that refuses -- a settings file with no `[Section]`,
+        one another module owns -- the checkout is already on the rejected commit,
+        and a Rebuild would compile it without the settings file it needs. So the
+        clone is put back on the commit it was on, through the update's own record,
+        and the refusal says so.
+        """
+        was_on = self._head_of_an_outside_mod(manifest)
+        try:
+            return super().update(manifest, values, approved=approved)
+        except CompletionRefused as refused:
+            said = self._put_back_a_refused_update(manifest, was_on)
+            refused.args = (f"{refused} {said}".rstrip(),)
+            raise
+
+    def _refuse_a_core_module_name(self, manifest: Manifest) -> None:
+        """Refuse a player's server module whose name the core's own `modules/` already uses (T611).
+
+        Read from the core's checkout on the disk every time, before anything is cloned or
+        copied: the core moves with "Update to latest", so an Update of a module that
+        installed cleanly meets the name later (an Update runs this `install()`). Remove is
+        not asked, so the way out stays.
+        """
+        if manifest.type != "module" or manifest.origin is None:
+            return
+        core = core_modules.same_name_in(
+            manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
+        )
+        if core is not None:
+            installed = os.path.lexists(self.clone_dir(manifest))
+            said = core_modules.sentence(manifest.id, core, CORE_MODULES_DIR, installed=installed)
+            raise ApplyRefusal(f"{said} Nothing was changed." if installed else said)
+
+    def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:
+        """Where an outside add-on or database package's clone is, before its Update (T611)."""
+        if manifest.type != "mod" or manifest.origin is None:
+            return None
+        head: str | None = self._reader("head_sha", HeadReader)(self.clone_dir(manifest))
+        return head
+
+    def _put_back_a_refused_update(self, manifest: Manifest, was_on: str | None = None) -> str:
+        if manifest.type == "mod":
+            return self._put_a_mod_back(manifest, was_on)
+        if manifest.type != "module" or manifest.origin is None:
+            return ""
+        last = self.last_update(manifest)
+        if last is None:
+            return ""
+        try:
+            self.put_back(manifest, last=last, automatic=True)
+        except (ApplyError, OSError) as exc:
+            return (
+                f"Yu'lon could not put it back on the version it was on ({exc}), so the next "
+                "rebuild would build the version that was just fetched."
+            )
+        return (
+            "Yu'lon put it back on the version it was on, so the next rebuild builds that one, "
+            "and the version it refused is not offered again."
+        )
+
+    def _put_a_mod_back(self, manifest: Manifest, was_on: str | None) -> str:
+        """Put an add-on or database package's clone back on the commit it was on (T611).
+
+        Nothing compiles from it, so there is no build to fail and no move record
+        (`last_update()` is for a module): the commit read before the Update is the
+        place to go back to. Nothing of the rejected commit was applied -- the clone
+        is read before the first step -- so the checkout is all there is to restore,
+        and the version it refused is noted so Check for updates does not offer it again.
+        """
+        clone = self.clone_dir(manifest)
+        reader = self._reader("head_sha", HeadReader)
+        landed: str | None = reader(clone)
+        if was_on is None or landed is None or landed == was_on:
+            return ""
+        # `restore_rev` is `--force`, and "a caller must make its own check first"
+        # (`git.restore_rev`): the same one `put_back()` makes, here without a fetch.
+        if self._reset_cost(manifest, clone, history=False) is not None:
+            return (
+                f"Yu'lon did not put it back on the version it was on: files in "
+                f"{clone.relative_to(self.server_dir).as_posix()} were changed, and putting it "
+                "back would throw them away."
+            )
+        try:
+            self._reader("restore_rev", RevRestorer)(clone, was_on)
+        except (ApplyError, OSError) as exc:
+            return (
+                f"Yu'lon could not put it back on the version it was on ({exc}), so it is "
+                "still on the version that was just fetched."
+            )
+        problem = module_moves.skip(
+            self.server_dir, module_moves.key(manifest.type, manifest.id), tip=landed
+        )
+        if problem:
+            logger.warning(f"{manifest.id} was put back, but not recorded: {problem}")
+        if problem:
+            return "Yu'lon put it back on the version it was on."
+        return (
+            "Yu'lon put it back on the version it was on, and the version it refused is not "
+            "offered again."
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")
@@ -572,7 +710,31 @@ class GuardedApplier(Applier):
 
     def remove(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "remove")
-        return _with_note(super().remove(manifest, values), note)
+        report = _naming_the_conf_kept(super().remove(manifest, values), manifest)
+        return _with_note(report, note)
+
+
+def _naming_the_conf_kept(report: ApplyReport, manifest: Manifest) -> ApplyReport:
+    """Say what Remove does with an outside server module's settings files (T596, PR-B).
+
+    It never removes them: the image that compiled the module still reads
+    `etc/modules/<n>.conf` at every start until a Rebuild has taken the module out,
+    and a world that cannot find one does not start (`Config.cpp:207-231`). After
+    the Rebuild the file is unread and harmless, so it stays for the player to
+    delete or to find again if the module is installed again.
+    """
+    if manifest.type != "module" or manifest.origin is None:
+        return report
+    files = [step.file for step in manifest.conf if step.template is not None]
+    if not files:
+        return report
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    line = (
+        f"its settings file {', '.join(files)} is kept: the server running now was built with "
+        f"this module and still reads it, so press {rebuild} to take the module out of the "
+        "server; after that the file is unread"
+    )
+    return replace(report, left_behind=(line, *report.left_behind))
 
 
 def _with_note(report: ApplyReport, note: str) -> ApplyReport:
@@ -598,8 +760,10 @@ def guarded_applier(
     arming: Callable[[], Arming],
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
+    sql_backup: SqlBackup | None = None,
 ) -> GuardedApplier:
     """The applier the Tortoise Modules tab is handed. See `modules.applier()`."""
     return GuardedApplier(
@@ -610,6 +774,8 @@ def guarded_applier(
         arming=arming,
         world_running=world_running,
         start_database=start_database,
+        sql_backup=sql_backup,
+        hold_server=hold_server,
     )
 
 

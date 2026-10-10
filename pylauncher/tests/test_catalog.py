@@ -232,13 +232,13 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "f19a18799a35f7c24bdcdc9ea399c601f166259b",
-        "mod-playerbots/mod-playerbots": "037c01418b5d01506917a3db9b44fd56ac5f965c",
+        "mod-playerbots/azerothcore-wotlk": "2a2211cd8f3d157da432ec0175ddd4b8a191931f",
+        "mod-playerbots/mod-playerbots": "79bd428115c8f33b74b13de23b133d49c3f75c60",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
         "cmangos/playerbots": "da4419afc44f97bb950ca2ebccc3f29a902a3fab",
-        "cmangos/tbc-db": "866723612d93791e442fb1b18d642118fa682edd",
+        "cmangos/tbc-db": "ebe51a83b0fde5397f0ecd82a36cb6c40f667d36",
     },
     "wow-vanilla": {
         "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
@@ -249,11 +249,19 @@ GATE_PINS = {
 """The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26 and 2026-10-08:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08 and
+2026-10-10:
 
-* `wow-wotlk`: T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
+* `wow-wotlk`: T655 (2026-10-10), core `2a2211cd` and module `79bd4281`, the two `test-staging`
+  merges of 2026-10-09 (core #264, module #2903, ten minutes apart). The module reads its
+  settings as `Playerbots.*` since ed54b459 (#2854), which T657 taught Yu'lon to follow, and
+  declares the config members mod-ale master reads since its #409 (84b85cc). Gate: T655's
+  "Return to the tested pin…" on `yulon-fedora` 2026-10-10, which moved T657's install from
+  `f19a1879`/`037c0141` to these two and read them back out of its checkouts (world
+  `AzerothCore rev. 2a2211cd8f3d+`; WoW Unbound on the same pair the same day). Before that,
+  T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
   and module `037c0141`, the two `test-staging` merges of 2026-10-02 (core #258, module
-  #2873). The core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
+  #2873). That core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
   (AzerothCore #27533), which mod-ale's master calls since its #408; and the module's
   b0cd0ea7 takes the core's async module database (ff8d11773), so the two are one pair.
   Before that, T134's `7f12e89e`/`7bae1b5c` (2026-09-26, the same box), and until then
@@ -292,6 +300,9 @@ changed comments only, among them the commented default of
 `# Key =` shape Vanilla's `match_commented` writes its own value into.
 The gate was one fresh TBC and one fresh Vanilla install through the app's
 engine on `yulon-fedora-gate`, each read back from its own `src/` checkout.
+
+T654 (2026-10-10) moved `tbc-db` 86672361 -> ebe51a83 (two commits, both only
+`utilities/cmangos_custom.sql`: two Sanctity/Haste aura no-stack rows, no `Updates/` file).
 
 T524 (2026-10-07) moved the shared `playerbots` once more, 76b97537 -> 45bed519 (one
 commit, the Karazhan Netherspite strategy: eight C++ files under `playerbot/`; no SQL,
@@ -975,13 +986,14 @@ def test_tbc_carries_the_script_values_verbatim() -> None:
     assert cm.ready.regex is False, "a literal marker; the spine re.escapes it (A5)"
 
 
-UPSTREAM_AFTER_INSTANCES = ("core updates", "dbc data", "ACID")
+UPSTREAM_AFTER_INSTANCES = ("core updates", "dbc data", "ACID", "cmangos custom")
 """What upstream's `InstallFullDB.sh` applies AFTER `Updates/Instances/`, as Yu'lon names it.
 
 Read at the tbc-db and classic-db pins (T141): `apply_content_db` runs the
 Full_DB dump, `Updates/[0-9]*.sql`, then `Updates/Instances/[0-9]*.sql`, and
 `apply_full_content_db` goes on to the world core updates, the dbc data and
-ACID. `dbc data` is TBC's alone; Vanilla's plan has no such phase.
+ACID, and last `utilities/cmangos_custom.sql` (T659). `dbc data` is TBC's alone;
+Vanilla's plan has no such phase.
 """
 
 
@@ -1193,7 +1205,7 @@ and its `ExtractSingleModel` already normalises (read the same day at
 CARRIED = {
     "wow-tbc": "src/mangos-tbc",
     "wow-vanilla": "src/mangos-classic",
-    "wow-tortoise": None,
+    "wow-tortoise": None,  # carries a different patch: test_tortoise_updater_patch.py
 }
 
 
@@ -1206,7 +1218,8 @@ def test_the_doodad_patch_is_carried_by_the_two_entries_whose_extractor_drops_pl
     patches = entry.install.native.cmangos.patches
     source = CARRIED[game_id]
     if source is None:
-        assert patches == ()
+        # Tortoise's extractor never needed it; what it does carry is its own patch.
+        assert DOODAD_PATCH not in [p.file for p in patches]
         return
     assert [(p.file, p.source) for p in patches] == [(DOODAD_PATCH, source)]
     assert patches[0].reason
@@ -1255,7 +1268,7 @@ def test_every_shipped_patch_names_a_source_the_entry_clones_and_a_file_that_shi
             path = resources.installers_dir() / spec.file
             assert path.is_file(), (entry.id, spec.file)
             assert patch.parse(path.read_text(encoding="utf-8"))
-    assert seen == 2
+    assert seen == 3
 
 
 def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:

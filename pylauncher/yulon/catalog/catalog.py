@@ -640,6 +640,26 @@ class MmapPlan(_Strict):
         return value
 
 
+class ConfDefaultsFollow(_Strict):
+    """Where a live conf's template lives in a source, so a press that moves it can follow it.
+
+    T656: TortoiseBots changed a default (cb90e735, `PoolBudgetWhenTickOverMs` 150 -> 0) that
+    an installed server's conf, made once at install, would otherwise keep for ever. The
+    update route reads this file at the commit it leaves and at the one it lands on.
+    """
+
+    repo: str = Field(min_length=1, description="The emulator source's `repo` holding the file.")
+    path: str = Field(min_length=1, description="The template, relative to that checkout.")
+
+    @field_validator("path")
+    @classmethod
+    def _relative(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"path must be a relative POSIX path in the checkout, got {value!r}")
+        return value
+
+
 class ConfPatch(_Strict):
     """One conf file's `Key = value` table; values take the `{{TOKEN}}` grammar."""
 
@@ -666,6 +686,15 @@ class ConfPatch(_Strict):
             "`tortoise_bots.conf`. Both were an InstallerError before this field, and a "
             "changed DEFAULT would have made the other three games' images answer a question "
             "nobody had asked them."
+        ),
+    )
+    defaults_follow: ConfDefaultsFollow | None = Field(
+        default=None,
+        description=(
+            "The source file this conf's defaults come from (T656). When an update or a "
+            "return moves that source, a live value still equal to the old commit's default "
+            "is set to the new one; a value the player changed, and every key of `keys`, is "
+            "kept. None: the live file is never touched by a move."
         ),
     )
 
@@ -785,7 +814,9 @@ class SqlPhase(_Strict):
         ),
     )
 
-    on_update: Literal["leave", "apply_new", "report", "replace_changed", "refuse_new"] = Field(
+    on_update: Literal[
+        "leave", "apply_new", "report", "replace_changed", "reapply_changed", "refuse_new"
+    ] = Field(
         default="leave",
         description=(
             "What the server update route (to the newest code, and back to the tested pin) "
@@ -804,8 +835,12 @@ class SqlPhase(_Strict):
             "so a re-run leaves what a fresh install leaves; a file of any other shape is named "
             "and not run. `refuse_new` (T533): a move that adds or changes a file under its globs "
             "refuses the whole press before the compile -- for a chain the route cannot apply "
-            "safely to an existing server. Not in `digest()`: it does not change what an import "
-            "applies."
+            "safely to an existing server. `reapply_changed` (T659): each file whose bytes the "
+            "ledger does not hold (never seen, or edited upstream since) is run again, in the "
+            "same window -- for a file of keyed corrections that is safe to repeat "
+            "(`sqlplan.repeat_problem`); a file of any other shape is named and not run, and "
+            "nothing is seeded, so a server installed before the phase existed gets it once. "
+            "Not in `digest()`: it does not change what an import applies."
         ),
     )
 
@@ -993,6 +1028,19 @@ class SourcePatch(_Strict):
     reason: str = Field(
         min_length=1,
         description="One sentence the install log says when the patch is applied: what it fixes.",
+    )
+
+    obsolete_when_absent: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "A line of text the patch exists to remove (T600). When every file the patch edits "
+            "exists and none still contains it, the patch is skipped with a note instead of "
+            "applied or refused: upstream fixed the defect itself, so a moved tip must not "
+            "refuse an update over a patch it no longer needs. A file that still contains it "
+            "but no longer matches the patch is still refused. None: the patch is always "
+            "applied or refused."
+        ),
     )
 
     @field_validator("file")
@@ -2873,6 +2921,16 @@ class Client(_Strict):
             "differ, exit 139. The exe's build cannot tell such a client apart (a Turtle exe "
             "and a stock vanilla one both report 5875). SQL echo lines are ignored. None: "
             "this server has no such known signature."
+        ),
+    )
+    addon_interface: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The `## Interface:` number this client's add-ons are written for (T613): 30300 "
+            "for 3.3.5a, 20400 for 2.4.3, 11200 for 1.12 (a Turtle client too). "
+            "`addon_layout.band()` takes from its major version's first number up to it. "
+            "None: this game takes no client add-ons."
         ),
     )
     realmlist_file: str = "realmlist.wtf"

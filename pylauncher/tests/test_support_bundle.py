@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import zipfile
 from collections.abc import Callable
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +21,14 @@ from yulon.support.redact import Redactor
 from yulon.support.sources import InstallFacts, LiveLog, Sources
 
 TBC = load_catalog().get("wow-tbc")
+
+
+@pytest.fixture(autouse=True)
+def _size_cap_tests_run_without_the_quick_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the zip's SIZE cap; the cleaner's read budget (T638, its own tests
+    are `test_support_bundle_quick.py`) would shorten their logs before the cap is reached."""
+    for name in ("OLD_TAIL", "OLD_BUDGET"):
+        monkeypatch.setattr(bundle, name, 1 << 40)
 
 
 def _seams(**overrides: object) -> bundle.Seams:
@@ -479,3 +489,87 @@ def test_a_bundle_still_over_the_cap_at_every_floor_says_so(tmp_path: Path) -> N
     for name in members:
         if name.startswith(("live/", "conf/")):
             assert len(members[name].encode()) <= bundle.MIN_TAIL, name
+
+
+def test_a_move_package_in_the_server_folder_never_reaches_the_zip(tmp_path: Path) -> None:
+    """T601: a package holds every account's login verifier. No folder the bundle reads carries it.
+
+    Dropped in the places it could plausibly sit: the server folder, a conf folder, and the
+    backups folder, under the name Yu'lon gives it and under another.
+    """
+    install = _install(tmp_path)
+    secret = b"SRP-VERIFIER-OF-SOMEBODYS-ACCOUNT"
+    for where in (
+        install.server_dir,
+        install.server_dir / "etc",
+        install.server_dir / "sql_scripts" / "backups",
+    ):
+        where.mkdir(parents=True, exist_ok=True)
+        for name in ("yulon-move-wow-tbc-20261009-1530-keep-private.zip", "renamed.zip"):
+            with zipfile.ZipFile(where / name, "w") as z:
+                z.writestr("db/realmd.sql", secret)
+    sources = Sources(platform.config_dir(), None, (install,))
+    dest = tmp_path / "s.zip"
+    bundle.build(dest, sources, Redactor.build([]), seams=_seams())
+    assert dest.exists()
+    with zipfile.ZipFile(dest) as archive:
+        names = archive.namelist()
+        assert not [n for n in names if "yulon-move" in n or n.endswith("renamed.zip")]
+        assert not [n for n in names if secret in archive.read(n)]
+
+
+class _CutFails(Redactor):
+    """A redactor that vouches for a whole log but not for a log cut below `floor_kib` (T606).
+
+    The cut notice names how many KiB were kept, so the text a cut makes is the only one
+    this refuses. `floor_kib=10**9` refuses every cut; `600` lets a 1280 KiB log be cut
+    once (to 640) and refuses the next cut.
+    """
+
+    floor_kib = 10**9
+
+    def redact(self, text: str) -> str:
+        found = re.search(r"kept the last (\d+) KiB", text)
+        if found and int(found.group(1)) < self.floor_kib:
+            raise RecursionError("a pattern gave up on the cut text")
+        return super().redact(text)
+
+
+def _cut_fails(floor_kib: int) -> Redactor:
+    base = Redactor.build([])
+    cls = type("_CutFailsAt", (_CutFails,), {"floor_kib": floor_kib})
+    return cls(**{field.name: getattr(base, field.name) for field in fields(base)})
+
+
+@pytest.mark.parametrize("floor_kib", [10**9, 600], ids=["first-cut-fails", "second-cut-fails"])
+def test_a_cut_text_the_redactor_cannot_vouch_for_is_left_out_for_that_reason_alone(
+    tmp_path: Path, floor_kib: int
+) -> None:
+    """T606: it was listed as left out for size, and a log cut once showed as cut AND left out."""
+    dest = tmp_path / "s.zip"
+    report = bundle.build(
+        dest,
+        Sources(platform.config_dir(), None, _noisy_installs(tmp_path, 3, 1000)),
+        _cut_fails(floor_kib),
+        seams=_seams(live_logs=_noisy_live(1280 * 1024)),
+        cap_bytes=3_000_000,
+    )
+    members = _read(dest)
+    manifest = members["MANIFEST.txt"]
+    unvouched = list(report.unvouched)
+    assert unvouched and all(name.startswith("live/") for name in unvouched)
+    assert not set(unvouched) & set(report.dropped)
+    assert not set(unvouched) & set(report.cut)
+    assert not set(unvouched) & set(report.included)
+    assert not set(unvouched) & set(members)
+    _, _, rest = manifest.partition("could not vouch for")
+    assert rest, manifest
+    after = rest.split("\n\n", 1)[0] + "\n"
+    for name in unvouched:
+        assert f"  {name}\n" in after, name
+        assert name not in manifest.split("Included:")[1].split("Skipped")[0], name
+        assert f"  {name}  last " not in manifest, name
+    # The size list never names one of them.
+    if "Left out to keep the file under" in manifest:
+        size_list = manifest.split("Left out to keep the file under")[1].split("\n\n", 1)[0]
+        assert not any(name in size_list for name in unvouched)

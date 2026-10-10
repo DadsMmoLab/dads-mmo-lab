@@ -42,7 +42,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from yulon import platform, tuning
+from yulon import platform, playerbots_keys, tuning
 from yulon.catalog import bot_dashboard, time_zone
 from yulon.catalog.catalog import (
     NATIVE_DEFAULT_DB_PORT,
@@ -251,6 +251,17 @@ def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] |
     if operations is None or not operations.enable_env or not channel_is_on(server_dir):
         return None
     return {**world_env(entry), **operations.enable_env}
+
+
+def shadowing_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
+    """The environment this install's override gives its world, as `shadowed_by_env` asks it.
+
+    The channel's while its press is live, else the install's, with the bot names as
+    this server's mod-playerbots reads them (T657): a renamed module's
+    `Playerbots.MinRandomBots` row is shadowed by `AC_PLAYERBOTS_MIN_RANDOM_BOTS`.
+    """
+    env = channel_world_env(entry, server_dir) or world_env(entry)
+    return playerbots_keys.env_map(env, playerbots_keys.module_prefix(server_dir))
 
 
 def shadowed_by_env(text: str, env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
@@ -584,6 +595,9 @@ def render(
     # server is configured through its `.conf` files and not through container
     # environment.
     env = _world_env(entry, world_env)
+    # T657: every bot name as this server's mod-playerbots checkout reads it (the catalog
+    # spells the old `AC_AI_PLAYERBOT_*`); a checkout that cannot say changes nothing.
+    env = playerbots_keys.env_map(env, playerbots_keys.module_prefix(server_dir))
     base = fill(
         texts["base.yml.tmpl"],
         {

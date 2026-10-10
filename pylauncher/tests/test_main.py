@@ -4837,6 +4837,36 @@ def test_the_sweep_says_nothing_when_nothing_is_left(tmp_path: Path) -> None:
     assert _REAL_SWEEP(config_dir=tmp_path) is None
 
 
+def test_the_start_up_sweep_also_removes_stale_add_on_staging_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T613 PR-2: the add-on staging sweep rides the start-up sweep, off the GUI thread."""
+    from yulon import addon_archive
+
+    swept: list[str] = []
+    monkeypatch.setattr(addon_archive, "sweep_stale", lambda: swept.append("addons") or [])
+
+    assert _REAL_SWEEP(config_dir=tmp_path) is None
+    assert swept == ["addons"]
+
+
+def test_an_add_on_sweep_that_breaks_does_not_stop_the_client_copy_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from yulon import addon_archive
+
+    def broken() -> list[Path]:
+        raise RuntimeError("no cache dir")
+
+    monkeypatch.setattr(addon_archive, "sweep_stale", broken)
+    foreign = _leftover(tmp_path, "WoW (Yu'lon map data, temporary)")
+    with caplog.at_level("WARNING", logger="main"):
+        notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert notice is not None and foreign.is_dir()
+    assert "could not sweep the add-on staging folders: no cache dir" in caplog.text
+
+
 def _leftover(tmp_path: Path, name: str) -> Path:
     """A folder at a noted place that is not ours: kept, warned about, noticed."""
     import json
@@ -6094,3 +6124,133 @@ def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: 
     finally:
         window.yulon_open_settings = real
     assert opened == [1]
+
+
+def test_a_finished_install_also_puts_the_default_addons_in(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fresh_install` -> the tab -> `put_default_addons_in()` (T612); "Use existing…" does not."""
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(ControllerView, "settle_channel_after_install", lambda self: None)
+    monkeypatch.setattr(
+        ControllerView,
+        "put_default_addons_in",
+        lambda self: asked.append(self.services.controller.server_dir),
+        raising=False,
+    )
+    server_dir = tmp_path / "addons-please"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    assert asked == []
+    catalog.fresh_install.emit("wow-wotlk", server_dir, None)
+    assert asked == [server_dir], asked
+
+
+def test_a_tab_from_state_json_asks_for_its_default_addons_later(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start-up opens the saved tabs and each asks `put_default_addons_later()` (T612)."""
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t612-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "put_default_addons_later",
+        lambda self, milliseconds=5000: asked.append(self.services.controller.server_dir),
+    )
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+    window = main.build_window()
+    try:
+        assert asked == [server_dir]
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()
+
+
+def test_a_server_installed_or_pointed_at_this_session_also_gets_its_update_refresh(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T621: not only the tabs of `state.json`; a tab that opens later refreshes too."""
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "refresh_updates_later",
+        lambda self, milliseconds=20_000: asked.append(self.services.controller.server_dir),
+    )
+    server_dir = tmp_path / "refresh-please"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    assert asked == [server_dir], asked
+
+
+def test_a_tab_from_state_json_asks_for_its_update_refresh(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t621-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "refresh_updates_later",
+        lambda self, milliseconds=20_000: asked.append(self.services.controller.server_dir),
+    )
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+    window = main.build_window()
+    try:
+        assert asked == [server_dir]
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()

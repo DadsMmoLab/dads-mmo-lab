@@ -227,7 +227,7 @@ def test_a_rate_the_file_spells_oddly_is_shown_as_written_and_can_still_be_edite
 # kept and set to 0.25.
 
 WOTLK_RATES = (
-    # mod-playerbots/azerothcore-wotlk @7f12e89e (the file is unchanged at f19a1879),
+    # mod-playerbots/azerothcore-wotlk @7f12e89e (the file is unchanged at f19a1879 and 2a2211cd),
     # worldserver.conf.dist:2439,2499-2503,2573,2850-2858
     "Rate.Reputation.Gain = 11\n"
     "Rate.XP.Kill      = 2\n"
@@ -288,7 +288,8 @@ VANILLA_RATES = (
     "Rate.Reputation.LowLevel.Kill    = 0.25\n"
 )
 TORTOISE_RATES = (
-    # tortoise-wow/tortoise-wow @187af788, mangosd.conf.dist.in:1702-1716,1744,1776
+    # tortoise-wow/tortoise-wow @187af788 (the file is unchanged at 6131a26f),
+    # mangosd.conf.dist.in:1702-1716,1744,1776
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"

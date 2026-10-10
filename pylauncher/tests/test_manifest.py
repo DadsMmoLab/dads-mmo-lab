@@ -202,6 +202,32 @@ def test_sql_step_needs_exactly_one_body() -> None:
             parse_manifest({**README_EXAMPLE, "sql": [{"db": "world", **body}]})
 
 
+def test_a_migration_module_rides_only_on_one_direct_file() -> None:
+    """T596: `migration_module` records a file in the server's own `migrations` table.
+
+    A ledger row is ONE file's hash, so the step must name one file this app runs
+    itself: not a glob (which file would the row be for?), not an inline statement
+    (no file, no hash the server's updater could ever match), not a `then` chain
+    (several files, one row) and not a `db-import` step (the server's updater would
+    write its own row).
+    """
+    step = {"db": "characters", "path": "data/sql/character/a.sql", "migration_module": "pkg"}
+    ok = parse_manifest({**README_EXAMPLE, "sql": [step]})
+    assert ok.sql[0].migration_module == "pkg"
+    assert parse_manifest(README_EXAMPLE).sql[0].migration_module is None
+    for bad in (
+        {**step, "path": "data/sql/character/*.sql"},
+        {"db": "world", "statement": "UPDATE x SET y = 1", "migration_module": "pkg"},
+        {**step, "then": ["b.sql"]},
+        {**step, "applied_by": "db-import"},
+        {**step, "migration_module": ""},
+        {**step, "migration_module": "a'b"},
+        {**step, "precondition": _ROSTER_PRECONDITION},
+    ):
+        with pytest.raises(ValidationError):
+            parse_manifest({**README_EXAMPLE, "sql": [bad]})
+
+
 _ROSTER_PRECONDITION: dict[str, Any] = {
     "db": "playerbots",
     "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
@@ -309,9 +335,9 @@ def test_no_shipped_sql_step_check_carries_a_template_field() -> None:
                 if "{" in check["query"] or "{" in check["missing"]:
                     offenders.append(f"{path.relative_to(MANIFESTS_DIR)}: {check['query']!r}")
     assert offenders == [], offenders
-    # mod-city-bots' precondition and its two verify entries, and npc-teleporter's two verify
-    # entries (T564: the menus were moved off the base game's ids)
-    assert len(seen) == 5, seen
+    # mod-city-bots' precondition and its two verify entries, and npc-teleporter's three verify
+    # entries (T634: no capital NPC, a stale copy on the base game's ids, an Onyxia row that moved)
+    assert len(seen) == 6, seen
 
 
 def test_prompt_choice_rules() -> None:
@@ -422,6 +448,94 @@ def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> N
                     "origin": {"kind": "folder", "path": "/x", "added": "2026-09-08"},
                 }
             )
+
+
+_SHA = "ab" * 32
+
+
+def _addon_with(origin: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": "pfui",
+        "name": "pfUI",
+        "type": "mod",
+        "game": "wow-vanilla",
+        "origin": origin,
+        "client": [{"src": "pfUI-master", "dest": "addons", "name": "pfUI"}],
+    }
+
+
+def test_an_archive_origin_records_its_zip_by_path_or_by_link_with_its_sha256() -> None:
+    """T613 PR-2: an add-on from a zip says which zip, and which bytes it was."""
+    local = parse_manifest(
+        _addon_with(
+            {
+                "kind": "archive",
+                "path": "C:/Downloads/pfUI-master.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            }
+        )
+    )
+    assert local.origin is not None and local.origin.sha256 == _SHA and local.origin.url is None
+    linked = parse_manifest(
+        _addon_with(
+            {
+                "kind": "archive",
+                "url": "https://github.com/shagu/pfUI/archive/refs/heads/master.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            }
+        )
+    )
+    assert linked.origin is not None and linked.origin.path is None
+
+
+@pytest.mark.parametrize(
+    "origin, said",
+    [
+        ({"kind": "archive", "path": "/a.zip", "added": "2026-10-09"}, "needs the zip's sha256"),
+        (
+            {"kind": "archive", "sha256": _SHA, "added": "2026-10-09"},
+            "names its zip by a path or a url",
+        ),
+        (
+            {
+                "kind": "archive",
+                "path": "/a.zip",
+                "url": "https://github.com/a/b.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            },
+            "names its zip by a path or a url",
+        ),
+        (
+            {
+                "kind": "archive",
+                "url": "http://github.com/a/b.zip",
+                "sha256": _SHA,
+                "added": "2026-10-09",
+            },
+            "url must be https",
+        ),
+        (
+            {"kind": "archive", "path": "/a.zip", "sha256": "AB" * 32, "added": "2026-10-09"},
+            "should match pattern",
+        ),
+        (
+            {"kind": "folder", "path": "/x", "sha256": _SHA, "added": "2026-10-09"},
+            "are only an archive origin",
+        ),
+        (
+            {"kind": "link", "url": "https://github.com/a/b.zip", "added": "2026-10-09"},
+            "are only an archive origin",
+        ),
+    ],
+)
+def test_an_origin_that_says_too_little_or_too_much_is_refused(
+    origin: dict[str, object], said: str
+) -> None:
+    with pytest.raises(ValidationError, match=said):
+        parse_manifest(_addon_with(origin))
 
 
 def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:

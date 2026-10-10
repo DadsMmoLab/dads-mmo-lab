@@ -19,6 +19,77 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.16-Public — 2026-10-10
+
+### New
+- Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
+- **Play** puts the game add-ons you brought back into a ready-to-play client that was made again.
+- The support file now says how big your computer is: processor, memory, and how much of it Docker gets.
+- **Auction House Bot** asks you to pick its character from your server's list; the Characters tab shows each GUID.
+- A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
+- A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
+- On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
+- Database changes added that way are backed up first and run once; **Remove** keeps them and names that backup.
+- On Tortoise, a server module can be installed from a link or folder; **Rebuild the server…** builds it in.
+- **Pack for another computer…** moves accounts and characters into a server of the same game on another computer.
+- **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
+- Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
+- **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
+- **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
+
+### Fixed
+- WotLK and Unbound bot settings work again on the newest bots module: Yu'lon renames them for it, and back.
+- A custom SQL fix the database refused now shows on the Server tab, and a fresh install says so at the end.
+- TBC and Vanilla servers now get the database's own data corrections, new installs and updates alike.
+- WotLK and Unbound offer **Update Docker Compose** when it is too old for them; a cut-off database import is redone.
+- After an update stopped mid-build, Start says the build is behind its sources and names **Rebuild the server…**.
+- A bot settings file renamed for the newest bots module also gets the settings that module added.
+- A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
+- An install stops before building, naming the folder, when another install already holds its container names.
+- Moving a server says "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".
+- Bringing a whole server in holds it for the whole job, so another Yu'lon stays refused and no warning shows.
+- On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
+- On Windows, opening the LAN ports asks for administrator rights itself, and the commands it shows now work when pasted.
+- The Lua engine builds again with the newest Playerbots, which renamed settings the engine still asked for.
+- Making the support file no longer takes minutes on big old logs: it keeps their newest lines and says what it cut.
+- While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
+- **Start** on a server whose build is gone says so and names **Rebuild the server…** before starting anything.
+- **Rebuild the server…** on a server from the retired playerbots fork says so at once, not after half an hour.
+- **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
+- A failed, stopped or rolled-back update keeps every earlier database copy; only a successful one clears them.
+- On Tortoise, **Return to the tested pin…** no longer builds onto databases a newer build migrated; it names the backup.
+- A module update that breaks the build is still put back when you pressed Stop just as the build failed.
+- A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
+- A database password typed inside escaped or joined quotes no longer slips into a support zip.
+- Rebuilding or updating a server now swaps in its Lua scripts only after the old server has stopped.
+- A Rebuild that fails part-way through laying Lua scripts leaves the old server stopped; Start says to Rebuild.
+- On Windows, SQL with accented or non-Latin letters reaches the database exactly as written.
+- On Tortoise, a module named like one the server holds is refused, and a refused add-on update is put back.
+- On Tortoise, **Remove** of an add-on you added takes back its files, keeping any you changed and your saved settings.
+- Restore refuses a backup made on another game, such as WotLK onto Unbound, and asks about an old one.
+- Two Yu'lons no longer update or start one server at once: the second says who holds it, and **Stop** asks first.
+- Modules, Party links, channel setup and bot rebuilds refuse while another Yu'lon works on the server.
+- **Stop** no longer waits long on a slow Docker to reserve the server; it goes ahead after a few seconds.
+- Account, character and settings changes refuse while another Yu'lon works on the server, and name who holds it.
+- The saved server log leaves out a line the cleaner is unsure of, and the support file says why a log is left out.
+- **Save logs for support…** now says how many logs it left out of the zip, and why, before you send it.
+- A Tortoise world that fails a database update now stops and names the file and error, instead of hanging.
+- The realm badge says UPDATE FAILED, not STARTING, for a Tortoise world stuck at a failed database update.
+- An older Tortoise server is offered **Turn it off** for its SQL log spam on the Tuning tab, without a full reset.
+- Saving settings no longer freezes the window.
+- Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
+- Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
+- On disks with hard links, two Yu'lons pressing on one new folder at once no longer report a false id-file error.
+
+### Changed
+- Centurion and TBC servers move to newer builds of their sources; there is nothing new for players to notice.
+- WotLK and WoW Unbound are tested on the newest AzerothCore Playerbot core and mod-playerbots, with mod-ale to match.
+- Tortoise installs the TortoiseBots of 10 October; bot logs keep 3 days; unchanged bot settings follow its new defaults.
+- WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
+- NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
+- The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.
+- The update question says copies are kept until an update succeeds, and a restore says how long it takes.
+
 ## v0.9.15-Public — 2026-10-09
 
 ### New

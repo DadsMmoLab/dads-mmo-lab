@@ -51,6 +51,7 @@ Three things this binding does NOT do, each for the reason 8.7b gives:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from yulon import resources
@@ -87,9 +88,16 @@ def load_module(manifest_path: Path) -> Manifest:
     return load_manifest(manifest_path)
 
 
-def store(root: Path = BUNDLED_MANIFESTS_DIR) -> ManifestStore:
-    """The Vanilla manifest store over `root` (bundled by default, or a refreshed cache)."""
-    return ManifestStore(root, GAME)
+def store(root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None) -> ManifestStore:
+    """The Vanilla manifest store over `root`, with the user layer over it (T613 PR-2).
+
+    `root` is the bundled tree by default (or a refreshed cache). The second layer
+    is where a client add-on the player brought is recorded (`yulon.client_addons`),
+    so it is listed on the next start, as on WotLK and Tortoise.
+    """
+    from yulon.controller_wow_wotlk.modules import user_manifests_dir
+
+    return ManifestStore(root, GAME, user_root if user_root is not None else user_manifests_dir())
 
 
 def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:
@@ -108,6 +116,7 @@ def applier(
     sql: SqlRunner | None,
     world_running: Callable[[], bool | None],
     start_database: Callable[[], bool] | None = None,
+    hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> Applier:
@@ -143,6 +152,7 @@ def applier(
         client_dir=client_dir,
         world_running=world_running,
         start_database=start_database,
+        hold_server=hold_server,
     )
 
 

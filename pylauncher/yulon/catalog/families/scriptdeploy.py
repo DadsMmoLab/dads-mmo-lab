@@ -5,8 +5,9 @@ its talent bridge, its talent data) names the scripts in its catalog block
 (`AzerothCoreData.lua_scripts`): a folder or a file inside a checkout the install
 cloned, and the folder under `env/dist/etc/modules/lua_scripts/` it goes to. The
 world reads that folder only when it starts, so the scripts are laid before the
-world first starts, again before every rebuild, and again when an update has moved
-the checkout they come from (`AzerothCoreInstaller`'s hooks say where).
+world first starts, again on every rebuild, and again when an update has moved
+the checkout they come from -- with the old world stopped (T562), after the
+compile (`AzerothCoreInstaller`'s hooks say where).
 
 **Only Yu'lon's own copies are ever replaced.** Each file written is recorded by
 its SHA-256 in `RECORD_FILE`, in the script folder. A file on disk is replaced only
@@ -48,7 +49,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon import docker, server_build_presses
 from yulon.catalog.catalog import LUA_SCRIPTS_DIR, LuaScripts, SqlCheck
-from yulon.catalog.installer import InstallerError, SelfExplainedError
+from yulon.catalog.installer import InstallerError, ScriptsPartlyLaid, SelfExplainedError
 from yulon.log import get_logger
 from yulon.manifest import Db
 
@@ -329,6 +330,41 @@ def _renamed_in_place(
     return found
 
 
+def _refuse_before_writing(
+    server_dir: Path, specs: Sequence[LuaScripts]
+) -> tuple[str, list[_Planned]]:
+    """The refusals that come before any write: a link at the destination, a bad source.
+
+    Returns the press `lay()` names when it refuses, and every file it would lay.
+    """
+    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    # The script folder, each entry's own folder in it, and the record: none may be
+    # a link (or under one), or the press would write where the link points. Asked
+    # before anything is read or written, so a refusal here writes nothing at all.
+    for target in (
+        record_path(server_dir),
+        *(server_dir / spec.dest.rstrip("/") / RECORD_FILE for spec in specs),
+    ):
+        link = target if target.is_symlink() else _through_a_link(server_dir, target)
+        if link is not None:
+            raise _link_refusal(server_dir, link, remedy)
+    return remedy, _plan(server_dir, specs, remedy)
+
+
+def check_layable(server_dir: Path, specs: Sequence[LuaScripts]) -> None:
+    """Make `lay()`'s refusals that come before a write, without laying anything (T562).
+
+    A press that lays with the old world stopped asks this first, while a refusal
+    still leaves everything as it was: the lay itself runs after the compile.
+
+    Raises:
+        InstallerError: a source is not there or has a link in it, or the place the
+            scripts go is a link.
+    """
+    if specs or record_path(server_dir).exists():
+        _refuse_before_writing(server_dir, specs)
+
+
 def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -> Iterator[str]:
     """Lay every script the specs name; one line per file that changed or was kept.
 
@@ -346,18 +382,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     """
     if not specs and not record_path(server_dir).exists():
         return
-    remedy = server_build_presses.under_server_build(server_build_presses.REBUILD)
-    # The script folder, each entry's own folder in it, and the record: none may be
-    # a link (or under one), or the press would write where the link points. Asked
-    # before anything is read or written, so a refusal here writes nothing at all.
-    for target in (
-        record_path(server_dir),
-        *(server_dir / spec.dest.rstrip("/") / RECORD_FILE for spec in specs),
-    ):
-        link = target if target.is_symlink() else _through_a_link(server_dir, target)
-        if link is not None:
-            raise _link_refusal(server_dir, link, remedy)
-    planned = _plan(server_dir, specs, remedy)
+    remedy, planned = _refuse_before_writing(server_dir, specs)
     folders = ", ".join(sorted({spec.dest.rstrip("/") for spec in specs}))
     to_delete = f"{folders} and that file" if folders else "that file"
     record, unreadable, had_pending = _read_record(server_dir)
@@ -373,6 +398,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
     kept_record = dict(record)
     renamed = _renamed_in_place(server_dir, record, planned)
     wrote = current = 0
+    changed = 0
+    """Scripts written or removed so far: a failure after the first leaves a mixed set (T602)."""
     finished = False
     pending_written = False
     try:
@@ -410,6 +437,7 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             _publish(item.target, data)
             kept_record[item.rel] = new
             wrote += 1
+            changed += 1
             yield f"{'Updated' if old is not None else 'Laid'} {item.rel}."
         shipped = {item.rel for item in planned}
         for rel, digest in sorted(record.items()):
@@ -433,12 +461,19 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
                 continue
             if same:
                 path.unlink()
+                changed += 1
                 yield f"Removed {rel}: this server no longer ships it."
             else:
                 yield f"{rel} is no longer shipped and was changed on this machine; left as it is."
         finished = True
+    except SelfExplainedError as exc:
+        # A link that appeared between the plan and the write, after some were written.
+        if changed and not isinstance(exc, ScriptsPartlyLaid):
+            raise ScriptsPartlyLaid(str(exc)) from exc
+        raise
     except OSError as exc:
-        raise SelfExplainedError(
+        failure = ScriptsPartlyLaid if changed else SelfExplainedError
+        raise failure(
             f"The Lua scripts could not be laid ({exc}). Once the reason is fixed, press "
             f"{remedy}: it lays them again."
         ) from exc
@@ -449,7 +484,8 @@ def lay(server_dir: Path, specs: Sequence[LuaScripts], *, quiet: bool = False) -
             except OSError as exc:
                 logger.warning(f"could not write {record_path(server_dir)}: {exc}")
                 if finished:
-                    raise SelfExplainedError(
+                    failure = ScriptsPartlyLaid if changed else SelfExplainedError
+                    raise failure(
                         "The Lua scripts were copied, but Yu'lon could not save its list of "
                         f"them, {LUA_SCRIPTS_DIR}/{RECORD_FILE} ({exc}), so it stopped here and "
                         f"started nothing new. Once that is fixed, delete {to_delete}, "

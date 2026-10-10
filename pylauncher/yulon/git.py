@@ -29,15 +29,19 @@ Two traps are baked in here rather than left for each caller to remember:
 from __future__ import annotations
 
 import enum
+import io
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -924,6 +928,217 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
+def tree_files_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git ls-tree -r -z --name-only <rev> -- <paths>`: the files one commit tracks (T630)."""
+    return ["ls-tree", "-r", "-z", "--name-only", rev, "--", *paths]
+
+
+def parse_tree_files(raw: str) -> tuple[str, ...]:
+    """The paths of a `ls-tree -z --name-only` answer, unquoted, in git's order."""
+    return tuple(path for path in raw.split("\0") if path)
+
+
+ANCESTRY_COMMITS_ARGS = [
+    "cat-file",
+    "--batch-all-objects",
+    "--batch-check=%(objecttype) %(objectname)",
+]
+"""Every object this checkout holds, as `<type> <id>`; the commits are the ones read next."""
+
+ANCESTRY_READ_ARGS = ["cat-file", "--batch"]
+"""Prints each commit id on stdin as a header and the raw object: no traversal, any git."""
+
+ANCESTRY_LIMIT = 20000
+"""How many commit objects one ancestry question reads at most."""
+
+
+def commit_ids(listing: str, *, limit: int = ANCESTRY_LIMIT) -> list[str]:
+    """The ids of the commits in a `--batch-check=%(objecttype) %(objectname)` listing."""
+    ids: list[str] = []
+    for line in listing.splitlines():
+        kind, _, sha = line.partition(" ")
+        if kind == "commit" and sha:
+            ids.append(sha.strip())
+            if len(ids) >= limit:
+                break
+    return ids
+
+
+def parse_commit_parents(raw: bytes) -> dict[str, tuple[str, ...]] | None:
+    """`{commit id: its parent ids}` from `git cat-file --batch` output, or None if it is cut.
+
+    Each object is `<id> <type> <size>\\n`, exactly `size` bytes, `\\n`; an id git does not
+    have is `<id> missing\\n`. The sizes are bytes, so this reads bytes (a commit message
+    in UTF-8 would throw a text read off by its multibyte characters), and a message that
+    looks like a header is skipped by its size and never read as one. The parent ids are
+    the real ones written in the object: a graft (`.git/shallow`) is applied by git's
+    traversal, not by reading the object.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    at = 0
+    while at < len(raw):
+        end = raw.find(b"\n", at)
+        if end < 0:
+            return None
+        header = raw[at:end].split()
+        at = end + 1
+        if len(header) == 2 and header[1] == b"missing":
+            continue
+        if len(header) != 3 or not header[2].isdigit():
+            return None
+        size = int(header[2])
+        body = raw[at : at + size]
+        if len(body) != size or raw[at + size : at + size + 1] != b"\n":
+            return None
+        at += size + 1
+        if header[1] != b"commit":
+            continue
+        top = body.split(b"\n\n", 1)[0]
+        found[header[0].decode("ascii", "replace")] = tuple(
+            line[7:].decode("ascii", "replace")
+            for line in top.split(b"\n")
+            if line.startswith(b"parent ")
+        )
+    return found
+
+
+def reaches(parents: Mapping[str, Sequence[str]], new: str, old: str) -> bool:
+    """Is `old` `new`, or named as a parent on any path from `new` through `parents`?
+
+    A parent that is not itself in `parents` (a graft's cut-off parent, an object this
+    checkout never fetched) still counts when it IS `old`: its id is written in the commit
+    that names it. Breadth first, each id once, so a malformed cycle ends.
+    """
+    seen = {new}
+    queue = deque([new])
+    while queue:
+        sha = queue.popleft()
+        if sha == old:
+            return True
+        for parent in parents.get(sha, ()):
+            if parent not in seen:
+                seen.add(parent)
+                queue.append(parent)
+    return False
+
+
+def ancestry(
+    dest: Path,
+    old: str,
+    new: str,
+    merge_base: Callable[[str, str], int | None],
+    history: Callable[[], Mapping[str, Sequence[str]] | None],
+) -> bool | None:
+    """Is `old` an ancestor of a commit? True / False / None (cannot tell). Read-only (T632).
+
+    `merge-base --is-ancestor` is the answer unless the checkout is SHALLOW. Every source
+    but AzerothCore's core is a depth-1 clone: the tip and the pin are grafts in
+    `.git/shallow` and later fetches connect new commits back only to what is held, so the
+    command answers 1 for a REAL forward move through a graft (never 0 for a false one),
+    so on a shallow checkout the answer 1 is followed by the reverse question: `new`
+    already in `old`'s history proves a move BACK. The parent ids written in
+    the commit objects survive grafting, so `history()` reads the commit objects
+    themselves (`cat-file`, which traverses nothing: `rev-list` with the grafts off stops
+    at a graft on git 2.34) and `reaches()` looks for `old` among every id they name, held
+    or not. Not found there is no proof of anything: None, and
+    the caller asks GitHub. Never `fetch --unshallow` or `--deepen` (see `_pin()`).
+    """
+    said = merge_base(old, new)
+    if said == 0:
+        return True
+    if said == 1:
+        if not (dest / ".git" / "shallow").is_file():
+            return False
+        # A graft only removes parents, so the REVERSE answer 0 cannot lie: `new` is in
+        # `old`'s history, and this is a move back.
+        if old != new and merge_base(new, old) == 0:
+            return False
+    parents = history()
+    if parents is not None and reaches(parents, new, old):
+        return True
+    return None
+
+
+def tree_bytes_args(rev: str, path: str) -> list[str]:
+    """`git archive --format=tar <rev> -- <path>`: a file or folder at a commit, as bytes (T632)."""
+    return ["archive", "--format=tar", rev, "--", path]
+
+
+def parse_tree_bytes(raw: bytes) -> dict[str, bytes] | None:
+    """`{repository path: exact bytes}` of every regular file in a `git archive` tar, or None.
+
+    Bytes and not text: Tortoise's AutoUpdater hashes each migration file's exact bytes,
+    and a text read would turn CRLF into LF. A tar that does not read is "could not ask".
+    """
+    found: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for member in archive:
+                if not member.isreg():
+                    continue
+                handle = archive.extractfile(member)
+                if handle is None:
+                    return None
+                found[member.name] = handle.read()
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    return found
+
+
+def folder_is_absent(listing: str) -> bool:
+    """`git ls-tree -z --name-only` printed nothing: the path is not in that commit."""
+    return not listing.strip("\0")
+
+
+_LOGGED_ARGV_CHARS = 1000
+"""How much of a containerized git command line one log line shows (T630 re-review)."""
+
+
+def _logged(argv: Sequence[str]) -> str:
+    """`argv` joined for a log line, cut at `_LOGGED_ARGV_CHARS` with how much was left out."""
+    said = " ".join(argv)
+    if len(said) <= _LOGGED_ARGV_CHARS:
+        return said
+    return f"{said[:_LOGGED_ARGV_CHARS]} … ({len(said) - _LOGGED_ARGV_CHARS} more characters)"
+
+
+def file_lines_args(rev: str, paths: Sequence[str]) -> list[str]:
+    """`git grep -z -I --no-color -e ^ <rev> -- <folders>`: every line of the files, one run (T630).
+
+    The FOLDERS of `paths` are the pathspecs, not the files: an install months behind
+    moves past thousands of update files, and a command line naming each one passes
+    Windows' 32,767-character limit (docker.exe and wsl.exe alike). `parse_file_lines()`
+    keeps the files asked. `-e ^` matches every line, empty ones too, and is a
+    non-empty argument, which an empty pattern handed through wsl.exe might not stay.
+    `-z` puts a NUL after each `<rev>:<path>`, so an answer splits cleanly whatever a
+    line holds. `-I` leaves binary files out; `--no-color`, and no pager.
+    """
+    folders = sorted({posixpath.dirname(path) or "." for path in paths})
+    return ["grep", "-z", "-I", "--no-color", "-e", "^", rev, "--", *folders]
+
+
+def parse_file_lines(
+    raw: str, rev: str, paths: Sequence[str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    """`{path: lines}` from a `file_lines_args()` answer, only `paths` when given.
+
+    A file with no lines is absent. The answer covers the whole folders asked, so the
+    files that were not named are dropped here.
+    """
+    wanted = set(paths) if paths is not None else None
+    found: dict[str, list[str]] = {}
+    lead = f"{rev}:"
+    for record in raw.split("\n"):
+        name, sep, line = record.partition("\0")
+        if not sep:
+            continue
+        path = name.removeprefix(lead)
+        if wanted is not None and path not in wanted:
+            continue
+        found.setdefault(path, []).append(line)
+    return {path: tuple(lines) for path, lines in found.items()}
+
+
 def changed_lines_args(old: str, new: str, path: str) -> list[str]:
     """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
     return [*_DIFF_ARGS, "-U0", old, new, "--", path]
@@ -1582,6 +1797,102 @@ class RunnerGit:
             return None
         return parse_changed_files(proc.stdout)
 
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """Each of `paths`' lines at commit `rev`, in one run. None = cannot ask (T630).
+
+        `git grep` exits 1 when nothing matched -- only files with no lines at all --
+        which is an answer (no lines), not a failure.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run(["git", *file_lines_args(rev, paths)], cwd=dest, env=_no_prompt_env())
+        except OSError as exc:
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        if proc.returncode not in (0, 1):
+            logger.debug(f"could not read the files {rev} has in {dest}: {proc.stderr.strip()}")
+            return None
+        return parse_file_lines(proc.stdout, rev, paths)
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        """Is `old` in `new`'s history, so a move from it to `new` goes FORWARD? (T632)
+
+        True / False are answers; None is "git could not tell", which a caller must not
+        read as either. Read-only: nothing is fetched and the checkout is never deepened.
+        `ancestry()` carries the reasoning (a shallow checkout's grafts).
+        """
+        if not (dest / ".git").is_dir():
+            return None
+
+        def merge_base(first: str, second: str) -> int | None:
+            try:
+                return runner.run(
+                    ["git", "merge-base", "--is-ancestor", first, second],
+                    cwd=dest,
+                    env=_no_prompt_env(),
+                ).returncode
+            except OSError:
+                return None
+
+        def history() -> dict[str, tuple[str, ...]] | None:
+            try:
+                listing = runner.run(
+                    ["git", *ANCESTRY_COMMITS_ARGS], cwd=dest, env=_no_prompt_env()
+                )
+                if listing.returncode != 0:
+                    return None
+                ids = commit_ids(listing.stdout)
+                with tempfile.TemporaryFile() as stdin:
+                    stdin.write("".join(f"{sha}\n" for sha in ids).encode("ascii"))
+                    stdin.seek(0)
+                    proc = runner.run_bytes(
+                        ["git", *ANCESTRY_READ_ARGS], cwd=dest, env=_no_prompt_env(), stdin=stdin
+                    )
+            except OSError:
+                return None
+            return parse_commit_parents(proc.stdout) if proc.returncode == 0 else None
+
+        return ancestry(dest, old, new, merge_base, history)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
+
+        The commit's own list, not the disk's: an untracked file, or one a sparse
+        checkout leaves out, is not something the commit ships.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *tree_files_args(rev, paths)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`{repository path: bytes}` of the files under `path` (a file or folder) at `rev` (T632).
+
+        From the commit's own tree, never from the working tree: an untracked or edited
+        copy on disk is not what that commit ships. A path the commit does not have is
+        a real answer, `{}`; git that cannot say is None.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run_bytes(
+                ["git", *tree_bytes_args(rev, path)], cwd=dest, env=_no_prompt_env()
+            )
+            if proc.returncode == 0:
+                return parse_tree_bytes(proc.stdout)
+            tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", path], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
+
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
         if not (dest / ".git").is_dir():
@@ -1677,10 +1988,7 @@ class RunnerGit:
             return Counted(None)
         ref = _fetch_ref(branch)
         try:
-            _run_git(
-                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
-                cwd=dest,
-            )
+            self._fetch_to_count(dest, ref)
         except GitError as exc:
             logger.debug(
                 f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
@@ -1693,6 +2001,18 @@ class RunnerGit:
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return Counted(None)
+
+    def _fetch_to_count(self, dest: Path, ref: str) -> None:
+        """The fetch `counted_behind()` counts against; `GitError` if it fails.
+
+        Unbounded here, as it has always been: the person pressed Check for updates and is
+        looking at it. `RefreshGit` is the same fetch with a leash, for the one caller that
+        runs without anybody waiting.
+        """
+        _run_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+            cwd=dest,
+        )
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
@@ -2109,6 +2429,71 @@ def distro_owner(distro: str, inside: str) -> str | None:
     return said
 
 
+FETCH_TIMEOUT_SECONDS = 90
+"""How long the background refresh lets one `git fetch` run before it ends it (T621).
+
+A depth-1 fetch of an add-on or module is kilobytes to a few megabytes; a minute and a half
+covers a slow line and still ends a dead proxy or a stalled server.
+"""
+
+FETCH_LOW_SPEED_LIMIT = 1000
+"""Bytes a second below which git counts a transfer as stalled (`http.lowSpeedLimit`)."""
+
+FETCH_LOW_SPEED_SECONDS = 20
+"""How long it may stay below `FETCH_LOW_SPEED_LIMIT` before git gives up (`http.lowSpeedTime`)."""
+
+_BOUNDED_FETCH_ARGS = [
+    "-c",
+    f"http.lowSpeedLimit={FETCH_LOW_SPEED_LIMIT}",
+    "-c",
+    f"http.lowSpeedTime={FETCH_LOW_SPEED_SECONDS}",
+]
+
+
+class RefreshGit(RunnerGit):
+    """`RunnerGit` for the background update refresh: a fetch that cannot hang, and can be ended.
+
+    T621. Nobody is waiting on this fetch, so nobody would notice one that never returns:
+    it carries git's own low-speed limits (a transfer that stalls gives up), a process timeout
+    (a connection that never opens is ended too) and the `cancel` event of the run it belongs
+    to (a Quit or a press that starts ends it within a fifth of a second). Every answer to
+    "could not fetch" is the same `Counted(None)` the Check press gives, and the caller keeps
+    the count it had.
+    """
+
+    def __init__(
+        self,
+        cancel: threading.Event | None = None,
+        timeout: float = FETCH_TIMEOUT_SECONDS,
+    ) -> None:
+        self._cancel = cancel if cancel is not None else threading.Event()
+        self._timeout = timeout
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        if self._cancel.is_set():
+            return Counted(None)
+        return super().counted_behind(dest, branch, release=release)
+
+    def _fetch_to_count(self, dest: Path, ref: str) -> None:
+        argv = [
+            "git",
+            *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
+            *_BOUNDED_FETCH_ARGS,
+            "fetch",
+            "origin",
+            ref,
+        ]
+        try:
+            proc = runner.run_cancellable(
+                argv, cwd=dest, env=_no_prompt_env(), timeout=self._timeout, cancel=self._cancel
+            )
+        except OSError as exc:
+            raise GitError(f"{argv[0]} could not be started: {exc}") from exc
+        if proc.returncode != 0:
+            raise GitError(f"{' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
+
+
 @dataclass(frozen=True)
 class ContainerGit:
     """`Git` that runs git inside a container, for hosts without one.
@@ -2416,6 +2801,80 @@ class ContainerGit:
             return None
         return parse_changed_files(proc.stdout)
 
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        """`RunnerGit.file_lines()`, containerised; `writes=False`, nothing is fetched (T630)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, file_lines_args(rev, paths), writes=False)
+        except GitError as exc:
+            # `git grep` exits 1 with nothing on stderr when no line matched at all.
+            if str(exc).rstrip().endswith("exited 1:"):
+                return {}
+            logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
+            return None
+        return parse_file_lines(proc.stdout, rev, paths)
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        """`RunnerGit.is_ancestor()`, containerised; `writes=False`, nothing is fetched (T632)."""
+        if not (dest / ".git").is_dir():
+            return None
+
+        def merge_base(first: str, second: str) -> int | None:
+            try:
+                self._capture(dest, ["merge-base", "--is-ancestor", first, second], writes=False)
+            except GitError as exc:
+                # `_capture()` words a non-zero exit as "exited <n>:".
+                return 1 if " exited 1:" in str(exc) else None
+            return 0
+
+        def history() -> dict[str, tuple[str, ...]] | None:
+            try:
+                listing = self._capture(dest, ANCESTRY_COMMITS_ARGS, writes=False)
+                ids = commit_ids(listing.stdout)
+                argv = self._argv(
+                    self._launcher(), dest, ANCESTRY_READ_ARGS, writes=False, interactive=True
+                )
+                with tempfile.TemporaryFile() as stdin:
+                    stdin.write("".join(f"{sha}\n" for sha in ids).encode("ascii"))
+                    stdin.seek(0)
+                    proc = runner.run_bytes(argv, env=_no_prompt_env(), stdin=stdin)
+            except (GitError, OSError):
+                return None
+            return parse_commit_parents(proc.stdout) if proc.returncode == 0 else None
+
+        return ancestry(dest, old, new, merge_base, history)
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, tree_files_args(rev, paths), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
+            return None
+        return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`RunnerGit.tree_bytes()`, containerised: the read-only container, no network (T632)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            argv = self._argv(self._launcher(), dest, tree_bytes_args(rev, path), writes=False)
+            proc = runner.run_bytes(argv, env=_no_prompt_env())
+            if proc.returncode == 0:
+                return parse_tree_bytes(proc.stdout)
+            tree = self._capture(
+                dest, ["ls-tree", "-z", "--name-only", rev, "--", path], writes=False
+            )
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
+
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""
         if not (dest / ".git").is_dir():
@@ -2691,7 +3150,11 @@ class ContainerGit:
             self._capture(spec.dest, git_args, writes=True)
 
     def _capture(
-        self, dest: Path, git_args: list[str], *, writes: bool
+        self,
+        dest: Path,
+        git_args: list[str],
+        *,
+        writes: bool,
     ) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
 
@@ -2838,7 +3301,7 @@ class ContainerGit:
         # string this process already held. Same shape as
         # `docker.build_staged()`, and safe to print: these URLs come from the
         # manifest allow-list and carry no credentials.
-        logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
+        logger.info(f"containerized git: `{_logged(argv[1:])}` into {dest}")
         try:
             proc = runner.run(argv, env=_no_prompt_env(), stdin=subprocess.DEVNULL)
         except OSError as exc:
@@ -2874,6 +3337,7 @@ class ContainerGit:
         *,
         writes: bool,
         name: str | None = None,
+        interactive: bool = False,
     ) -> list[str]:
         """The one docker argv every containerized git call here runs.
 
@@ -2906,6 +3370,7 @@ class ContainerGit:
             *launcher,
             "run",
             "--rm",
+            *(["-i"] if interactive else []),
             *(["--name", name] if name is not None else []),
             *hardening,
             "-v",

@@ -786,7 +786,11 @@ def test_an_install_from_a_released_plan_is_offered_nothing_today(tmp_path: Path
         seams=rec.seams(platform_id=lambda: "linux", exec_stdin=db.exec_stdin, sql_query=db.query),
     )
     check = engine.correction_check(folder(tmp_path))
-    assert (check.state, check.offered, check.withheld) == ("held", (), ("instance updates",))
+    assert (check.state, check.offered, check.withheld) == (
+        "held",
+        (),
+        ("instance updates",),
+    )
 
 
 def test_an_install_from_a_plan_nobody_released_is_offered_nothing(tmp_path: Path) -> None:

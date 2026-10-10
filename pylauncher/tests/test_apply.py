@@ -668,12 +668,13 @@ def test_docker_sql_keeps_the_password_and_the_sql_out_of_argv(
             "ac-database",
             "mysql",
             "-uroot",
+            "--default-character-set=utf8mb4",
             "acore_characters",
         ]
     ]
     flat = " ".join(seen[0])
     assert "hunter2" not in flat and "secret" not in flat  # the whole point
-    assert kwargs_seen[0]["input"] == "SET PASSWORD = 'secret'"  # SQL over stdin
+    assert kwargs_seen[0]["input"] == b"SET PASSWORD = 'secret'"  # SQL over stdin
     env = kwargs_seen[0]["env"]
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"  # value only in the env
 
@@ -723,10 +724,81 @@ def test_docker_sql_query_keeps_the_password_and_the_sql_out_of_argv_as_well(
         ]
     ]
     assert rows == "12401\n"  # stdout: the rows are the answer, stderr is not
-    assert kwargs_seen[0]["input"] == "SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
+    assert kwargs_seen[0]["input"] == b"SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
     env = kwargs_seen[0]["env"]
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"
     assert "hunter2" not in " ".join(seen[0])
+
+
+# Text an outside package's SQL can carry: an accent and a curly apostrophe (both in cp1252),
+# Cyrillic (in no Western code page), and a string literal that spans lines.
+_UNICODE_SCRIPT = (
+    "UPDATE npc SET name = 'Caf\u00e9', text = 'it\u2019s',\n"
+    "  greeting = '\u041f\u0440\u0438\u0432\u0435\u0442\n  second line' WHERE id = 1;\n"
+)
+
+
+def test_a_statement_reaches_mysql_as_utf8_bytes_with_no_newline_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T596 review: the script is bytes on stdin, never text through the locale codec.
+
+    `text=True` with no `encoding=` encodes stdin with the LOCALE codec and turns
+    `\\n` into `\\r\\n` on Windows: `\u00e9` arrived as a cp1252 byte, a line break inside
+    a literal was stored as CRLF, a Cyrillic letter raised `UnicodeEncodeError` -- while
+    the migrations ledger recorded the SHA1 of the file's own bytes. Pinned at the
+    `subprocess.run` call, which is the only place that behaves differently per
+    platform: the bytes handed over, and no text-mode switch of any spelling.
+    """
+    import subprocess
+
+    kwargs_seen: list[dict[str, object]] = []
+    argv_seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv_seen.append(argv)
+        kwargs_seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    DockerSql("ac-database", "hunter2").run_statement("characters", _UNICODE_SCRIPT)
+
+    kwargs = kwargs_seen[0]
+    assert kwargs["input"] == _UNICODE_SCRIPT.encode("utf-8")
+    assert b"\r" not in kwargs["input"]  # type: ignore[operator]
+    for text_mode in ("text", "universal_newlines", "encoding", "errors"):
+        assert not kwargs.get(text_mode), f"{text_mode}= puts stdin through the locale codec"
+    flags = argv_seen[0][argv_seen[0].index("-uroot") + 1 : -1]
+    assert flags == ["--default-character-set=utf8mb4"], argv_seen[0]
+
+
+def test_a_statement_that_cannot_be_encoded_is_not_sent_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lone surrogate has no UTF-8 spelling: an `ApplyError` that proves nothing ran."""
+    import subprocess
+
+    from yulon.apply import SqlNotSent
+
+    def never(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise AssertionError("mysql must not be started for a script that cannot be encoded")
+
+    monkeypatch.setattr(subprocess, "run", never)
+    with pytest.raises(SqlNotSent, match="UTF-8"):
+        DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT '\ud800'")
+
+
+def test_what_mysql_answers_is_decoded_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes back are UTF-8 too: `\u00e9` as two bytes is one letter, not `\u00c3\u00a9`."""
+    import subprocess
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, "Caf\u00e9\r\n".encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert DockerSql("ac-database", "hunter2").query("auth", "SELECT 1") == "Caf\u00e9\n"
 
 
 def test_a_query_that_failed_raises_instead_of_looking_like_an_empty_result(
@@ -5201,7 +5273,8 @@ def test_no_applier_the_app_builds_is_left_without_the_world_running_seam() -> N
 
     assert [f"{f}:{n}" for f, n, kw in sites if "world_running" not in kw] == []
     assert [f"{f}:{n}" for f, n, kw in sites if "start_database" not in kw] == []
-    assert len(sites) == 13, where
+    # 14 since T613 PR-2: Centurion's add-on-only applier (`for_entry()`).
+    assert len(sites) == 14, where
 
 
 def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> None:
@@ -5237,7 +5310,8 @@ def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> No
     # a line number here would go stale on the next edit above it and be
     # "corrected" by whoever hit it, which is how an audit stops auditing.
     real = [w for w, s in _seam_bindings("world_running") if s == "docker.world_running"]
-    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 4, real
+    # Five since T613 PR-2: the four games' module appliers and Centurion's add-on one.
+    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 5, real
 
 
 def test_the_audit_reads_a_differently_named_pass_through_as_a_stranger() -> None:
@@ -5293,6 +5367,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     55 after T564: four more `npc-teleporter` install steps: one before the files (clears the
     menus an earlier Install made), one after each `.dist` that moves its gossip menus off the
     base game's ids, and the put-back of the 19 base rows between them.
+    53 after T634: upstream renumbered its menus itself (38078d1d), so the two relocation
+    steps are gone.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5313,7 +5389,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        55,
+        53,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
@@ -6547,6 +6623,7 @@ def test_the_tortoise_applier_puts_a_put_back_through_its_guard(
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: object = None,
     ) -> ApplyReport:
         ran.append(m.id)
         return ApplyReport("install", m.id, family=m.type, done=("restore",))
@@ -6593,6 +6670,7 @@ def test_the_tortoise_guard_is_for_the_put_back_press_and_not_the_one_a_failed_b
         *,
         last: LastUpdate,
         automatic: bool = False,
+        complete: object = None,
     ) -> ApplyReport:
         ran.append(automatic)
         return ApplyReport("install", m.id, family=m.type, done=("restore",))

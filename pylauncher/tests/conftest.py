@@ -31,7 +31,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import docker as docker_module
 from yulon import log as log_module
-from yulon import platform
+from yulon import platform, server_build_gone
 from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -542,6 +542,20 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
     one.
     """
     monkeypatch.setattr(platform, "_resolved_docker_cli", "docker")
+
+
+@pytest.fixture(autouse=True)
+def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
+
+    Without this, every test that drives `Controller.start()` through seam-level fakes
+    (`docker.start_staged`, `port_conflicts`) would reach the real Docker CLI for that one
+    question, and the guard below fails it. `tests/test_compose_too_old.py` puts the real
+    `docker.compose_refusal` back and drives it through a runner double.
+    """
+    from yulon import docker
+
+    monkeypatch.setattr(docker, "compose_refusal", lambda *, wsl_distro=None: None)
 
 
 @pytest.fixture(autouse=True)
@@ -1236,6 +1250,27 @@ def _no_unit_test_asks_whether_the_database_is_there(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(docker_module, "database_volume", lambda *_a, **_k: None)
 
 
+REAL_IMAGE_REFUSAL = server_build_gone.refusal_before_start
+"""The real `server_build_gone.refusal_before_start`, for the tests about Start's image check."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_whether_the_image_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks Docker whether the built image is there (T627); a unit test hears nothing.
+
+    No refusal lets the Start go on as it did before T627, so every test written about
+    something else keeps testing that. The tests about the question put the real one back
+    with `real_image_read`.
+    """
+    monkeypatch.setattr(server_build_gone, "refusal_before_start", lambda *_a, **_k: None)
+
+
+@pytest.fixture
+def real_image_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_whether_the_image_is_there` for a test about the question."""
+    monkeypatch.setattr(server_build_gone, "refusal_before_start", REAL_IMAGE_REFUSAL)
+
+
 @pytest.fixture
 def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo `_no_unit_test_asks_whether_the_database_is_there` for a test about the question."""
@@ -1529,3 +1564,40 @@ def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker, "_console_send", unreachable)
     # T496: the command channels the wiring registers for a stop are this test's alone.
     monkeypatch.setattr(docker, "_save_channels", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_server_reservation_runs_at_a_real_docker() -> Iterator[None]:
+    """A lifecycle command or a press makes no real server reservation (T568).
+
+    `docker.server_claim()` is a `docker run` that the daemon arbitrates, and an engine or
+    controller test that fakes `docker.compose` fakes nothing it would answer. Off here; the
+    tests of the reservation itself (`test_server_claim.py`, `test_server_reservation.py`)
+    switch `RESERVATIONS_ON` on against `support_fake_docker`, and a guard test pins that the
+    default the app ships with is on.
+    """
+    from yulon import docker
+
+    # Not through `monkeypatch`: a test that calls `monkeypatch.undo()` part-way (several do)
+    # would switch the reservations back on under the rest of it.
+    was = docker.RESERVATIONS_ON
+    docker.RESERVATIONS_ON = False
+    yield
+    docker.RESERVATIONS_ON = was
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_probes_in_the_support_file(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """`system-info.txt` (T636) asks Docker and the OS how big the machine is; no unit test does.
+
+    Patched where `system_info` looks them up, so a test that hands its own
+    `machine=`/`engine=` (or calls `machine.machine_lines` itself) is untouched.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    from yulon.support import sources
+
+    monkeypatch.setattr(sources, "docker_size", lambda distro: None)
+    monkeypatch.setattr(sources, "machine_lines", lambda: ["CPU: test"])

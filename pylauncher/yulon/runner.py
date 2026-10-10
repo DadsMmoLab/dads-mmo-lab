@@ -28,7 +28,7 @@ import time
 import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
-from typing import TypeVar
+from typing import IO, TypeVar
 
 from yulon import ansi, winjob
 from yulon.after_stop import StopTookEffect
@@ -1432,6 +1432,126 @@ def run(
         )
     _note_answered(command)
     return proc
+
+
+def run_bytes(
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    *,
+    stdin: int | IO[bytes] | None = subprocess.DEVNULL,
+) -> subprocess.CompletedProcess[bytes]:
+    """`run()` for an answer that is bytes: stdout is not decoded or newline-translated (T632).
+
+    A file's hash is over its exact bytes; `run()`'s text mode turns CRLF into LF and
+    replaces what is not UTF-8, so the hash of what it returns is not the file's.
+    Does not raise on a non-zero exit; a timeout is reported as `run()` reports it.
+    """
+    logger.debug(f"run_bytes() called: command={command} cwd={cwd}")
+    try:
+        return subprocess.run(
+            command,
+            cwd=_cwd_arg(cwd),
+            env=child_env(env),
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            creationflags=creationflags(),
+            stdin=stdin,
+        )
+    except subprocess.TimeoutExpired:
+        _note_unanswered(command, timeout)
+        return subprocess.CompletedProcess(
+            command, TIMED_OUT_RETURNCODE, b"", f"{_TIMED_OUT} {timeout}s".encode()
+        )
+
+
+CANCELLED_RETURNCODE = 130
+"""The `returncode` `run_cancellable()` reports when its `cancel` was set (SIGINT's 128 + 2)."""
+
+_CANCELLED = "cancelled after"
+
+_CANCEL_POLL_SECONDS = 0.2
+"""How often `run_cancellable()` looks at its `cancel` and its deadline."""
+
+
+def cancelled(proc: subprocess.CompletedProcess[str]) -> bool:
+    """Whether `proc` is `run_cancellable()` giving up because its `cancel` was set."""
+    return proc.returncode == CANCELLED_RETURNCODE and proc.stderr.startswith(f"{_CANCELLED} ")
+
+
+def run_cancellable(
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    *,
+    cancel: threading.Event,
+    stdin: int | None = subprocess.DEVNULL,
+) -> subprocess.CompletedProcess[str]:
+    """`run()` that also ends its child, within a fifth of a second, when `cancel` is set (T621).
+
+    For the work nobody is waiting on: the background update refresh runs a `git fetch` per
+    clone, and a Quit or a press that starts must not sit behind one. A timeout is reported
+    as `run()` reports it (`timed_out()`), a cancel as `cancelled()`; neither raises. The
+    child leads its own process group off Windows and the whole group is ended, so git's
+    `git-remote-https` helper does not outlive its fetch; on Windows the tree is ended by
+    `_end_tree()`.
+    """
+    logger.debug(f"run_cancellable() called: command={command} cwd={cwd}")
+    proc = subprocess.Popen(
+        command,
+        cwd=_cwd_arg(cwd),
+        env=child_env(env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=stdin,
+        creationflags=creationflags(),
+        start_new_session=sys.platform != "win32",
+    )
+    deadline = None if timeout is None else time.monotonic() + timeout
+    why = ""
+    while True:
+        try:
+            out, err = proc.communicate(timeout=_CANCEL_POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            if cancel.is_set():
+                why = f"{_CANCELLED} request"
+            elif deadline is not None and time.monotonic() >= deadline:
+                why = f"{_TIMED_OUT} {timeout}s"
+            else:
+                continue
+            break
+        else:
+            return subprocess.CompletedProcess(command, proc.returncode, out, err)
+    _end_for_good(proc)
+    try:
+        out, err = proc.communicate(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        out = err = ""
+    if why.startswith(_TIMED_OUT):
+        _note_unanswered(command, timeout)
+        return subprocess.CompletedProcess(command, TIMED_OUT_RETURNCODE, _as_text(out), why)
+    return subprocess.CompletedProcess(command, CANCELLED_RETURNCODE, _as_text(out), why)
+
+
+def _end_for_good(proc: subprocess.Popen[str]) -> None:
+    """Kill `proc` and what it started, never raising."""
+    try:
+        if sys.platform == "win32":
+            _end_tree(proc)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError) as exc:
+        logger.debug(f"could not end the process group of pid {proc.pid}: {exc!r}")
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 TIMED_OUT_RETURNCODE = 124

@@ -17,13 +17,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "f19a18799a35f7c24bdcdc9ea399c601f166259b"
+            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "037c01418b5d01506917a3db9b44fd56ac5f965c"
+            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
           }
         ]
       },
@@ -92,6 +92,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,
@@ -190,7 +191,7 @@
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "866723612d93791e442fb1b18d642118fa682edd"
+            "rev": "ebe51a83b0fde5397f0ecd82a36cb6c40f667d36"
           }
         ]
       },
@@ -446,6 +447,19 @@
                   "on_error": "warn"
                 },
                 {
+                  "name": "cmangos custom",
+                  "on_update": "reapply_changed",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/utilities/cmangos_custom.sql"
+                  ],
+                  "on_error": "warn",
+                  "notes": [
+                    "tbc-db's InstallFullDB.sh runs utilities/cmangos_custom.sql last of its database steps, after the world core updates, the dbc data and ACID, on every full install with no option to leave it out, and stops on an error (T659). This phase sits after the core updates and the other database steps for the same reason: it updates columns that those add. It is `warn` here, not `fail`: a failure would drop and re-import the whole database for a set of data corrections.",
+                    "Every statement in the file is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts the row back, so it is safe to repeat; `sqlplan.repeat_problem` checks that again on the file before an update runs it, and a file of another shape is named and not run. An update applies it once to a server that has no record of it and again when upstream edits it."
+                  ]
+                },
+                {
                   "name": "spell_template hotfix",
                   "into": "mangos",
                   "statements": [
@@ -594,6 +608,7 @@
         }
       },
       "client": {
+        "addon_interface": 20400,
         "version": "2.4.3",
         "build": 8606,
         "required_build": 8606,
@@ -900,6 +915,19 @@
                   "on_error": "warn"
                 },
                 {
+                  "name": "cmangos custom",
+                  "on_update": "reapply_changed",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/utilities/cmangos_custom.sql"
+                  ],
+                  "on_error": "warn",
+                  "notes": [
+                    "classic-db's InstallFullDB.sh runs utilities/cmangos_custom.sql last of its database steps, after the world core updates, the dbc data and ACID, on every full install with no option to leave it out, and stops on an error (T659). This phase sits after the core updates and the other database steps for the same reason: it updates columns that those add. It is `warn` here, not `fail`: a failure would drop and re-import the whole database for a set of data corrections.",
+                    "Every statement in the file is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts the row back, so it is safe to repeat; `sqlplan.repeat_problem` checks that again on the file before an update runs it, and a file of another shape is named and not run. An update applies it once to a server that has no record of it and again when upstream edits it."
+                  ]
+                },
+                {
                   "name": "spell_template hotfix",
                   "into": "mangos",
                   "statements": [
@@ -1037,6 +1065,7 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.12.1",
         "build": 5875,
         "required_build": 5875,
@@ -1086,13 +1115,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "1181dev",
             "dest": "src/tortoise-wow",
-            "rev": "187af788177aa2f9f0e61eb8c5b9653d8f4f7199"
+            "rev": "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "83d88fdc034b224d88a2ecade975e26f8d1d513c",
+            "rev": "18d4d14b3efdd804dccc527003f5c92a02ff0c2c",
             "follow": "releases"
           }
         ]
@@ -1133,7 +1162,7 @@
           "ready": {
             "world": "World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login",
             "auth": null,
-            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\\[1146\\] Table .* doesn't exist|Your database structure is not up to date",
+            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\\[1146\\] Table .* doesn't exist|Your database structure is not up to date|Migration \\S+ with hash \\S+ failed to apply|DB AutoUpdater FAILED",
             "regex": true,
             "timeout_s": 10800,
             "restart_loop": 4
@@ -1215,6 +1244,10 @@
               "files": {
                 "aiplayerbot.conf": {
                   "template": "aiplayerbot.conf",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "ai/playerbot/aiplayerbot.conf.dist.in"
+                  },
                   "keys": {
                     "AiPlayerbot.Enabled": "1",
                     "AiPlayerbot.RandomBotAutoCreate": "1",
@@ -1226,6 +1259,10 @@
                 },
                 "modules/tortoise_bots.conf": {
                   "template": "modules/tortoise_bots.conf.dist",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "conf/tortoise_bots.conf.dist"
+                  },
                   "keys": {
                     "TortoiseBots.AutoTest": "0",
                     "TortoiseBots.PacketBridgeTest": "0",
@@ -1268,6 +1305,7 @@
                   "keys": {
                     "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
                     "ForcePinAccountRank": "10",
+                    "LogFilter_SQLText": "1",
                     "LogsDir": "\"../logs/\""
                   }
                 }
@@ -1371,7 +1409,15 @@
                 }
               ],
               "marker_db": "tw_world"
-            }
+            },
+            "patches": [
+              {
+                "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
+                "source": "src/tortoise-wow",
+                "obsolete_when_absent": "std::getline(std::cin",
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+              }
+            ]
           }
         }
       },
@@ -1451,6 +1497,7 @@
         }
       },
       "client": {
+        "addon_interface": 11200,
         "version": "1.18.1",
         "build": 7272,
         "required_build": 5875,
@@ -1500,7 +1547,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "4948d1a9290cb1046eede1dbf289789200ea050e"
+            "rev": "25d3e6efbee97c3cb38830003e2460d98e235f46"
           }
         ]
       },
@@ -1902,6 +1949,7 @@
         "local_address_column": "localAddress"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12342,
         "required_build": 12340,
@@ -2392,25 +2440,25 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "7bae1b5c58c76a0aa20381155edc08096d1485b2"
+            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
           },
           {
             "repo": "azerothcore/mod-ale",
             "branch": "master",
             "dest": "modules/mod-ale",
-            "rev": "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+            "rev": "84b85cc55980dbf67d596f3d5cb34ded10c59102"
           },
           {
             "repo": "DadsMmoLab/dads-mmo-lab",
             "branch": "mod-unbound",
             "dest": "modules/mod-unbound",
-            "rev": "49b334be72d4f1837c712d4f9ec7bcca05742155"
+            "rev": "e52e7d0472039050b352141a0756e0660825abde"
           }
         ]
       },
@@ -2568,6 +2616,7 @@
         "ale": "acore_ale"
       },
       "client": {
+        "addon_interface": 30300,
         "version": "3.3.5a",
         "build": 12340,
         "required_build": 12340,

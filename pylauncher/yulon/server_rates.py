@@ -213,16 +213,17 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="f19a18799a35f7c24bdcdc9ea399c601f166259b",
+        rev="2a2211cd8f3d157da432ec0175ddd4b8a191931f",
         keys=_ALL_KEYS,
         notes={},
     ),
-    # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin (7f12e89e)
-    # until T580 moves it; wow-wotlk moved on to f19a1879 (T389).
+    # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin. It shipped on
+    # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389; T655
+    # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two).
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+        rev="2a2211cd8f3d157da432ec0175ddd4b8a191931f",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -249,14 +250,14 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
-        rev="187af788177aa2f9f0e61eb8c5b9653d8f4f7199",
+        rev="6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a",
         keys=_ALL_KEYS,
         notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="4948d1a9290cb1046eede1dbf289789200ea050e",
+        rev="25d3e6efbee97c3cb38830003e2460d98e235f46",
         keys=_ALL_KEYS,
         notes={},
     ),

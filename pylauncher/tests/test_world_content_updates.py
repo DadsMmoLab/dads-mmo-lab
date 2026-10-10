@@ -131,6 +131,7 @@ def test_the_shipped_tbc_and_vanilla_plans_bring_new_content_updates_and_name_th
         "instance updates": "report",
         "ACID": "report",
         "core updates": "refuse_new",
+        "cmangos custom": "reapply_changed",
         "playerbots world": "replace_changed",
     }, said
 

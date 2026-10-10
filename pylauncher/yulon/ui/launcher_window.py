@@ -120,6 +120,7 @@ STARTING_BANNER = "The server is starting…"
 STOPPING_BANNER = "The server is stopping…"
 PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
 LOOP_BANNER = "The world server keeps crashing"
+FAILED_BANNER = "The world server is stuck at a failed update"
 STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
 STOPPING_REASON = (
     "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
@@ -130,6 +131,10 @@ RESTARTING_REASON = "The server is restarting. Once the realm is back up, PLAY s
 LOOP_REASON = (
     "The world server keeps crashing and starting again, so nobody can log in. The Server tab "
     "says what it printed."
+)
+FAILED_REASON = (
+    "The world server is stuck at a database update it could not apply, so nobody can log in. "
+    "The Server tab says which update."
 )
 PARTIAL_REASON = (
     "The server is partly up: PLAY starts the rest, waits for the realm, then starts the game."
@@ -151,6 +156,7 @@ _REASONS = {
     "building": STARTING_REASON,
     "restarting": RESTARTING_REASON,
     "loop": LOOP_REASON,
+    "failed": FAILED_REASON,
     "partial": PARTIAL_REASON,
     "unknown": UNKNOWN_REASON,
 }
@@ -1269,6 +1275,8 @@ class LauncherWindow(QWidget):
             text = PARTIAL_BANNER
         elif status == "loop":
             text = LOOP_BANNER  # T391: never "starting" over a crash loop
+        elif status == "failed":
+            text = FAILED_BANNER  # T608: nor over a world stuck at a failed update
         elif status == "unknown":
             # T194 C7: the Server tab's Docker banner's own title.
             text = docker_advice.UNKNOWN_TITLE

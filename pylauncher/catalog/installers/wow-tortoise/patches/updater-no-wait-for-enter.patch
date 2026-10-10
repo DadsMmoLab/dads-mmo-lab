@@ -1,0 +1,15 @@
+diff --git a/src/shared/Database/AutoUpdater.cpp b/src/shared/Database/AutoUpdater.cpp
+index 6d5350e..9ceaae9 100644
+--- a/src/shared/Database/AutoUpdater.cpp
++++ b/src/shared/Database/AutoUpdater.cpp
+@@ -234,8 +234,8 @@ namespace DBUpdater
+             if (!ExecuteUpdate(update, targetDatabase))
+             {
+                 sLog.outError("[DB Auto-Updater] Migration %s with hash %s failed to apply.", update.Name.c_str(), update.Hash.c_str());
+-                std::string line;
+-                std::getline(std::cin, line);
++                // No wait for Enter here: with stdin open (a container with a tty) the read
++                // never returns, so the failure was never reported and SIGTERM was never heard.
+                 return false;
+            }
+         }

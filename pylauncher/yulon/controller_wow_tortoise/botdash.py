@@ -9,10 +9,13 @@ source for the tab's log panel.
 
 1. the refusals, before anything is written: no dashboard in this module's
    checkout, a compose file this app did not write, a mixed SELinux label;
-2. the image, built from `tools/observability` in the module checkout the
-   install already cloned. First because it is the slow step (a Go build, a
-   few minutes the first time) and the one most likely to fail -- a failure
-   here has changed nothing;
+2. the image. First choice (T542) is TortoiseBots' prebuilt linux binary, from
+   the newest release at or before the module's commit, checked against the
+   checksum its release published (`botdash_binary`); with none that fits, or a checksum
+   that does not match, one line says why and the image is built from `tools/observability`
+   in the module checkout the install already cloned (a Go build, a few minutes
+   the first time). First because it is the slow step and the one most likely to
+   fail -- a failure here has changed nothing;
 3. `.env` gets this install's session secret if it has none;
 4. the conf is backed up once (`.before-dashboard`, `copy2`, so the mode goes
    with it) and the three keys are written, keeping the file's mode;
@@ -30,7 +33,8 @@ world keeps sending to an address nobody listens on until it restarts, which is
 harmless; the tab offers the restart.
 
 **After an update** the image is rebuilt from the module the update moved
-(`after_update()`). If that rebuild fails after the module moved, the old
+(`after_update()`), the binary picked again for the module's new commit. If that
+rebuild fails after the module moved, the old
 container is removed rather than left running: its daemon speaks the old
 module's datagram protocol and nothing on either side says so (T162, measured
 on TortoiseBots 632e1b63 -> ad9d71fb, protocol 4 -> 5: the daemon never reads
@@ -54,12 +58,13 @@ from pathlib import Path
 from yulon import docker
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.catalog import bot_dashboard as files
-from yulon.catalog import composegen
+from yulon.catalog import composegen, upstream
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.native import LatestRoute, stop_abandoned_worker
 from yulon.controller import Controller, StartRefused
-from yulon.controller_wow_tortoise import botpool
+from yulon.controller_wow_tortoise import botdash_binary, botpool
 from yulon.log import get_logger
+from yulon.selfupdate import fetch
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -107,6 +112,11 @@ class Dashboard:
 
     url: str = files.URL
 
+    http_get: upstream.HttpGet = upstream.https_get
+    """How the GitHub API is asked which prebuilt dashboard fits (T542). A test's seam."""
+    open_url: fetch.Opener = fetch._open
+    """How a release file is fetched (T542). A test's seam."""
+
     # -- readings ---------------------------------------------------------
 
     def state(self) -> files.State:
@@ -120,7 +130,6 @@ class Dashboard:
     def switch_on(self, *, lan: bool, cancel: threading.Event | None = None) -> Iterator[str]:
         """Build, write, start, restart. Yields what it is doing; raises `SwitchError`."""
         conf = self._conf_path()
-        context = self._context()
         base = files.base_path(self.server_dir)
         text = self._read_ours(base)
         if files.block_in(text) is not None:
@@ -132,16 +141,16 @@ class Dashboard:
         service = files.service(self.entry)
         image = files.image_ref(self.entry, self.server_dir)
 
-        yield (
-            "Building the bot dashboard from the bots module's own source. The first build "
-            "downloads Go and takes a few minutes…"
-        )
-        run = yield from _streamed(
-            lambda sink: docker.build_image(
-                context, image, wsl_distro=self.wsl_distro, sink=sink, cancel=cancel
-            ),
-            cancel=cancel,
-        )
+        try:
+            context = yield from self._build_context(cancel)
+            run = yield from _streamed(
+                lambda sink: docker.build_image(
+                    context.path, image, wsl_distro=self.wsl_distro, sink=sink, cancel=cancel
+                ),
+                cancel=cancel,
+            )
+        finally:
+            botdash_binary.clear(self.server_dir)
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise SwitchStopped("Stopped before anything was changed. The dashboard is still off.")
         if run.returncode != 0:
@@ -337,17 +346,20 @@ class Dashboard:
         distro = self.wsl_distro
         built = False
         try:
-            context = self._context()
-            run = yield from _streamed(
-                lambda sink: docker.build_image(
-                    context,
-                    files.image_ref(self.entry, self.server_dir),
-                    wsl_distro=distro,
-                    sink=sink,
+            try:
+                context = yield from self._build_context(cancel)
+                run = yield from _streamed(
+                    lambda sink: docker.build_image(
+                        context.path,
+                        files.image_ref(self.entry, self.server_dir),
+                        wsl_distro=distro,
+                        sink=sink,
+                        cancel=cancel,
+                    ),
                     cancel=cancel,
-                ),
-                cancel=cancel,
-            )
+                )
+            finally:
+                botdash_binary.clear(self.server_dir)
             if run.returncode == docker.CANCELLED_RETURNCODE:
                 return _Failed("the build was stopped")
             if run.returncode != 0:
@@ -361,6 +373,10 @@ class Dashboard:
                 self.server_dir, service, force_recreate=True, wsl_distro=distro
             )
             after = docker.container_ip(service, wsl_distro=distro)
+        except SwitchStopped:
+            # A Stop during the binary's download: the dashboard WAS on, so this
+            # is a stopped build like the one below, not "still off" (T542).
+            return _Failed("the build was stopped")
         except (SwitchError, docker.DockerCommandError, OSError) as exc:
             return _Failed(str(exc), built=built)
         try:
@@ -503,6 +519,47 @@ class Dashboard:
             )
         return context
 
+    def _binary_repo(self) -> str | None:
+        """The GitHub slug the catalog clones the bots module from; its releases hold the binary."""
+        source = botpool.module_source(self.entry)
+        return None if source is None else upstream.github_slug(source.repo)
+
+    def _build_context(self, cancel: threading.Event | None) -> Generator[str, None, _Context]:
+        """What the image is built from: TortoiseBots' prebuilt binary, else the module's source.
+
+        The prebuilt one (T542) when TortoiseBots has a release that fits this
+        server's bots module and its checksum holds; otherwise ONE line saying why
+        and the Go build the switch always had. Raises `SwitchStopped` when the
+        player's Stop ended the download, `SwitchError` when neither exists.
+        The caller clears the staging folder once the build has run.
+        """
+        try:
+            staged = botdash_binary.stage(
+                self.server_dir,
+                self._module_head(),
+                self._binary_repo(),
+                daemon_arch=lambda: docker.daemon_arch(wsl_distro=self.wsl_distro),
+                get=self.http_get,
+                open_url=self.open_url,
+                cancelled=lambda: cancel is not None and cancel.is_set(),
+            )
+        except botdash_binary.Stopped as exc:
+            raise SwitchStopped(
+                "Stopped before anything was changed. The dashboard is still off."
+            ) from exc
+        except botdash_binary.Unavailable as exc:
+            yield (
+                f"The prebuilt bot dashboard is not used: {exc}. Building it from the bots "
+                "module's own source instead; the first build downloads Go and takes a few "
+                "minutes…"
+            )
+            return _Context(self._context())
+        yield (
+            f"Using TortoiseBots' prebuilt bot dashboard from release {staged.tag}; the "
+            "download matches the checksum that release published."
+        )
+        return _Context(staged.context)
+
     def _read_ours(self, base: Path) -> str:
         try:
             text = files.read_exact(base)
@@ -571,6 +628,13 @@ def _streamed(
     if failure:
         raise SwitchError(f"the build could not be run: {failure[0]}") from failure[0]
     return outcome[0]
+
+
+@dataclass(frozen=True)
+class _Context:
+    """The folder the dashboard image is built from."""
+
+    path: Path
 
 
 @dataclass(frozen=True)

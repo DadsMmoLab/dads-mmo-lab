@@ -14,12 +14,15 @@ back before the old build starts again.
 What lives here is the seam and its two records. The dump and the restore are the
 Maintenance tab's own (`controller_wow_wotlk.maintenance.backup()` / `restore()`),
 and `install_wiring.database_snapshot_for()` binds them, because `catalog/` must
-not import a controller package (the same shape as the import probe). The one
-thing done here is forgetting older copies: only the last one per server is kept.
+not import a controller package (the same shape as the import probe). Two things
+are done here: forgetting older copies (only the last one per server is kept), and
+finding, for "Return to the tested pin…", the newest dump that is from before the
+updates the tested commit does not ship (`copy_from_before()`, T630).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +48,28 @@ It holds the databases as the new build left them, so nothing that build wrote
 is lost. A label of its own, not the Maintenance tab's `pre-restore`, so
 `prune_older()` can keep only the newest per database without touching a copy
 the player's own Restore took (cold review of 23361ca3)."""
+
+
+BACKUPS_FOLDER = Path("sql_scripts") / "backups"
+"""Where every copy and backup of a server's databases lives, relative to its folder.
+
+`controller_wow_wotlk.maintenance.BACKUP_SUBDIR`, spelled again because `catalog/`
+must not import a controller package; a test pins the two equal (T630)."""
+
+DUMP_TRAILER = b"-- Dump completed"
+"""What mysqldump writes last; a dump without it was cut short (`maintenance._DUMP_TRAILER`)."""
+
+UPDATES_TABLE = b"CREATE TABLE `updates`"
+MIGRATIONS_TABLE = b"CREATE TABLE `migrations`"
+"""Tortoise's ledger table in a mysqldump (T632); AzerothCore's is `UPDATES_TABLE`."""
+"""What a dump of an AzerothCore database holds for its update ledger (T630)."""
+
+DUMP_READ_BYTES = 4 * 1024 * 1024
+"""How much of a dump `copy_from_before()` reads at a time; a world dump is some hundreds of MB."""
+
+_EDGE_BYTES = 8192
+
+_STAMPED = re.compile(r"^\d{8}_\d{6}_")
 
 
 @dataclass(frozen=True)
@@ -116,6 +141,26 @@ def _rollback_safety_database(path: Path) -> str | None:
     return path.stem.split(marker, 1)[1]
 
 
+def kept_copies_bytes(directory: Path) -> int:
+    """The bytes the update's own copies take in `directory`: its copies and safety copies.
+
+    What "Update the server to latest…" shows when failed updates have piled up (T646). A backup the
+    player took is not counted. Never raises: a folder that cannot be read counts as nothing.
+    """
+    total = 0
+    try:
+        found = list(directory.iterdir())
+    except OSError:
+        return 0
+    for path in found:
+        if is_snapshot_file(path) or _rollback_safety_database(path) is not None:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
 def older_copies(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     """The update copies in `directory` other than `keep`, newest first. Never raises.
 
@@ -135,10 +180,11 @@ def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     """Remove every update copy in `directory` that is not in `keep`. Never raises.
 
     The owner's rule of 2026-10-04: only the last copy per server is kept. Called
-    once a copy is no longer the only good one there is -- after the new build came
-    up, or after the copy went back -- never when a copy is taken: a copy that could
-    not be put back is named in the sentence as the one to restore, and the next
-    press must not remove it before the player has.
+    only once a press SUCCEEDED -- its new build up and its world ready (T633, the
+    owner's "Delete only after success" of 2026-10-09) -- never when a copy is taken
+    and never after a failure, a Stop, a refusal or a rollback: a copy that could not
+    be put back is named in the sentence as the one to restore, and an earlier
+    update's copy is what "Return to the tested pin…" needs to go back (T630).
 
     The rollback's own safety copies (`ROLLBACK_SAFETY_LABEL`) go the same way:
     the newest per database is kept, every older one removed. The timestamp
@@ -176,3 +222,123 @@ def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     if removed:
         logger.info(f"forgot {len(removed)} older update copy file(s) in {directory}")
     return tuple(removed)
+
+
+def copy_from_before(
+    directory: Path, database: str, updates: Sequence[str], *, game: str
+) -> Path | None:
+    """The newest complete dump of `database` in `directory` naming none of `updates`; never raises.
+
+    What "Return to the tested pin…" names when the database already has updates the
+    tested commit does not ship (T630): the way back is a copy from before them. Read
+    from the dump itself, not from its label or its time: the copy an update kept is
+    from before THAT update, which after a second update is not before the first, and a
+    restore of a copy that still holds them would cost the player everything since and
+    open nothing. Any label counts (a backup the player took, an update's copy, a
+    restore's safety copy); a dump that was cut short, that has no `updates` table, or
+    that Restore would refuse as another game's (`_recorded_for()`), is not one a restore
+    can be sent to. None when there is no such dump or the folder cannot be read.
+    """
+    try:
+        found = sorted(
+            path
+            for path in directory.iterdir()
+            if _STAMPED.match(path.name) and path.name.endswith(f"_{database}.sql")
+        )
+    except OSError:
+        return None
+    for path in reversed(found):
+        if _recorded_for(path, game) and _holds_none_of(path, updates):
+            return path
+    return None
+
+
+_DUMP_BANNER = re.compile(rb"(?:\A|\n)--\s+(MySQL|MariaDB)\s+dump\s")
+_GAME_RECORD_LEAD = b"-- yulon-backup:"
+_GAME_RECORD = re.compile(rb"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
+
+
+def _recorded_for(path: Path, game: str) -> bool:
+    """Would Maintenance's Restore take this dump as `game`'s? Never raises (T630, T603).
+
+    `maintenance.backup_game()`'s reading, spelled again because `catalog/` must not
+    import a controller package (a test pins the two on every shape): the records in
+    the preamble above the dump's banner. No record is an older backup, which Restore
+    asks about and then takes; a record of another game, one that does not read, or
+    two that disagree, Restore refuses -- WotLK and Unbound share their schema names.
+    """
+    try:
+        with path.open("rb") as dump:
+            head = dump.read(_EDGE_BYTES)
+    except OSError:
+        return False
+    banner = _DUMP_BANNER.search(head)
+    if banner is None:
+        return False
+    found: set[str] = set()
+    for line in head[: banner.start()].split(b"\n"):
+        line = line.rstrip(b" \t\r")
+        if not line.startswith(_GAME_RECORD_LEAD):
+            continue
+        record = _GAME_RECORD.fullmatch(line)
+        if record is None:
+            return False
+        found.add(record.group(1).decode("ascii"))
+    return found <= {game}
+
+
+def copy_from_before_migrations(
+    directory: Path,
+    database: str,
+    hashes: Sequence[str],
+    *,
+    game: str,
+) -> Path | None:
+    """`copy_from_before()` for Tortoise's `migrations` table, keyed by hash (T632); never raises.
+
+    The newest complete dump of `database` with a `migrations` table whose rows hold none
+    of `hashes` (upper-case SHA-1 of the files the tested commit does not ship) and that
+    that Restore would take as `game`'s (`_recorded_for()`, T603: another game's is never named).
+    None when there is no such dump or the folder cannot be read.
+    """
+    try:
+        found = sorted(
+            path
+            for path in directory.iterdir()
+            if _STAMPED.match(path.name) and path.name.endswith(f"_{database}.sql")
+        )
+    except OSError:
+        return None
+    for path in reversed(found):
+        if _recorded_for(path, game) and _holds_none_of(path, hashes, table=MIGRATIONS_TABLE):
+            return path
+    return None
+
+
+def _holds_none_of(path: Path, updates: Sequence[str], table: bytes = UPDATES_TABLE) -> bool:
+    """A complete dump with an `updates` table whose rows name none of `updates`. Never raises.
+
+    mysqldump quotes each row's name (`'2026_09_21_00_playerbots_speech.sql'`), so the
+    quoted name is looked for, across the seams between reads.
+    """
+    needles = [f"'{name}'".encode() for name in updates]
+    # The tail kept between reads: longer than any name, and holding the trailer line
+    # at the end (`maintenance._EDGE_BYTES`'s 8 KiB).
+    keep = max([_EDGE_BYTES, *(len(needle) for needle in needles)])
+    carry = b""
+    has_table = False
+    try:
+        with path.open("rb") as dump:
+            while True:
+                piece = dump.read(DUMP_READ_BYTES)
+                if not piece:
+                    break
+                window = carry + piece
+                if any(needle in window for needle in needles):
+                    return False
+                has_table = has_table or table in window
+                carry = window[-keep:]
+    except OSError as exc:
+        logger.warning(f"could not read {path} to see which updates it holds: {exc}")
+        return False
+    return has_table and DUMP_TRAILER in carry

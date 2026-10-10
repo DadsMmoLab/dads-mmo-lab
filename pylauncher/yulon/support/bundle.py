@@ -24,6 +24,12 @@ time, never below `MIN_TAIL` (Codex T93 review: dropping alone left a zip twice
 the cap). Every drop and cut is a
 manifest line. Only when every file is at its floor is a zip written over the
 cap, and then the manifest and the tab say so.
+**It is made quickly** (T638): the cleaner reads each text twice and costs ~1.7 s per MiB, so
+`_trim()` bounds what it reads BEFORE it starts for the OLD logs only -- an old run, snapshot or
+app log rotation keeps its last `OLD_TAIL`, and the old ones share `OLD_BUDGET` (the oldest beyond
+it are left out). The newest runs, the app log, containers and confs are left to the size cap.
+The manifest names every cut and every log left out. `progress` is told what is happening, in
+words with no file name.
 **A very short password is named, never promised away**: one under the
 redactor's `TOKEN_FLOOR` is masked only where a password is written, so the
 manifest says where one is set and asks the user to look before sharing.
@@ -58,6 +64,16 @@ ZIP_CAP = 8_000_000
 
 MIN_TAIL = 32 * 1024
 """Bytes. A file is never cut shorter than this to fit the cap: its last lines are the point."""
+
+OLD_TAIL = 128 * 1024
+"""Bytes. An old run, a snapshot or an app log rotation keeps only its last this much (T638)."""
+
+OLD_BUDGET = 1024 * 1024
+"""Bytes of old logs, together, that are cleaned; the oldest beyond it are left out (T638).
+
+The newest runs, the app log, the container logs and the confs are NOT shortened for speed: the
+start of a failed install is the diagnosis, and only the size cap (`_fit`) may cut them.
+"""
 
 _ENTRY_OVERHEAD = 128
 """Local header + central directory record per member, rounded up, for the size estimate."""
@@ -110,6 +126,8 @@ class Seams:
 
     live_logs: Callable[[InstallFacts, SilentTargets], list[LiveLog]] = _collect_live_logs
     docker_version: Callable[[str | None], str | None] = src.docker_version
+    machine: Callable[[], list[str]] | None = None
+    docker_size: Callable[[str | None], tuple[int, int] | None] | None = None
     now: Callable[[], datetime] = _utc_now
 
 
@@ -123,7 +141,11 @@ class BundleReport:
     dropped: tuple[str, ...]
     size: int
     cut: tuple[str, ...] = ()
-    """Members cut shorter than their 2 MiB to fit the cap."""
+    """Members cut shorter than their 2 MiB, to fit the cap or to keep making the file quick."""
+    unvouched: tuple[str, ...] = ()
+    """Members left out because their cut text could not be vouched for (T606), not for size."""
+    quick_dropped: tuple[str, ...] = ()
+    """Old logs left out to keep making the file quick (T638), not for the zip's size."""
     short_passwords: tuple[str, ...] = ()
     """Where a password too short to take out of free text is set (`sources.Known.short`)."""
 
@@ -169,16 +191,14 @@ class _Collector:
         )
 
     def text(self, name: str, text: str, group: str, mtime: float = 0.0) -> None:
-        """Add a member. A text the redactor cannot vouch for is left out, and says so (T595)."""
+        """Add a member, its text still raw: `_clean()` redacts what survives `_trim()` (T638)."""
         try:
-            data = self._checked(text).encode("utf-8")
             safe_name = self._checked(name)
         except Unredactable:
             self.skip(name, LEFT_OUT)
             return
         name = self._unique(safe_name)
-        raw = text if group in _CUTTABLE else None
-        self.members.append(_Member(name, data, group, mtime, raw=raw))
+        self.members.append(_Member(name, b"", group, mtime, raw=text))
 
     def _unique(self, name: str) -> str:
         """`name`, or `name` with ` (2)` before its suffix when that is already taken.
@@ -267,6 +287,7 @@ def save(
     seams: Seams | None = None,
     home: Path | None = None,
     cap_bytes: int = ZIP_CAP,
+    progress: Callable[[str], None] | None = None,
 ) -> BundleReport:
     """Gather the known passwords, then `build()`. Raises `OSError` only if `dest` is unwritable.
 
@@ -288,6 +309,7 @@ def save(
         gaps=known.missing,
         short=known.short,
         cap_bytes=cap_bytes,
+        progress=progress,
     )
 
 
@@ -300,12 +322,16 @@ def build(
     gaps: Sequence[str] = (),
     short: Sequence[str] = (),
     cap_bytes: int = ZIP_CAP,
+    progress: Callable[[str], None] | None = None,
 ) -> BundleReport:
-    """Collect every source independently, redact, fit under the cap, replace `dest`.
+    """Collect every source independently, shorten, redact, fit under the cap, replace `dest`.
 
     `short` names where a password under `TOKEN_FLOOR` is set; the manifest
-    then warns instead of promising every password is gone.
+    then warns instead of promising every password is gone. `progress` is told, in
+    words with no file name in them, what the build is doing; a sink that raises is dropped.
     """
+    say = _Progress(progress)
+    say("Reading the logs and asking each server for its log…")
     seams = seams if seams is not None else Seams()
     collector = _Collector(redactor)
     collector.files("app", src.app_log_files(sources.app_log))
@@ -332,15 +358,38 @@ def build(
         collector.live(install, seams.live_logs, silent)
         collector.confs(install)
     # After the live logs, so a docker that went silent there is not asked for its version.
-    info = src.system_info(sources, seams.docker_version, silent_targets=silent)
+    info = src.system_info(
+        sources,
+        seams.docker_version,
+        silent_targets=silent,
+        machine=seams.machine,
+        engine=seams.docker_size,
+    )
     collector.text("system-info.txt", info, "info")
     stamp = seams.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    newest_runs = _newest_runs(
+        sorted((m for m in collector.members if m.group == "runs"), key=_written)
+    )
+    quick = _trim(collector.members, newest_runs)
+    members = _clean(quick.kept, collector, redactor.checked, say)
 
     def manifest(fit: _Fit, over: bool) -> _Member:
-        text = _manifest_text(stamp, fit, collector.skipped, gaps, short, cap_bytes, over=over)
+        text = _manifest_text(
+            stamp,
+            fit,
+            collector.skipped,
+            gaps,
+            short,
+            cap_bytes,
+            quick=_final(quick, fit),
+            over=over,
+        )
         return _Member("MANIFEST.txt", redactor.redact(text).encode("utf-8"), "manifest")
 
-    fit, data = _fit(collector.members, cap_bytes, manifest, redactor.checked)
+    say("Packing the zip…")
+    fit, data = _fit(members, cap_bytes, manifest, redactor.checked, newest_runs)
+    quick = _final(quick, fit)
+    say("Writing the file…")
     _write_atomically(dest, data)
     logger.info(f"support file written: {len(fit.kept)} files, {len(data)} bytes")
     return BundleReport(
@@ -349,7 +398,9 @@ def build(
         skipped=tuple(collector.skipped),
         dropped=tuple(member.name for member in fit.dropped),
         size=len(data),
-        cut=tuple(fit.cuts),
+        cut=tuple(dict.fromkeys([*quick.cuts, *fit.cuts])),
+        unvouched=tuple(member.name for member in fit.unvouched),
+        quick_dropped=tuple(member.name for member in quick.dropped),
         short_passwords=tuple(redactor.redact(where) for where in short),
     )
 
@@ -367,6 +418,12 @@ def short_password_warning(where: Sequence[str]) -> str:
     )
 
 
+def _cut_line(name: str, size: int) -> str:
+    if size == 0:
+        return f"  {name}  nothing of it kept (its final line alone was over the limit)"
+    return f"  {name}  last {size} bytes kept"
+
+
 def _manifest_text(
     stamp: str,
     fit: _Fit,
@@ -375,6 +432,7 @@ def _manifest_text(
     short: Sequence[str],
     cap: int,
     *,
+    quick: _Quick,
     over: bool,
 ) -> str:
     lines = [f"Yu'lon support file, made {stamp} by Yu'lon {__version__}."]
@@ -396,7 +454,8 @@ def _manifest_text(
         lines += _PROMISE
     lines += ["", "Included:"]
     lines += [
-        f"  {m.name}  ({_WHAT[m.group]}{', cut shorter' if m.name in fit.cuts else ''}, "
+        f"  {m.name}  ({_WHAT[m.group]}"
+        f"{', cut shorter' if m.name in fit.cuts or m.name in quick.cuts else ''}, "
         f"{len(m.data)} bytes)"
         for m in fit.kept
     ] or ["  nothing"]
@@ -406,12 +465,27 @@ def _manifest_text(
     if fit.dropped:
         lines += ["", f"Left out to keep the file under {megabytes} MB, oldest first:"]
         lines += [f"  {m.name}" for m in fit.dropped]
+    if quick.dropped:
+        lines += [
+            "",
+            "Left out to keep saving this file quick (the oldest logs, past their share):",
+        ]
+        lines += [f"  {m.name}" for m in quick.dropped]
+    if quick.cuts:
+        lines += [
+            "",
+            "Cut shorter to keep saving this file quick (the END of each is kept):",
+        ]
+        lines += [_cut_line(name, size) for name, size in sorted(quick.cuts.items())]
+    if fit.unvouched:
+        lines += ["", "Left out because the cleaner could not vouch for the shorter text:"]
+        lines += [f"  {m.name}" for m in fit.unvouched]
     if fit.cuts:
         lines += [
             "",
             f"Cut shorter to keep the file under {megabytes} MB (the END of each is kept):",
         ]
-        lines += [f"  {name}  last {size} bytes kept" for name, size in sorted(fit.cuts.items())]
+        lines += [_cut_line(name, size) for name, size in sorted(fit.cuts.items())]
     if over:
         lines += [
             "",
@@ -447,6 +521,122 @@ def _zip(members: Sequence[_Member]) -> bytes:
     return buffer.getvalue()
 
 
+class _Progress:
+    """`progress`, if any, and never a failure of it: a window that went away is not the zip's."""
+
+    def __init__(self, sink: Callable[[str], None] | None) -> None:
+        self._sink = sink
+
+    def __call__(self, line: str) -> None:
+        if self._sink is None:
+            return
+        try:
+            self._sink(line)
+        except Exception as exc:  # boundary: a progress line never breaks the zip
+            logger.debug(f"support file: progress sink failed: {exc}")
+            self._sink = None
+
+
+@dataclass
+class _Quick:
+    """What `_trim()` kept, cut and left out so the cleaner has a bounded amount to read."""
+
+    kept: list[_Member]
+    cuts: dict[str, int]
+    """Member name -> the bytes of its text still kept, in the order first cut."""
+    dropped: list[_Member]
+
+
+def _only_the_notice(raw: str) -> bool:
+    """`raw` is a cut's notice and nothing after it: no whole line fitted (T638)."""
+    return raw.startswith("[earlier lines dropped") and raw.count("\n") == 1
+
+
+def _kept_bytes(member: _Member) -> int:
+    """The bytes of its text a cut left, or 0 when nothing but the notice is left of it."""
+    assert member.raw is not None
+    return 0 if _only_the_notice(member.raw) else _raw_size(member)
+
+
+def _tail(member: _Member, limit: int) -> _Member:
+    """`member` keeping whole lines from the END of its RAW text, within `limit` bytes (T638).
+
+    Cut BEFORE cleaning, like `_shorter()`, so a secret is never split by the cut: the first
+    line of the kept tail is dropped unless it starts the text, and a tail with no newline in
+    it (the last line alone is over the limit) keeps nothing but the notice.
+    """
+    assert member.raw is not None
+    notice = (
+        f"[earlier lines dropped: Yu'lon kept the last {limit // 1024} KiB of this file "
+        "to keep saving the support file quick]\n"
+    )
+    return replace(member, raw=src.keep_tail(member.raw, limit, notice=notice))
+
+
+def _is_old(member: _Member, newest_runs: frozenset[str]) -> bool:
+    """A snapshot, a run that is none of the newest, an app log rotation (`_cut_tier` 1)."""
+    return (
+        member.group == "snapshots"
+        or (member.group == "runs" and member.name not in newest_runs)
+        or _cut_tier(member) == 1
+    )
+
+
+def _trim(members: list[_Member], newest_runs: frozenset[str]) -> _Quick:
+    """Bound what the cleaner reads (T638): old logs to their tail and a shared budget.
+
+    The cleaner reads every kept text twice and its cost is linear in the size, so this is
+    what makes the press quick. Every cut and every log left out is named in the manifest.
+    The newest runs, the app log, containers and confs are not touched here.
+    """
+    quick = _Quick(kept=list(members), cuts={}, dropped=[])
+    old: list[_Member] = []
+    for index, member in enumerate(quick.kept):
+        if _is_old(member, newest_runs):
+            if _raw_size(member) > OLD_TAIL:
+                member = _tail(member, OLD_TAIL)
+                quick.kept[index] = member
+                quick.cuts[member.name] = _kept_bytes(member)
+            old.append(member)
+    old.sort(key=lambda m: m.mtime)
+    # Oldest first out, until the old logs together fit their share.
+    while sum(_raw_size(m) for m in old) > OLD_BUDGET:
+        victim = old.pop(0)
+        quick.kept.remove(victim)
+        quick.dropped.append(victim)
+        quick.cuts.pop(victim.name, None)
+    return quick
+
+
+def _final(quick: _Quick, fit: _Fit) -> _Quick:
+    """`quick` as the zip ends up: a cut file the cleaner refused or the size cap left out is not
+    listed as cut, and one the size cap cut further is listed with its final size (T638)."""
+    kept = {member.name for member in fit.kept}
+    cuts = {name: fit.cuts.get(name, size) for name, size in quick.cuts.items() if name in kept}
+    return _Quick(kept=quick.kept, cuts=cuts, dropped=quick.dropped)
+
+
+def _clean(
+    members: Sequence[_Member],
+    collector: _Collector,
+    check: Callable[[str], str],
+    say: _Progress,
+) -> list[_Member]:
+    """Redact each member's text; one the cleaner cannot vouch for is left out and says so."""
+    cleaned: list[_Member] = []
+    for number, member in enumerate(members, 1):
+        say(f"Taking passwords out of the logs: {number} of {len(members)}…")
+        assert member.raw is not None
+        try:
+            data = check(member.raw).encode("utf-8")
+        except Unredactable:
+            collector.skip(member.name, LEFT_OUT)
+            continue
+        raw = member.raw if member.group in _CUTTABLE else None
+        cleaned.append(replace(member, data=data, raw=raw))
+    return cleaned
+
+
 @dataclass
 class _Fit:
     """What `_fit()` kept, left out and cut, as it goes."""
@@ -455,6 +645,8 @@ class _Fit:
     dropped: list[_Member]
     cuts: dict[str, int]
     """Member name -> the bytes of its text still kept, in the order first cut."""
+    unvouched: list[_Member]
+    """Left out because the redactor refused the text of their cut (T606), not for size."""
 
 
 def _cut_tier(member: _Member, newest_runs: frozenset[str] = frozenset()) -> int | None:
@@ -546,6 +738,7 @@ def _fit(
     cap: int,
     manifest: Callable[[_Fit, bool], _Member],
     redact: Callable[[str], str],
+    newest_runs: frozenset[str],
 ) -> tuple[_Fit, bytes]:
     """Leave out the oldest snapshots, then the oldest runs, then cut the rest shorter,
     until the zip fits `cap` or nothing can give any more.
@@ -558,10 +751,9 @@ def _fit(
     """
     queue = sorted((m for m in members if m.group == "snapshots"), key=lambda m: m.mtime)
     runs = sorted((m for m in members if m.group == "runs"), key=_written)
-    newest_runs = _newest_runs(runs)
     queue += [m for m in runs if m.name not in newest_runs]
     weight = {m.name: _estimate(m) for m in members}
-    fit = _Fit(kept=list(members), dropped=[], cuts={})
+    fit = _Fit(kept=list(members), dropped=[], cuts={}, unvouched=[])
 
     def give() -> bool:
         """Drop or cut one member. False when nothing is left to give."""
@@ -576,12 +768,15 @@ def _fit(
         try:
             shorter = _shorter(fit.kept[index], redact)
         except Unredactable:
-            # The cut text cannot be vouched for: it goes, whole, rather than raw (T595).
-            fit.dropped.append(fit.kept.pop(index))
+            # The cut text cannot be vouched for: it goes, whole, rather than raw (T595),
+            # under its own reason and not as a cut file (T606).
+            victim = fit.kept.pop(index)
+            fit.cuts.pop(victim.name, None)
+            fit.unvouched.append(victim)
             return True
         fit.kept[index] = shorter
         weight[shorter.name] = _estimate(shorter)
-        fit.cuts[shorter.name] = _raw_size(shorter)
+        fit.cuts[shorter.name] = _kept_bytes(shorter)
         return True
 
     def estimated() -> int:

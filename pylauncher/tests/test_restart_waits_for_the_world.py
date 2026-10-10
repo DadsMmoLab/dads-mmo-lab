@@ -615,3 +615,32 @@ def test_a_wait_that_broke_says_so_and_never_done(
 def _run_the_first(jobs: _Deferred, on_done: object) -> None:
     index = next(i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done)
     jobs.run(index)
+
+
+def test_a_world_stuck_at_a_failed_update_answers_fatal_with_the_file_and_the_error() -> None:
+    """T600: running, restarts 0, silent -- the shape that used to read `quiet` after 3 hours.
+
+    The wait answers on its first look, and the words are the plain sentence naming the
+    update file and what MariaDB said, not just the log line.
+
+    Mutation: leave `_dying_words()` quoting the bare line, and the words lose the file name
+    and the error; drop the updater alternation from the catalog's `fatal`, and the verdict
+    is no longer `fatal`.
+    """
+    log = (
+        "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+        "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+        "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+    )
+    world = _World(banner="World server is up and running", boot_s=10**9)
+    world.output = lambda spec, **_kw: (  # type: ignore[method-assign]
+        world.looks.append(world.elapsed) or native.WorldOutput(log, 0, "running")
+    )
+    world.wait = lambda *_a, **_kw: False  # type: ignore[method-assign]  # the real wait sees the fatal line
+
+    answer = _after_start(TORTOISE, world)
+
+    assert answer.verdict == "fatal"
+    assert "20260903063722_world.sql" in answer.words
+    assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in answer.words
+    assert world.looks == [0.0, 0.0], "answered on its first look, not after a window"

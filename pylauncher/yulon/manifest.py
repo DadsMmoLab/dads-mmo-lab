@@ -43,7 +43,7 @@ ManifestType = Literal["module", "ale", "mod", "keg"]
 Db = Literal["auth", "characters", "world", "playerbots", "ale"]
 When = Literal["install", "remove", "configure"]
 ClientDest = Literal["addons", "interface", "data"]
-PromptKind = Literal["string", "int", "float", "bool", "choice"]
+PromptKind = Literal["string", "int", "float", "bool", "choice", "character"]
 
 
 class _Strict(BaseModel):
@@ -218,6 +218,12 @@ class SqlStep(_Strict):
     Both are `direct`-only. A `db-import` step is handed to another program on a
     later boot and nothing here is in a position to check either end of it, so
     declaring one there would be a field nothing reads.
+
+    `migration_module` (T596) is for a server whose own updater keeps a
+    `migrations(Name, Module, Hash, AppliedAt)` table in each database (the
+    Tortoise core, `AutoUpdater.cpp:135-170`). The app runs the file itself and
+    writes the row the updater would have written, so neither runs it twice; a
+    file whose hash the table already holds under that Module is not sent again.
     """
 
     db: Db
@@ -241,6 +247,14 @@ class SqlStep(_Strict):
             "leaves none applied. Single files (templates ok), never globs; direct only."
         ),
     )
+    migration_module: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]{1,255}$",
+        description=(
+            "Record the file in the server's own `migrations` table under this Module name "
+            "and skip it when that table already holds its hash. One direct file only."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_body(self) -> SqlStep:
@@ -262,6 +276,23 @@ class SqlStep(_Strict):
                     "SqlStep.then needs `applied_by='direct'`: only a file this app runs itself "
                     "can be put inside its transaction"
                 )
+        if self.migration_module is not None and (
+            self.path is None
+            or _glob_chars(self.path)
+            or self.then
+            or self.applied_by != "direct"
+            or self.precondition is not None
+        ):
+            # T596. A ledger row is one file's hash, written by the program that ran
+            # the file: a glob or a chain has no one hash, an inline statement has no
+            # file the server's updater could ever match, and a db-import file is the
+            # updater's to record. No precondition either (Codex review): the updater
+            # has none, and a file skipped by one would still count as sent for a
+            # later file of the same bytes.
+            raise ValueError(
+                "SqlStep.migration_module needs one direct `path` file: no glob, no `then`, "
+                "no inline statement, no precondition"
+            )
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
@@ -492,6 +523,45 @@ class Prompt(_Strict):
         ),
     )
 
+    multi: bool = Field(
+        default=False,
+        description=(
+            "character only (T637): the answer is a comma list of GUIDs, one per ticked "
+            "character, as `AuctionHouseBot.GUIDs` reads it. False: exactly one GUID."
+        ),
+    )
+    part: Literal["guid", "account"] = Field(
+        default="guid",
+        description=(
+            "character only (T637): which part of the picked character this answer is: its "
+            "`guid`, or the id of its `account`. `account` needs `follows`."
+        ),
+    )
+    follows: str | None = Field(
+        default=None,
+        description=(
+            "character only (T637): the key of another character prompt. This one gets no "
+            "row of its own: it takes its answer from the character picked for that prompt "
+            "(`mod-ah-bot`'s `bot_account` follows `bot_guid`: one pick, two answers)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _character_fields(self) -> Prompt:
+        if self.kind != "character":
+            if self.multi:
+                raise ValueError("`multi` only valid with kind='character'")
+            if self.follows is not None or self.part != "guid":
+                raise ValueError("`follows` and `part` only valid with kind='character'")
+            return self
+        if (self.part == "account") != (self.follows is not None):
+            raise ValueError("`part`='account' and `follows` go together")
+        if self.follows is not None and self.multi:
+            raise ValueError("a prompt that follows another cannot be `multi`")
+        if self.default is not None:
+            raise ValueError("a character prompt has no `default`")
+        return self
+
     @model_validator(mode="after")
     def _unsigned_needs_an_int(self) -> Prompt:
         if self.unsigned and self.kind != "int":
@@ -572,11 +642,53 @@ class Origin(_Strict):
     ownership is decided by the clone claim, as it is for a shipped module.
     """
 
-    kind: Literal["link", "folder"]
+    kind: Literal["link", "folder", "archive"]
     path: str | None = Field(
-        default=None, description="The folder it was copied from (kind='folder'); null for a link."
+        default=None,
+        description=(
+            "The folder it was copied from (kind='folder'), or the zip it was unpacked from "
+            "(kind='archive', a zip on this computer); null for a link."
+        ),
+    )
+    url: str | None = Field(
+        default=None,
+        description=(
+            "kind='archive' only: the https link the zip was downloaded from (T613), for "
+            "Update to fetch again. Null for a zip on this computer."
+        ),
+    )
+    sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "kind='archive' only, and required there: the SHA-256 of the zip that was "
+            "installed (T613), so an Update can tell a changed download from the same one."
+        ),
     )
     added: str = Field(min_length=1, description="ISO date the derivation happened.")
+    addon: bool = Field(
+        default=False,
+        description=(
+            "Made by the add-on route (`yulon.client_addons`, T613): the item is client "
+            "add-ons alone, completed by that route's reader only, and refused by the applier "
+            "the moment anything makes it more (SQL, settings, a rebuild)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_archive_says_which_zip(self) -> Origin:
+        """An archive names its zip by a path or a url (one), and its bytes; nothing else does."""
+        if self.kind != "archive":
+            if self.url is not None or self.sha256 is not None:
+                raise ValueError("url and sha256 are only an archive origin's")
+            return self
+        if self.sha256 is None:
+            raise ValueError("an archive origin needs the zip's sha256")
+        if (self.path is None) == (self.url is None):
+            raise ValueError("an archive origin names its zip by a path or a url, one of them")
+        if self.url is not None and urlsplit(self.url).scheme != "https":
+            raise ValueError(f"an archive origin's url must be https, got {self.url!r}")
+        return self
 
 
 class Manifest(_Strict):
@@ -662,6 +774,13 @@ class Manifest(_Strict):
             raise ValueError("type='keg' requires `source.sparse_path` (kegs live inside a repo)")
         if self.id in self.requires or self.id in self.conflicts_with:
             raise ValueError("an item cannot require or conflict with itself")
+        picked = {p.key for p in self.prompts if p.kind == "character" and p.follows is None}
+        for prompt in self.prompts:
+            if prompt.follows is not None and prompt.follows not in picked:
+                raise ValueError(
+                    f"prompt {prompt.key!r}: `follows` {prompt.follows!r} is not a character "
+                    "prompt of this manifest"
+                )
         return self
 
 

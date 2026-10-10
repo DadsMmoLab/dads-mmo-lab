@@ -4211,7 +4211,38 @@ def apply(
     policy = platform.elevation_policy(network_plan.firewall)
 
     disarmed = network_plan.probed_elevated and not elevate
-    for cmd in network_plan.firewall_commands + network_plan.portproxy_commands:
+    all_commands = network_plan.firewall_commands + network_plan.portproxy_commands
+    # Windows: every netsh line behind ONE UAC prompt, results read back per command (T644).
+    batch = platform.elevated_batch(network_plan.firewall, all_commands) if elevate else None
+    batch_results: list[tuple[int, str]] | None = None
+    if batch is not None:
+        batch_argv, batch_path = batch
+        try:
+            batch_proc = do(batch_argv)
+        except OSError as exc:
+            batch_proc = subprocess.CompletedProcess(batch_argv, 1, "", str(exc))
+        if batch_proc.returncode == platform.UAC_DECLINED:
+            skipped.append(platform.UAC_DECLINED_TEXT)
+        elif batch_proc.returncode != 0:
+            skipped.append(
+                "The Windows administrator prompt could not be shown "
+                f"(exit {batch_proc.returncode} {batch_proc.stderr.strip()}). "
+                "Press Apply again, or run the commands by hand" + policy.retry_hint + "."
+            )
+        else:
+            batch_results = platform.read_batch_results(batch_path, len(all_commands))
+        try:
+            batch_path.unlink()
+        except OSError:
+            pass
+    for index, cmd in enumerate(all_commands):
+        if batch is not None and batch_results is None:
+            if batch_proc.returncode == 0:
+                skipped.append(
+                    f"{platform.command_text(cmd)}: no result came back from the "
+                    "administrator window — run it by hand" + policy.retry_hint
+                )
+            continue
         if disarmed and _can_lock_out(cmd):
             # The plan read root's socket table (and firewalld's zones) through
             # `sudo -n`, and these writes will not have that. Without this the
@@ -4224,7 +4255,7 @@ def apply(
                 f"{' '.join(platform.elevation_policy(network_plan.firewall).prefix)} and "
                 "these commands are being run without it, so the rule that keeps SSH "
                 "reachable cannot be written. Plan again for a run without it, or apply this "
-                f"plan with it.\n{' '.join(cmd)}"
+                f"plan with it.\n{platform.command_text(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)
@@ -4242,7 +4273,7 @@ def apply(
             refusal = (
                 f"REFUSED to run the command below: the rule that keeps SSH reachable "
                 f"({unapplied}) did not apply, so running it could have cut the way back "
-                f"into this machine.\n{' '.join(cmd)}"
+                f"into this machine.\n{platform.command_text(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)
@@ -4251,15 +4282,20 @@ def apply(
         if policy.prefix and elevate:
             argv = [*policy.prefix, *argv]
         try:
-            proc = do(argv)
+            if batch_results is not None:
+                code, text = batch_results[index]
+                proc = subprocess.CompletedProcess(argv, code, text, text)
+            else:
+                proc = do(argv)
         except OSError as exc:
-            skipped.append(f"{' '.join(cmd)}: {exc}")
+            skipped.append(f"{platform.command_text(cmd)}: {exc}")
             continue
         if proc.returncode == 0:
-            done.append(" ".join(cmd))
+            done.append(platform.command_text(cmd))
         else:
             skipped.append(
-                f"{' '.join(cmd)}: exit {proc.returncode} {proc.stderr.strip()} — run it by hand"
+                f"{platform.command_text(cmd)}: exit {proc.returncode} "
+                f"{proc.stderr.strip()} — run it by hand"
                 + policy.retry_hint
                 + _firewalld_daemon_hint(list(cmd), proc.returncode)
             )

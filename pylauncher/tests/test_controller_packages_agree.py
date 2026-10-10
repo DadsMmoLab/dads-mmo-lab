@@ -495,12 +495,19 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             if cloned
             else {
                 "module_updates",
+                "module_refresh",  # T621: the same count in the background
                 "unfinished_modules",
                 "unknown_modules",
                 "module_version",
             }
             | (set() if settings else {"installed_modules"})
-        ) | (set() if counted else custom)
+        ) | (
+            set()
+            if counted or game == "wow-tortoise"
+            # T613 PR-2: `module_forget` arrives with the add-on route on every game
+            # whose client takes add-ons, so a Remove drops an outside add-on's record.
+            else custom - ({"module_forget"} if entry.client.addon_interface else set())
+        )
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an
         # AzerothCore Lua module hooking AzerothCore's command table, and the
@@ -613,6 +620,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # own (`AiPlayerbot.RandomBotPoolReset`), which no other game's bot
         # module reads, so the seam is Tortoise's alone, the reference included.
         unrebuilt = set() if game == "wow-tortoise" else {"bot_pool_rebuild"}
+        # T596: Tortoise's custom route takes add-ons and database packages, not
+        # `modules/` checkouts, so it has the five seams above with no module
+        # manifest, and its own two tooltips; WotLK (the reference) keeps its
+        # built-in ones, so the field is absent there and everywhere else.
+        untipped = set() if game == "wow-tortoise" else {"custom_module_tips"}
         # T174's folder lock, decided by the PLATFORM rather than the game: only a
         # Windows folder has a DACL to lock, so every game has it there, the
         # reference included, and none has it anywhere else.
@@ -639,6 +651,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | undashboarded
             | unpaired
             | unrebuilt
+            | untipped
             | uncorrectable
             | unlocked
         )
@@ -654,6 +667,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | unrepaired
                 | unpaired
                 | unrebuilt
+                | untipped
                 | uncorrectable
                 | unlocked
             )

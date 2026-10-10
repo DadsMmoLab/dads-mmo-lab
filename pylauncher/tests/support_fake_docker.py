@@ -54,7 +54,9 @@ def attached(box):
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
-if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
+if args[:1] == ["run"] and "-i" in args and (
+    "yulon-claim-" in " ".join(args) or "yulon-busy-" in " ".join(args)
+):
     # T543: a folder claim, `docker run --rm -i --name yulon-claim-<id> ... cat`. The name
     # is taken atomically (the daemon's arbitration), refused with the daemon's Conflict
     # when it is in use; it runs until its stdin closes, and `--rm` then removes it.
@@ -67,6 +69,15 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
     if (state / "claim-no-daemon").exists():
         sys.stderr.write("docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
         sys.exit(125)
+    image = args[args.index("--entrypoint") + 2] if "--entrypoint" in args else ""
+    if image and (state / "missing-images").exists():
+        # T568: the image after `--entrypoint sh` is one the daemon does not have.
+        if image in (state / "missing-images").read_text(encoding="utf-8").split():
+            sys.stderr.write(f"docker: Error response from daemon: No such image: {{image}}\\n")
+            sys.exit(125)
+    if image:
+        with open(state / "claim-images.log", "a", encoding="utf-8") as tried:
+            tried.write(image + "\\n")
     while (state / "claim-slow").exists():  # the daemon takes its time (cold review of T543)
         time.sleep(0.02)
     labels = state / "labels"
@@ -97,6 +108,21 @@ if args[:1] == ["run"] and "-i" in args and "yulon-claim-" in " ".join(args):
         sys.stderr.write("docker: Error response from daemon: failed to create task\\n")
         sys.exit(127)
     sys.stdin.read()
+    if (state / "claim-lingers").exists() and box.exists():
+        # T568: `--rm` removal in progress on a loaded daemon: `removing`, then gone.
+        import subprocess
+        box.write_text("removing", encoding="utf-8")
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, pathlib; time.sleep(0.6); p = pathlib.Path(sys.argv[1]); "
+             "p.unlink() if p.exists() and p.read_text() == 'removing' else None",
+             str(box)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.exit(0)
     box.unlink(missing_ok=True)
     sys.exit(0)
 if args[:1] in (["run"], ["create"]):
@@ -122,7 +148,11 @@ if args[:1] == ["create"]:
         sys.stderr.write("Unable to find image 'yulon.local/nope:native' locally\\n")
         sys.stderr.write("Error response from daemon: pull access denied\\n")
         sys.exit(125)
-    box.write_text("created", encoding="utf-8")
+    # Made whole and put in place at once (T610): `write_text` truncates first, and a reader
+    # in that instant found an empty file, which `running()` reads as started.
+    pending = state / f".{{name}}.{{os.getpid()}}"
+    pending.write_text("created", encoding="utf-8")
+    os.replace(pending, box)
     if "--label" in args:
         # Cold review of the stop-paths branch: whose Yu'lon made it and which folders it
         # writes, one `key=value` per line, read back by `ps`.
@@ -165,6 +195,8 @@ if args[:1] == ["ps"]:
             sys.stdout.write("\\t".join([box.name, *(values.get(k, "") for k in keys)]) + "\\n")
     sys.exit(0)
 if args[:1] == ["inspect"]:
+    if (state / "inspect-hangs").exists():
+        time.sleep(3)  # T568: a daemon that is starting or paused: the caller's bound ends it
     # `docker.container_exit()`'s question (T303): a container still there is running.
     if (state / "no-answer").exists():
         sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
@@ -178,15 +210,46 @@ if args[:1] == ["inspect"]:
         values = dict(line.split("=", 1) for line in given if "=" in line)
         keys = [piece.split('"')[1] for piece in fmt.split(".Config.Labels ")[1:]]
         made = (state / "containers" / args[1]).read_text(encoding="utf-8")
-        status = ["created" if made == "created" else "running"] if ".State.Status" in fmt else []
+        state_word = made if made in ("created", "removing") else "running"
+        status = [state_word] if ".State.Status" in fmt else []
+        # T568: `{{{{.Created}}}}` is the daemon's own stamp (a `created-at` file, else fixed).
+        when = state / "created-at"
+        made_at = (
+            [when.read_text(encoding="utf-8").strip() if when.exists() else "2026-10-09T12:00:00Z"]
+            if ".Created" in fmt
+            else []
+        )
         sys.stdout.write(
-            "\\t".join([args[1] + "-id", *status, *(values.get(k, "") for k in keys)]) + "\\n"
+            "\\t".join([args[1] + "-id", *status, *made_at, *(values.get(k, "") for k in keys)])
+            + "\\n"
         )
         sys.exit(0)
+    if fmt == "{{{{.Image}}}}":
+        # T568: the image a container runs (`images/<container>` holds it), as the daemon
+        # answers for `docker inspect --format {{{{.Image}}}}`.
+        pinned = state / "images" / args[1]
+        if pinned.exists():
+            sys.stdout.write(pinned.read_text(encoding="utf-8").strip() + "\\n")
+            sys.exit(0)
+        sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
+        sys.exit(1)
     if (state / "containers" / args[1]).exists():
         sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
         sys.exit(0)
     sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
+    sys.exit(1)
+if args[:2] == ["image", "ls"]:
+    # T568: `image ls --format {{{{.Repository}}}}:{{{{.Tag}}}}`: the refs in `images-listed`.
+    listed = state / "images-listed"
+    sys.stdout.write(listed.read_text(encoding="utf-8") if listed.exists() else "")
+    sys.exit(0)
+if args[:2] == ["image", "inspect"]:
+    # T622: `image inspect <ref> --format {{{{.Id}}}}`: the id in `image-ids/<ref, / and : as _>`.
+    known = state / "image-ids" / args[2].replace("/", "_").replace(":", "_")
+    if known.exists():
+        sys.stdout.write(known.read_text(encoding="utf-8").strip() + "\\n")
+        sys.exit(0)
+    sys.stderr.write(f"Error: No such image: {{args[2]}}\\n")
     sys.exit(1)
 if args[:2] == ["buildx", "inspect"]:
     # T413: the builder a plain build would use, in buildx's own text shape:
@@ -270,6 +333,26 @@ if args[:2] == ["rm", "-f"]:
         box = state / "containers" / args[2][: -len("-id")]
     if (state / "refuse-rm").exists():
         sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
+        sys.exit(1)
+    if (state / "rm-lingers").exists() and box.exists():
+        # T568: a loaded daemon (measured on yulon-ubuntu, load 9): `rm -f` answers "already
+        # in progress" and the container stays, `removing`, for a moment before it is gone.
+        box.write_text("removing", encoding="utf-8")
+        import subprocess
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, pathlib; time.sleep(0.6); p = pathlib.Path(sys.argv[1]); "
+             "p.unlink() if p.exists() and p.read_text() == 'removing' else None",
+             str(box)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.stderr.write(
+            f"Error response from daemon: removal of container {{args[2]}} "
+            "is already in progress\\n"
+        )
         sys.exit(1)
     if (state / "rm-in-progress").exists() and box.exists():
         # `--rm` got there first: Moby answers the second removal like this,

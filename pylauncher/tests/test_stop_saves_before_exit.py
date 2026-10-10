@@ -1028,6 +1028,49 @@ def test_a_world_that_crashes_on_its_way_out_is_not_said_to_have_saved(
     assert docker.outlives_the_stop(said[-1])
 
 
+def test_a_world_that_exited_at_a_failed_update_is_not_blamed_on_a_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T600: a patched core exits 1 at a failed update and Docker restarts it; the stop that
+    finds it must say the update, not "while it was saving characters" (seen live 2026-10-09).
+
+    Mutation: drop the update check in `_how_the_world_ended()` and the save blame is back.
+    """
+    from yulon.said import split_details
+
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    fake.exit_code = "1"
+    fake.log_tail = (
+        "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+        "[1050] Table 'item_template' already exists\n"
+        "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+        "DB AutoUpdater FAILED, cancelling server.\n"
+    )
+    _, said, _ = _stop(fake, tmp_path)
+    sentence, _details = split_details(said[-1])
+    assert "20260903063722_world.sql" in sentence
+    assert "[1050] Table 'item_template' already exists" in sentence
+    assert "saving" not in sentence and "saves" not in sentence
+    assert docker.outlives_the_stop(said[-1])
+
+
+def test_every_other_exit_one_keeps_the_save_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An exit code 1 whose log does not end on a failed update is still a save that went wrong."""
+    from yulon.said import split_details
+
+    fake = _install(monkeypatch, "wow-tortoise", _rising(10))
+    monkeypatch.setattr(docker, "wait_for_the_world_to_load", lambda *a, **k: True)
+    fake.exit_code = "1"
+    fake.log_tail = "Halting process...\nCant begin transaction.\n"
+    _, said, _ = _stop(fake, tmp_path)
+    sentence, details = split_details(said[-1])
+    assert "exit code 1" in sentence and "while it was saving characters" in sentence
+    assert "Cant begin transaction." in details
+
+
 def test_a_crash_before_the_first_look_is_said_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

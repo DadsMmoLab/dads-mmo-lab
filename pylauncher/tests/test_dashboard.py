@@ -2191,3 +2191,198 @@ def test_a_run_that_got_past_the_transports_is_not_blamed(tmp_path: Path) -> Non
     assert "transports" in first.warning and "transports" in second.warning
     assert alive.state == "restart_loop" and alive.warning == ""
     assert dead.state == "restart_loop" and dead.warning == ""
+
+
+# ------------------------------------------- T600: a world stopped at a failed update
+
+FAILED_UPDATE_LOG = (
+    "[DB Auto-Updater] Attempting to execute update 20260903063722_world, hash AB12.\n"
+    "[1062] Duplicate entry '44070' for key 'PRIMARY'\n"
+    "[DB Auto-Updater] Migration 20260903063722_world with hash AB12 failed to apply.\n"
+)
+
+
+def _tortoise_watch(
+    tmp_path: Path, *, age: timedelta, log: str, asked: list[str] | None = None
+) -> dashboard.Dashboard:
+    run = _stamp(NOW - age)
+    sql = _FakeSql()
+    return dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=sql,
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: (asked.append(since) if asked is not None else None)
+        or log,
+        now=lambda: NOW,
+    )
+
+
+def test_a_world_that_stopped_at_a_failed_update_is_not_called_up_after_ten_minutes(
+    tmp_path: Path,
+) -> None:
+    """The 10-minute rule calls a silent world ready; it must never outrank this run's own log.
+
+    Mutation: delete the `_update_failure()` check in `_tick()` and this reads `up`.
+    """
+    watch = _tortoise_watch(
+        tmp_path, age=dashboard.SETTLED_AFTER + timedelta(minutes=1), log=FAILED_UPDATE_LOG
+    )
+
+    verdict = watch.tick()
+
+    assert verdict.ready is False
+    assert verdict.stable is False
+    said = dashboard.line(verdict)
+    assert "20260903063722_world.sql" in said
+    assert "[1062] Duplicate entry '44070' for key 'PRIMARY'" in said
+    assert not said.startswith("up")
+
+
+def test_a_world_that_stopped_at_a_failed_update_is_not_called_ready_while_young_either(
+    tmp_path: Path,
+) -> None:
+    verdict = _tortoise_watch(tmp_path, age=timedelta(minutes=2), log=FAILED_UPDATE_LOG).tick()
+    assert verdict.ready is False and "20260903063722_world.sql" in dashboard.line(verdict)
+
+
+def test_the_realm_keeper_is_not_told_a_failed_world_is_ready(tmp_path: Path) -> None:
+    told: list[bool] = []
+
+    class _Keeper:
+        said_ready = None
+
+        def begin(self) -> int:
+            return 0
+
+        def after_tick(self, _status: str, _run: str, ready: bool, _begun: int) -> None:
+            told.append(ready)
+
+    watch = _tortoise_watch(
+        tmp_path, age=dashboard.SETTLED_AFTER + timedelta(minutes=1), log=FAILED_UPDATE_LOG
+    )
+    watch._realm = _Keeper()  # type: ignore[assignment]
+    watch.tick()
+    assert told == [False]
+
+
+def test_a_healthy_tortoise_world_is_up_and_its_log_is_not_read_again_once_ready(
+    tmp_path: Path,
+) -> None:
+    asked: list[str] = []
+    watch = _tortoise_watch(
+        tmp_path,
+        age=timedelta(minutes=3),
+        log="World server is up and running! Loading time: 1 minutes\n",
+        asked=asked,
+    )
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1
+    assert dashboard.line(watch.tick()).startswith("up")
+
+
+def test_a_run_past_the_read_span_is_read_once_and_then_remembered(tmp_path: Path) -> None:
+    asked: list[str] = []
+    watch = _tortoise_watch(tmp_path, age=dashboard.READY_READ_SPAN * 2, log="quiet\n", asked=asked)
+    assert [watch.tick().ready for _ in range(3)] == [True] * 3
+    assert len(asked) == 1
+
+
+def test_a_run_between_the_settle_time_and_the_read_span_is_read_once_a_minute_at_most(
+    tmp_path: Path,
+) -> None:
+    """A world hung for 15 minutes is found on the first tick; the log is not read every tick."""
+    asked: list[str] = []
+    now = [NOW]
+    run = _stamp(NOW - timedelta(minutes=15))
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or "Loading maps...\n",
+        now=lambda: now[0],
+    )
+    for _ in range(12):  # a minute of 5-second ticks
+        assert watch.tick().ready is True
+        now[0] += timedelta(seconds=5)
+    assert len(asked) == 1
+    now[0] += dashboard.FAILURE_READ_EVERY
+    watch.tick()
+    assert len(asked) == 2
+
+
+def test_the_log_read_for_a_failed_update_also_serves_the_realm_keeper_once(
+    tmp_path: Path,
+) -> None:
+    """One read of a run's first span answers both who ask, so the run is read no more often."""
+    asked: list[str] = []
+    run = _stamp(NOW - dashboard.READY_READ_SPAN * 2)
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, since: asked.append(since) or "Loading maps...\n",
+        now=lambda: NOW,
+    )
+    watch.tick()
+    assert watch._world_said_ready(run) is False  # the keeper's ask takes the same text
+    assert len(asked) == 1
+    assert watch._world_said_ready(run) is False  # its next ask is fresh
+    assert len(asked) == 2
+
+
+def test_a_world_that_exits_at_a_failed_update_and_is_restarted_says_which_update_t600() -> None:
+    """With the updater patched the world exits instead of hanging; Docker restarts it.
+
+    The verdict is still a restart loop, but it carries the file and the error, which a bare
+    "restart loop" does not. Mutation: drop `failure=` from the `restart_loop` verdict.
+    """
+    tmp_path = Path("/nonexistent-server-dir")
+    run = _stamp(NOW - timedelta(seconds=30))
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: docker.ContainerState("restarting", run, 7),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, _since: FAILED_UPDATE_LOG
+        + "DB AutoUpdater FAILED, cancelling server.\n",
+        now=lambda: NOW,
+    )
+    verdict = watch.tick()
+    assert verdict.state == "restart_loop"
+    said = dashboard.line(verdict)
+    assert "20260903063722_world.sql" in said
+    assert "restart loop" in said and "7 restarts" in said
+
+
+def test_an_unreadable_log_does_not_settle_an_old_run_as_clean(tmp_path: Path) -> None:
+    """`docker._logs()` answers "" when Docker would not talk: not evidence of a clean start.
+
+    Mutation: settle on any read and the failed run below is called up for good.
+    """
+    texts = ["", FAILED_UPDATE_LOG]
+    now = [NOW]
+    run = _stamp(NOW - dashboard.READY_READ_SPAN * 2)
+    watch = dashboard.Dashboard(
+        TORTOISE.container_spec(),
+        TORTOISE,
+        tmp_path,
+        sql=_FakeSql(),
+        state_of=lambda _container: _running(run),
+        daemon_of=lambda: "bridge-before",
+        log_of=lambda _container, _since: texts[0] if len(texts) == 1 else texts.pop(0),
+        now=lambda: now[0],
+    )
+    assert watch.tick().ready is True  # nothing readable yet: the tab's own rule
+    now[0] += dashboard.FAILURE_READ_EVERY
+    assert watch.tick().ready is False  # the next read found it

@@ -15,6 +15,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from yulon import docker, logsnap, runner
 from yulon.catalog import composegen
 
@@ -407,3 +409,101 @@ def test_the_published_wotlk_password_is_not_masked_as_a_secret_in_the_snapshot(
 
     assert snap.path is not None
     assert snap.path.read_text(encoding="utf-8") == line
+
+
+def _unsafe_redactor(monkeypatch, word: str, how: str) -> None:
+    """Make `Redactor.redact` fail the way T595 guards against, for text holding `word`."""
+    from yulon.support.redact import Redactor
+
+    real = Redactor.redact
+
+    def redact(self, text: str) -> str:  # noqa: ANN001
+        if word in text:
+            if how == "raises":
+                raise RecursionError("a pattern gave up")
+            return text + "x"  # not settled: a second pass changes it again
+        return real(self, text)
+
+    monkeypatch.setattr(Redactor, "redact", redact)
+
+
+@pytest.mark.parametrize("how", ["raises", "unsettled"])
+def test_a_line_the_cleaner_cannot_vouch_for_is_not_left_on_disk(
+    tmp_path: Path, monkeypatch, how: str
+) -> None:
+    """T606: the file is attached by hand, so it is as strict as the support zip (T595)."""
+    _unsafe_redactor(monkeypatch, "HALFMASKED", how)
+    log = "first fine line\nHALFMASKED secret=hunter22\nlast fine line\n"
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text=log))
+    (tmp_path / "server").mkdir()
+
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    written = snap.path.read_text(encoding="utf-8")
+    assert "HALFMASKED" not in written and "hunter22" not in written
+    assert written.startswith("first fine line\n") and written.endswith("last fine line\n")
+    assert written.count("removed") == 1  # a marker line says a line is missing
+
+
+def test_a_snapshot_the_cleaner_vouches_for_is_saved_unchanged(tmp_path: Path, monkeypatch) -> None:
+    log = "one\ntwo\n"
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text=log))
+    (tmp_path / "server").mkdir()
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+    assert snap.path is not None
+    assert snap.path.read_text(encoding="utf-8") == log
+
+
+def test_a_log_whose_lines_pass_but_not_together_is_removed_whole(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A secret spread over two lines: each is fine alone, the pair is refused."""
+    from yulon.support.redact import Redactor
+
+    real = Redactor.redact
+
+    def redact(self, text: str) -> str:  # noqa: ANN001
+        return text + "x" if "PART-A" in text and "PART-B" in text else real(self, text)
+
+    monkeypatch.setattr(Redactor, "redact", redact)
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="PART-A\nPART-B\n"))
+    (tmp_path / "server").mkdir()
+
+    snap = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is not None
+    written = snap.path.read_text(encoding="utf-8")
+    assert "PART-" not in written and "log was removed" in written
+
+
+def test_the_marker_for_a_log_the_cleaner_could_not_vouch_for_says_secrets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T609: the cleaner takes out tokens and home paths too, so "passwords" understates it.
+
+    Mutation: put "passwords" back in `_REMOVED_LINE` or `_REMOVED_ALL`.
+    """
+    from yulon.support.redact import Redactor
+
+    _unsafe_redactor(monkeypatch, "HALFMASKED", "raises")
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="a\nHALFMASKED x\nb\n"))
+    (tmp_path / "server").mkdir()
+    one = logsnap.capture(SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    real = Redactor.redact
+
+    def redact(self, text: str) -> str:  # noqa: ANN001
+        return text + "x" if "PART-A" in text and "PART-B" in text else real(self, text)
+
+    monkeypatch.setattr(Redactor, "redact", redact)
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="PART-A\nPART-B\n"))
+    whole = logsnap.capture(
+        SPEC, tmp_path / "server", game="wow-wotlk", logs_dir=tmp_path / "logs2"
+    )
+
+    assert one.path is not None and whole.path is not None
+    for path in (one.path, whole.path):
+        written = path.read_text(encoding="utf-8")
+        assert "free of secrets" in written, written
+        assert "passwords" not in written, written

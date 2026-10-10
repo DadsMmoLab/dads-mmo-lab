@@ -289,7 +289,7 @@ def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) ->
 
 
 PINNED_WOTLK_DOCKERFILE = (
-    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-f19a1879" / "Dockerfile"
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-2a2211cd" / "Dockerfile"
 )
 """The catalog pin's `apps/docker/Dockerfile`; `test_build_context` fails a pin bump until it is
 vendored again, which re-runs the check below on the new recipe."""
@@ -2212,8 +2212,15 @@ def test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies(
     lines = [line for line in ignore.splitlines() if line and not line.startswith("#")]
     assert lines[0] == "*"
     core = entry.emulator.sources[0].dest
-    assert [line for line in lines if line.startswith("!")] == [f"!{core}"]
+    # T596: a recipe that lays the server's own `modules/` over the core's (Tortoise's, for the
+    # server modules a player brings) admits that one folder too, without its history or claim.
+    copies_modules = "\nCOPY modules/ " in dockerfile_text(entry)
+    admitted = [f"!{core}", *(["!modules"] if copies_modules else [])]
+    assert [line for line in lines if line.startswith("!")] == admitted
     assert f"{core}/.git" in lines
+    assert copies_modules == (entry.id == "wow-tortoise"), "only Tortoise takes outside modules"
+    if copies_modules:
+        assert "modules/*/.git" in lines and "modules/*/.yulon-clone.json" in lines
     for source in entry.emulator.sources[1:]:
         nested = source.dest.startswith(f"{core}/")
         assert nested == (f"{source.dest}/.git" in lines), source.dest

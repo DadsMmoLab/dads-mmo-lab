@@ -43,6 +43,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY src/tortoise-wow /src
 
+# MODULES FROM OUTSIDE (T596). A server module the player brought from a link or a
+# folder is cloned to `<server>/modules/<name>` by the app -- NOT into `src/tortoise-wow`,
+# which "Update to latest" resets and which must stay a clean checkout -- and this line
+# lays that folder over the core's own `modules/` before CMake looks. The core compiles
+# every `modules/<name>/src/` it finds (`ConfigureModules.cmake:30-52`) and `-DMODULES=
+# static` below is already the default, so nothing else changes: a folder with no `src/`
+# is ignored, TortoiseBots (inside the core tree) is merged with, not replaced. The
+# `write-dockerfile` stage makes the folder if the server has none, so this never fails on
+# a server that took no module; `.dockerignore` keeps each module's `.git` and this app's
+# claim file out of the context.
+COPY modules/ /src/modules/
+
 # **A clone made from inside an `ubuntu:22.04` image over HTTP/2 fails**, and
 # this line is here because of it — but the diagnosis was made on the OTHER two
 # entries, not on this one. In `cmangos/mangos-tbc` and `cmangos/mangos-classic`

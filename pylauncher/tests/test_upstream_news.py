@@ -143,14 +143,25 @@ def test_a_reading_from_the_future_or_about_other_sources_is_not_served(
 ) -> None:
     rec, server_dir = _installed(tmp_path)
     _news(rec, server_dir, T0)
-    _news(rec, server_dir, T0 - 60)
-    assert len(rec.gets) == 4, "a clock set back served a reading from its future"
+    _news(rec, server_dir, T0 - upstream.CLOCK_STEP_BACK_SECONDS - 1)
+    assert len(rec.gets) == 4, "a reading from far in the future was served"
     path = server_dir / upstream.UPSTREAM_FILE
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["sources"] = payload["sources"][:1]
     path.write_text(json.dumps(payload), encoding="utf-8")
     _news(rec, server_dir, T0)
     assert len(rec.gets) == 6, "a reading about another set of sources was served"
+
+
+def test_a_clock_stepped_back_a_little_still_serves_the_reading(tmp_path: Path) -> None:
+    rec, server_dir = _installed(tmp_path)
+    first = _news(rec, server_dir, T0)
+    stepped = _news(rec, server_dir, T0 - 30)
+    assert len(rec.gets) == 2, "a 30 s clock step back made the reading look missing"
+    assert stepped == first
+    sources = [(CORE, "branch"), (BOTS, "branch")]
+    edge = upstream.read_cached(server_dir, sources, T0 - upstream.CLOCK_STEP_BACK_SECONDS)
+    assert len(edge) == 2
 
 
 def test_a_damaged_cache_is_asked_again_rather_than_trusted(tmp_path: Path) -> None:

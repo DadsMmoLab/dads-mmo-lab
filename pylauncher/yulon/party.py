@@ -36,8 +36,9 @@ The four ways, each with its own sentence in `preconditions()`:
 2. **`ALE.Enabled` is off.** Its compiled default is not what the source spells:
    `ALE src/LuaEngine/ALEConfig.cpp:20` passes the STRING `"false"` as the default
    of `SetConfigValue<bool>`, and a string literal converts to `true`, so a key
-   nobody set runs the engine (read at mod-ale 1cb86c96 on 2026-10-08; it was
-   believed `false` here until then). This module does not rely on that accident:
+   nobody set runs the engine (read at mod-ale 1cb86c96 on 2026-10-08, and the same
+   line at cead0cb, Unbound's pin since T580, on 2026-10-09; it was believed `false`
+   here until then). This module does not rely on that accident:
    a missing or unreadable `ALE.Enabled` is reported as unknown and My Party is not
    offered, which errs on the safe side.
 3. **`ALE.ScriptPath` points elsewhere.** It ships as `"lua_scripts"`, relative,
@@ -64,17 +65,19 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import dbreads, platform, play, resources, runner, tuning
+from yulon import dbreads, platform, play, playerbots_keys, resources, runner, tuning
 from yulon.actions import Outcome
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.said import SaidByYulon
 from yulon.tuning import core_bool
 
 logger = get_logger(__name__)
@@ -108,6 +111,10 @@ CONTROL_MARKER = "AiPlayerbot.Enabled"
 """A string the binary MUST have, so a zero for `ALE_MARKER` can be told apart
 from a reading that never happened. Both were measured on `yulon-ubuntu`
 2026-09-08: `ALE.ScriptPath` 0, `AiPlayerbot.Enabled` 1."""
+
+CONTROL_MARKERS = (CONTROL_MARKER, playerbots_keys.key(CONTROL_MARKER, playerbots_keys.NEW))
+"""Either spelling counts (T657): a build of mod-playerbots past ed54b459 reads
+`Playerbots.Enabled` and has no `AiPlayerbot.Enabled` in it (`PlayerbotAIConfig.cpp:83`)."""
 
 
 class NothingToDeploy(RuntimeError):
@@ -195,6 +202,11 @@ class BinaryRead:
     sentence: str
 
 
+def _each_pattern(patterns: tuple[str, ...]) -> str:
+    """`-e "<a>" -e "<b>"`: grep counts the lines holding any of them."""
+    return " ".join(f'-e "{pattern}"' for pattern in patterns)
+
+
 def read_engine_in_binary(
     container: str,
     *,
@@ -218,7 +230,8 @@ def read_engine_in_binary(
         return BinaryRead(None, "the Lua engine could not be read: there is no docker command here")
     script = (
         f'printf "ALE %s\\n" "$(grep -c -a -F "{ALE_MARKER}" "{binary}" || true)"; '
-        f'printf "CONTROL %s\\n" "$(grep -c -a -F "{CONTROL_MARKER}" "{binary}" || true)"'
+        f'printf "CONTROL %s\\n" "$(grep -c -a -F {_each_pattern(CONTROL_MARKERS)} "{binary}" '
+        f'|| true)"'
     )
     argv = [*prefix, "exec", container, "sh", "-c", script]
     try:
@@ -235,8 +248,9 @@ def read_engine_in_binary(
         return BinaryRead(
             None,
             _unreadable(
-                f"the reading found no {CONTROL_MARKER} either, and every build of this "
-                "server has that — so what was read was not this server's executable"
+                f"the reading found no {' or '.join(CONTROL_MARKERS)} either, and every "
+                "build of this server has one of them — so what was read was not this "
+                "server's executable"
             ),
         )
     if counts.get("ALE", 0) < 1:
@@ -922,7 +936,7 @@ def spec_command(player: str, bot: str, spec: str) -> str:
     return f"{_whisper(player, bot)} talents spec {spec}"
 
 
-def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
+def read_spec_names(text: str, prefix: str | None = None) -> dict[int, tuple[str, ...]]:
     """Every premade spec this conf defines, per class id, in the module's order.
 
     Two measured rules, both from `mod-playerbots` on `yulon-ubuntu2` 2026-09-09,
@@ -957,6 +971,7 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
     can hear it. Measuring `sConfigMgr`'s comment handling is what would let this
     read the value the module actually holds.
     """
+    spec_key = playerbots_keys.key(SPEC_NAME_KEY, prefix)  # T657: the server's own prefix
     seen: dict[int, dict[int, str]] = {}
     taken: set[str] = set()
     for line in text.splitlines():
@@ -969,9 +984,9 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
         if not sep or key in taken:
             continue
         taken.add(key)
-        if not key.startswith(SPEC_NAME_KEY):
+        if not key.startswith(spec_key):
             continue
-        parts = key[len(SPEC_NAME_KEY) :].split(".")
+        parts = key[len(spec_key) :].split(".")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
             continue
         value = tail.strip().strip('"')
@@ -995,7 +1010,9 @@ def spec_names(server_dir: Path) -> dict[int, tuple[str, ...]]:
     full of names the running server had never loaded, refused one at a time in
     a chat window nothing here can read.
     """
-    return read_spec_names(_conf_text(server_dir / PLAYERBOTS_CONF))
+    return read_spec_names(
+        _conf_text(server_dir / PLAYERBOTS_CONF), playerbots_keys.module_prefix(server_dir)
+    )
 
 
 def max_player_level(server_dir: Path) -> int | None:
@@ -2209,7 +2226,8 @@ def max_added_bots(server_dir: Path) -> int | None:
     cap nobody could read means no row is refused for it here -- the server
     still enforces whatever it has -- and the picker's note says so.
     """
-    value = _conf_value(_conf_text(server_dir / PLAYERBOTS_CONF), MAX_ADDED_BOTS_KEY)
+    key = playerbots_keys.key(MAX_ADDED_BOTS_KEY, playerbots_keys.module_prefix(server_dir))
+    value = _conf_value(_conf_text(server_dir / PLAYERBOTS_CONF), key)
     return int(value) if value is not None and value.isdigit() else None
 
 
@@ -2246,10 +2264,12 @@ def allow_flags(server_dir: Path) -> AllowFlags:
     for reading one as though it were configuration.
     """
     text = _conf_text(server_dir / PLAYERBOTS_CONF)
+    prefix = playerbots_keys.module_prefix(server_dir)
     return AllowFlags(
-        _flag(_conf_value(text, ALLOW_ACCOUNT_KEY)),
-        _flag(_conf_value(text, ALLOW_GUILD_KEY)),
-        _flag(_conf_value(text, ALLOW_LINKED_KEY)),
+        *(
+            _flag(_conf_value(text, playerbots_keys.key(name, prefix)))
+            for name in (ALLOW_ACCOUNT_KEY, ALLOW_GUILD_KEY, ALLOW_LINKED_KEY)
+        )
     )
 
 
@@ -2648,6 +2668,10 @@ class AccountLink:
     sentence: str
     blocker: str = ""
     """Set when nothing was written and nothing could be: this module's word."""
+
+
+LINK_PRESS = "Link accounts"
+"""The press name on the reservation the account-link write takes (T607)."""
 
 
 def account_of_sql(entry: CatalogEntry, master: str) -> str:
@@ -3050,6 +3074,7 @@ class InstallParty:
         level_setter: LevelSetter | None = None,
         link_writer: SqlWriter | None = None,
         altbots: AltbotMemory | None = None,
+        hold_server: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -3068,6 +3093,8 @@ class InstallParty:
         # a second seam beside `sql` rather than a wider `sql`, so the read half
         # keeps the guarantee its own type makes.
         self._link_writer = link_writer
+        # T607: the server's cross-process hold (`docker.server_hold`) around the link write.
+        self._hold_server = hold_server
         # T26 round 2. The record `members()` unions with the bot marker, and
         # the reason it is a seam is the reason `link_writer` is one: the tests
         # for every sentence this object says must not be tests that need a
@@ -3086,7 +3113,12 @@ class InstallParty:
         self.level_setter: LevelSetter = (
             level_setter
             or play.InstallPlay(
-                entry, server_dir, sql=sql, channel_for_saved=channel_for_saved
+                entry,
+                server_dir,
+                sql=sql,
+                channel_for_saved=channel_for_saved,
+                # T610: the level is a write to the server, under its cross-process hold.
+                hold_server=hold_server,
             ).set_level
         )
 
@@ -3518,7 +3550,15 @@ class InstallParty:
         (my_id, mine), (their_id, theirs), half = found
         script = link_transaction_sql(self.entry, master_account=my_id, other_account=their_id)
         try:
-            answered = self._link_writer.query("playerbots", script)
+            with ExitStack() as held:
+                if self._hold_server is not None:
+                    try:
+                        held.enter_context(self._hold_server(LINK_PRESS))
+                    except SaidByYulon as refused:
+                        # Another Yu'lon is working on this server (T607): its own sentence,
+                        # and nothing was written.
+                        return AccountLink(False, mine, theirs, str(refused), blocker=str(refused))
+                answered = self._link_writer.query("playerbots", script)
         except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
             logger.warning(f"could not link {mine} and {theirs}: {exc}")
             return AccountLink(

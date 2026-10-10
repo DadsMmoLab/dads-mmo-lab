@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from yulon import docker, module_moves, platform, server_build_presses, wsl
-from yulon.after_stop import StopSaid, TrueAfterStop
+from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
@@ -50,10 +50,12 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
     ComposeRepairRoute,
     ConfCheck,
+    ConfRepaired,
     ConfRepairRoute,
     CorrectionRoute,
     KeptBuildRoute,
@@ -62,6 +64,7 @@ from yulon.catalog.native import (
     Seams,
     SourceVersion,
     StagedInstaller,
+    ale_playerbots_note,
     core_off_its_moved_pin_note,
     correction_phases,
     module_order_note,
@@ -77,12 +80,14 @@ from yulon.catalog.native import (
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
+    BACKUPS_FOLDER,
     ROLLBACK_SAFETY_LABEL,
     SNAPSHOT_LABEL,
     CopyNotUsable,
     DatabaseSnapshot,
     PutBack,
     Snapshot,
+    kept_copies_bytes,
     prune_older,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
@@ -179,8 +184,8 @@ def import_gate_for(
             sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
         )
 
-    def reset() -> tuple[str, ...]:
-        return wotlk_repair.reset_unfinished(sql, mysql)
+    def reset(*, everything: bool = False) -> tuple[str, ...]:
+        return wotlk_repair.reset_unfinished(sql, mysql, everything=everything)
 
     return probe, reset
 
@@ -238,6 +243,7 @@ class _MaintenanceSnapshot:
                 report = maintenance.backup(
                     server_dir,
                     self._mysql(server_dir),
+                    game=maintenance.game_of(self.entry),
                     only=tuple(databases),
                     label=SNAPSHOT_LABEL,
                     spec=spec,
@@ -281,11 +287,16 @@ class _MaintenanceSnapshot:
                 self._database_up(server_dir)
                 mysql = self._mysql(server_dir)
                 for path in snapshot.files:
+                    game = maintenance.game_of(self.entry)
                     plan = maintenance.plan_restore(
-                        path, server_dir, spec=spec, wsl_distro=self.wsl_distro
+                        path, server_dir, game=game, spec=spec, wsl_distro=self.wsl_distro
                     )
                     if plan.refusals:
                         raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    # The copy is this server's own, taken moments ago by `take()`, so
+                    # one a Yu'lon older than the game record wrote needs no question
+                    # (T603). A copy that records ANOTHER game is already a refusal above.
+                    plan = plan.with_unlabeled_accepted()
                     # A replacement, not the Maintenance tab's merge: the tables
                     # the copy does not hold -- made by the new build or by its
                     # database updates -- are dropped before the copy loads.
@@ -293,6 +304,7 @@ class _MaintenanceSnapshot:
                     report = maintenance.restore(
                         plan,
                         mysql,
+                        game=game,
                         confirm=plan.token,
                         spec=spec,
                         core_databases=self.entry.core_databases(),
@@ -440,10 +452,10 @@ def with_module_moves(
     lines: Iterator[str],
     server_dir: Path,
     *,
-    cancel: threading.Event | None,
     put_back: ModulePutBack | None,
     kept_settles: bool = True,
     note: ModuleNote | None = None,
+    lag: str = "",
 ) -> Iterator[str]:
     """A build press's lines, passed through, with the module-update record kept true (T557).
 
@@ -455,7 +467,9 @@ def with_module_moves(
       unbuilt any more (`module_moves.settle()`); so does a build that was KEPT
       after its world came up (`WorldStoppedAfterReadyError`), when
       `kept_settles`;
-    - **Stop** (`StopSaid`, or the cancel event set): nothing changes;
+    - **Stop** (a failure that IS the Stop taking effect: `after_stop.stop_took_effect()`):
+      nothing changes. The cancel event is not asked (T592): a compile error that
+      lands as Stop is pressed is still the compile error, and its module goes back;
     - **a failure the old build is not back from** (`TrueAfterStop`: a
       rollback that stopped half-way, the new build running): nothing
       changes either -- the sources must stay with the build the tags name;
@@ -471,6 +485,9 @@ def with_module_moves(
     `note` (T586) is asked, after any put-back, for one more sentence about the
     modules the errors named -- which press builds them, and in which order --
     on the same failures the put-back runs on; nothing when no module was named.
+    `lag` (T645) is said INSTEAD when an error was inside mod-ale's Playerbots
+    support (`BuildErrorScanner.ale_playerbots_failed`): there the cause is known,
+    and "update mod-ale" is not the way out (`native.ale_playerbots_note()`).
     """
     scanner = module_moves.BuildErrorScanner()
     try:
@@ -482,8 +499,7 @@ def with_module_moves(
             _settle(server_dir)
         raise
     except InstallerError as exc:
-        stopped = isinstance(exc, StopSaid) or (cancel is not None and cancel.is_set())
-        if stopped or isinstance(exc, TrueAfterStop):
+        if stop_took_effect(exc) or isinstance(exc, TrueAfterStop):
             raise
         said = ""
         if put_back is not None:
@@ -495,7 +511,9 @@ def with_module_moves(
                 )
                 said = ""
         noted = ""
-        if note is not None and scanner.named:
+        if lag and scanner.ale_playerbots_failed:
+            noted = lag
+        elif note is not None and scanner.named:
             try:
                 noted = note(scanner.named)
             except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
@@ -594,9 +612,9 @@ def rebuild_for_app(
                 InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
             ),
             server_dir,
-            cancel=cancel,
             put_back=put_back,
             note=_core_note(entry, server_dir, wsl_distro),
+            lag=ale_playerbots_note(server_build_presses.REBUILD),
         )
 
     return rebuild
@@ -717,6 +735,11 @@ def update_to_latest_for_app(
         }
         return {**found, **met}
 
+    def kept_copies() -> int:
+        # T646: a directory listing in the server folder; callers read it only where the
+        # folder may be read (this distro, not stopped), like the upstream cache.
+        return kept_copies_bytes(server_dir / BACKUPS_FOLDER)
+
     def confirmation() -> str:
         # §2: the cache lives in the server folder, and reading a WSL folder
         # starts its distro -- for a question the player may cancel. The folder
@@ -736,7 +759,13 @@ def update_to_latest_for_app(
         copied = family.snapshot_databases() if isinstance(family, StagedInstaller) else ()
         not_copied = family.snapshot_left_out() if isinstance(family, StagedInstaller) else ()
         text = update_to_latest_confirmation(
-            entry, server_dir, repo, tuple(said.values()), copied=copied, not_copied=not_copied
+            entry,
+            server_dir,
+            repo,
+            tuple(said.values()),
+            copied=copied,
+            not_copied=not_copied,
+            kept_bytes=0 if (elsewhere or stopped) else kept_copies(),
         )
         return f"{text}\n\n{WSL_DISTRO_STOPPED_NOTE}" if stopped else text
 
@@ -754,10 +783,10 @@ def update_to_latest_for_app(
                     options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
                 ),
                 server_dir,
-                cancel=cancel,
                 put_back=None,
                 kept_settles=False,
                 note=partial(module_order_note, press=server_build_presses.UPDATE_TO_LATEST),
+                lag=ale_playerbots_note(server_build_presses.UPDATE_TO_LATEST),
             )
         except RewrittenHistory as exc:
             met[exc.repo] = exc.line
@@ -768,10 +797,10 @@ def update_to_latest_for_app(
         yield from with_module_moves(
             engine().update_to_latest(options, to_pin=True, cancel=cancel),
             server_dir,
-            cancel=cancel,
             put_back=None,
             kept_settles=False,
             note=partial(module_order_note, press=server_build_presses.RETURN_TO_PIN),
+            lag=ale_playerbots_note(server_build_presses.RETURN_TO_PIN),
         )
 
     def pins() -> tuple[CatalogPin, ...]:
@@ -790,9 +819,11 @@ def update_to_latest_for_app(
         # T588: the question names the move the version line offered, from the same
         # two readings; a folder this must not read gets the question it always had.
         if _in_the_distro(server_dir, wsl_distro) and not _distro_down(wsl_distro):
+            kept = kept_copies()
             moved = moved_pins(read_state(server_dir, valid=()), pins())
             if moved:
-                return moved_pin_confirmation(entry, server_dir, moved)
+                return moved_pin_confirmation(entry, server_dir, moved, kept)
+            return return_to_pin_confirmation(entry, server_dir, repo, kept)
         return return_to_pin_confirmation(entry, server_dir, repo)
 
     def news() -> upstream.UpstreamNews:
@@ -983,10 +1014,14 @@ def repair_confs_for_app(
             return ConfCheck()
         return azerothcore.conf_check(entry, server_dir)
 
-    return ConfRepairRoute(
-        check=check,
-        repair=lambda: azerothcore.repair_confs(entry, server_dir),
-    )
+    def repair() -> ConfRepaired:
+        # T568: the conf half of "Repair server files…" writes into the server folder like
+        # the compose half does (a press of the engine), so it reserves the server too.
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        with engine.reserved(server_dir, REPAIR_FILES_LABEL):
+            return azerothcore.repair_confs(entry, server_dir)
+
+    return ConfRepairRoute(check=check, repair=repair)
 
 
 def corrections_for_app(

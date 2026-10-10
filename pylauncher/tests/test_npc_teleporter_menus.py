@@ -7,20 +7,20 @@ Pebblebitty (creature 3836, menu 50000) and Maggran Earthbinder (11860, menu 500
 files also collide with each other on 50009 (the capital's battleground menu is deleted by
 the starting-zone file).
 
-Yu'lon cannot edit the clone (a changed clone is a refused Update), so, as for T104's
-`@ONY_LEVEL`, the manifest runs each file unmodified and corrects the database around it:
+T634: upstream merged the renumbering (Zoidwaffle/sql-npc-teleporter#6, 38078d1d: capital menus
+60000..60009, starting-zone menu 60010), so Yu'lon moves nothing any more. What stays, around the
+unmodified files (as for T104's `@ONY_LEVEL`):
 
 * before the files, it clears the menus an earlier Install of this module made, found through
-  the two NPCs' `gossip_menu_id` (not by an id range, which could hold somebody else's menus);
-* after each file, if the NPC still points at the old id AND 60000..60010 is empty, it moves
-  the teleporter's menus to 60000..60010 (capital 60000..60009, starting zone 60010) with every
-  reference, in one transaction; a file that already uses another range is left alone
-  (upstream#6 uses 60000/60010), and an occupied range is refused;
-* it puts the 19 base rows back, and writes the Onyxia answer into the row at the NPC's menu + 4.
+  the two NPCs' `gossip_menu_id` and kept to rows carrying the module's own npc_text ids
+  (300000..300009), not an id range, which could hold somebody else's menus;
+* after the capital file it puts back, only where missing (INSERT IGNORE), the 19 base rows an
+  old install took, refuses a stale copy of the files still on 50000..50009, and writes the
+  Onyxia answer into the row at the NPC's menu + 4.
 
 These tests run the manifest's own statements, in order, against a SQLite model of the tables
-and the REAL `.dist` files (tests/data/npc-teleporter-*): upstream @06e5242 and the branch of
-upstream#6 (035da5d), plus that same file renumbered to 70000/70010. The model understands
+and the REAL `.dist` files (tests/data/npc-teleporter-*): upstream @06e5242 (the old layout) and
+upstream since #6 (035da5d = 38078d1d's tree), plus that same file renumbered to 70000/70010. The model understands
 what these files and statements use of MySQL: `SET @var := ...` within one step (one mysql
 session), `START TRANSACTION`/`COMMIT`, double-quoted strings, `ALTER TABLE ... AUTO_INCREMENT`
 (skipped). The live check on a real WotLK database is in the ticket's gate directory.
@@ -40,13 +40,14 @@ from yulon.catalog.catalog import load_catalog
 
 NEW_FIRST, NEW_LAST = 60000, 60010
 DATA = Path(__file__).resolve().parent / "data"
-VARIANTS = ("06e5242", "035da5d", "70000")
-"""The .dist files in play: upstream as Yu'lon shipped it, upstream#6, and #6 moved elsewhere."""
-EXPECTED_MENUS = {"06e5242": (60000, 60010), "035da5d": (60000, 60010), "70000": (70000, 70010)}
+VARIANTS = ("035da5d", "70000")
+"""The .dist files in play: upstream since #6 (38078d1d), and #6 moved elsewhere."""
+EXPECTED_MENUS = {"035da5d": (60000, 60010), "70000": (70000, 70010)}
 
 PINS_MEASURED = (
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
     "f19a18799",
+    "2a2211cd8",
 )
 USED_AT_BOTH_PINS = (
     (50000, 50008),
@@ -68,7 +69,10 @@ USED_AT_BOTH_PINS = (
 menu: `gossip_menu.MenuID`, `gossip_menu_option.MenuID` and `.ActionMenuID`, `conditions.SourceGroup`
 of types 14 and 15, `smart_scripts.event_param1` of event 62 (and the menu of action 98),
 `creature_template.gossip_menu_id`. Measured 2026-10-08 over base SQL plus every db_world
-update, at 7f12e89e AND at f19a1879: the two sets are identical. Unbound's Mentor (900001)
+update, at 7f12e89e AND at f19a1879: the two sets are identical. T655 (2026-10-10) checked 2a2211cd:
+no base SQL changed since f19a1879, and its 66 db_world updates touch gossip menus 5853/5854, 8554,
+8799/8874/8881/8927 and 10854 only (no event-62 or action-98 smart_scripts row and no
+`gossip_menu_id` in the range; the ids in the range they name are `*_locale` rows). Unbound's Mentor (900001)
 carries `gossip_menu_id` 0 and talks through Lua. 58000..60999 and 62000..89999 are unused.
 """
 
@@ -276,8 +280,15 @@ class World:
                         row = self.con.execute(f"SELECT {expr}").fetchone()
                         variables[name.strip().lstrip("@").lower()] = row[0]
                     continue
-                sql = _sqlite_text(fill(statement))
-                insert = re.match(r"(?:INSERT|REPLACE)\s+INTO\s+(\w+)\s*\(([^)]*)\)", sql, re.I)
+                sql = re.sub(
+                    r"^INSERT\s+IGNORE",
+                    "INSERT OR IGNORE",
+                    _sqlite_text(fill(statement)),
+                    flags=re.I,
+                )
+                insert = re.match(
+                    r"(?:INSERT(?: OR IGNORE)?|REPLACE)\s+INTO\s+(\w+)\s*\(([^)]*)\)", sql, re.I
+                )
                 if insert:
                     self._ensure(insert.group(1), [c.strip() for c in insert.group(2).split(",")])
                 self.con.execute(sql)
@@ -306,6 +317,13 @@ def _dist(variant: str, name: str) -> str:
         moved, count = re.subn(rf"(@GOSSIP_MENU\s*:=\s*){old}", rf"\g<1>{new}", text)
         assert count == 1
         return moved
+    if variant == "ony5":  # upstream moves the Onyxia row off menu+4
+        text = _dist("035da5d", name)
+        return text.replace(
+            "(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL", "(15, @GOSSIP_MENU+5, 11, 27, @ONY_LEVEL"
+        )
+    if variant == "nonpc" and name == "capital":  # the capital file did not create its NPC
+        return "-- nothing\n"
     return (DATA / f"npc-teleporter-{variant}" / f"teleporter_{name}.dist").read_text("utf-8")
 
 
@@ -435,13 +453,8 @@ def test_the_onyxia_answer_lands_on_the_row_at_the_npcs_menu_plus_four(variant: 
     ) == [(_ONY,)]
 
 
-def test_upstream_6_and_the_old_files_end_in_the_same_world() -> None:
-    """The relocation produces exactly what the renumbered upstream files produce by themselves."""
-    assert _installed("06e5242").state() == _installed("035da5d").state()
-
-
-def test_a_world_the_renumbered_upstream_file_ran_alone_on_is_left_as_it_is() -> None:
-    """With upstream#6 nothing is moved: apart from the Onyxia answer, the install is a no-op."""
+def test_a_world_the_new_upstream_file_ran_alone_on_is_left_as_it_is() -> None:
+    """Nothing is moved: apart from the Onyxia answer, the install is a no-op after the files."""
     world = World()
     world.run(_dist("035da5d", "capital"))
     world.run(_dist("035da5d", "starting_zone"))
@@ -452,6 +465,60 @@ def test_a_world_the_renumbered_upstream_file_ran_alone_on_is_left_as_it_is() ->
     done = _installed("035da5d").state()
     done["conditions"] = [r for r in done["conditions"] if not (r[1] == 60004 and r[2] == 11)]
     assert done == straight
+
+
+def test_no_install_step_moves_a_menu() -> None:
+    """T634: upstream numbers its menus 60000-60018 itself, so nothing is renumbered here."""
+    moving = [
+        s
+        for step in _steps()
+        if "statement" in step
+        for s in _statements(step["statement"])
+        if re.match(
+            r"UPDATE (gossip_menu|gossip_menu_option|conditions|smart_scripts|creature_template)",
+            s,
+            re.I,
+        )
+        and "ConditionValue1" not in s
+    ]
+    assert moving == []
+
+
+def test_the_put_back_keeps_a_base_row_somebody_edited() -> None:
+    """The 19 rows are put back only where they are missing, never over an edit."""
+    for variant in VARIANTS:
+        world = World()
+        world.con.execute("UPDATE gossip_menu_option SET OptionText = 'mine' WHERE MenuID = 50003")
+        _install(world, variant)
+        assert world.rows("SELECT OptionText FROM gossip_menu_option WHERE MenuID = 50003") == [
+            ("mine",)
+        ]
+        _remove(world)
+        assert world.rows("SELECT OptionText FROM gossip_menu_option WHERE MenuID = 50003") == [
+            ("mine",)
+        ]
+
+
+def test_files_of_the_old_layout_are_refused_and_a_new_install_mends_it() -> None:
+    """A stale clone (menus on 50000) must say so, not pass: Install again with new files heals."""
+    world = World()
+    with pytest.raises(Refused, match="50000"):
+        _install(world, "06e5242")
+    _install(world, "035da5d")
+    assert world.state() == _installed("035da5d").state()
+
+
+def test_the_clear_before_the_files_takes_only_menus_with_the_modules_texts() -> None:
+    """Step 0 follows the NPC to its menus but spares a row there that is not ours."""
+    world = _installed("035da5d")
+    for menu in (60003, 60010):
+        _foreign(world, menu)
+    world.run(_steps()[0]["statement"])
+    assert {r[0] for r in world.rows("SELECT MenuID FROM gossip_menu WHERE TextID = 4242")} == {
+        60003,
+        60010,
+    }
+    assert world.rows("SELECT COUNT(*) FROM gossip_menu WHERE TextID >= 300000") == [(0,)]
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
@@ -473,12 +540,14 @@ def test_an_install_over_one_made_before_the_fix_gives_the_base_rows_back(varian
 @pytest.mark.parametrize("variant", ["035da5d", "70000"])
 def test_an_install_over_one_this_fix_relocated_follows_the_new_file(variant: str) -> None:
     """The menus an earlier Install put at 60000..60010 go, wherever the new file builds."""
-    world = _installed("06e5242")
+    world = World()  # what T564's relocation left: the new upstream's layout
+    world.run(_dist("035da5d", "capital"))
+    world.run(_dist("035da5d", "starting_zone"))
     _install(world, variant)
     assert world.state() == _installed(variant).state()
 
 
-@pytest.mark.parametrize("variant", ["06e5242", "035da5d"])
+@pytest.mark.parametrize("variant", ["035da5d"])
 def test_an_install_interrupted_between_any_two_statements_is_mended_by_installing_again(
     variant: str,
 ) -> None:
@@ -505,26 +574,10 @@ def _foreign(world: World, menu: int) -> None:
     world.con.execute(f"INSERT INTO gossip_menu (MenuID, TextID) VALUES ({menu}, 4242)")
 
 
-def test_an_occupied_range_is_refused_and_the_other_menus_are_left_alone() -> None:
-    world = World()
-    _foreign(world, 60005)
-    with pytest.raises(Refused, match="60000-60010"):
-        _install(world, "06e5242")
-    assert world.rows("SELECT * FROM gossip_menu WHERE MenuID = 60005") == [(60005, 4242)]
-
-
-def test_an_occupied_zone_menu_is_refused_too() -> None:
-    world = World()
-    _foreign(world, 60010)
-    with pytest.raises(Refused, match="60010"):
-        _install(world, "06e5242")
-    assert world.rows("SELECT * FROM gossip_menu WHERE MenuID = 60010") == [(60010, 4242)]
-
-
 def test_install_deletes_no_menu_that_is_not_the_modules() -> None:
     """Menus around the new range, and in it when upstream builds elsewhere, survive Install."""
     for variant, menus in (
-        ("06e5242", (59999, 60011)),
+        ("035da5d", (59999, 60019)),
         ("70000", (60000, 60005, 59999, 60011, 70020)),
     ):
         world = World()
@@ -553,7 +606,7 @@ def test_remove_after_an_install_made_before_the_fix_still_leaves_the_base_game_
     assert world.state(like=World()) == World().state()
 
 
-@pytest.mark.parametrize("variant", ["06e5242", "70000"])
+@pytest.mark.parametrize("variant", ["035da5d", "70000"])
 def test_remove_interrupted_between_any_two_statements_is_mended_by_removing_again(
     variant: str,
 ) -> None:
@@ -575,7 +628,7 @@ def test_remove_interrupted_between_any_two_statements_is_mended_by_removing_aga
 def test_remove_deletes_no_menu_that_is_not_the_modules(variant: str) -> None:
     """Nothing but the menus the NPCs pointed at goes: not the old range, not the new one."""
     world = _installed(variant)
-    foreign = (50009, 50010, 50017, 59999, 60011, 70011, 61500)
+    foreign = (50009, 50010, 50017, 59999, 60003, 60011, 70011, 61500)
     for menu in foreign:
         _foreign(world, menu)
     world.con.execute(
@@ -588,16 +641,6 @@ def test_remove_deletes_no_menu_that_is_not_the_modules(variant: str) -> None:
     assert world.rows(
         "SELECT MenuID, OptionID FROM gossip_menu_option WHERE OptionText IN ('x', 'custom') ORDER BY 1"
     ) == [(50003, 9), (50012, 0)]
-
-
-def test_a_refused_install_is_mended_by_clearing_the_range_and_installing_again() -> None:
-    world = World()
-    _foreign(world, 60005)
-    with pytest.raises(Refused, match="stay missing"):
-        _install(world, "06e5242")
-    world.con.execute("DELETE FROM gossip_menu WHERE MenuID = 60005")
-    _install(world, "06e5242")
-    assert world.state() == _installed("06e5242").state()
 
 
 # --------------------------------------------------------------------------- the range is free
@@ -617,17 +660,20 @@ def test_the_snapshot_covers_the_pin_the_catalog_ships() -> None:
     )
 
 
-def test_every_row_moving_install_statement_is_guarded() -> None:
-    """Dropping a guard moves base rows into the range or deletes menus that are not ours."""
-    moving = [
-        s
-        for step in _steps()
-        if step.get("when", "install") == "install" and "statement" in step
-        for s in _statements(step["statement"])
-        if re.match(
-            r"UPDATE (gossip_menu|gossip_menu_option) SET|UPDATE conditions SET SourceGroup|UPDATE smart_scripts SET event_param1|UPDATE creature_template SET gossip_menu_id",
-            s,
-        )
-    ]
-    assert len(moving) == 10
-    assert all("@tp_move=1" in s for s in moving), [s for s in moving if "@tp_move=1" not in s]
+# --------------------------------------------------------------------------- T634 follow-ups
+
+
+def test_an_onyxia_row_that_upstream_moved_is_refused_in_plain_words() -> None:
+    """The UPDATE would match nothing; the install must say what changed, not pass."""
+    world = World()
+    with pytest.raises(Refused, match="Onyxia"):
+        _install(world, "ony5")
+
+
+def test_a_missing_capital_npc_gets_its_own_sentence() -> None:
+    """No row 190000 is not 'the files still use the old ids'."""
+    world = World()
+    with pytest.raises(Refused) as caught:
+        _install(world, "nonpc")
+    assert "50000" not in str(caught.value)
+    assert "190000" in str(caught.value)

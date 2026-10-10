@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -95,6 +96,19 @@ if TYPE_CHECKING:
     from yulon.catalog.catalog import CatalogEntry
 
 logger = get_logger(__name__)
+
+
+def removable_images(built: Sequence[str]) -> tuple[str, ...]:
+    """Every image the uninstall removes for these built refs, with kept builds and rollbacks."""
+    return (
+        *built,
+        *(ref + PARKED_TAG_SUFFIX for ref in built),
+        *(ref + ROLLBACK_TAG_SUFFIX for ref in built),
+    )
+
+
+UNINSTALL_PRESS = "Uninstall the server"
+"""The press name the uninstall's hold carries (T622)."""
 
 
 class PurgeError(RuntimeError):
@@ -343,6 +357,7 @@ class Uninstaller:
         remove_extraction_client: Callable[[], str] | None = None,
         stop_background_jobs: Callable[[], None] | None = None,
         take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -350,6 +365,8 @@ class Uninstaller:
         self.image_refs = tuple(image_refs)
         self.wsl_distro = wsl_distro
         self.forget = forget
+        # T622: the server's cross-process hold, for the whole of `run()`. None holds nothing.
+        self._hold_server = hold_server
         self._logs_dir = logs_dir
         self._claim = claim if claim is not None else _default_claim
         self._reason_of = reason_of if reason_of is not None else _default_reason
@@ -626,6 +643,23 @@ class Uninstaller:
     # -- running -----------------------------------------------------------
 
     def run(self, *, keep_characters: bool) -> PurgeReport:
+        """Remove this install under the server's hold (T622); see `_run`.
+
+        The hold is for the whole removal and not only the containers' (`remove_staged` has its
+        own): the volumes, the images and the folder go afterwards, and another Yu'lon's Start or
+        Update must not find the server half-removed between them. While another Yu'lon holds the
+        server the press is refused with its sentence, and nothing is removed.
+        """
+        if self._hold_server is None:
+            return self._run(keep_characters=keep_characters)
+        with ExitStack() as held:
+            try:
+                held.enter_context(self._hold_server(UNINSTALL_PRESS))
+            except docker.ServerHeldError as refused:
+                raise PurgeRefusal(str(refused)) from refused
+            return self._run(keep_characters=keep_characters)
+
+    def _run(self, *, keep_characters: bool) -> PurgeReport:
         """Remove this install. Raises `PurgeError` rather than doing half of it.
 
         Every refusal is re-asked here rather than taken from the plan the
@@ -722,13 +756,37 @@ class Uninstaller:
         # BEFORE the folder: every module's receipts live in its clone in it. Each
         # module's client file goes, and each file of the player's a module set
         # aside is put back; what cannot be is named, never deleted (T262).
+        # T613 round 3: the note of the player's add-on folders set aside lives in the
+        # server folder, which goes below; read before the take-back, which may break.
+        from yulon.apply import (
+            aside_path_could_be_ours,
+            read_addon_asides,
+            unchecked_addon_aside_paths,
+        )
+
+        asides = [
+            entry
+            for entry in read_addon_asides(self.server_dir)
+            if aside_path_could_be_ours(entry["aside"])
+        ]
+        unchecked = unchecked_addon_aside_paths(self.server_dir)
         try:
             took, kept_back = self.take_back_client_files()
         except (OSError, ValueError) as exc:
             took, kept_back = [], [
                 f"the files modules put into your game client could not be checked ({exc}); "
                 f"any file of yours a module set aside is still beside it, named "
-                f"<name>.yulon-module-old"
+                f"<name>.yulon-module-old",
+                *(
+                    f"your own {entry['addon']} add-on folder that Yu'lon set aside is still at "
+                    f"{entry['aside']}; rename it back to {entry['addon']} when you want it again"
+                    for entry in asides
+                ),
+                *(
+                    f"an add-on folder of yours that Yu'lon set aside may still be at {path} "
+                    "(its note could not be checked)"
+                    for path in unchecked
+                ),
             ]
         for line in took:
             logger.info(f"uninstall: {line}")

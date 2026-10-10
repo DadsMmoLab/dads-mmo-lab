@@ -253,7 +253,11 @@ def test_progress_is_read_from_the_generators_own_lines(server: Path) -> None:
     now = status(server, fake)
     assert (now.state, now.percent, now.map) == ("running", 37, 1)
     assert now.line() == "Pathfinding data: 37 % — the server already runs without it."
-    assert record(server)["percent"] == 37
+    assert (
+        "percent" not in record(server) or record(server)["percent"] is None
+    ), "T623: the poll holds nothing"
+    read = mmaps.read_record(server)
+    assert read is not None and read.percent == 37, "its progress file, laid over the record"
     assert not now.restart_needed and not now.pathfinding_on
 
 

@@ -74,6 +74,9 @@ stdin is EOF, and the live Centurion press exited 255 (T241).
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
+TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-6131a26f"
+"""`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
+
 
 def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
     """An `on_clone` hook laying the pre-image of every patch `entry` carries under its source.
@@ -98,7 +101,9 @@ def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
             for hunk in patch.parse((root / spec.file).read_text(encoding="utf-8")):
                 target = dest.joinpath(*hunk.path.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]).read_bytes())
+                whole = TORTOISE_FIXTURE.joinpath(*hunk.path.split("/"))
+                source = whole if whole.is_file() else VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]
+                target.write_bytes(source.read_bytes())
 
     return on_clone
 
@@ -138,6 +143,8 @@ class Recorder:
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     one_shot_left: docker.OneShotLeft | None = None
     """What `end_one_shot()` answers (T539): None, nothing of the one-shot is running."""
+    one_shots_running: list[str] = field(default_factory=list)
+    """One-shots still running from an earlier run, which `end_one_shot()` kills (T658)."""
     ended_one_shots: list[str] = field(default_factory=list)
     """Every service `end_one_shot()` was asked to end, in order. Not in `calls`, so the
     recorded call lists every other test pins stay as they were."""
@@ -382,6 +389,32 @@ class Recorder:
     row is a ledger nobody can read, and the update route then refuses every press.
     """
 
+    applied_updates: dict[str, str] = field(default_factory=dict)
+    """T630: what a schema's `updates` table answers to "which of these names do you hold".
+
+    Keyed by schema, VERBATIM like `query_answer`; a schema not named holds none of
+    them. Filtered by the names asked, as the `IN (...)` filters, so a test sees the
+    route ask about the files it found and not the whole ledger.
+    """
+
+    byte_trees: dict[tuple[Path, str, str], dict[str, bytes] | None] = field(default_factory=dict)
+    """T632: git's tree per `(checkout, commit, folder)`: `{name: bytes}`; None = git cannot say.
+
+    The route's `tree_bytes()` seam answers from these (and `blobs`), as `git archive` would.
+    A folder not named is a folder that commit does not have.
+    """
+
+    blobs: dict[tuple[Path, str, str], bytes] = field(default_factory=dict)
+    """T632: a single file at `(checkout, commit, path)` for `tree_bytes()`: its bytes."""
+
+    migrations: dict[str, str] = field(default_factory=dict)
+    """T632: a Tortoise schema's `migrations` ledger, `<module>:<HASH>` per line, answered verbatim.
+
+    A schema not named has no `migrations` table (the table question answers nothing)."""
+
+    updates_error: str = ""
+    """T630: non-empty and every `updates` question fails with it (a database that cannot say)."""
+
     column_answer: str | None = None
     """What an `information_schema.columns` question answers; None falls through to `query_answer`.
 
@@ -479,6 +512,29 @@ class Recorder:
     about the folders it reads and not the whole tree.
     """
 
+    trees: dict[tuple[Path, str], tuple[str, ...] | None] = field(default_factory=dict)
+    """T630: `tree_files()`'s answer per `(checkout, commit)`: the paths that commit tracks.
+
+    Absent is a commit tracking nothing under the asked folders; `None` is git that
+    could not say. Filtered by the pathspecs asked, as `git ls-tree` filters. Read
+    from here and never from the disk, as the real seam reads the commit's tree.
+    """
+
+    lines: dict[tuple[Path, str, str], tuple[str, ...]] = field(default_factory=dict)
+    """T630: `file_lines()`'s answer per `(checkout, commit, path)`; absent is a file with none."""
+
+    lines_unreadable: bool = False
+    """T630: `file_lines()` answers None (git could not read the files)."""
+
+    ancestors: set[tuple[Path, str, str]] = field(default_factory=set)
+    """T632: `(checkout, old, new)` triples `is_ancestor()` answers True for (a forward move)."""
+
+    ancestry_undecided: bool = False
+    """T632: `is_ancestor()` answers None, as a depth-1 clone's grafts leave git unable to."""
+
+    db_was_up: bool | None = True
+    """What `db_running()` answers for the database container (T630): up, by default."""
+
     diff_lines: dict[tuple[Path, str, str, str], tuple[str, ...] | None] = field(
         default_factory=dict
     )
@@ -558,6 +614,62 @@ class Recorder:
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
 
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        self.calls.append(f"is-ancestor:{dest.name}:{old[:7]}:{new[:7]}")
+        if self.ancestry_undecided:
+            return None
+        return (dest, old, new) in self.ancestors
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
+        said = self.trees.get((dest, rev), ())
+        if said is None:
+            return None
+        return tuple(
+            path
+            for path in said
+            if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
+        )
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        self.calls.append(f"tree-bytes:{dest.name}:{rev[:7]}:{path}")
+        found: dict[str, bytes] = {}
+        for (where, at, folder), files in {**self.byte_trees, **self.blobs}.items():
+            if where != dest or at != rev:
+                continue
+            inside = (
+                folder == path or folder.startswith(f"{path}/") or path.startswith(f"{folder}/")
+            )
+            if folder == path and files is None:
+                return None
+            if not inside or files is None:
+                continue
+            if isinstance(files, bytes):
+                found[folder] = files
+                continue
+            for name, data in files.items():
+                full = f"{folder}/{name}"
+                if full == path or full.startswith(f"{path}/"):
+                    found[full] = data
+        return found
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        self.calls.append(f"file-lines:{dest.name}:{rev[:7]}:{len(paths)}")
+        if self.lines_unreadable:
+            return None
+        return {
+            path: self.lines[(dest, rev, path)] for path in paths if (dest, rev, path) in self.lines
+        }
+
+    def db_running(self, container: str) -> bool | None:
+        self.calls.append(f"db-running?:{container}")
+        return self.db_was_up
+
+    def stop_db(self, containers: list[str]) -> None:
+        self.calls.append(f"stop-db:{','.join(containers)}")
+
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
         return self.diff_lines.get((dest, old, new, path))
@@ -591,8 +703,8 @@ class Recorder:
             return UNREADABLE
         return self.probe_answers.pop(0) if len(self.probe_answers) > 1 else self.probe_answers[0]
 
-    def reset(self) -> tuple[str, ...]:
-        self.calls.append("reset")
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        self.calls.append("reset-everything" if everything else "reset")
         if self.reset_error is not None:
             raise self.reset_error
         return self.reset_answer
@@ -758,6 +870,26 @@ class Recorder:
             return self.realm_row
         if "yulon_install_file" in statement:
             return self.file_ledger
+        if statement == "SHOW TABLES LIKE 'migrations'":
+            return "migrations\n" if schema in self.migrations else ""
+        if "FROM `migrations` WHERE" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([0-9A-F]+)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.migrations.get(schema or "", "").splitlines()
+                if line.partition(":")[2] in asked
+            )
+        if "FROM updates WHERE name IN" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([^']*)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.applied_updates.get(schema or "", "").splitlines()
+                if line in asked
+            )
         if self.column_answer is not None and "information_schema.columns" in statement:
             return self.column_answer
         if statement.startswith(scriptdeploy.TABLES_QUESTION):
@@ -810,15 +942,28 @@ class Recorder:
             return self.build_result
 
         def one_shot(
-            service: str, server_dir: Path, *, sink: object = None, cancel: object = None
+            service: str,
+            server_dir: Path,
+            *,
+            sink: object = None,
+            cancel: object = None,
+            record_ended: bool = False,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
             if callable(sink):
                 sink(f"{service} said something")
             return self.one_shot_result
 
-        def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        def end_one_shot(
+            service: str, server_dir: Path, *, record_ended: bool = False
+        ) -> docker.OneShotLeft | None:
             self.ended_one_shots.append(service)
+            if service in self.one_shots_running:
+                # What the real one does when it has to kill one (T658): a record only when
+                # the caller asked for one, which is the import's callers.
+                self.one_shots_running.remove(service)
+                if record_ended:
+                    docker.one_shot_ended_marker(server_dir, service).write_text("ended\n")
             return self.one_shot_left
 
         def verify(
@@ -853,6 +998,12 @@ class Recorder:
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
+            tree_files=self.tree_files,
+            is_ancestor=self.is_ancestor,
+            file_lines=self.file_lines,
+            tree_bytes=self.tree_bytes,
+            db_running=self.db_running,
+            stop_db=self.stop_db,
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
@@ -1099,8 +1250,9 @@ class FakeSnapshot:
         return snapshot.PutBack(restored=copy.databases, safety=safety)
 
     def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        """The real forgetting (`snapshot.prune_older()`), on the files a test laid (T633)."""
         self.rec.calls.append("prune")
-        return ()
+        return snapshot.prune_older(copy.directory, copy.files)
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

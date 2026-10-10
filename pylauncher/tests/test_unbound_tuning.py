@@ -29,10 +29,16 @@ DIST = (
 
 @pytest.fixture
 def ps(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """`test_controller_view`'s Docker-free `runner.run`."""
+    """`test_controller_view`'s Docker-free `runner.run`, and its inline jobs (T622).
+
+    A Save is a job now: run inline, its answer is on the card when the click returns.
+    """
     from tests.test_controller_view import _Ps
     from yulon import runner
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.widgets.job import run_inline
 
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _p: run_inline)
     fake = _Ps()
     monkeypatch.setattr(runner, "run", fake)
     return fake

@@ -92,7 +92,9 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
         assert sql.root_password == install_wiring.fixed_db_password(WOTLK)
         return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
-    def fake_reset(sql: DockerSql, mysql: DockerMysql) -> tuple[str, ...]:
+    def fake_reset(
+        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False
+    ) -> tuple[str, ...]:
         seen.append((sql.db_container, mysql.db_container))
         return ("acore_world",)
 
@@ -1366,6 +1368,54 @@ def test_a_copy_cut_short_drops_nothing_and_names_the_file(
     with pytest.raises(CopyNotUsable) as raised:
         copy.put_back(tmp_path, Snapshot(cut.parent, (cut,), ("acore_playerbots",)))
     assert str(cut) in str(raised.value) and "nothing was dropped" in str(raised.value)
+    assert server.schemas == {"acore_playerbots": {"updates", "playerbots_speech"}}
+    assert server.statements == [], "nothing was sent to the database"
+
+
+def test_the_copy_the_update_takes_says_which_game_it_is_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T603: the update's own snapshot goes through `backup()`, so it carries the record."""
+    from yulon.controller_wow_wotlk.maintenance import backup_game
+
+    copy = _real_put_back(monkeypatch, _TableServer({"acore_playerbots": {"updates"}}))
+    taken = copy.take(tmp_path, ("acore_playerbots",))
+    assert [backup_game(path) for path in taken.files] == ["wow-wotlk"]
+
+
+def test_a_copy_an_older_yulon_took_with_no_game_record_still_goes_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T603: it is this server's own copy, so the rollback does not ask about its game."""
+    from yulon.catalog.snapshot import Snapshot
+
+    server = _TableServer({"acore_playerbots": {"updates", "playerbots_speech"}})
+    copy = _real_put_back(monkeypatch, server)
+    old = _a_copy(
+        tmp_path / "sql_scripts/backups/x_before-new-build_acore_playerbots.sql",
+        "acore_playerbots",
+        ("updates",),
+    )
+    put = copy.put_back(tmp_path, Snapshot(old.parent, (old,), ("acore_playerbots",)))
+    assert put.restored == ("acore_playerbots",)
+    assert server.schemas == {"acore_playerbots": {"updates"}}
+
+
+def test_a_copy_that_names_another_game_is_never_put_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon.catalog.snapshot import Snapshot
+
+    server = _TableServer({"acore_playerbots": {"updates", "playerbots_speech"}})
+    copy = _real_put_back(monkeypatch, server)
+    foreign = _a_copy(
+        tmp_path / "sql_scripts/backups/x_before-new-build_acore_playerbots.sql",
+        "acore_playerbots",
+        ("updates",),
+    )
+    foreign.write_bytes(b"-- yulon-backup: game=wow-unbound\n" + foreign.read_bytes())
+    with pytest.raises(InstallerError, match="will not do it"):
+        copy.put_back(tmp_path, Snapshot(foreign.parent, (foreign,), ("acore_playerbots",)))
     assert server.schemas == {"acore_playerbots": {"updates", "playerbots_speech"}}
     assert server.statements == [], "nothing was sent to the database"
 

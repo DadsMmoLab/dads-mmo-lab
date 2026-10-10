@@ -185,7 +185,9 @@ class DadcraftRealmBadge(QWidget):
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
             border_color = "#555560"
             text_color = "#A0A0AA"
-            display_text = "○ REALM OFFLINE"
+            # T608: "failed" is the Server tab's verdict naming a failed database update; the
+            # world is not coming up, and the word says why instead of STARTING.
+            display_text = "✖ UPDATE FAILED" if self._status == "failed" else "○ REALM OFFLINE"
 
         self._label.setText(display_text)
         self._label.setStyleSheet(

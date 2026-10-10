@@ -533,6 +533,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".cmangos",),
     ),
     Site(
+        "yulon.playerbots_rename",
+        "settle",
+        "the bot settings renamed to the config prefix the server's mod-playerbots reads (T657)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable(
+                "its bot modules kept the AiPlayerbot. names; there is no mod-playerbots checkout"
+            ),
+            "trinitycore": not_applicable(
+                "its bot module reads Playerbot.* keys of its own; no mod-playerbots checkout"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
         "yulon.bot_population",
         "where",
         "the file the Bots tab writes the random-bot count into",
@@ -982,7 +997,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "what a family stops before a rebuild, an update or a return to the tested commit",
         {
             "azerothcore": supported(
-                "AzerothCoreInstaller writes its carried patches and lays its Lua scripts (T553)"
+                "AzerothCoreInstaller writes its patches and checks its Lua scripts can be laid"
             ),
             "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
             "trinitycore": supported("TrinityCoreInstaller stops a running movement-map job"),

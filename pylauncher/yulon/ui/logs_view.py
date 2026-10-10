@@ -60,7 +60,7 @@ from yulon.support import sources as support_sources
 from yulon.support.redact import Redactor
 from yulon.ui.folder_picker import pick_save_file
 from yulon.ui.widgets.flow_layout import flow_bar
-from yulon.ui.widgets.job import JobRunner, threaded_job_runner
+from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import line_format
 
 logger = get_logger(__name__)
@@ -200,6 +200,30 @@ def _intro(*, short: bool) -> str:
     return text + "."
 
 
+def _left_out_text(report: bundle.BundleReport) -> str:
+    """One short clause per reason a log was left out of the zip, or "" when none was (T609).
+
+    MANIFEST.txt inside the zip names each one; the line on screen is what the player reads
+    before sending, so it says how many and why.
+    """
+    clauses = []
+    if report.dropped:
+        clauses.append(f"{_logs(len(report.dropped))} left out to keep the file small")
+    if report.quick_dropped:
+        clauses.append(f"{_logs(len(report.quick_dropped))} left out to keep saving quick")
+    if report.unvouched:
+        n = len(report.unvouched)
+        it = "it" if n == 1 else "them"
+        clauses.append(f"{_logs(n)} left out because the cleaner could not vouch for {it}")
+    count = len(report.dropped) + len(report.unvouched) + len(report.quick_dropped)
+    names = "it" if count == 1 else "them"
+    return f" {', '.join(clauses)}; MANIFEST.txt names {names}." if clauses else ""
+
+
+def _logs(n: int) -> str:
+    return f"{n} log" if n == 1 else f"{n} logs"
+
+
 def _size_text(size: int) -> str:
     """Bytes as a person reads them: `3.2 MB`, `412 KB`. Decimal, as Discord states its limit."""
     if size >= 1_000_000:
@@ -317,6 +341,9 @@ class LogsView(QWidget):
         """The newest read started; a result from any other is dropped."""
         self._reading = False
         self._saving_to: Path | None = None
+        self._save_relay = LineRelay(self)
+        """The worker's progress lines, carried to `_save_progress` on this thread (T638)."""
+        self._save_relay.line.connect(self._save_progress)
         self._short_passwords: tuple[str, ...] = ()
         """The newest read's `Known.short`: while set, nothing here promises every
         password is gone (Codex T93 review)."""
@@ -489,15 +516,23 @@ class LogsView(QWidget):
         qt_version = qVersion()
         seams = self._bundle_seams
 
+        relay = self._save_relay
+
         def work() -> bundle.BundleReport:
             # Worker thread, like every other read here (see the module docstring).
             sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
-            return bundle.save(dest, sources, seams=seams)
+            return bundle.save(dest, sources, seams=seams, progress=relay.emit_line)
 
         self._set_saving(dest)
-        self.status.setText("Saving the support file… reading each server's log can take a minute.")
+        self.status.setText("Saving the support file…")
         self._jobs(work, self._saved, self._save_failed)
         return True
+
+    @Slot(str)
+    def _save_progress(self, line: str) -> None:
+        """What the build is doing, while it does it; a late line after the end is dropped."""
+        if self._saving_to is not None:
+            self.status.setText(f"Saving the support file… {line}")
 
     @Slot(object)
     def _saved(self, report: object) -> None:
@@ -506,7 +541,7 @@ class LogsView(QWidget):
             return
         skipped = (
             f" {len(report.skipped)} skipped, MANIFEST.txt says why." if report.skipped else ""
-        )
+        ) + _left_out_text(report)
         if report.short_passwords:
             text = (
                 f"Saved {report.path} ({_size_text(report.size)}).{skipped} "
@@ -544,6 +579,6 @@ class LogsView(QWidget):
         if self._saving_to is None:
             return None
         return (
-            "Yu'lon is still saving the support file. It finishes on its own within a "
-            "minute or two; close the window again then."
+            "Yu'lon is still saving the support file. It finishes on its own; "
+            "close the window again then."
         )

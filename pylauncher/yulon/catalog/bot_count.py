@@ -31,7 +31,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from yulon import tuning
+from yulon import playerbots_keys, tuning
 from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatchTable
 
@@ -86,24 +86,39 @@ def _text(path: Path) -> str | None:
         return None
 
 
-def in_override_text(text: str, entry: CatalogEntry) -> dict[str, str]:
-    """`{MIN_ENV: …, MAX_ENV: …}` from an override's world environment, or `{}`."""
+def in_override_text(text: str, entry: CatalogEntry, prefix: str | None = None) -> dict[str, str]:
+    """`{MIN_ENV: …, MAX_ENV: …}` from an override's world environment, or `{}`.
+
+    Under either of mod-playerbots' prefixes (T657), the one `prefix` names first: an
+    override a press has not renamed yet holds the pair the next render carries over,
+    under the names that render writes. Keyed by the catalog's names whichever was read.
+    """
     native = entry.install.native
     if native is None or native.azerothcore is None:
         return {}
     lines = text.split("\n")
     at = env_lines(lines, entry.container_spec().world)
-    spots = [at.get(name, []) for name in (MIN_ENV, MAX_ENV)]
-    if any(len(spot) != 1 for spot in spots):
-        return {}
-    kept = pair(*(env_value(lines[spot[0]]) for spot in spots))
-    return {} if kept is None else {MIN_ENV: kept[0], MAX_ENV: kept[1]}
+    for low, high in zip(
+        playerbots_keys.reading_order(MIN_ENV, prefix, of_env=True),
+        playerbots_keys.reading_order(MAX_ENV, prefix, of_env=True),
+        strict=True,
+    ):
+        spots = [at.get(name, []) for name in (low, high)]
+        if not any(spots):
+            continue
+        if any(len(spot) != 1 for spot in spots):
+            return {}
+        kept = pair(*(env_value(lines[spot[0]]) for spot in spots))
+        return {} if kept is None else {MIN_ENV: kept[0], MAX_ENV: kept[1]}
+    return {}
 
 
 def in_override(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     """The player's pair in this install's override on disk, or `{}`."""
     text = _text(server_dir / composegen.OVERRIDE_FILE)
-    return {} if text is None else in_override_text(text, entry)
+    if text is None:
+        return {}
+    return in_override_text(text, entry, playerbots_keys.module_prefix(server_dir))
 
 
 def in_conf(path: Path, low: str = MIN_KEY, high: str = MAX_KEY) -> dict[str, str]:

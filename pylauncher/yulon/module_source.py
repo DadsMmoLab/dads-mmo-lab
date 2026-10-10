@@ -36,10 +36,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Container
 from datetime import date
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -83,6 +85,9 @@ FOLDER_DESCRIPTION = "Custom module (copied from a folder you provided)."
 _NOTHING_CHANGED = "Nothing on this machine was changed."
 """The tab's own closing clause, true of every refusal here: nothing writes first."""
 
+NOTHING_CHANGED = _NOTHING_CHANGED
+"""The same clause for a per-game `Layout`, whose refusals end the same way (T596)."""
+
 _CUSTOM_ID = re.compile(r"^mod-[a-z0-9-]{1,64}$")
 """`_valid_cpp_key` (`RUST modules.rs:40-50`), ported exactly.
 
@@ -125,6 +130,39 @@ neither spelling gets no step at all rather than a guessed database.
 """
 
 
+class Layout(Protocol):
+    """What one game's custom route takes, for a game whose rules are not WotLK's (T596).
+
+    `derive_link()`/`derive_folder()` keep WotLK's behaviour byte for byte when
+    they are handed none; a game with its own kinds hands its layout instead of a
+    copy of this module. Every refusal a layout raises is a whole `DeriveError`
+    sentence ending in `NOTHING_CHANGED`, because it is raised before anything is
+    written, as this module's own are.
+    """
+
+    @property
+    def link_description(self) -> str:
+        """The list's description of an item from a link."""
+        ...
+
+    @property
+    def folder_description(self) -> str:
+        """The list's description of an item from a folder."""
+        ...
+
+    def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
+        """`(type, id, name)` for a repository or folder basename, or a `DeriveError`."""
+        ...
+
+    def refuse_folder(self, path: Path, name: str) -> str | None:
+        """Why the folder at `path` cannot be installed, read before any copy; None if it can."""
+        ...
+
+    def build(self, kind: ManifestType) -> Build:
+        """What the derived item of this kind asks of the server after it is installed."""
+        ...
+
+
 class DeriveError(RuntimeError):
     """A link or a folder this app will not derive a module from.
 
@@ -138,7 +176,14 @@ class DeriveError(RuntimeError):
 # ---------------------------------------------------------------- deriving
 
 
-def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str] = ()) -> Manifest:
+def derive_link(
+    text: str,
+    game: str,
+    *,
+    today: date,
+    shipped_ids: Container[str] = (),
+    layout: Layout | None = None,
+) -> Manifest:
     """A minimal module manifest for the repository `text` points at.
 
     Minimal because a link's CONTENTS are not known until it is cloned: this
@@ -172,6 +217,23 @@ def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str
             f"on {', '.join(ALLOWED_REPO_HOSTS)}, or owner/name for github.com. "
             f"{_NOTHING_CHANGED}"
         ) from exc
+    if layout is not None:
+        kind, laid_id, name = layout.identify(
+            _basename(text.rstrip("/").rsplit("/", 1)[-1]), folder=False
+        )
+        _refuse_shipped(laid_id, shipped_ids)
+        return _manifest(
+            laid_id,
+            game,
+            description=layout.link_description,
+            source=source,
+            origin=Origin(kind="link", added=today.isoformat()),
+            came_from=text,
+            today=today,
+            kind=kind,
+            name=name,
+            build=layout.build(kind),
+        )
     item_id = _id_from(text.rstrip("/").rsplit("/", 1)[-1])
     if item_id is None:
         raise DeriveError(
@@ -193,7 +255,12 @@ def derive_link(text: str, game: str, *, today: date, shipped_ids: Container[str
 
 
 def derive_folder(
-    path: Path, game: str, *, today: date, shipped_ids: Container[str] = ()
+    path: Path,
+    game: str,
+    *,
+    today: date,
+    shipped_ids: Container[str] = (),
+    layout: Layout | None = None,
 ) -> Manifest:
     """A minimal module manifest for the folder at `path`, with no `source` at all.
 
@@ -204,6 +271,24 @@ def derive_folder(
     """
     if not path.is_dir():
         raise DeriveError(f"{path} is not a folder this app can read. {_NOTHING_CHANGED}")
+    if layout is not None:
+        kind, laid_id, name = layout.identify(path.name, folder=True)
+        refusal = layout.refuse_folder(path, name)
+        if refusal:
+            raise DeriveError(f"{refusal} {_NOTHING_CHANGED}")
+        _refuse_shipped(laid_id, shipped_ids)
+        return _manifest(
+            laid_id,
+            game,
+            description=layout.folder_description,
+            source=None,
+            origin=Origin(kind="folder", path=str(path), added=today.isoformat()),
+            came_from=str(path),
+            today=today,
+            kind=kind,
+            name=name,
+            build=layout.build(kind),
+        )
     item_id = _id_from(path.name)
     if item_id is None:
         raise DeriveError(
@@ -315,6 +400,68 @@ def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:
     return tuple(steps)
 
 
+_DERIVED_FIELDS = frozenset(
+    {"schema_version", "id", "name", "type", "game", "description", "source", "origin"}
+    | {"build", "notes", "conf", "sql"}
+)
+"""The fields a derivation (`_manifest()`) and its completion (`complete()`) ever set."""
+_CONF_STEM = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+
+
+def beyond_derived_shape(manifest: Manifest) -> str | None:
+    """The first field of `manifest` that no derivation produces, or None when it is plain.
+
+    A description that arrives from outside (a move package) is somebody's file: a crafted one
+    can carry patches, client files, deploys, NPCs, server DBCs, folders, prompts, requires or
+    conflicts, and the install would act on them. A derived manifest sets only the fields in
+    `_DERIVED_FIELDS`, and `complete()` fills `conf` and `sql` in ONE shape, checked here step
+    by step; anything else is named so the caller can refuse it.
+    """
+    for name, field in Manifest.model_fields.items():
+        if name not in _DERIVED_FIELDS and getattr(manifest, name) != field.get_default(
+            call_default_factory=True
+        ):
+            return name
+    source = manifest.source
+    if source is not None and (source.branch, source.sparse_path, source.depth) != (
+        None,
+        None,
+        Source.model_fields["depth"].default,
+    ):
+        # A link derives `Source(repo=...)` and nothing more. A carried branch would reach
+        # `git clone --branch`, a sparse path the checkout and a depth the clone, so none is taken.
+        return "source"
+    for step in manifest.conf:
+        template = step.template or ""
+        stem = template[len("conf/") : -len(_CONF_DIST_SUFFIX)]
+        if (
+            template != f"conf/{stem}{_CONF_DIST_SUFFIX}"
+            or not _CONF_STEM.fullmatch(stem)
+            or step.file != f"{_MODULE_CONF_DIR}/{stem}.conf"
+            or step.keys
+        ):
+            return "conf"
+    for sql in manifest.sql:
+        found = re.fullmatch(r"data/sql/([a-z_-]+)/\*\*/\*\.sql", sql.path or "")
+        if (
+            found is None
+            or sql
+            != SqlStep(
+                db=_SQL_DBDIRS.get(found.group(1), "world"),
+                path=sql.path,
+                applied_by="db-import",
+            )
+            or found.group(1) not in _SQL_DBDIRS
+        ):
+            return "sql"
+    return None
+
+
+def _basename(text: str) -> str:
+    """A repository basename with `.git` stripped once, case kept (a layout decides case)."""
+    return text[: -len(".git")] if text.endswith(".git") else text
+
+
 def _id_from(basename: str) -> str | None:
     """The module id a repository or folder basename yields, or `None` if it yields none.
 
@@ -347,6 +494,9 @@ def _manifest(
     origin: Origin,
     came_from: str,
     today: date,
+    kind: ManifestType = "module",
+    name: str | None = None,
+    build: Build | None = None,
 ) -> Manifest:
     """The fields a derivation can honestly fill in, and nothing beyond them.
 
@@ -360,13 +510,13 @@ def _manifest(
     """
     return Manifest(
         id=item_id,
-        name=item_id,
-        type="module",
+        name=name or item_id,
+        type=kind,
         game=game,
         description=description,
         source=source,
         origin=origin,
-        build=Build(rebuild=True),
+        build=build if build is not None else Build(rebuild=True),
         notes=(
             f"Derived by Yu'lon from {came_from} on {today.isoformat()}; "
             "nothing here was written by the module's author.",
@@ -420,6 +570,11 @@ def persist(user_root: Path, manifest: Manifest, *, shipped_ids: Container[str])
     items_dir.mkdir(parents=True, exist_ok=True)
     _write_atomically(items_dir / f"{manifest.id}.json", manifest.model_dump_json(indent=2) + "\n")
     _rewrite_index(user_root, manifest.game, manifest.type)
+
+
+def recorded(user_root: Path, manifest: Manifest) -> bool:
+    """Whether the user layer holds a record of `manifest`'s item (T596)."""
+    return (_items_dir(user_root, manifest.game, manifest.type) / f"{manifest.id}.json").is_file()
 
 
 def forget(user_root: Path, manifest: Manifest) -> bool:
@@ -568,14 +723,28 @@ def _git_and_links(folder: str, names: list[str]) -> set[str]:
 
     An `OSError`, the copier's failure (`apply.FolderCopier`): reached only by a
     link made after `_first_link()` looked, when the old copy is already gone.
+
+    Anything that is neither a folder nor a plain file -- a named pipe, a socket,
+    a device -- is left behind too (T613 PR-2): `copytree` refuses one as a
+    "special file" with the whole copy, `addon_archive.check_folder()` passes
+    over one without opening it, and neither a module nor an add-on is made of one.
     """
     if links.is_link(folder):  # a child folder swapped for a link after its parent's look
         raise OSError(f"{folder} became a link while it was being copied; it was not copied")
+    left = {".git"} & set(names)
     for name in sorted(names):
         path = os.path.join(folder, name)
-        if name != ".git" and links.is_link(path):
+        if name == ".git":
+            continue
+        if links.is_link(path):
             raise OSError(f"{path} became a link while it was being copied; it was not copied")
-    return {".git"} & set(names)
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            continue  # gone since the listing: `copytree` says so in its own words
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            left.add(name)
+    return left
 
 
 def _link_refusal(link: Path) -> str:

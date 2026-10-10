@@ -196,6 +196,9 @@ MODULE_SURFACE_AFTER_7_2 = {
     # Added deliberately with T563: an InstallerError whose sentence already says
     # what to do, so a wrapper passes it through. An exception type, not machinery.
     "SelfExplainedError",
+    # Added deliberately with T602: a Lua lay that failed after it had changed a script, so a
+    # plain Rebuild leaves the old build stopped. An exception type, not machinery.
+    "ScriptsPartlyLaid",
     # Added deliberately with T228: the mark two of this module's failure types
     # carry so the log panel shows them after a Stop. A marker class, imported.
     "TrueAfterStop",
@@ -249,6 +252,8 @@ MODULE_SURFACE_AFTER_7_2 = {
     "UpstreamNews",
     # T126. `InstallEngine.update_to_latest(rewritten_ok=...)` is typed with it.
     "Collection",
+    # T568. `InstallEngine.reserved()` returns a context manager.
+    "AbstractContextManager",
     "get_logger",
 }
 

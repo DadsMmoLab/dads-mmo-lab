@@ -6766,3 +6766,133 @@ def test_t142_a_stopped_daemon_takes_back_with_the_offline_tool() -> None:
         "starts):\nsudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp"
     ) in notes[0]
     assert "firewall-cmd" not in notes[0] and "--reload" not in notes[0], notes[0]
+
+
+# ---------------------------------------------------------------- T644: Windows quoting
+
+
+def _win_firewall_argv() -> list[str]:
+    return platform.firewall_commands("netsh", (3724,), rule_prefix="Yulon")[0]
+
+
+def test_t644_shown_netsh_firewall_command_quotes_the_rule_name() -> None:
+    """A rule name with a space must read `name="Yulon 3724"`, or netsh sees a stray `3724`."""
+    assert platform.command_text(_win_firewall_argv()) == (
+        'netsh advfirewall firewall add rule name="Yulon 3724" protocol=TCP dir=in '
+        "localport=3724 action=allow"
+    )
+
+
+def test_t644_shown_text_leaves_plain_commands_alone() -> None:
+    assert platform.command_text(["ufw", "allow", "3724/tcp"]) == "ufw allow 3724/tcp"
+    portproxy = platform.portproxy_commands("192.168.1.25", (3724,))[0]
+    assert platform.command_text(portproxy) == (
+        "netsh interface portproxy add v4tov4 listenaddress=192.168.1.25 listenport=3724 "
+        "connectaddress=127.0.0.1 connectport=3724"
+    )
+
+
+def _decode_inner(argv: list[str]) -> str:
+    """The elevated half of a batch argv: its `-EncodedCommand` payload, decoded."""
+    import base64
+
+    outer = argv[3]
+    assert "-EncodedCommand" in outer
+    b64 = outer.split("-EncodedCommand','")[1].split("'")[0]
+    return base64.b64decode(b64).decode("utf-16-le")
+
+
+def test_t644_elevated_batch_is_one_runas_that_stops_on_a_decline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    cmds = platform.firewall_commands("netsh", (3724, 8085), rule_prefix="Yulon")
+    cmds += platform.portproxy_commands("192.168.1.25", (3724,))
+    batch = platform.elevated_batch("netsh", cmds, is_admin=False)
+    assert batch is not None
+    argv, results = batch
+    assert argv[:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    outer = argv[3]
+    assert outer.count("Start-Process") == 1 and "-Verb RunAs" in outer
+    # A No on the prompt must be a failure, not "exit $null" = 0.
+    assert "$ErrorActionPreference = 'Stop'" in outer
+    assert "catch" in outer and f"exit {platform.UAC_DECLINED}" in outer
+    inner = _decode_inner(argv)
+    assert inner.count("& netsh") == 3
+    assert "'name=Yulon 3724'" in inner and "'name=Yulon 8085'" in inner
+    assert "listenaddress=192.168.1.25" in inner
+    assert str(results) in inner
+
+
+def test_t644_elevated_batch_is_none_when_already_admin_or_not_netsh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    cmds = platform.firewall_commands("netsh", (3724,), rule_prefix="Yulon")
+    assert platform.elevated_batch("netsh", cmds, is_admin=True) is None
+    assert platform.elevated_batch("ufw", [["ufw", "allow", "1/tcp"]], is_admin=False) is None
+    assert platform.elevated_batch("netsh", [], is_admin=False) is None
+
+
+def _windows_plan(monkeypatch: pytest.MonkeyPatch) -> networking.NetworkPlan:
+    monkeypatch.setattr(platform, "windows_is_admin", lambda: False)
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    return networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="netsh", wsl=False, enable_firewall=True
+    )
+
+
+def _batch_runner(
+    seen: list[list[str]], rc: int, results: list[tuple[int, str]] | None, stderr: str = ""
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    import json
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if results is not None:
+            inner = _decode_inner(argv)
+            marker = "WriteAllText('"
+            path = Path(inner.split(marker)[1].split("'")[0])
+            payload = [{"rc": r, "out": o} for r, o in results]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, rc, "", stderr)
+
+    return run
+
+
+def test_t644_apply_on_windows_asks_once_and_reports_each_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = _windows_plan(monkeypatch)
+    seen: list[list[str]] = []
+    run = _batch_runner(seen, 0, [(0, "Ok."), (1, "The object already exists")])
+    report = networking.apply(p, sql=None, run=run)
+    assert len(seen) == 1 and seen[0][0] == "powershell.exe"
+    assert report.done[0] == (
+        'netsh advfirewall firewall add rule name="Yulon 3724" protocol=TCP dir=in '
+        "localport=3724 action=allow"
+    )
+    assert any("Yulon 8085" in s and "The object already exists" in s for s in report.skipped)
+
+
+def test_t644_apply_says_a_decline_in_plain_words_and_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = _windows_plan(monkeypatch)
+    seen: list[list[str]] = []
+    run = _batch_runner(seen, platform.UAC_DECLINED, None, "The operation was canceled")
+    report = networking.apply(p, sql=None, run=run)
+    assert not any("netsh" in d for d in report.done)
+    said = " ".join(report.skipped)
+    assert "You said No to the Windows administrator prompt" in said
+    assert "Press Apply again and choose Yes" in said
+    assert "Administrator PowerShell" not in said
+
+
+def test_t644_a_batch_that_wrote_no_results_is_not_reported_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = _windows_plan(monkeypatch)
+    report = networking.apply(p, sql=None, run=_batch_runner([], 0, None))
+    assert not any("netsh" in d for d in report.done)
+    assert any("Yulon 3724" in s for s in report.skipped)
