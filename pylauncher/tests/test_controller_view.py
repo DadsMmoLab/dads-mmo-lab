@@ -930,6 +930,8 @@ def test_a_character_question_is_handed_the_roster_read_and_the_jobs_runner(
     keeps the docker exec off the GUI thread. Mutation: drop either kwarg and the dialog
     reads nothing (or reads inline).
     """
+    from yulon.character_pick import Roster
+
     given: dict[str, object] = {}
 
     def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
@@ -944,8 +946,8 @@ def test_a_character_question_is_handed_the_roster_read_and_the_jobs_runner(
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     asked: list[object] = []
-    applier.character_roster = lambda entry: asked.append(entry) or "roster"  # type: ignore[method-assign,assignment]
-    assert given["characters"]() == "roster"  # type: ignore[operator]
+    applier.character_roster = lambda entry: asked.append(entry) or Roster()  # type: ignore[method-assign,assignment]
+    assert given["characters"]() == Roster()  # type: ignore[operator]
     assert asked == [WOTLK]
 
 
