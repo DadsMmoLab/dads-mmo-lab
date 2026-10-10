@@ -17,13 +17,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "f19a18799a35f7c24bdcdc9ea399c601f166259b"
+            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "037c01418b5d01506917a3db9b44fd56ac5f965c"
+            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
           }
         ]
       },
@@ -2406,19 +2406,19 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "f19a18799a35f7c24bdcdc9ea399c601f166259b"
+            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "037c01418b5d01506917a3db9b44fd56ac5f965c"
+            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
           },
           {
             "repo": "azerothcore/mod-ale",
             "branch": "master",
             "dest": "modules/mod-ale",
-            "rev": "cead0cb2e58ec0f73676ba578eff26cddb79fc01"
+            "rev": "84b85cc55980dbf67d596f3d5cb34ded10c59102"
           },
           {
             "repo": "DadsMmoLab/dads-mmo-lab",
