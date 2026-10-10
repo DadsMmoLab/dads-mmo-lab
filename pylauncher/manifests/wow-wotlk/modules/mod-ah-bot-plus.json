@@ -71,13 +71,13 @@
     {
       "key": "bot_guid",
       "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
-      "kind": "int",
-      "unsigned": true,
+      "kind": "character",
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid}",
         "missing": "no character in this server's own database has GUID {bot_guid} \u2014 create the AHBOT account and ONE character, log that character out, then try again"
-      }
+      },
+      "multi": true
     }
   ],
   "notes": [

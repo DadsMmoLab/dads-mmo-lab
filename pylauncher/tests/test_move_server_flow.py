@@ -81,14 +81,18 @@ def whole_facts() -> ServerFacts:
     )
 
 
-def whole_package(tmp_path: Path, realm: str = "Old Realm") -> Path:
+def whole_package(
+    tmp_path: Path,
+    realm: str = "Old Realm",
+    facts: Callable[[], ServerFacts] | None = None,
+) -> Path:
     root = tmp_path / "old-computer"
     root.mkdir(parents=True)
     source = Box(root, running_now=("ac-database",), db=Db([], realm=realm))
     folder = tmp_path / "docs"
     folder.mkdir()
     return move_flows.export_package(
-        source.world, folder, stop_allowed=False, whole=whole_facts
+        source.world, folder, stop_allowed=False, whole=facts or whole_facts
     ).path
 
 
@@ -364,6 +368,27 @@ class FakeApplier:
         self.events = events
         self.server_dir = server_dir
         self.installed: list[tuple[str, str | None, Mapping[str, str] | None]] = []
+        self.folders: list[tuple[str, dict[str, bytes]]] = []
+        self.folder_error: Exception | None = None
+
+    def install_folder(self, manifest: Manifest, folder: Path) -> apply.ApplyReport:
+        """The Modules tab's folder route: the folder is read NOW, it is gone afterwards."""
+        self.events.append(f"folder:{manifest.id}")
+        if self.folder_error is not None:
+            raise self.folder_error
+        self.folders.append(
+            (
+                manifest.id,
+                {
+                    p.relative_to(folder).as_posix(): p.read_bytes()
+                    for p in sorted(folder.rglob("*"))
+                    if p.is_file()
+                },
+            )
+        )
+        return apply.ApplyReport(
+            action="install", item_id=manifest.id, family=manifest.type, done=("copied",)
+        )
 
     world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
 
@@ -389,8 +414,14 @@ class FakeApplier:
 class Move:
     """A whole package, a new folder, and every double the run acts through."""
 
-    def __init__(self, tmp_path: Path, *, fresh_db: Db | None = None) -> None:
-        self.path = whole_package(tmp_path)
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        fresh_db: Db | None = None,
+        facts: Callable[[], ServerFacts] | None = None,
+    ) -> None:
+        self.path = whole_package(tmp_path, facts=facts)
         self.target = Box(
             tmp_path,
             running_now=("ac-database", "ac-authserver", "ac-worldserver"),
@@ -423,6 +454,7 @@ class Move:
             rebuild=rebuild,
             db_password="password",
             persist_manifest=lambda m: self.events.append(f"persist:{m.id}"),
+            install_folder=self.applier.install_folder,
         )
 
     def install(self) -> move_server.MovedInInstall:
@@ -919,3 +951,158 @@ def test_a_clone_that_clears_the_folder_and_fails_silently_still_leaves_the_reco
     with pytest.raises(native.InstallerError):
         mv.run()
     assert plan_for(mv.path, mv.target.server_dir).resuming
+
+
+# =============================================================== a module added from a folder
+
+
+MINE_FILES = {"src/mine.cpp": b"// mine\n", "conf/mine.conf.dist": b"A = 1\n"}
+
+
+def folder_facts(
+    files: dict[str, bytes] | None = None, carry: bool = True, source: bool = False
+) -> Callable[[], ServerFacts]:
+    def build() -> ServerFacts:
+        base = whole_facts()
+        mine = Manifest.model_validate(
+            {
+                "id": "mod-mine",
+                "name": "My Module",
+                "type": "module",
+                "game": "wow-wotlk",
+                "origin": {"kind": "folder", "added": "2026-10-01"},
+                "build": {"rebuild": True},
+                **({"source": {"repo": "someone/mod-mine"}} if source else {}),
+            }
+        )
+        members = [
+            PackFile(kind="module", target=f"module/mod-mine/{rel}", data=data)
+            for rel, data in (MINE_FILES if files is None else files).items()
+        ]
+        return ServerFacts(
+            spec=ServerSpec(
+                sources=base.spec.sources,
+                modules=(PackedModule(type="module", id="mod-mine", origin="folder"),),
+            ),
+            files=(
+                *(
+                    [
+                        PackFile(
+                            kind="manifest",
+                            target="module/mod-mine",
+                            data=mine.model_dump_json().encode(),
+                        )
+                    ]
+                    if carry
+                    else []
+                ),
+                *members,
+            ),
+        )
+
+    return build
+
+
+def test_a_folder_module_plans_with_its_description_and_files(tmp_path: Path) -> None:
+    fine = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: False)
+    plan = _plan_with(whole_package(tmp_path, facts=folder_facts()), tmp_path / "new", fine)
+    assert plan.allowed, plan.refusals
+    (planned,) = plan.modules
+    assert planned.manifest.id == "mod-mine" and planned.manifest.source is None
+    assert planned.manifest.origin is not None and planned.manifest.origin.kind == "folder"
+    assert [m.target for m in planned.folder_files] == [
+        "module/mod-mine/conf/mine.conf.dist",
+        "module/mod-mine/src/mine.cpp",
+    ]
+    assert "My Module" in plan.text()
+
+
+def test_a_folder_module_named_like_a_shipped_one_is_refused(tmp_path: Path) -> None:
+    clash = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: True)
+    plan = _plan_with(whole_package(tmp_path, facts=folder_facts()), tmp_path / "new", clash)
+    assert plan.refusals == (
+        "mod-mine was added from a folder on the old computer, and this Yu'lon ships a module of "
+        "that name, so the two cannot be told apart. Remove it on the old computer and pack "
+        "again.",
+    )
+
+
+def test_a_folder_module_without_its_description_is_refused(tmp_path: Path) -> None:
+    fine = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: False)
+    path = whole_package(tmp_path, facts=folder_facts(carry=False))
+    assert _plan_with(path, tmp_path / "new", fine).refusals == (
+        "The package's description of mod-mine is missing or damaged. Pack again on the old "
+        "computer.",
+    )
+
+
+def test_a_folder_module_described_with_a_repository_is_refused(tmp_path: Path) -> None:
+    fine = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: False)
+    path = whole_package(tmp_path, facts=folder_facts(source=True))
+    assert _plan_with(path, tmp_path / "new", fine).refusals == (
+        "The package's description of mod-mine is missing or damaged. Pack again on the old "
+        "computer.",
+    )
+
+
+def test_a_folder_module_without_its_files_is_refused(tmp_path: Path) -> None:
+    fine = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: False)
+    path = whole_package(tmp_path, facts=folder_facts(files={}))
+    assert _plan_with(path, tmp_path / "new", fine).refusals == (
+        "The package holds no files for mod-mine. Pack again on the old computer.",
+    )
+
+
+def folder_move(tmp_path: Path) -> Move:
+    mv = Move(tmp_path, facts=folder_facts())
+    fine = move_server.ModuleLookup(load=lambda k, i: None, shipped=lambda k, i: False)
+    mv.plan = _plan_with(mv.path, mv.target.server_dir, fine)
+    # The catalog module is not in this package; the folder module is the only one.
+    assert mv.plan.allowed, mv.plan.refusals
+    return mv
+
+
+def test_a_folder_module_goes_back_through_the_folder_route(tmp_path: Path) -> None:
+    mv = folder_move(tmp_path)
+    mv.run()
+    assert mv.applier.folders == [("mod-mine", MINE_FILES)]
+    assert mv.applier.installed == []
+    assert "persist:mod-mine" not in mv.events  # the folder route completes and persists itself
+    assert mv.rebuilds == 1  # the module declares a rebuild
+
+
+def test_the_staged_copy_is_gone_afterwards_and_never_inside_modules(tmp_path: Path) -> None:
+    mv = folder_move(tmp_path)
+    seen: list[Path] = []
+    real = mv.applier.install_folder
+
+    def spy(manifest: Manifest, folder: Path) -> apply.ApplyReport:
+        seen.append(folder)
+        return real(manifest, folder)
+
+    mv.applier.install_folder = spy  # type: ignore[method-assign]
+    mv.run()
+    (staged,) = seen
+    assert not staged.exists()
+    assert (mv.target.server_dir / "modules") not in staged.parents
+    assert not [p for p in mv.target.server_dir.iterdir() if "move-folder" in p.name]
+
+
+def test_a_folder_module_that_fails_says_so_and_leaves_no_staged_copy(tmp_path: Path) -> None:
+    mv = folder_move(tmp_path)
+    mv.applier.folder_error = apply.ApplyRefusal("the copy was cut off")
+    with pytest.raises(MoveError) as raised:
+        mv.run()
+    assert str(raised.value).startswith("My Module could not be installed again: ")
+    assert "Press Bring from another computer… again" in str(raised.value)
+    assert not [p for p in mv.target.server_dir.iterdir() if "move-folder" in p.name]
+
+
+def test_a_folder_module_with_no_folder_route_here_is_refused(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    mv = folder_move(tmp_path)
+    original = mv.server_for
+    mv.server_for = lambda d, c: replace(original(d, c), install_folder=None)  # type: ignore[method-assign]
+    with pytest.raises(MoveError, match="has no module installer here"):
+        mv.run()

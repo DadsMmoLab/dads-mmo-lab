@@ -66,8 +66,7 @@
     {
       "key": "bot_guid",
       "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
-      "kind": "int",
-      "unsigned": true,
+      "kind": "character",
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid}",
@@ -77,13 +76,14 @@
     {
       "key": "bot_account",
       "question": "Account id of the AH bot character (the AHBOT account you created it on; Yu'lon checks the two name the same character)",
-      "kind": "int",
-      "unsigned": true,
+      "kind": "character",
       "exists": {
         "db": "characters",
         "query": "SELECT name FROM characters WHERE guid = {bot_guid} AND account = {bot_account}",
         "missing": "character GUID {bot_guid} does not belong to account {bot_account} in this server's own database \u2014 the two keys must name the same character"
-      }
+      },
+      "part": "account",
+      "follows": "bot_guid"
     }
   ],
   "notes": [

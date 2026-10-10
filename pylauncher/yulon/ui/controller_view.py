@@ -137,6 +137,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
+from yulon.character_pick import Roster
 from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -770,6 +771,8 @@ class PromptAsker(Protocol):
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
         notes: Sequence[str] = (),
+        characters: Callable[[], Roster] | None = None,
+        run_job: JobRunner | None = None,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -14504,6 +14507,7 @@ class ControllerView(QWidget):
             where = "online" if character.online else "offline"
             item = QListWidgetItem(
                 f"{character.name} — level {character.level} — {where} — {character.account}"
+                f" — GUID {character.guid}"
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
@@ -17935,6 +17939,7 @@ class ControllerView(QWidget):
             self._module_pending = None
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
+                + self._database_left_up()
             )
             return
         # T302: an answer written to a Server rates key is held to that key's rule,
@@ -17944,6 +17949,7 @@ class ControllerView(QWidget):
             self._module_pending = None
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+                + self._database_left_up()
             )
             self.action_failed.emit(problem)
             return
@@ -17971,6 +17977,13 @@ class ControllerView(QWidget):
             return run(manifest, values)
 
         self._run_module_job(update_anyway, self._module_done, self._module_failed)
+
+    _picker_started_db = False
+    """The character picker's read started the database in this press (T637)."""
+
+    def _database_left_up(self) -> str:
+        """` DATABASE_LEFT_UP` where the picker had to start the database and the press stops."""
+        return f" {apply_module.DATABASE_LEFT_UP}" if self._picker_started_db else ""
 
     def _module_values(
         self, manifest: Manifest, action: When, *, again: bool = False
@@ -18005,6 +18018,7 @@ class ControllerView(QWidget):
         A default shown in a box the person can change is an answer; a default
         written unseen is not.
         """
+        self._picker_started_db = False
         needed = required_prompts(manifest, action)
         if not needed:
             return True, None
@@ -18022,7 +18036,7 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
-        extra: dict[str, tuple[str, ...]] = {}
+        extra: dict[str, Any] = {}
         if action != "remove":
             # T302 (cold review): an answer written to a key the Server rates card
             # writes starts at what the card says now -- over the mod's default and
@@ -18038,6 +18052,19 @@ class ControllerView(QWidget):
                 note = server_rates.prompt_note(manifest, rates)
                 if note is not None:
                     extra["notes"] = (note,)
+        if applier is not None and any(p.kind == "character" for p in asked):
+            # T637: the server's own characters to pick from, read on a worker by the dialog
+            # (the answers' check and this read both go through the applier's seams).
+            entry = self.entry
+
+            def read_characters() -> Roster:
+                roster = applier.character_roster(entry)
+                if roster.database_started:
+                    self._picker_started_db = True
+                return roster
+
+            extra["characters"] = read_characters
+            extra["run_job"] = self._jobs
         answers = self._prompt_asker(
             self,
             manifest,
