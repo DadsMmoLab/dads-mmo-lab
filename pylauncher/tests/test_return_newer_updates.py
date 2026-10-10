@@ -322,7 +322,11 @@ def test_a_direction_neither_git_nor_github_can_tell_refuses_and_says_so(tmp_pat
     _said, raised, _fake = _return(rec, server_dir)
 
     assert raised is not None
-    assert "could not show whether" in str(raised) and "GitHub did not answer" in str(raised)
+    assert (
+        "could not show whether" in str(raised)
+        and "GitHub did not answer" in str(raised)
+        and "try again later" in str(raised)
+    )
 
 
 def test_a_move_that_removes_nothing_never_asks_the_direction(tmp_path: Path) -> None:

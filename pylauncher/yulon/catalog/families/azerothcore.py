@@ -680,14 +680,14 @@ class AzerothCoreInstaller(StagedInstaller):
         * the target ships the same name for the same database (`_database_part()`:
           an update upstream moved to its archive), never one for another database --
           `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
-        * the move goes forward in history (`Seams.is_ancestor`; a checkout that cannot
-          show it is never forward), and it and a file the target ships in the same folder
-          are both dated (`YYYY_MM_DD_NN`, how AzerothCore and mod-playerbots name their
-          updates) and the target's sorts at or after it: it is older than what the target
+        * the move goes forward in history (`direction.moves_forward()`: git, else GitHub's
+          compare; when neither can say the Return refuses), and it and a file the target
+          ships in the same folder are both dated (`YYYY_MM_DD_NN`, how AzerothCore and
+          mod-playerbots name their updates) and the target's sorts at or after it: it is older than what the target
           has, which a Return that moves forward (T588) over a squash removes. Going back
           the name says nothing: an update written before the target's newest but merged
-          after it is newer. A name that
-          is not dated says nothing about order (cold review of a72e048f).
+          after it is newer. A name that is not dated says nothing about order (cold review of
+          a72e048f).
         """
         lacked: dict[str, None] = {}
         for source, dest, old in moved:
