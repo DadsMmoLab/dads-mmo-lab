@@ -310,7 +310,7 @@ def test_a_live_conf_without_the_key_is_not_given_one(
     rec, server_dir, made = _update(tmp_path)
     _writes(monkeypatch, rec)
     path = _live(server_dir)
-    text = path.read_text(encoding="utf-8", newline="")
+    text = path.read_bytes().decode("utf-8")
     path.write_bytes(
         "".join(
             line
