@@ -4224,7 +4224,7 @@ def apply(
                 f"{' '.join(platform.elevation_policy(network_plan.firewall).prefix)} and "
                 "these commands are being run without it, so the rule that keeps SSH "
                 "reachable cannot be written. Plan again for a run without it, or apply this "
-                f"plan with it.\n{' '.join(cmd)}"
+                f"plan with it.\n{platform.command_text(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)
@@ -4242,7 +4242,7 @@ def apply(
             refusal = (
                 f"REFUSED to run the command below: the rule that keeps SSH reachable "
                 f"({unapplied}) did not apply, so running it could have cut the way back "
-                f"into this machine.\n{' '.join(cmd)}"
+                f"into this machine.\n{platform.command_text(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)
@@ -4250,16 +4250,19 @@ def apply(
         argv = list(cmd)
         if policy.prefix and elevate:
             argv = [*policy.prefix, *argv]
+        elif elevate:
+            argv = platform.elevated_argv(network_plan.firewall, argv)
         try:
             proc = do(argv)
         except OSError as exc:
-            skipped.append(f"{' '.join(cmd)}: {exc}")
+            skipped.append(f"{platform.command_text(cmd)}: {exc}")
             continue
         if proc.returncode == 0:
-            done.append(" ".join(cmd))
+            done.append(platform.command_text(cmd))
         else:
             skipped.append(
-                f"{' '.join(cmd)}: exit {proc.returncode} {proc.stderr.strip()} — run it by hand"
+                f"{platform.command_text(cmd)}: exit {proc.returncode} "
+                f"{proc.stderr.strip()} — run it by hand"
                 + policy.retry_hint
                 + _firewalld_daemon_hint(list(cmd), proc.returncode)
             )

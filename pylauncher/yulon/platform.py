@@ -487,6 +487,67 @@ def firewall_commands(
     return []
 
 
+_KEY_VALUE = re.compile(r"[A-Za-z]+=")
+
+
+def command_text(argv: Iterable[str]) -> str:
+    """`argv` as one line a player can paste, quoted the way the tool reading it wants (T644).
+
+    `" ".join` printed `netsh ... name=Yulon 3724 ...`, which netsh reads as a `name` of
+    "Yulon" and a stray `3724` ("A specified value is not valid"). A netsh argument with a
+    space is shown as `key="value with space"`, which both cmd and PowerShell hand to netsh
+    as one value. Every other command is unchanged.
+    """
+    parts = list(argv)
+    if not parts or parts[0] not in ("netsh", "netsh.exe"):
+        return " ".join(parts)
+    shown = []
+    for part in parts:
+        if " " not in part:
+            shown.append(part)
+        elif _KEY_VALUE.match(part):
+            key, _, value = part.partition("=")
+            shown.append(f'{key}="{value}"')
+        else:
+            shown.append(f'"{part}"')
+    return " ".join(shown)
+
+
+def windows_is_admin() -> bool:
+    """Whether this process is elevated on Windows; False anywhere else or when it cannot tell."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined,unused-ignore]
+    except (AttributeError, OSError):
+        return False
+
+
+def elevated_argv(
+    backend: FirewallBackend, argv: list[str], *, is_admin: bool | None = None
+) -> list[str]:
+    """`argv` wrapped so Windows asks for administrator rights once, when it needs them (T644).
+
+    An unelevated `netsh advfirewall ...` answers "The requested operation requires elevation"
+    and Apply used to stop there, telling the player to do it by hand. `Start-Process -Verb
+    RunAs` raises the UAC prompt; `-PassThru` hands back netsh's own exit code. netsh gets ONE
+    command line built with `list2cmdline`, so a name with a space reaches it quoted. Only the
+    `netsh` backend on Windows is wrapped, and only when this process is not already admin.
+    """
+    if backend != "netsh" or not argv or argv[0] != "netsh":
+        return list(argv)
+    if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
+        return list(argv)
+    script = (
+        f"$p = Start-Process -FilePath {_ps_quote(argv[0])} -Verb RunAs -Wait -PassThru "
+        f"-WindowStyle Hidden -ArgumentList {_ps_quote(subprocess.list2cmdline(argv[1:]))}; "
+        "exit $p.ExitCode"
+    )
+    return ["powershell.exe", "-NoProfile", "-Command", script]
+
+
 def portproxy_commands(listen_address: str, ports: Iterable[int]) -> list[list[str]]:
     """WSL2 `netsh interface portproxy` rules forwarding `listen_address:port` → 127.0.0.1:port."""
     return [

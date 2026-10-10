@@ -6766,3 +6766,78 @@ def test_t142_a_stopped_daemon_takes_back_with_the_offline_tool() -> None:
         "starts):\nsudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp"
     ) in notes[0]
     assert "firewall-cmd" not in notes[0] and "--reload" not in notes[0], notes[0]
+
+
+# ---------------------------------------------------------------- T644: Windows quoting
+
+
+def _win_firewall_argv() -> list[str]:
+    return platform.firewall_commands("netsh", (3724,), rule_prefix="Yulon")[0]
+
+
+def test_t644_shown_netsh_firewall_command_quotes_the_rule_name() -> None:
+    """A rule name with a space must read `name="Yulon 3724"`, or netsh sees a stray `3724`."""
+    assert platform.command_text(_win_firewall_argv()) == (
+        'netsh advfirewall firewall add rule name="Yulon 3724" protocol=TCP dir=in '
+        "localport=3724 action=allow"
+    )
+
+
+def test_t644_shown_text_leaves_plain_commands_alone() -> None:
+    assert platform.command_text(["ufw", "allow", "3724/tcp"]) == "ufw allow 3724/tcp"
+    portproxy = platform.portproxy_commands("192.168.1.25", (3724,))[0]
+    assert platform.command_text(portproxy) == (
+        "netsh interface portproxy add v4tov4 listenaddress=192.168.1.25 listenport=3724 "
+        "connectaddress=127.0.0.1 connectport=3724"
+    )
+
+
+def test_t644_elevated_argv_runs_netsh_through_one_runas_with_the_quotes_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    argv = _win_firewall_argv()
+    wrapped = platform.elevated_argv("netsh", argv, is_admin=False)
+    assert wrapped[:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    script = wrapped[3]
+    assert "-Verb RunAs" in script and "-Wait" in script and "-PassThru" in script
+    assert "exit $p.ExitCode" in script
+    assert "-FilePath 'netsh'" in script
+    # netsh receives one command line in which the name value is quoted.
+    assert (
+        '-ArgumentList \'advfirewall firewall add rule "name=Yulon 3724" protocol=TCP '
+        "dir=in localport=3724 action=allow'"
+    ) in script
+
+
+def test_t644_elevated_argv_is_untouched_when_already_admin_or_not_netsh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    argv = _win_firewall_argv()
+    assert platform.elevated_argv("netsh", argv, is_admin=True) == argv
+    assert platform.elevated_argv("ufw", ["ufw", "allow", "1/tcp"], is_admin=False) == [
+        "ufw",
+        "allow",
+        "1/tcp",
+    ]
+
+
+def test_t644_apply_on_windows_elevates_and_reports_the_quoted_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "windows_is_admin", lambda: False)
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    p = networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="netsh", wsl=False, enable_firewall=True
+    )
+    seen: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    report = networking.apply(p, sql=None, run=run)
+    assert seen and all(a[0] == "powershell.exe" for a in seen)
+    assert 'name="Yulon 3724"' in report.done[0]
+    assert "name=Yulon 3724" not in report.done[0]

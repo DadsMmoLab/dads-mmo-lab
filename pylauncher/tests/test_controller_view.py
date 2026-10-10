@@ -28868,7 +28868,7 @@ def test_the_network_plan_reads_as_words_and_the_commands_are_in_details(
     assert details.isVisibleTo(page) and details.collapsed
     held = details.text()
     assert (
-        "netsh advfirewall firewall add rule name=Yulon 3724 dir=in action=allow protocol=TCP "
+        'netsh advfirewall firewall add rule name="Yulon 3724" dir=in action=allow protocol=TCP '
         "localport=3724"
     ) in held, held
     assert "netsh interface portproxy add v4tov4 listenport=3724 connectaddress=172.20.0.2" in held
