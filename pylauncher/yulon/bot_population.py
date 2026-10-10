@@ -163,6 +163,8 @@ class Reading:
     """Why the count cannot be read or changed here; `None` when it can."""
     rows: tuple[tuning.TuningRow, ...] = field(default_factory=tuple)
     """The Tuning tab's rows for the CMaNGOS file's own keys. Empty for WotLK."""
+    env_names: tuple[str, str] = (MIN_ENV, MAX_ENV)
+    """The two environment names as the override spells them (T657: either prefix)."""
 
 
 @dataclass(frozen=True)
@@ -396,13 +398,16 @@ def read(entry: CatalogEntry, server_dir: Path) -> Reading:
     lines = text.split("\n")
     prefix = playerbots_keys.module_prefix(server_dir)
     try:
-        low, high = (
-            _number(bot_count.env_value(lines[_env_line(lines, entry, name, path.name, prefix)]))
-            for name in (MIN_ENV, MAX_ENV)
-        )
+        spots = [_env_line(lines, entry, name, path.name, prefix) for name in (MIN_ENV, MAX_ENV)]
     except BotCountError as exc:
         return Reading(file, route, problem=str(exc))
-    return Reading(file, route, low, high)
+    low, high = (_number(bot_count.env_value(lines[spot])) for spot in spots)
+    names = [bot_count.ENV_LINE.match(lines[spot].rstrip("\r")) for spot in spots]
+    spelled = tuple(
+        match.group("key") if match else name
+        for match, name in zip(names, (MIN_ENV, MAX_ENV), strict=True)
+    )
+    return Reading(file, route, low, high, env_names=(spelled[0], spelled[1]))
 
 
 def _ceiling(accounts_text: str | None) -> tuple[int, str]:
@@ -516,7 +521,8 @@ def question(entry: CatalogEntry, reading: Reading, n: int) -> str:
         )
     else:
         parts.append(
-            f"{name} gets {n} for both {MIN_ENV} and {MAX_ENV}, the lowest and highest number "
+            f"{name} gets {n} for both {reading.env_names[0]} and {reading.env_names[1]}, the "
+            "lowest and highest number "
             "of random bots; only those two lines change. A backup of it is made beside it "
             "first."
         )

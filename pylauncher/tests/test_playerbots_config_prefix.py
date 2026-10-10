@@ -346,6 +346,14 @@ def test_a_count_under_both_names_is_read_and_set_where_the_module_reads_it(tmp_
     assert env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == "7", "the line the module ignores is left"
 
 
+def test_the_bots_tabs_question_names_the_lines_it_changes(tmp_path: Path) -> None:
+    _installed(tmp_path, NEW_DIST, NEW_CONF)
+    reading = bot_population.read(WOTLK, tmp_path)
+    said = bot_population.question(WOTLK, reading, 50)
+    assert "AC_PLAYERBOTS_MIN_RANDOM_BOTS and AC_PLAYERBOTS_MAX_RANDOM_BOTS" in said
+    assert "AC_AI_PLAYERBOT" not in said
+
+
 # -- the rename on the way to a start ------------------------------------------------
 
 
